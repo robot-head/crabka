@@ -15,6 +15,10 @@ pub struct TopicRecord {
     pub replication_factor: i16,
 }
 
+fn default_partition_epoch() -> i32 {
+    -1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PartitionRecord {
     pub topic: String,
@@ -38,6 +42,12 @@ pub struct PartitionRecord {
     /// broker's failed-dir UUID to the partitions it must fail over by
     /// matching this against the broker's replica slot.
     pub directories: Vec<Uuid>,
+    /// KIP-631: per-partition state epoch. Increments on every state change
+    /// (leader election, ISR change, reassignment). Set to 0 on creation.
+    /// Default of -1 matches the KIP-631 schema default for compatibility
+    /// with records written before this field was added.
+    #[serde(default = "default_partition_epoch")]
+    pub partition_epoch: i32,
 }
 
 /// KIP-858 directory-assignment delta. A broker reports which log-dir UUID
@@ -329,6 +339,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::nil()],
+            partition_epoch: 0,
         });
         assert!(round_trip(&r) == r);
     }

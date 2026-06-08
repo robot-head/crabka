@@ -542,6 +542,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -568,6 +569,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(1, &img).is_empty());
@@ -592,6 +594,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
@@ -639,6 +642,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
             MetadataRecord::V1Topic(TopicRecord {
                 name: "b".into(),
@@ -656,6 +660,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
@@ -667,6 +672,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -704,6 +710,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         let mut overrides = BTreeMap::new();
         overrides.insert("retention.ms".to_string(), "60000".to_string());
@@ -763,6 +770,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
 
         let dir = tempdir().expect("tempdir");
@@ -815,6 +823,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
 
         // Materialize the partition under a temp dir.

@@ -3189,6 +3189,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
 

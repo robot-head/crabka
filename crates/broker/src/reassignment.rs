@@ -130,6 +130,7 @@ pub(crate) async fn compute_reassignment_progress(
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
+                    partition_epoch: pr.partition_epoch + 1,
                 }));
             }
             // Whether or not we found a leader, don't also try to complete this tick.
@@ -153,6 +154,7 @@ pub(crate) async fn compute_reassignment_progress(
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: new_directories,
+            partition_epoch: pr.partition_epoch + 1,
         }));
     }
     updates
@@ -203,6 +205,7 @@ mod tests {
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
             directories: vec![],
+            partition_epoch: 0,
         }));
         Arc::new(img)
     }
@@ -282,6 +285,7 @@ mod tests {
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
             directories: directories.to_vec(),
+            partition_epoch: 0,
         }));
         Arc::new(image)
     }
@@ -393,6 +397,7 @@ mod tests {
                 adding_replicas: vec![3],
                 removing_replicas: vec![2],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
         let img = Arc::new(img_inner);
