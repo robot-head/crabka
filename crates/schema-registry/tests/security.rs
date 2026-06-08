@@ -24,6 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
@@ -31,12 +33,14 @@ use crabka_client_admin::{
 use crabka_schema_registry::auth::AuthState;
 use crabka_schema_registry::auth::basic::BasicAuthStore;
 use crabka_schema_registry::authz::SchemaRegistryAuthz;
+use crabka_schema_registry::cli::{SecurityCliInput, build_security};
 use crabka_schema_registry::config::{
     AuthzConfig, BasicAuthConfig, RegistryConfig, SecurityConfig,
 };
 use crabka_schema_registry::election::{Election, PrimaryState};
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState, SecurityLayers, forward::ForwardState};
+use crabka_security::Jwks;
 use crabka_security::TlsConfig;
 use crabka_security::ca::{SubjectAltName, generate_clients_ca, issue_broker_cert};
 use tokio_util::sync::CancellationToken;
@@ -485,4 +489,285 @@ async fn two_nodes_authorize_then_forward_to_primary() {
     a.cancel.cancel();
     b.cancel.cancel();
     broker.shutdown().await;
+}
+
+// ── JWKS test helpers ────────────────────────────────────────────────────────
+
+/// Static RSA-2048 PKCS#8 private key used for JWT signing in tests.
+/// This is the same constant as in `crates/security/src/jwks.rs` tests —
+/// reproduced here because those helpers are `pub(crate)` and not accessible
+/// from outside the security crate.
+const RSA_PKCS8_B64: &str = "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQC1Ekoc++7sSsH55QXBCq/aj71helk6ZCTkzYxfLRZXbox0FcV7vOkLNodetJLY7nAUekZLltQ7Q6FJ42geqGV+vgttF63Ue9OP24mPmn/OiFqVYhBaJDRI5BMBLCqZbUfpNBDh7ZOCczwlX8Z5FQS0QJBA4F26H9AKzFRvofwHFk1wxqiGdgwDyClgi+eDnhEGGhBEHuTl1edvTRif88rLDfPHKG1TRqKC6LMXCZQdNy7lrDEGPKHqfW4mb2mq7Vj6h2Jjv+1SpsSxdqX8Tsua4/LrAKvFIXfoZAnjzhACbhXqf1DdSdInZ0i1adY8JpgJQ+WtJ0i9aIOnnmDYwgMvAgMBAAECggEAHqBqUr62Kdd3Odpn/7/cAL7hTHSSVRMNPnoZ7RtGNSGothXcolJQpKnjebxXPkQORxhrfWuUmDWXOVUyjkTzbd2dNyWTLGaJYULD4LtENN3RXIUKuQR4p3+US1V6Gxtl12cMF/rEQYNWQAgUHPTWJ9rny2Fn2Qx6dukauwsOAvCU47fL873sm06SYgPJsLm7MKVeifl8dDudgpURxeC9z37cm9kjjE6n6aiBTNAuBEkMaAbcfgJ0RZfzaMo7IpsOeyOwp932JDlKROpQWKA+lz08YzhkU81qHJYOS/js2F0jxzFz31D9IN+OLu7vRCANFLJl/qnin1JEgVPh7gxSKQKBgQDfrQEsutvH1746ytfE+4jUXyv7Fuaz9MML8uaJbC4hMFdCJuMuLBY07bDE23+4byuWY7JHrgsLRaZ+qpNGWs3LH2x6xsHiK8Ivpuy8TVUJ6hgkPK1cr8yUJxaDcyV8tJAZ+mFmyyWx7wUdlgJFCa2MQF1HnrlBKZvSLWV4CjctZQKBgQDPPR2wLwyk6JlyapsVnCpNBGcXqbJxPh1TM7uPqlODxTzegUK+TMJDZ840u2aBNXf2D5WIJMl+/ohYefOOqK9z2OJUGObnJMgGusH04rdbBoDCdBwfwjiluU7vxbuQKBu8JNXzeb7HJhmgxtXWdJuFYcYbmGu8leFvmUxZTPRfAwKBgQCm6Gpf/m/SiGMjbAnmq+xGzV38V/J/hr2lRPRSx68EhRYX/vy3j55ikJu/yitcbViROIPoiS8kkizTiGWtskSuthw04ev74btd46n0OaCjbVPmdoDHEUgPpbtfC6WFkReWyweztRPD2yBuG2pGKhqe9cilkQOcZHgqNkXpdXYHIQKBgQCO0BQkdNfm0O/l3DdRdhPkjVMqCGSTC3YT/0OS5pK07PhccYF4ONdqsh91UWt7QUiRBf5LGubMoEV/i1LfjbmTQPP/dkWxJjS+Bndg9dfbX6jd2DwFWsfE1OXj8ESoPCuYxV23cr+Y59WjaUK1jhgam9106N3d0P/Q8zidFZ4V1wKBgQDFvIqMLnpaInWhb7kP+X6o0tPQSg+6odMWPnjhwnpSIiUjPUTZV4ijc/d1tPsUemFQxDe+ZreQXDMVGcAVldFnoEMyL8iAtMAHtsSmq2E80RNZfc6nUgy5esQ9rJeX2pH9aZCVvKv6iVTeUtAxS+ltjmEG9BSEI2WQI1WDzPbKiA==";
+
+/// Decode RSA-2048 PKCS#8 DER bytes from the base64 constant above.
+fn rsa_pkcs8_der() -> Vec<u8> {
+    use base64::engine::general_purpose::STANDARD;
+    STANDARD.decode(RSA_PKCS8_B64).unwrap()
+}
+
+/// Mint an RS256 JWT signed by the static RSA-2048 key and return
+/// `(token_string, jwks_json_string)` where the JWKS contains the matching
+/// public key with the given `kid`.
+///
+/// `claims_json` is the full JWT payload as a JSON string. Set `exp` to a
+/// large Unix timestamp so tokens don't expire during tests.
+fn mint_rs256_for_test(kid: &str, claims_json: &str) -> (String, String) {
+    use ring::rand::SystemRandom;
+    use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
+
+    let der = rsa_pkcs8_der();
+    let kp = RsaKeyPair::from_pkcs8(&der).unwrap();
+    let header = format!("{{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"{kid}\"}}");
+    let signing_input = format!(
+        "{}.{}",
+        B64.encode(header.as_bytes()),
+        B64.encode(claims_json.as_bytes()),
+    );
+    let mut sig = vec![0u8; kp.public().modulus_len()];
+    kp.sign(
+        &RSA_PKCS1_SHA256,
+        &SystemRandom::new(),
+        signing_input.as_bytes(),
+        &mut sig,
+    )
+    .unwrap();
+    let token = format!("{signing_input}.{}", B64.encode(&sig));
+
+    let (n, e) = split_pkcs1_for_jwks(kp.public().as_ref());
+    let jwks = format!(
+        "{{\"keys\":[{{\"kty\":\"RSA\",\"kid\":\"{kid}\",\"alg\":\"RS256\",\"use\":\"sig\",\"n\":\"{}\",\"e\":\"{}\"}}]}}",
+        B64.encode(&n),
+        B64.encode(&e),
+    );
+    (token, jwks)
+}
+
+/// Extract the (n, e) big-endian unsigned integers from a PKCS#1 RSAPublicKey
+/// DER blob. ring exposes the public key as raw PKCS#1 bytes.
+fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    fn read_len(b: &[u8]) -> (usize, usize) {
+        if b[0] & 0x80 == 0 {
+            (b[0] as usize, 1)
+        } else {
+            let nb = (b[0] & 0x7f) as usize;
+            let mut l = 0usize;
+            for i in 0..nb {
+                l = (l << 8) | b[1 + i] as usize;
+            }
+            (l, 1 + nb)
+        }
+    }
+    fn read_int(der: &[u8], p: &mut usize) -> Vec<u8> {
+        assert_eq!(der[*p], 0x02);
+        *p += 1;
+        let (len, adv) = read_len(&der[*p..]);
+        *p += adv;
+        let mut bytes = der[*p..*p + len].to_vec();
+        *p += len;
+        if bytes.first() == Some(&0) {
+            bytes.remove(0); // strip DER sign byte
+        }
+        bytes
+    }
+    let mut p = 0usize;
+    assert_eq!(der[p], 0x30);
+    p += 1;
+    let (_, adv) = read_len(&der[p..]);
+    p += adv;
+    let n = read_int(der, &mut p);
+    let e = read_int(der, &mut p);
+    (n, e)
+}
+
+/// Start an SR node with JWKS Bearer auth. Routes through `build_security()` so
+/// the production CLI code path (and its coverage) is exercised. The caller
+/// provides a pre-built `Jwks` that is stored in the handle immediately,
+/// bypassing the HTTP refresher (no real JWKS endpoint needed in tests).
+async fn start_jwks_node(
+    bootstrap: &str,
+    initial_jwks: Jwks,
+    valid_issuer: Option<String>,
+) -> Node {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = i32::from(listener.local_addr().unwrap().port());
+
+    // Exercise the production CLI assembly path so cli.rs JWKS code is covered.
+    let input = SecurityCliInput {
+        require_auth: true,
+        realm: "test".into(),
+        bearer: "jwks".into(),
+        jwks_endpoint_uri: Some("https://test.invalid/.well-known/jwks.json".into()),
+        jwks_valid_issuer: valid_issuer,
+        // Default::default() gives "" for String fields; provide the same
+        // defaults the binary's clap layer would supply at runtime.
+        kafka_security_protocol: "PLAINTEXT".into(),
+        bearer_principal_claim: "sub".into(),
+        ..Default::default()
+    };
+    let out = build_security(&input).expect("build_security should succeed with JWKS input");
+    let jwks_for_refresh = out.jwks_handle.unwrap();
+    // Pre-load test keys directly — no HTTP fetch or refresher task in tests.
+    jwks_for_refresh.handle.store(initial_jwks);
+
+    let cfg = RegistryConfig {
+        bootstrap: bootstrap.into(),
+        schemas_topic: "_schemas".into(),
+        schemas_topic_rf: 1,
+        client_id: format!("sr-jwks-{port}"),
+        advertised_url: format!("http://127.0.0.1:{port}"),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
+        security: out.config,
+    };
+    let cancel = CancellationToken::new();
+    let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
+    let primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+
+    let bearer_validator = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
+    let auth = AuthState {
+        basic: None,
+        bearer: bearer_validator,
+        require_auth: true,
+        realm: "test".into(),
+    };
+    let fwd = ForwardState {
+        primary: primary.clone(),
+        http: reqwest::Client::new(),
+        node_id: cfg.advertised_url.clone(),
+    };
+    let app: Router = rest::router_with_security(
+        AppState {
+            store: store.clone(),
+        },
+        SecurityLayers {
+            auth,
+            authz: None,
+            forward: fwd,
+        },
+    );
+    let serve_cancel = cancel.clone();
+    tokio::spawn(async move {
+        rest::serve::serve_http(listener, app, serve_cancel)
+            .await
+            .ok();
+    });
+    Node {
+        port,
+        _store: store,
+        primary,
+        cancel,
+    }
+}
+
+// ── JWKS integration tests ────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn jwks_bearer_valid_signed_token_returns_200() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let (token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
+    let mut node = start_jwks_node(&bootstrap, jwks, None).await;
+    // Wait until the node becomes primary so _schemas topic is ready.
+    await_state(&mut node.primary, 25, |s| s.is_primary).await;
+    let base = format!("http://127.0.0.1:{}", node.port);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/subjects/s/versions"))
+        .header("Content-Type", SR_CONTENT_TYPE)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(SCHEMA_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "expected 200 with valid signed token, got {}",
+        resp.status()
+    );
+
+    node.cancel.cancel();
+}
+
+#[tokio::test]
+async fn jwks_bearer_unsigned_token_returns_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let (_token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
+    let node = start_jwks_node(&bootstrap, jwks, None).await;
+    let base = format!("http://127.0.0.1:{}", node.port);
+    let client = reqwest::Client::new();
+
+    // Unsigned (alg:none) JWT — the Signed validator must reject it.
+    let unsigned_token = format!(
+        "{}.{}.{}",
+        B64.encode(br#"{"alg":"none","typ":"JWT"}"#),
+        B64.encode(br#"{"sub":"alice","exp":9999999999}"#),
+        "",
+    );
+    let resp = client
+        .post(format!("{base}/subjects/s/versions"))
+        .header("Content-Type", SR_CONTENT_TYPE)
+        .header("Authorization", format!("Bearer {unsigned_token}"))
+        .body(SCHEMA_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "expected 401 for unsigned token, got {}",
+        resp.status()
+    );
+
+    node.cancel.cancel();
+}
+
+#[tokio::test]
+async fn jwks_bearer_wrong_issuer_returns_401() {
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let (token, jwks_json) = mint_rs256_for_test(
+        "k1",
+        r#"{"sub":"alice","iss":"https://wrong-idp.example.com","exp":9999999999}"#,
+    );
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
+    // Configure node to require iss = "https://idp.example.com"
+    let node = start_jwks_node(&bootstrap, jwks, Some("https://idp.example.com".into())).await;
+    let base = format!("http://127.0.0.1:{}", node.port);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/subjects/s/versions"))
+        .header("Content-Type", SR_CONTENT_TYPE)
+        .header("Authorization", format!("Bearer {token}"))
+        .body(SCHEMA_BODY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "expected 401 for wrong issuer, got {}",
+        resp.status()
+    );
+
+    node.cancel.cancel();
 }
