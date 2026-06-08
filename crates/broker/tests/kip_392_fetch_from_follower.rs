@@ -10,15 +10,11 @@
 //!   3. A consumer Fetch to the LEADER carrying the leader's own rack gets
 //!      `preferred_read_replica == -1` (read from the leader).
 //!
-//! Gated `#[cfg(not(target_os = "windows"))]` to mirror `replication.rs` /
-//! `quorum.rs` (openraft `debug_assert!` race on the hosted Windows runner).
-//!
 //! The shared `support` harness has no per-broker config customizer, so
 //! this test inlines the harness's bootstrap-then-join start loop (option
 //! (b) in the task plan) to set a distinct `rack` and the `RackAware`
 //! selector on each broker. The blast radius stays in this file.
 
-#![cfg(not(target_os = "windows"))]
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files; the
 // sibling integration tests allow it wholesale for the same reason.
 #![allow(clippy::pedantic)]

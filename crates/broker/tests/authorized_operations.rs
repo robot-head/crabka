@@ -17,8 +17,6 @@
 //! handler dispatch (no SASL framing dance — we drive
 //! `BrokerConfig.authorizer` directly with a `SimpleAclAuthorizer`).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::collections::HashSet;
 use std::sync::Arc;

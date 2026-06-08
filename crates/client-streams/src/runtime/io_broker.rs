@@ -771,7 +771,7 @@ pub(crate) async fn build_eos(
 
 // ─── tests ────────────────────────────────────────────────────────────────────
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(test)]
 mod tests {
 
     use crabka_broker::{Broker, BrokerConfig};

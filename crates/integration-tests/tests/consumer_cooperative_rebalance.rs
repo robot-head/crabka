@@ -3,8 +3,6 @@
 //! Boots a Crabka broker + multiple Rust consumers using
 //! `Assignor::CooperativeSticky` and exercises phase-1/phase-2 rebalances.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

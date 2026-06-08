@@ -24,7 +24,6 @@
 // `if l.is_some() && l != Some(1)` in `jvm_kafka_leader_election_preferred`
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 use std::io::Write;
@@ -3983,7 +3982,6 @@ async fn jvm_inter_broker_replication_authed() {
 /// `host.docker.internal:<port>` so the JVM containers can reach them via
 /// `--add-host=host.docker.internal:host-gateway` AND so each broker can
 /// dial its peer using the same host name.
-#[cfg(not(target_os = "windows"))]
 #[allow(clippy::too_many_lines)]
 async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     ctrl_protocol: crabka_security::ListenerProtocol,

@@ -5,7 +5,6 @@
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::default_trait_access,

@@ -1,7 +1,6 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by jbod.rs / compaction.rs.
 #![allow(clippy::pedantic)]
-#![cfg(not(target_os = "windows"))]
 
 //! KIP-112 runtime log-dir failure path.
 //!

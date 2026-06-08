@@ -22,8 +22,6 @@
 //! tracks Kafka's own `MetadataVersion` enum; this test guards the
 //! fresh-broker surface.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 mod support;
 

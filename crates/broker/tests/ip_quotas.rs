@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 #![allow(clippy::unnecessary_unwrap)]
 #![allow(clippy::type_complexity)]

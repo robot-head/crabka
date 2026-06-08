@@ -2,7 +2,6 @@
 //!
 //! Requires Docker; gated `#[ignore]` and CI runs with `--include-ignored`.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;
