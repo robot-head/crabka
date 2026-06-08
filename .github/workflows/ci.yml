@@ -40,6 +40,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             jvm_differential:
               - 'crates/protocol/**'
@@ -163,6 +164,9 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -184,10 +188,45 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
+      - uses: taiki-e/install-action@nextest
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-        if: matrix.os != 'ubuntu-latest'
+      - name: Run tests
+        run: cargo nextest run --workspace --profile ci
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report-type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: rust-${{ matrix.os }}
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Rust nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: rust-nextest
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/rust-nextest.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Unit test coverage
         if: matrix.os == 'ubuntu-latest'
         run: |
