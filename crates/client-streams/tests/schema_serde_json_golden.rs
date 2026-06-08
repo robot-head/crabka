@@ -1,10 +1,10 @@
 #![cfg(feature = "schema-serde")]
-//! Asserts our JSON framing/body matches bytes captured from Confluent's JVM
-//! `KafkaJsonSchemaSerializer`. The golden in
-//! `testdata/schema_serde/json/order.hex` is a PLACEHOLDER until captured from
-//! a real Confluent run, so the test is `#[ignore]`. NOTE: cross-vendor JSON
-//! byte-exactness also depends on field ordering (`serde_json` vs Jackson) — to
-//! be reconciled when capturing the real golden.
+//! Asserts our JSON framing/body matches bytes captured from Confluent's
+//! `JSONSerializer`. The golden in `testdata/schema_serde/json/order.hex` was
+//! captured against `confluentinc/cp-schema-registry` (schema id 3) via
+//! `tests/schema-serde-capture/run.sh`. Confluent emits compact JSON
+//! (`{"id":"o-1","total":9.5}`, no spaces, declaration field order) — which
+//! matches `serde_json`'s compact output, so the frames are byte-identical.
 
 use assert2::check;
 use crabka_schema_serde::RegistryClient;
@@ -21,14 +21,13 @@ struct Order {
 }
 
 #[test]
-#[ignore = "golden bytes must be captured from the Confluent JVM KafkaJsonSchemaSerializer"]
 fn json_frame_matches_confluent_golden() {
     let golden = hex::decode(include_str!("testdata/schema_serde/json/order.hex").trim())
         .expect("valid hex");
 
     let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
     let serde = JsonSerde::<Order>::new(&cache, "orders-json-value", false);
-    cache.seed_subject_id("orders-json-value", 1);
+    cache.seed_subject_id("orders-json-value", 3);
 
     let order = Order {
         id: "o-1".into(),

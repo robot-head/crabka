@@ -1,8 +1,8 @@
 #![cfg(feature = "schema-serde")]
-//! Asserts our Avro framing/body matches bytes captured from Confluent's JVM
-//! `KafkaAvroSerializer`. The golden in `testdata/schema_serde/avro/order.hex`
-//! is a PLACEHOLDER until captured from a real Confluent run (no Docker/cp in
-//! this environment), so the test is `#[ignore]`.
+//! Asserts our Avro framing/body matches bytes captured from Confluent's
+//! `AvroSerializer`. The golden in `testdata/schema_serde/avro/order.hex` was
+//! captured against `confluentinc/cp-schema-registry` (schema id 1) via
+//! `tests/schema-serde-capture/run.sh`.
 
 use apache_avro::AvroSchema;
 use assert2::check;
@@ -19,7 +19,6 @@ struct Order {
 }
 
 #[test]
-#[ignore = "golden bytes must be captured from the Confluent JVM KafkaAvroSerializer"]
 fn avro_frame_matches_confluent_golden() {
     let golden_hex = include_str!("testdata/schema_serde/avro/order.hex").trim();
     let golden = hex::decode(golden_hex).expect("valid hex");

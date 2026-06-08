@@ -1,8 +1,9 @@
 #![cfg(feature = "schema-serde")]
 //! Asserts our Protobuf framing (magic+id+message-index+body) matches bytes
-//! captured from Confluent's JVM `KafkaProtobufSerializer`. The golden in
-//! `testdata/schema_serde/protobuf/order.hex` is a PLACEHOLDER until captured
-//! from a real Confluent run, so the test is `#[ignore]`.
+//! captured from Confluent's `ProtobufSerializer`. The golden in
+//! `testdata/schema_serde/protobuf/order.hex` was captured against
+//! `confluentinc/cp-schema-registry` (schema id 2; top-level message-index is
+//! the single `0x00` byte) via `tests/schema-serde-capture/run.sh`.
 
 use assert2::check;
 use crabka_schema_serde::RegistryClient;
@@ -21,14 +22,13 @@ mod order {
 use order::Order;
 
 #[test]
-#[ignore = "golden bytes must be captured from the Confluent JVM KafkaProtobufSerializer"]
 fn protobuf_frame_matches_confluent_golden() {
     let golden = hex::decode(include_str!("testdata/schema_serde/protobuf/order.hex").trim())
         .expect("valid hex");
 
     let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
     let serde = ProtobufSerde::<Order>::new(&cache, "orders-pb-value");
-    cache.seed_subject_id("orders-pb-value", 1);
+    cache.seed_subject_id("orders-pb-value", 2);
 
     let order = Order {
         id: "o-1".into(),

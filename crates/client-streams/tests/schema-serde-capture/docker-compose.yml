@@ -1,0 +1,47 @@
+# Captures byte-exact Confluent serializer goldens for the schema-serde golden
+# tests. Not used by CI — run manually via ./run.sh when Docker is available.
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    hostname: schema-registry
+    depends_on: [kafka]
+    ports: ["8081:8081"]
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  capture:
+    image: python:3.12-slim
+    depends_on: [schema-registry]
+    volumes:
+      - ./capture.py:/capture.py:ro
+      - ../../examples/proto/order.proto:/proto/order.proto:ro
+      - ./out:/out
+    working_dir: /
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        pip install --quiet --disable-pip-version-check \
+          'confluent-kafka[avro,protobuf,json,schemaregistry]' \
+          fastavro protobuf jsonschema requests grpcio-tools
+        python /capture.py
