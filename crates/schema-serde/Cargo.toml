@@ -1,0 +1,44 @@
+[package]
+name = "crabka-schema-serde"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Confluent-compatible schema serdes (Avro/Protobuf/JSON) for Crabka clients"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-schema-serde"
+readme = "README.md"
+keywords = ["kafka", "schema", "avro", "protobuf", "crabka"]
+categories = ["encoding", "api-bindings"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+avro = ["dep:apache-avro"]
+protobuf = ["dep:prost", "dep:prost-reflect"]
+json = ["dep:schemars", "dep:jsonschema"]
+
+[dependencies]
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+apache-avro = { workspace = true, features = ["derive"], optional = true }
+prost = { workspace = true, optional = true }
+prost-reflect = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+jsonschema = { workspace = true, optional = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+serde_json = { workspace = true }
+hex = { workspace = true }
