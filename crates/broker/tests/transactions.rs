@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! In-process transactional integration tests.
 //!
 //! These tests exercise the full end-to-end transactional path:

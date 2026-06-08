@@ -1,4 +1,4 @@
-﻿//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
+//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
 //! and a terminal aggregation (`count`/`reduce`/`aggregate`).
 //!
 //! `groupByKey`/`groupBy` record **no** graph node — they capture lineage state
@@ -58,7 +58,7 @@ where
               topic: String| {
             let parent = NodeHandle::<K, V>::from_name(parent_name);
             // sink: parent → repartition topic
-            state.topology.add_sink::<K, V, KS, VS, _, _>(
+            state.topology.add_sink_explicit::<K, V, KS, VS, _, _>(
                 sink_name,
                 topic.clone(),
                 [parent],
@@ -68,7 +68,7 @@ where
             // repartition topic (loop-back source)
             state.topology.add_repartition_topic(topic.clone());
             // source: repartition topic → new source node
-            state.topology.add_source::<K, V, KS, VS>(
+            state.topology.add_source_explicit::<K, V, KS, VS>(
                 source_name,
                 [topic],
                 crate::processor::serde::Consumed::with(key_serde, value_serde),

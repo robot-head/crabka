@@ -24,7 +24,6 @@
 //! Known limitation (per the FK slice): the runtime has no null-valued
 //! source-record path, so source-row tombstones (deleting an `a`/`b` row via a
 //! null produce) are not exercised here.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 

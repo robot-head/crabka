@@ -12,8 +12,6 @@
 //!   * unknown topic / out-of-range partition → per-partition
 //!     `UNKNOWN_TOPIC_OR_PARTITION (3)`
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 mod support;
 

@@ -9,7 +9,6 @@
 //! the rebalancer's prost/pbjson codegen emits — something the unit tests
 //! can only assume.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;

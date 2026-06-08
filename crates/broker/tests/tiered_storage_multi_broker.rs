@@ -47,11 +47,7 @@
 //! evicted; it can only serve via the shared Local tier + shared RLMM metadata.
 //! With a per-broker in-memory RLMM the survivor would have no metadata and the
 //! consume would fail.  Do NOT weaken the assertion (must require all records back).
-//!
-//! Gated `#[cfg(not(target_os = "windows"))]` like the other multi-broker
-//! raft tests (openraft `debug_assert!` races on the hosted Windows scheduler).
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic, clippy::manual_assert, clippy::too_many_lines)]
 
 use assert2::assert;

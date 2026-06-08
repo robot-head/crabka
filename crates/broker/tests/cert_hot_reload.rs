@@ -11,8 +11,6 @@
 //! assertion is "the server presented cert X" — there's no way to
 //! satisfy a B-pinned verifier with the A cert (and vice-versa).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::path::PathBuf;

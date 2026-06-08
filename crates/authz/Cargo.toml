@@ -17,8 +17,8 @@ categories = ["authentication", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-metadata = { version = "0.3.2", path = "../metadata" }
-crabka-security = { version = "0.3.2", path = "../security" }
+crabka-metadata = { version = "0.3.3", path = "../metadata" }
+crabka-security = { version = "0.3.3", path = "../security" }
 
 [dev-dependencies]
 assert2 = { workspace = true }

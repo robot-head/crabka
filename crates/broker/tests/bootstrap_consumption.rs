@@ -20,8 +20,6 @@
 //! helpers, a verbatim copy keeps blast radius small and avoids touching
 //! the (1500+ line) auth test file.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

@@ -523,7 +523,7 @@ where
         );
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            state.topology.add_sink::<K, V, KS2, VS2, _, _>(
+            state.topology.add_sink_explicit::<K, V, KS2, VS2, _, _>(
                 name.clone(),
                 topic,
                 [parent],
@@ -1341,7 +1341,7 @@ where
             let parent = NodeHandle::<K, V>::from_name(parent_name);
             let topic = format!("{}-{topic_base}{}", state.app_id, names::REPARTITION_SUFFIX);
             // sink: write to repartition topic
-            state.topology.add_sink::<K, V, KS2, VS2, _, _>(
+            state.topology.add_sink_explicit::<K, V, KS2, VS2, _, _>(
                 sink_name.clone(),
                 topic.clone(),
                 [parent],
@@ -1353,7 +1353,7 @@ where
             // mark the topic as internal repartition (loop-back)
             state.topology.add_repartition_topic(topic.clone());
             // source: read from repartition topic
-            state.topology.add_source::<K, V, KS2, VS2>(
+            state.topology.add_source_explicit::<K, V, KS2, VS2>(
                 source_name.clone(),
                 [topic],
                 crate::processor::serde::Consumed::with(

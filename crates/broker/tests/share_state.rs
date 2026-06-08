@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 //! End-to-end integration tests for the KIP-932 share coordinator (persister),

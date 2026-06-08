@@ -18,8 +18,6 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

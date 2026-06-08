@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "windows"))]
-
 //! Tests for the KIP-932 [`ShareConsumer`]: a membership smoke test (join +
 //! close, Task E1) and a happy-path poll test (acquire records with the broker's
 //! `delivery_count`, then implicit auto-`Accept` advances the SPSO, Task E2).

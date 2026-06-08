@@ -11,9 +11,7 @@
 //!
 //! Gated to non-Windows: the broker handle's `metrics_addr()` is
 //! Linux/macOS-only by convention (matches the other integration
-//! tests' `#![cfg(not(target_os = "windows"))]`).
-
-#![cfg(not(target_os = "windows"))]
+//! tests' ``).
 
 use assert2::assert;
 use std::io;

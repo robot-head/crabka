@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use crate::processor::serde::{Consumed, StringSerde};
     use crate::runtime::io::{FetchBatch, FetchedRec};
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
 
     /// Build a one-entry `GlobalStateManager` over a `KeyValueBytesStore<String,String>`
@@ -209,13 +209,8 @@ mod tests {
             Consumed::with(StringSerde, StringSerde),
         );
         // A topology needs a non-global source/sink to build (global is invisible).
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            crate::processor::serde::Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         let built = t.build("app").unwrap();
         GlobalStateManager::build(
             built.global_store_factories(),
@@ -335,13 +330,8 @@ mod tests {
             "gproc",
             Consumed::with(StringSerde, StringSerde),
         );
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            crate::processor::serde::Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         let built = t.build("app").unwrap();
         GlobalStateManager::build(
             built.global_store_factories(),

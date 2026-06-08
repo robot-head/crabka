@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Service;
-use kube::api::Api;
+use k8s_openapi::api::core::v1::{Secret, Service};
+use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
@@ -17,9 +18,13 @@ use kube::{Resource, ResourceExt as _};
 use serde_json::json;
 
 use crate::context::Context;
-use crate::controller::common::{ReconcileError, apply_object, condition, owner_ref, patch_status};
+use crate::controller::common::{
+    FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status,
+};
 use crate::controller::topic::internal_listener_bootstrap;
-use crate::crd::{Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth};
+use crate::crd::{
+    BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth,
+};
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
@@ -51,6 +56,7 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<C
     Action::requeue(Duration::from_secs(15))
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn reconcile(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
@@ -101,7 +107,62 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
 
-    // 3. Render + apply children (Deployment + 2 Services).
+    // 3. Resolve TLS secret name (handles issuerRef path + mutual-exclusion).
+    let tls_secret_name: Option<String> = if let Some(tls) = &obj.spec.tls {
+        match (&tls.secret_name, &tls.issuer_ref) {
+            (Some(_), Some(_)) => {
+                set_status(
+                    &sr_api,
+                    &name,
+                    &obj,
+                    "InvalidSpec",
+                    "spec.tls.secretName and spec.tls.issuerRef are mutually exclusive",
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            (None, None) => {
+                set_status(
+                    &sr_api,
+                    &name,
+                    &obj,
+                    "InvalidSpec",
+                    "spec.tls must set either secretName or issuerRef",
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            (Some(sn), None) => Some(sn.clone()),
+            (None, Some(issuer)) => {
+                let cert_secret = format!("{name}-sr-tls");
+                apply_certificate_cr(&ctx.client, &ns, &name, &cert_secret, issuer, &obj).await?;
+                // Gate: wait for cert-manager to provision the Secret.
+                let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+                if secret_api.get_opt(&cert_secret).await?.is_none() {
+                    set_status(
+                        &sr_api,
+                        &name,
+                        &obj,
+                        "WaitingForCert",
+                        &format!("waiting for cert-manager to provision Secret {cert_secret}"),
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+                Some(cert_secret)
+            }
+        }
+    } else {
+        None
+    };
+
+    // 4. Render + apply children (Deployment + 2 Services).
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
 
@@ -115,19 +176,24 @@ pub async fn reconcile(
         .clone()
         .or_else(|| ctx.config.default_schema_registry_image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
-    let deployment = render_deployment(&obj, &bootstrap, &image)?;
+    let deployment = render_deployment(&obj, &bootstrap, &image, tls_secret_name.as_deref())?;
     apply_object(&dep_api, &deployment_name(&name), &deployment).await?;
 
-    // 4. Status from the live Deployment.
+    // 5. Status from the live Deployment.
     let live = dep_api.get_opt(&deployment_name(&name)).await?;
     let (replicas, ready) = live
         .as_ref()
         .and_then(|d| d.status.as_ref())
         .map_or((None, None), |s| (s.replicas, s.ready_replicas));
     let desired = obj.spec.replicas;
+    let scheme = if tls_secret_name.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     let url = format!(
         "{}://{}.{}.svc.cluster.local:{SR_PORT}",
-        scheme(&obj),
+        scheme,
         service_name(&name),
         ns
     );
@@ -165,13 +231,6 @@ fn service_name(n: &str) -> String {
 }
 fn headless_name(n: &str) -> String {
     format!("{n}-sr-headless")
-}
-fn scheme(obj: &SchemaRegistry) -> &'static str {
-    if obj.spec.tls.is_some() {
-        "https"
-    } else {
-        "http"
-    }
 }
 
 /// Stable label set used for Deployment `selector.matchLabels`, the pod
@@ -244,6 +303,7 @@ fn render_deployment(
     obj: &SchemaRegistry,
     bootstrap: &str,
     image: &str,
+    tls_secret: Option<&str>,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let ns = obj
@@ -252,13 +312,23 @@ fn render_deployment(
         .clone()
         .unwrap_or_else(|| "default".into());
     let selector = selector_labels(obj);
-    let (args, volumes, mounts) = build_args_and_mounts(obj, bootstrap);
+    let (args, volumes, mounts, extra_env) = build_args_and_mounts(obj, bootstrap, tls_secret);
+    let scheme = if tls_secret.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     let advertised = format!(
         "{}://$(POD_NAME).{}.{}.svc.cluster.local:{SR_PORT}",
-        scheme(obj),
+        scheme,
         headless_name(&name),
         ns
     );
+    let mut env = vec![
+        json!({ "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } }),
+        json!({ "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised }),
+    ];
+    env.extend(extra_env);
     let dep = serde_json::from_value(json!({
         "metadata": {
             "name": deployment_name(&name),
@@ -278,10 +348,7 @@ fn render_deployment(
                         "name": "schema-registry",
                         "image": image,
                         "args": args,
-                        "env": [
-                            { "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } },
-                            { "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised },
-                        ],
+                        "env": env,
                         "ports": [{ "name": "rest", "containerPort": SR_PORT, "protocol": "TCP" }],
                         "volumeMounts": mounts,
                         "readinessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 2, "periodSeconds": 5 },
@@ -297,11 +364,18 @@ fn render_deployment(
 
 /// Build the container args + the Secret volumes/mounts from the spec.
 /// Non-secret config → args; credentials → mounted Secret files referenced
-/// by path args. Returns (args, volumes, volumeMounts) as JSON values.
+/// by path args. Returns (args, volumes, volumeMounts, `extra_env`) as JSON values.
+#[allow(clippy::too_many_lines)]
 fn build_args_and_mounts(
     obj: &SchemaRegistry,
     bootstrap: &str,
-) -> (Vec<String>, Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    tls_secret: Option<&str>,
+) -> (
+    Vec<String>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+) {
     let s = &obj.spec;
     // The SR binary has no subcommand — args are flags only. (apko's
     // `cmd: run` default is replaced by the container `args` set here.)
@@ -320,13 +394,17 @@ fn build_args_and_mounts(
 
     let mut volumes = Vec::new();
     let mut mounts = Vec::new();
+    let mut extra_env: Vec<serde_json::Value> = Vec::new();
 
-    // Server TLS
+    // Server TLS — use the resolved tls_secret param instead of tls.secret_name
     if let Some(tls) = &s.tls {
-        a.push("--tls-cert=/etc/sr/tls/tls.crt".into());
-        a.push("--tls-key=/etc/sr/tls/tls.key".into());
-        volumes.push(json!({ "name": "tls", "secret": { "secretName": tls.secret_name } }));
-        mounts.push(json!({ "name": "tls", "mountPath": "/etc/sr/tls", "readOnly": true }));
+        if let Some(sn) = tls_secret {
+            a.push("--tls-cert=/etc/sr/tls/tls.crt".into());
+            a.push("--tls-key=/etc/sr/tls/tls.key".into());
+            volumes.push(json!({ "name": "tls", "secret": { "secretName": sn } }));
+            mounts.push(json!({ "name": "tls", "mountPath": "/etc/sr/tls", "readOnly": true }));
+        }
+        // client_auth and client_ca still read from tls struct (unchanged)
         let mode = match tls.client_auth.unwrap_or(TlsClientAuth::Disabled) {
             TlsClientAuth::Disabled => "disabled",
             TlsClientAuth::Optional => "optional",
@@ -359,14 +437,44 @@ fn build_args_and_mounts(
             }}));
             mounts.push(json!({ "name": "basic", "mountPath": "/etc/sr/basic", "readOnly": true }));
         }
-        if authn.bearer.is_some() {
-            a.push("--bearer=unsecured".into());
-            if let Some(pc) = authn
-                .bearer
-                .as_ref()
-                .and_then(|b| b.principal_claim.clone())
-            {
-                a.push(format!("--bearer-principal-claim={pc}"));
+        if let Some(bearer) = &authn.bearer {
+            match bearer.mode {
+                BearerMode::Unsecured => {
+                    a.push("--bearer=unsecured".into());
+                    if let Some(pc) = &bearer.principal_claim {
+                        a.push(format!("--bearer-principal-claim={pc}"));
+                    }
+                }
+                BearerMode::Jwks => {
+                    a.push("--bearer=jwks".into());
+                    if let Some(uri) = &bearer.jwks_endpoint_uri {
+                        a.push(format!("--bearer-jwks-endpoint-uri={uri}"));
+                    }
+                    if let Some(iss) = &bearer.jwks_valid_issuer {
+                        a.push(format!("--bearer-jwks-valid-issuer={iss}"));
+                    }
+                    if let Some(aud) = &bearer.jwks_expected_audience {
+                        a.push(format!("--bearer-jwks-expected-audience={aud}"));
+                    }
+                    if let Some(pc) = bearer
+                        .jwks_principal_claim
+                        .as_ref()
+                        .or(bearer.principal_claim.as_ref())
+                    {
+                        a.push(format!("--bearer-jwks-principal-claim={pc}"));
+                    }
+                    if let Some(ms) = bearer.jwks_refresh_ms {
+                        a.push(format!("--bearer-jwks-refresh-ms={ms}"));
+                    }
+                    if let Some(ca_sn) = &bearer.jwks_tls_secret_name {
+                        a.push("--bearer-jwks-ca=/etc/sr/jwks-ca/ca.crt".into());
+                        volumes
+                            .push(json!({ "name": "jwks-ca", "secret": { "secretName": ca_sn } }));
+                        mounts.push(
+                            json!({ "name": "jwks-ca", "mountPath": "/etc/sr/jwks-ca", "readOnly": true }),
+                        );
+                    }
+                }
             }
         }
     }
@@ -384,7 +492,88 @@ fn build_args_and_mounts(
         }
     }
 
-    (a, volumes, mounts)
+    // SR → broker kafka-client security
+    if let Some(kc) = &s.kafka_client {
+        let proto = kc.security_protocol.as_deref().unwrap_or("PLAINTEXT");
+        a.push(format!("--kafka-security-protocol={proto}"));
+        if let Some(sasl) = &kc.sasl {
+            a.push(format!("--kafka-sasl-mechanism={}", sasl.mechanism));
+            extra_env.push(json!({
+                "name": "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME",
+                "valueFrom": { "secretKeyRef": { "name": sasl.secret_ref, "key": "username" } }
+            }));
+            extra_env.push(json!({
+                "name": "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD",
+                "valueFrom": { "secretKeyRef": { "name": sasl.secret_ref, "key": "password" } }
+            }));
+        }
+        if let Some(tls) = &kc.tls {
+            if tls.ca_secret_name.is_some() {
+                a.push("--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt".into());
+            }
+            if let Some(sn) = &tls.server_name_override {
+                a.push(format!("--kafka-tls-server-name={sn}"));
+            }
+            if let Some(ca_sn) = &tls.ca_secret_name {
+                volumes.push(json!({ "name": "kafka-tls", "secret": { "secretName": ca_sn } }));
+                mounts.push(
+                    json!({ "name": "kafka-tls", "mountPath": "/etc/sr/kafka-tls", "readOnly": true }),
+                );
+            }
+        }
+    }
+
+    (a, volumes, mounts, extra_env)
+}
+
+/// SSA-apply a `cert-manager.io/v1` `Certificate` CR using [`DynamicObject`]
+/// (avoids a cert-manager Rust crate dep — same pattern as `metrics.rs`).
+///
+/// DNS SANs: per-pod headless DNS + `ClusterIP` service DNS.
+async fn apply_certificate_cr(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    cert_secret_name: &str,
+    issuer: &CertManagerIssuerRef,
+    owner: &SchemaRegistry,
+) -> Result<(), ReconcileError> {
+    let kind = issuer.kind.as_deref().unwrap_or("Issuer");
+    let group = issuer.group.as_deref().unwrap_or("cert-manager.io");
+    let cert_name = format!("{name}-sr");
+    let body = serde_json::json!({
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {
+            "name": cert_name,
+            "namespace": ns,
+            "ownerReferences": [owner_ref::<SchemaRegistry>(owner)?],
+        },
+        "spec": {
+            "secretName": cert_secret_name,
+            "issuerRef": {
+                "name": issuer.name,
+                "kind": kind,
+                "group": group,
+            },
+            "dnsNames": [
+                format!("*.{}.{}.svc.cluster.local", headless_name(name), ns),
+                format!("{}.{}.svc.cluster.local", service_name(name), ns),
+            ],
+        }
+    });
+    let gvk = GroupVersionKind::gvk("cert-manager.io", "v1", "Certificate");
+    let ar = ApiResource::from_gvk_with_plural(&gvk, "certificates");
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let obj: DynamicObject = serde_json::from_value(body)?;
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+    match api.patch(&cert_name, &pp, &Patch::Apply(&obj)).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Err(ReconcileError::Malformed(
+            "cert-manager Certificate CRD not installed".into(),
+        )),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Patch status with a single rolled-up `Ready` condition + a `KafkaReady`

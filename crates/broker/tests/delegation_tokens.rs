@@ -49,8 +49,6 @@
 //! tuple). No public test-support surface was added — the helpers are
 //! inline so they don't leak into other tests.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

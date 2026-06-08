@@ -44,12 +44,39 @@ spec:
                   bearer:
                     nullable: true
                     properties:
-                      mode:
+                      jwksEndpointUri:
+                        description: JWKS endpoint URI (required when `mode` = `Jwks`).
+                        nullable: true
+                        type: string
+                      jwksExpectedAudience:
+                        description: Expected `aud` claim value.
+                        nullable: true
+                        type: string
+                      jwksPrincipalClaim:
                         description: |-
-                          Bearer mode. Only `Unsecured` (dev) is supported today; JWKS is a
-                          future SR enhancement.
+                          JWT claim to use as the principal when mode is `Jwks`. Overrides
+                          `principalClaim` for JWKS paths.
+                        nullable: true
+                        type: string
+                      jwksRefreshMs:
+                        description: JWKS key-set refresh interval in milliseconds. Default 60 000.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      jwksTlsSecretName:
+                        description: |-
+                          Secret name whose `ca.crt` key is mounted and passed as
+                          `--bearer-jwks-ca`.
+                        nullable: true
+                        type: string
+                      jwksValidIssuer:
+                        description: Expected `iss` claim value.
+                        nullable: true
+                        type: string
+                      mode:
                         enum:
                         - Unsecured
+                        - Jwks
                         type: string
                       principalClaim:
                         description: JWT claim used as the principal name. Default `sub`.
@@ -102,6 +129,42 @@ spec:
                   `--default-schema-registry-image`.
                 nullable: true
                 type: string
+              kafkaClient:
+                description: SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
+                nullable: true
+                properties:
+                  sasl:
+                    description: SASL credentials for the SR → broker connection.
+                    nullable: true
+                    properties:
+                      mechanism:
+                        description: e.g. `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
+                        type: string
+                      secretRef:
+                        description: Name of the Secret holding `username` and `password` keys.
+                        type: string
+                    required:
+                    - mechanism
+                    - secretRef
+                    type: object
+                  securityProtocol:
+                    description: e.g. `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, `SASL_SSL`.
+                    nullable: true
+                    type: string
+                  tls:
+                    description: TLS settings for the SR → broker connection.
+                    nullable: true
+                    properties:
+                      caSecretName:
+                        description: Secret with a `ca.crt` key used as the broker CA.
+                        nullable: true
+                        type: string
+                      serverNameOverride:
+                        description: Override the server name used for TLS SNI / hostname verification.
+                        nullable: true
+                        type: string
+                    type: object
+                type: object
               replicas:
                 description: Stateless replicas; all join the election group. Default 1.
                 format: int32
@@ -173,11 +236,29 @@ spec:
                       `clientAuth` != Disabled).
                     nullable: true
                     type: string
+                  issuerRef:
+                    description: cert-manager issuer reference. Mutually exclusive with `secretName`.
+                    nullable: true
+                    properties:
+                      group:
+                        description: API group. Default `cert-manager.io`.
+                        nullable: true
+                        type: string
+                      kind:
+                        description: Defaults to `Issuer`; set `ClusterIssuer` for cluster-scoped issuers.
+                        nullable: true
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
                   secretName:
-                    description: Secret (type kubernetes.io/tls) with `tls.crt` + `tls.key`.
+                    description: |-
+                      Secret (type kubernetes.io/tls) with `tls.crt` + `tls.key`.
+                      Mutually exclusive with `issuerRef`.
+                    nullable: true
                     type: string
-                required:
-                - secretName
                 type: object
             required:
             - replicas

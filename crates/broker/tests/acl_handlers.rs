@@ -18,8 +18,6 @@
 //! (the SASL listener startup is fine on Windows, but keeping
 //! the gate uniform avoids one-off CI matrix surprises).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

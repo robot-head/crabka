@@ -12,8 +12,6 @@
 //! `client_software_name` / `client_software_version` bytes the broker
 //! sees.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

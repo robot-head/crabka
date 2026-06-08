@@ -51,7 +51,7 @@
 //! deliberately do NOT use `--network host` (it silently fails to share the
 //! host loopback on hosted ubuntu runners — see the `jvm_acceptance.rs`
 //! module docs).
-#![cfg(not(target_os = "windows"))]
+
 #![allow(clippy::too_many_lines)]
 // rustc 1.95 clippy ICEs on pedantic lints for files that build wire frames
 // with `.expect()` inside Result-returning helpers — same upstream

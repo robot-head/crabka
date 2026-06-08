@@ -14,8 +14,6 @@
 //! Gated to non-Windows to match the multi-broker test convention used
 //! by the other replication and compaction tests.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

@@ -55,7 +55,7 @@ pub async fn start() -> InProcess {
 //
 // The functions below are only meaningful on non-Windows targets because
 // openraft's debug_assert! races on the hosted Windows task scheduler.
-// Individual test files gate their use with `#![cfg(not(target_os = "windows"))]`.
+// Individual test files gate their use with ``.
 
 /// Lazily-initialized tracing subscriber so `RUST_LOG=...` works in
 /// integration tests. Safe to call multiple times; `try_init` is a no-op

@@ -1,4 +1,4 @@
 {
   "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js-value\",\"version\":1,\"magic\":1}",
-  "value": "{\"subject\":\"js-value\",\"version\":1,\"id\":3,\"schemaType\":\"JSON\",\"schema\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"id\\\":{\\\"type\\\":\\\"integer\\\"}}}\",\"deleted\":false}"
+  "value": "{\"subject\":\"js-value\",\"version\":1,\"id\":3,\"schema\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"id\\\":{\\\"type\\\":\\\"integer\\\"}}}\",\"deleted\":false,\"schemaType\":\"JSON\"}"
 }
