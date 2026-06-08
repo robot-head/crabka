@@ -314,6 +314,7 @@ mod tests {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id,
             broker_epoch: epoch,
+            incarnation_id: uuid::Uuid::nil(),
             host: "h".into(),
             port: 9092,
             rack: None,

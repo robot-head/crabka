@@ -347,6 +347,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: n,
                     broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::nil(),
                     host: "localhost".into(),
                     port: 9092,
                     rack: None,

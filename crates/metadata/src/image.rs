@@ -991,6 +991,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 0,
+                incarnation_id: Uuid::nil(),
                 host: "h1".into(),
                 port: 9092,
                 rack: Some("r1".into()),
@@ -1006,6 +1007,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 2,
                 broker_epoch: 0,
+                incarnation_id: Uuid::nil(),
                 host: "h2".into(),
                 port: 9092,
                 rack: None,
@@ -1505,6 +1507,7 @@ mod tests {
         let b = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
             broker_epoch: 0,
+            incarnation_id: Uuid::nil(),
             host: "h".into(),
             port: 9092,
             rack: None,
@@ -2356,6 +2359,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 5,
                 broker_epoch: 99,
+                incarnation_id: Uuid::nil(),
                 host: "h".into(),
                 port: 9092,
                 rack: None,

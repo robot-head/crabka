@@ -596,6 +596,7 @@ mod run_recovery_tests {
             BrokerRegistrationRecord {
                 node_id,
                 broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
                 host: host.into(),
                 port,
                 rack: None,

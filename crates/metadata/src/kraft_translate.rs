@@ -713,6 +713,11 @@ fn register_broker_to_kraft(
         rack: b.rack.clone(),
         end_points,
         broker_epoch: b.broker_epoch,
+        incarnation_id: to_kuuid(b.incarnation_id),
+        // Crabka brokers are always-active; there is no fence/unfence lifecycle.
+        // Emit false rather than the schema default (true) so JVM tools do not
+        // interpret our brokers as fenced on startup.
+        fenced: false,
         ..Default::default()
     })
 }
@@ -940,6 +945,7 @@ fn register_broker_from_kraft(
     Ok(BrokerRegistrationRecord {
         node_id: b.broker_id as u64,
         broker_epoch: b.broker_epoch,
+        incarnation_id: from_kuuid(b.incarnation_id),
         host,
         port,
         rack: b.rack.clone(),
@@ -1138,6 +1144,7 @@ mod tests {
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: 7,
                 broker_epoch: 42,
+                incarnation_id: uuid::Uuid::from_u128(0xdeadbeef_cafe_babe_0123_456789abcdef),
                 host: "192.168.1.10".into(),
                 port: 9092,
                 rack: Some("us-east-1a".into()),
@@ -1155,6 +1162,7 @@ mod tests {
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 7,
+                incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
                 host: "h".into(),
                 port: 9092,
                 rack: None,

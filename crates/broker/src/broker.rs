@@ -1406,6 +1406,13 @@ impl Broker {
             // Controller-only nodes never register — they host no data and
             // must not appear as brokers in Metadata/DescribeCluster.
             if config.is_broker() {
+                // Load (or generate) the incarnation UUID before registering.
+                // This persists a UUID to `{log_dir}/incarnation_id` on first
+                // boot and reloads it on every subsequent start, so a JVM
+                // controller can detect broker restarts and fence stale
+                // replica memberships (KIP-631).
+                config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
+
                 // Per-listener endpoints: every configured listener's
                 // advertised `host:port` + protocol becomes a `BrokerEndpoint`
                 // on the broker's self-registration record. Clients on
@@ -1428,6 +1435,7 @@ impl Broker {
                     crabka_metadata::BrokerRegistrationRecord {
                         node_id: config.node_id,
                         broker_epoch: 0,
+                        incarnation_id: config.incarnation_id,
                         host: config
                             .advertised_listener
                             .split(':')

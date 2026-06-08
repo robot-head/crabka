@@ -179,6 +179,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: n,
                     broker_epoch: 0,
+                    incarnation_id: Uuid::nil(),
                     host: String::new(),
                     port: 0,
                     rack: None,
@@ -257,6 +258,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: n,
                     broker_epoch: 0,
+                    incarnation_id: Uuid::nil(),
                     host: String::new(),
                     port: 0,
                     rack: None,
@@ -366,6 +368,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: n,
                     broker_epoch: 0,
+                    incarnation_id: Uuid::nil(),
                     host: String::new(),
                     port: 0,
                     rack: None,
