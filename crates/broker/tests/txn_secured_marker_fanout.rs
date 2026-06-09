@@ -122,7 +122,8 @@ async fn sasl_client(addr: &str) -> Client {
 async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
     support::init_tracing();
 
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(2).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(2).await;
 
     // KIP-595 Slice 3c static bootstrap: both brokers boot in `Bootstrap` mode
     // with the same static 2-voter set (concrete controller ports) and elect
@@ -154,13 +155,23 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     cfg1.bootstrap_servers = vec![];
     apply_sasl(&mut cfg1, client_addrs[1]);
 
+    // Pull held listeners before the spawns so each spawn owns its pair.
+    let mut data_ls = client_listeners.into_iter();
+    let mut ctrl_ls = controller_listeners.into_iter();
+    let (data0, controller0) = (data_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (data1, controller1) = (data_ls.next().unwrap(), ctrl_ls.next().unwrap());
+
     // Start both concurrently: `Broker::start` blocks until a leader is
     // committed, which needs a voter majority up, so a sequential
     // `start().await` on broker0 alone would deadlock.
     let cfg0_for_spawn = cfg0.clone();
     let cfg1_for_spawn = cfg1.clone();
-    let join0 = tokio::spawn(async move { Broker::start(cfg0_for_spawn).await });
-    let join1 = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+    let join0 = tokio::spawn(async move {
+        Broker::start_with_listeners(cfg0_for_spawn, Some(controller0), Some(data0)).await
+    });
+    let join1 = tokio::spawn(async move {
+        Broker::start_with_listeners(cfg1_for_spawn, Some(controller1), Some(data1)).await
+    });
     let broker0 = join0
         .await
         .map_err(|e| BrokerError::Startup(format!("broker0 task panicked: {e}")))??;
