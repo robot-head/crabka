@@ -153,9 +153,12 @@ where
             let store = ctx
                 .get_session_store::<K, VA>(&self.store_name)
                 .expect("session store not found");
-            store.find_closed_sessions(window_close_time).await
+            // Strict close (JVM): a session finalizes once stream-time moves PAST
+            // its end (`end < window_close_time`), so with grace 0 a session is not
+            // emitted at its own stream-time. `find_closed_sessions(arg)` is `end<=arg`.
+            store.find_closed_sessions(window_close_time - 1).await
         };
-        due.retain(|(_, _, end, _)| *end > self.last_emitted_close);
+        due.retain(|(_, _, end, _)| *end >= self.last_emitted_close);
         due.sort_by_key(|(_, start, end, _)| (*end, *start));
         for (k, start, end, v) in due {
             ctx.forward(Record::new(
@@ -296,9 +299,12 @@ where
             let store = ctx
                 .get_session_store::<K, V>(&self.store_name)
                 .expect("session store not found");
-            store.find_closed_sessions(window_close_time).await
+            // Strict close (JVM): a session finalizes once stream-time moves PAST
+            // its end (`end < window_close_time`), so with grace 0 a session is not
+            // emitted at its own stream-time. `find_closed_sessions(arg)` is `end<=arg`.
+            store.find_closed_sessions(window_close_time - 1).await
         };
-        due.retain(|(_, _, end, _)| *end > self.last_emitted_close);
+        due.retain(|(_, _, end, _)| *end >= self.last_emitted_close);
         due.sort_by_key(|(_, start, end, _)| (*end, *start));
         for (k, start, end, v) in due {
             ctx.forward(Record::new(

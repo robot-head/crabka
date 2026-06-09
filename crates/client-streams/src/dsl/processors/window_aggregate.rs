@@ -58,7 +58,7 @@ where
 
         for ws in self.windows.windows_for(r.timestamp) {
             // Emit-final drops updates for windows that already closed.
-            if self.emit.is_on_close() && ws + size <= self.last_emitted_close {
+            if self.emit.is_on_close() && ws + size < self.last_emitted_close {
                 continue;
             }
             // Borrow the store, do the async fetch + put, then drop the borrow
@@ -115,7 +115,10 @@ where
         window_close_time: i64,
     ) {
         let size = self.windows.size_ms;
-        let start_to = window_close_time - size; // end = start + size <= close
+        // JVM closes a window strictly: emit once stream-time moves PAST the end
+        // (`end < window_close_time`), so a zero-width / boundary window is not
+        // finalized at its own stream-time. end = start + size < close ⟺ start <= close-size-1.
+        let start_to = window_close_time - size - 1;
         let start_from = self.last_emitted_close.saturating_sub(size);
         let mut due = {
             let store = ctx
@@ -123,7 +126,7 @@ where
                 .expect("window store not found");
             store.fetch_all_in_range(start_from, start_to).await
         };
-        due.retain(|(_, ws, _, _)| ws + size > self.last_emitted_close);
+        due.retain(|(_, ws, _, _)| ws + size >= self.last_emitted_close);
         due.sort_by_key(|(_, ws, _, _)| *ws);
         for (k, ws, ts, v) in due {
             ctx.forward(Record::new(
@@ -190,7 +193,7 @@ where
 
         for ws in self.windows.windows_for(r.timestamp) {
             // Emit-final drops updates for windows that already closed.
-            if self.emit.is_on_close() && ws + size <= self.last_emitted_close {
+            if self.emit.is_on_close() && ws + size < self.last_emitted_close {
                 continue;
             }
             // Borrow the store, do the async fetch + put, then drop the borrow
@@ -247,7 +250,10 @@ where
         window_close_time: i64,
     ) {
         let size = self.windows.size_ms;
-        let start_to = window_close_time - size; // end = start + size <= close
+        // JVM closes a window strictly: emit once stream-time moves PAST the end
+        // (`end < window_close_time`), so a zero-width / boundary window is not
+        // finalized at its own stream-time. end = start + size < close ⟺ start <= close-size-1.
+        let start_to = window_close_time - size - 1;
         let start_from = self.last_emitted_close.saturating_sub(size);
         let mut due = {
             let store = ctx
@@ -255,7 +261,7 @@ where
                 .expect("window store not found");
             store.fetch_all_in_range(start_from, start_to).await
         };
-        due.retain(|(_, ws, _, _)| ws + size > self.last_emitted_close);
+        due.retain(|(_, ws, _, _)| ws + size >= self.last_emitted_close);
         due.sort_by_key(|(_, ws, _, _)| *ws);
         for (k, ws, ts, v) in due {
             ctx.forward(Record::new(

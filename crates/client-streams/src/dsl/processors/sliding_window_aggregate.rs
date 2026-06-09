@@ -509,7 +509,9 @@ where
         window_close_time: i64,
     ) {
         let w = self.windows.time_difference_ms;
-        let start_to = window_close_time - w; // end = start + w <= close
+        // Strict close (JVM): emit once stream-time moves PAST the end
+        // (`end < window_close_time`). end = start + w < close ⟺ start <= close-w-1.
+        let start_to = window_close_time - w - 1;
         // Unlike the time-window processor (which pre-filters already-closed
         // windows out of the store-update loop), the sliding store-update logic
         // runs for every window each record; the `retain` below on
@@ -521,7 +523,7 @@ where
                 .expect("window store not found");
             store.fetch_all_in_range(start_from, start_to).await
         };
-        due.retain(|(_, ws, _, _)| ws + w > self.last_emitted_close);
+        due.retain(|(_, ws, _, _)| ws + w >= self.last_emitted_close);
         due.sort_by_key(|(_, ws, _, _)| *ws);
         for (k, ws, ts, v) in due {
             ctx.forward(Record::new(
@@ -977,7 +979,9 @@ where
         window_close_time: i64,
     ) {
         let w = self.windows.time_difference_ms;
-        let start_to = window_close_time - w; // end = start + w <= close
+        // Strict close (JVM): emit once stream-time moves PAST the end
+        // (`end < window_close_time`). end = start + w < close ⟺ start <= close-w-1.
+        let start_to = window_close_time - w - 1;
         // Unlike the time-window processor (which pre-filters already-closed
         // windows out of the store-update loop), the sliding store-update logic
         // runs for every window each record; the `retain` below on
@@ -989,7 +993,7 @@ where
                 .expect("window store not found");
             store.fetch_all_in_range(start_from, start_to).await
         };
-        due.retain(|(_, ws, _, _)| ws + w > self.last_emitted_close);
+        due.retain(|(_, ws, _, _)| ws + w >= self.last_emitted_close);
         due.sort_by_key(|(_, ws, _, _)| *ws);
         for (k, ws, ts, v) in due {
             ctx.forward(Record::new(
