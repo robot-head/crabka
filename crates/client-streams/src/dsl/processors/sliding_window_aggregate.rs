@@ -190,6 +190,8 @@ where
             }
         }
 
+        // createWindows (JVM processEarly order: current right → prev right → combined)
+
         // Create current record's right window [t+1, t+1+W] if not already present.
         if !right_win_already_created {
             if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
@@ -604,6 +606,8 @@ where
             }
         }
 
+        // createWindows (JVM processEarly order: current right → prev right → combined)
+
         // Current record's right window.
         if !right_win_already_created {
             if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
@@ -841,29 +845,27 @@ where
 
         // 3. Current record's right window.
         if !right_win_already_created {
-            if let Some((rts, ragg)) = right_win_agg {
-                if rts > t {
-                    let rws = t + 1;
-                    let rwe = rws + w;
-                    if rwe >= close_time {
-                        {
-                            let store = ctx
-                                .get_window_store::<K, V>(&self.store_name)
-                                .expect("window store not found");
-                            store.put(key.clone(), rws, ragg.clone(), rts).await;
-                        }
-                        ctx.forward(Record::new(
-                            Some(Windowed {
-                                key: key.clone(),
-                                window: Window {
-                                    start: rws,
-                                    end: rwe,
-                                },
-                            }),
-                            Change::update(None, ragg),
-                            rts,
-                        ));
+            if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
+                let rws = t + 1;
+                let rwe = rws + w;
+                if rwe >= close_time {
+                    {
+                        let store = ctx
+                            .get_window_store::<K, V>(&self.store_name)
+                            .expect("window store not found");
+                        store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: rws,
+                                end: rwe,
+                            },
+                        }),
+                        Change::update(None, ragg),
+                        rts,
+                    ));
                 }
             }
         }
