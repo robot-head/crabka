@@ -11,6 +11,7 @@ pub mod header;
 pub mod metadata;
 pub(crate) mod owned;
 mod payload;
+pub mod remote_log_metadata;
 
 pub use borrowed::{
     Record as RecordBorrowed, RecordBatch as RecordBatchBorrowed,
