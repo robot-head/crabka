@@ -170,6 +170,10 @@ where
                                         let a = agg.clone();
                                         move |k: &K, v: &Vn, acc: VOut| a(k, v, acc)
                                     },
+                                    // Cogroup does not expose emit-final; default to emit-on-update.
+                                    emit: crate::dsl::emit::EmitStrategy::default(),
+                                    stream_time: i64::MIN,
+                                    last_emitted_close: i64::MIN,
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -197,6 +201,9 @@ where
                                         move |k: &K, v: &Vn, acc: VOut| a(k, v, acc)
                                     },
                                     stream_time: i64::MIN,
+                                    // Cogroup does not expose emit-final; default to emit-on-update.
+                                    emit: crate::dsl::emit::EmitStrategy::default(),
+                                    last_emitted_close: i64::MIN,
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -231,6 +238,11 @@ where
                                         let m = merger.clone();
                                         move |k: &K, a: VOut, b: VOut| m(k, a, b)
                                     },
+                                    // Cogroup does not expose emit-final; default to emit-on-update.
+                                    emit: crate::dsl::emit::EmitStrategy::default(),
+                                    grace_ms: w.grace_ms,
+                                    stream_time: i64::MIN,
+                                    last_emitted_close: i64::MIN,
                                     _pd: PhantomData,
                                 },
                                 [parent],

@@ -7,6 +7,7 @@
 pub(crate) mod builder;
 pub mod cogrouped;
 pub mod config;
+pub mod emit;
 pub mod global_table;
 pub(crate) mod graph;
 pub mod kgrouped;
@@ -26,6 +27,7 @@ pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
 pub use cogrouped::CogroupedKStream;
 pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
+pub use emit::EmitStrategy;
 pub use global_table::GlobalKTable;
 pub use kgrouped::KGroupedStream;
 pub use kstream::{BranchedStream, KStream};
