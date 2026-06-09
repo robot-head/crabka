@@ -127,7 +127,7 @@ lru = "0.18"
 # Schema Registry (crabka-schema-registry) — schema parsing + canonical form.
 apache-avro = "0.21"
 prost-reflect = "0.16"
-jsonschema = { version = "0.30", default-features = false }
+jsonschema = { version = "0.46", default-features = false }
 
 # Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
 # credentials, integrity-only Wrap tokens, multi-SPN acceptor keys). Branched
