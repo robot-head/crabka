@@ -12,6 +12,7 @@ pub enum StoreKind {
     KeyValue,
     Window,
     Session,
+    Versioned,
 }
 
 /// Byte-level IQ reads. Implemented by the three materialized `*Bytes` stores.
@@ -52,6 +53,19 @@ pub trait IqQueryable: Send + Sync {
     /// All sessions for `key`, store order. Tuple is `(start, end)`.
     async fn iq_session_fetch_key(&self, _key: &[u8]) -> Vec<((i64, i64), Bytes)> {
         Vec::new()
+    }
+
+    /// Latest live version: `(validFrom, validTo=None, valueBytes)`.
+    async fn iq_versioned_get(&self, _key: &[u8]) -> Option<(i64, Option<i64>, Bytes)> {
+        None
+    }
+    /// Version valid at `as_of`: `(validFrom, validTo, valueBytes)`.
+    async fn iq_versioned_get_as_of(
+        &self,
+        _key: &[u8],
+        _as_of: i64,
+    ) -> Option<(i64, Option<i64>, Bytes)> {
+        None
     }
 }
 
