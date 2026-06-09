@@ -28,7 +28,7 @@ pub use serde::{
 /// (output_key, output_value)` declaration.
 ///
 /// ```
-/// use crabka_client_streams::{impl_processor, Record};
+/// use crabka_client_streams::{Record, impl_processor};
 ///
 /// struct Upper;
 /// impl_processor! {
