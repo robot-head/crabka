@@ -1,6 +1,7 @@
-//! Sliding-window aggregation processor (KIP-450): emit-on-update over inclusive,
-//! data-defined windows of size `time_difference_ms`. Ports JVM
-//! `KStreamSlidingWindowAggregate`.
+//! Sliding-window aggregation processor (KIP-450): inclusive, data-defined
+//! windows of size `time_difference_ms`. Ports JVM
+//! `KStreamSlidingWindowAggregate`. Supports both emit-on-update (the default)
+//! and emit-on-close (KIP-825) forwarding strategies.
 //!
 //! ## Algorithm overview
 //!
@@ -16,11 +17,18 @@
 //!   - Right window `[prev+1, prev+1+W]` is created for the most recent prior
 //!     record if it does not already exist.
 //!
-//! **Emission gate**: a window is only forwarded when
+//! **Emission gate (emit-on-update)**: a window is only forwarded when
 //! `window_end >= window_close_time` where
 //! `window_close_time = stream_time - grace_ms`. Windows that fall entirely
 //! before `window_close_time` are updated in the store but not forwarded (they
 //! are already "expired").
+//!
+//! **Emit-on-close (KIP-825)**: when `EmitStrategy::on_window_close()` is
+//! configured, the per-update forwards above are suppressed entirely; instead
+//! each window is forwarded exactly once — as a final `Change` with `old=None`
+//! — once stream-time advances past its close (`window_end <=
+//! window_close_time`). The store-update logic is identical in both modes; only
+//! the forwarding differs.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -51,6 +59,10 @@ pub(crate) struct KStreamSlidingWindowAggregateProcessor<K, V, VA, I, A> {
     pub agg: A,
     /// Observed max record timestamp (per task instance).
     pub stream_time: i64,
+    /// Emit on every update (default) or only on window close (KIP-825).
+    pub emit: crate::dsl::emit::EmitStrategy,
+    /// Highest `window_close_time` already emitted; prevents re-emit.
+    pub last_emitted_close: i64,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -90,6 +102,10 @@ where
         } else {
             self.process_normal(ctx, key, r.value, t, w, close_time)
                 .await;
+        }
+
+        if self.emit.is_on_close() {
+            self.emit_closed_windows(ctx, close_time).await;
         }
     }
 }
@@ -174,14 +190,16 @@ where
                     store.put(key.clone(), ws, new_agg.clone(), new_ts).await;
                     prior
                 };
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window { start: ws, end: we },
-                    }),
-                    Change::update(old_agg, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window { start: ws, end: we },
+                        }),
+                        Change::update(old_agg, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 let store = ctx
                     .get_window_store::<K, VA>(&self.store_name)
@@ -204,17 +222,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: rws,
-                                end: rwe,
-                            },
-                        }),
-                        Change::update(None, ragg),
-                        rts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: rws,
+                                    end: rwe,
+                                },
+                            }),
+                            Change::update(None, ragg),
+                            rts,
+                        ));
+                    }
                 }
             }
         }
@@ -234,17 +254,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: pws,
-                                end: pwe,
-                            },
-                        }),
-                        Change::update(None, new_agg),
-                        new_ts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: pws,
+                                    end: pwe,
+                                },
+                            }),
+                            Change::update(None, new_agg),
+                            new_ts,
+                        ));
+                    }
                 }
             }
         }
@@ -264,17 +286,19 @@ where
                         .expect("window store not found");
                     store.put(key.clone(), cws, new_agg.clone(), new_ts).await;
                 }
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window {
-                            start: cws,
-                            end: cwe,
-                        },
-                    }),
-                    Change::update(old_agg_opt, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: cws,
+                                end: cwe,
+                            },
+                        }),
+                        Change::update(old_agg_opt, new_agg),
+                        new_ts,
+                    ));
+                }
             }
         }
     }
@@ -354,14 +378,16 @@ where
                     store.put(key.clone(), ws, new_agg.clone(), new_ts).await;
                     prior
                 };
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window { start: ws, end: we },
-                    }),
-                    Change::update(old_agg, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window { start: ws, end: we },
+                        }),
+                        Change::update(old_agg, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 let store = ctx
                     .get_window_store::<K, VA>(&self.store_name)
@@ -386,17 +412,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: pws,
-                                end: pwe,
-                            },
-                        }),
-                        Change::update(None, new_agg),
-                        new_ts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: pws,
+                                    end: pwe,
+                                },
+                            }),
+                            Change::update(None, new_agg),
+                            new_ts,
+                        ));
+                    }
                 }
             }
         }
@@ -419,17 +447,19 @@ where
                         .expect("window store not found");
                     store.put(key.clone(), lws, new_agg.clone(), new_ts).await;
                 }
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window {
-                            start: lws,
-                            end: lwe,
-                        },
-                    }),
-                    Change::update(None, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: lws,
+                                end: lwe,
+                            },
+                        }),
+                        Change::update(None, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 // Store but don't emit (expired).
                 let store = ctx
@@ -451,20 +481,58 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: rws,
-                                end: rwe,
-                            },
-                        }),
-                        Change::update(None, ragg),
-                        rts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: rws,
+                                    end: rwe,
+                                },
+                            }),
+                            Change::update(None, ragg),
+                            rts,
+                        ));
+                    }
                 }
             }
         }
+    }
+
+    /// Forward each window whose `end <= window_close_time` and `end >
+    /// last_emitted_close` as a final `Change`, ascending by window start, then
+    /// advance the watermark. Sliding windows have `end = start +
+    /// time_difference_ms`.
+    async fn emit_closed_windows(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
+        window_close_time: i64,
+    ) {
+        let w = self.windows.time_difference_ms;
+        let start_to = window_close_time - w; // end = start + w <= close
+        let start_from = self.last_emitted_close.saturating_sub(w);
+        let mut due = {
+            let store = ctx
+                .get_window_store::<K, VA>(&self.store_name)
+                .expect("window store not found");
+            store.fetch_all_in_range(start_from, start_to).await
+        };
+        due.retain(|(_, ws, _, _)| ws + w > self.last_emitted_close);
+        due.sort_by_key(|(_, ws, _, _)| *ws);
+        for (k, ws, ts, v) in due {
+            ctx.forward(Record::new(
+                Some(Windowed {
+                    key: k,
+                    window: Window {
+                        start: ws,
+                        end: ws + w,
+                    },
+                }),
+                Change::update(None, v),
+                ts,
+            ));
+        }
+        self.last_emitted_close = window_close_time;
     }
 }
 
@@ -484,6 +552,10 @@ pub(crate) struct KStreamSlidingWindowReduceProcessor<K, V, R> {
     pub windows: SlidingWindows,
     pub reducer: R,
     pub stream_time: i64,
+    /// Emit on every update (default) or only on window close (KIP-825).
+    pub emit: crate::dsl::emit::EmitStrategy,
+    /// Highest `window_close_time` already emitted; prevents re-emit.
+    pub last_emitted_close: i64,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -517,6 +589,10 @@ where
         } else {
             self.process_normal(ctx, key, r.value, t, w, close_time)
                 .await;
+        }
+
+        if self.emit.is_on_close() {
+            self.emit_closed_windows(ctx, close_time).await;
         }
     }
 }
@@ -590,14 +666,16 @@ where
                     store.put(key.clone(), ws, new_agg.clone(), new_ts).await;
                     prior
                 };
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window { start: ws, end: we },
-                    }),
-                    Change::update(old_agg, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window { start: ws, end: we },
+                        }),
+                        Change::update(old_agg, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 let store = ctx
                     .get_window_store::<K, V>(&self.store_name)
@@ -620,17 +698,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: rws,
-                                end: rwe,
-                            },
-                        }),
-                        Change::update(None, ragg),
-                        rts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: rws,
+                                    end: rwe,
+                                },
+                            }),
+                            Change::update(None, ragg),
+                            rts,
+                        ));
+                    }
                 }
             }
         }
@@ -649,17 +729,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: pws,
-                                end: pwe,
-                            },
-                        }),
-                        Change::update(None, new_agg),
-                        new_ts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: pws,
+                                    end: pwe,
+                                },
+                            }),
+                            Change::update(None, new_agg),
+                            new_ts,
+                        ));
+                    }
                 }
             }
         }
@@ -682,17 +764,19 @@ where
                         .expect("window store not found");
                     store.put(key.clone(), cws, new_agg.clone(), new_ts).await;
                 }
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window {
-                            start: cws,
-                            end: cwe,
-                        },
-                    }),
-                    Change::update(old_agg, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: cws,
+                                end: cwe,
+                            },
+                        }),
+                        Change::update(old_agg, new_agg),
+                        new_ts,
+                    ));
+                }
             }
         }
     }
@@ -761,14 +845,16 @@ where
                     store.put(key.clone(), ws, new_agg.clone(), new_ts).await;
                     prior
                 };
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window { start: ws, end: we },
-                    }),
-                    Change::update(old_agg, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window { start: ws, end: we },
+                        }),
+                        Change::update(old_agg, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 let store = ctx
                     .get_window_store::<K, V>(&self.store_name)
@@ -791,17 +877,19 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: pws,
-                                end: pwe,
-                            },
-                        }),
-                        Change::update(None, new_agg),
-                        new_ts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: pws,
+                                    end: pwe,
+                                },
+                            }),
+                            Change::update(None, new_agg),
+                            new_ts,
+                        ));
+                    }
                 }
             }
         }
@@ -824,17 +912,19 @@ where
                         .expect("window store not found");
                     store.put(key.clone(), lws, new_agg.clone(), new_ts).await;
                 }
-                ctx.forward(Record::new(
-                    Some(Windowed {
-                        key: key.clone(),
-                        window: Window {
-                            start: lws,
-                            end: lwe,
-                        },
-                    }),
-                    Change::update(None, new_agg),
-                    new_ts,
-                ));
+                if self.emit.is_on_update() {
+                    ctx.forward(Record::new(
+                        Some(Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: lws,
+                                end: lwe,
+                            },
+                        }),
+                        Change::update(None, new_agg),
+                        new_ts,
+                    ));
+                }
             } else {
                 let store = ctx
                     .get_window_store::<K, V>(&self.store_name)
@@ -855,20 +945,58 @@ where
                             .expect("window store not found");
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
-                    ctx.forward(Record::new(
-                        Some(Windowed {
-                            key: key.clone(),
-                            window: Window {
-                                start: rws,
-                                end: rwe,
-                            },
-                        }),
-                        Change::update(None, ragg),
-                        rts,
-                    ));
+                    if self.emit.is_on_update() {
+                        ctx.forward(Record::new(
+                            Some(Windowed {
+                                key: key.clone(),
+                                window: Window {
+                                    start: rws,
+                                    end: rwe,
+                                },
+                            }),
+                            Change::update(None, ragg),
+                            rts,
+                        ));
+                    }
                 }
             }
         }
+    }
+
+    /// Forward each window whose `end <= window_close_time` and `end >
+    /// last_emitted_close` as a final `Change`, ascending by window start, then
+    /// advance the watermark. Sliding windows have `end = start +
+    /// time_difference_ms`.
+    async fn emit_closed_windows(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
+        window_close_time: i64,
+    ) {
+        let w = self.windows.time_difference_ms;
+        let start_to = window_close_time - w; // end = start + w <= close
+        let start_from = self.last_emitted_close.saturating_sub(w);
+        let mut due = {
+            let store = ctx
+                .get_window_store::<K, V>(&self.store_name)
+                .expect("window store not found");
+            store.fetch_all_in_range(start_from, start_to).await
+        };
+        due.retain(|(_, ws, _, _)| ws + w > self.last_emitted_close);
+        due.sort_by_key(|(_, ws, _, _)| *ws);
+        for (k, ws, ts, v) in due {
+            ctx.forward(Record::new(
+                Some(Windowed {
+                    key: k,
+                    window: Window {
+                        start: ws,
+                        end: ws + w,
+                    },
+                }),
+                Change::update(None, v),
+                ts,
+            ));
+        }
+        self.last_emitted_close = window_close_time;
     }
 }
 
@@ -961,6 +1089,8 @@ mod tests {
             init: (|| 0i64) as fn() -> i64,
             agg: (|_k: &String, _v: &String, a: i64| a + 1) as fn(&String, &String, i64) -> i64,
             stream_time: i64::MIN,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            last_emitted_close: i64::MIN,
             _pd: PhantomData,
         }
     }
@@ -1012,6 +1142,109 @@ mod tests {
         );
     }
 
+    /// Build a count processor in emit-on-close mode with a generous grace so
+    /// freshly-created left windows (which end exactly at stream-time) stay open
+    /// until a far-future record forces them closed.
+    #[allow(clippy::type_complexity)]
+    fn count_proc_close() -> KStreamSlidingWindowAggregateProcessor<
+        String,
+        String,
+        i64,
+        fn() -> i64,
+        fn(&String, &String, i64) -> i64,
+    > {
+        let mut p = count_proc();
+        p.windows = SlidingWindows::of_time_difference_and_grace(10, 100);
+        p.emit = crate::dsl::emit::EmitStrategy::on_window_close();
+        p
+    }
+
+    /// Emit-on-close (KIP-825): no window is forwarded while it is still open;
+    /// once stream-time advances past a window's close, that window is forwarded
+    /// exactly once as a final `Change { old: None, new: Some(count) }`. The set
+    /// of forwarded windows must match exactly the store's windows whose `end`
+    /// has closed, with no duplicates.
+    #[tokio::test]
+    async fn sliding_count_emit_final_emits_only_on_close() {
+        let mut stores = store();
+        let mut p = count_proc_close();
+
+        // Two records in overlapping sliding windows. grace=100 keeps every
+        // window open (close_time = stream_time - 100 is far below any window
+        // end), so emit-on-close must forward NOTHING here.
+        let out1 = run(&mut p, &mut stores, "a", 10).await;
+        assert!(
+            out1.is_empty(),
+            "emit-on-close must not forward on update (ts=10), got {out1:?}"
+        );
+        let out2 = run(&mut p, &mut stores, "a", 12).await;
+        assert!(
+            out2.is_empty(),
+            "emit-on-close must not forward on update (ts=12), got {out2:?}"
+        );
+
+        // Snapshot which windows are present in the store and have closed by the
+        // time stream-time jumps to 1000 (close_time = 1000 - grace(100) = 900,
+        // so windows with end <= 900 close).
+        let w = 10i64;
+        let close_time = 900i64;
+        let expected: std::collections::HashMap<i64, i64> = {
+            let s = stores.get_window::<String, i64>("w").unwrap();
+            s.fetch_all_in_range(i64::MIN / 2, close_time - w)
+                .await
+                .into_iter()
+                .filter(|(_, ws, _, _)| ws + w <= close_time)
+                .map(|(_, ws, _, v)| (ws, v))
+                .collect()
+        };
+        assert!(
+            !expected.is_empty(),
+            "test setup: expected some closed windows in the store"
+        );
+
+        // Far-future record closes all the earlier windows.
+        let out3 = run(&mut p, &mut stores, "a", 1000).await;
+
+        // Collect final emissions for windows that should have closed (end <=
+        // close_time). The far-future record also creates a fresh window at
+        // start=990 (end=1000) which is itself due, plus possibly others; we only
+        // assert about the windows we snapshotted as closed pre-jump.
+        let mut emitted: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for (win, old, new) in &out3 {
+            assert_eq!(
+                *old, None,
+                "final emission must have old=None, got {out3:?}"
+            );
+            assert_eq!(
+                win.end,
+                win.start + w,
+                "sliding window end must be start + W, got {out3:?}"
+            );
+            if win.end <= close_time {
+                let prev = emitted.insert(win.start, new.expect("final has Some value"));
+                assert!(
+                    prev.is_none(),
+                    "window start={} emitted twice as final, got {out3:?}",
+                    win.start
+                );
+            }
+        }
+
+        // Every snapshotted closed window must have been emitted with its stored
+        // aggregate value.
+        for (ws, v) in &expected {
+            assert_eq!(
+                emitted.get(ws),
+                Some(v),
+                "window start={ws} expected final value {v}, emitted map {emitted:?}, raw {out3:?}"
+            );
+        }
+        assert!(
+            !emitted.is_empty(),
+            "expected at least one final emission after close, got {out3:?}"
+        );
+    }
+
     // ── Reduce processor unit tests ─────────────────────────────────────────
 
     /// Helper to build a `StoreRegistry` holding a `WindowBytesStore<String, String>`
@@ -1035,6 +1268,8 @@ mod tests {
             reducer: (|a: &String, v: &String| format!("{a}|{v}"))
                 as fn(&String, &String) -> String,
             stream_time: i64::MIN,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            last_emitted_close: i64::MIN,
             _pd: PhantomData,
         }
     }
