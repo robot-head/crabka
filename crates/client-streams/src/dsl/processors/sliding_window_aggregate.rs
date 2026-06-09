@@ -510,6 +510,10 @@ where
     ) {
         let w = self.windows.time_difference_ms;
         let start_to = window_close_time - w; // end = start + w <= close
+        // Unlike the time-window processor (which pre-filters already-closed
+        // windows out of the store-update loop), the sliding store-update logic
+        // runs for every window each record; the `retain` below on
+        // `last_emitted_close` is therefore the SOLE re-emit dedup here.
         let start_from = self.last_emitted_close.saturating_sub(w);
         let mut due = {
             let store = ctx
@@ -974,6 +978,10 @@ where
     ) {
         let w = self.windows.time_difference_ms;
         let start_to = window_close_time - w; // end = start + w <= close
+        // Unlike the time-window processor (which pre-filters already-closed
+        // windows out of the store-update loop), the sliding store-update logic
+        // runs for every window each record; the `retain` below on
+        // `last_emitted_close` is therefore the SOLE re-emit dedup here.
         let start_from = self.last_emitted_close.saturating_sub(w);
         let mut due = {
             let store = ctx

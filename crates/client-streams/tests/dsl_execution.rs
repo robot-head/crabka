@@ -3030,6 +3030,58 @@ fn sliding_window_aggregate_executes() {
     );
 }
 
+/// Sliding-window emit-final (KIP-825): `.emit_strategy(on_window_close())`
+/// must suppress all per-update emits and forward finals only once windows
+/// close. With a large grace the windows from the two in-order records stay
+/// open (nothing emitted); a far-future record advances stream-time past their
+/// close, flushing the finals. The discriminator vs emit-on-update is that the
+/// first two records produce NO output.
+#[test]
+fn sliding_window_emit_final_emits_only_on_close() {
+    use crabka_client_streams::dsl::EmitStrategy;
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_and_grace(10, 100))
+        .emit_strategy(EmitStrategy::on_window_close())
+        .aggregate(|| 0i64, |_k: &String, _v: &String, a: i64| a + 1, "w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    let consume = || Consumed::with(StringSerde, StringSerde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    // Two in-window records (grace 100 keeps their windows open).
+    d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 20);
+    d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 25);
+    // Emit-final: nothing forwarded while windows are open.
+    assert_eq!(
+        d.read_output("out", p()),
+        None,
+        "emit-final must not emit while windows are open"
+    );
+    // Far-future record advances stream-time → close_time 900 closes the
+    // earlier windows, flushing their finals.
+    d.pipe_input(
+        "in",
+        consume(),
+        Some("k".to_string()),
+        "x".to_string(),
+        1000,
+    );
+    assert!(
+        d.read_output("out", p()).is_some(),
+        "closed windows must flush their finals once stream-time passes their close"
+    );
+}
+
 /// Sliding-window count via the ergonomic non-explicit `.count()` form.
 /// Exercises the `count` → `count_explicit` lowering path distinct from
 /// `count_explicit` called directly.
