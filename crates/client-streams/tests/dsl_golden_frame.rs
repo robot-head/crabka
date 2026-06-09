@@ -28,8 +28,8 @@ fn stateless_chain_matches_jvm() {
 fn windowed_count_matches_jvm() {
     use crabka_client_streams::{I64Serde, Materialized, TimeWindowedSerde, TimeWindows};
     // Mirrors Capture.java `windowedCount()`:
-    //   stream("in").groupByKey().windowedBy(TimeWindows.ofSizeWithNoGrace(60s)).count_explicit()
-    //     .toStream().to_explicit("out")
+    //   stream("in").groupByKey().windowedBy(TimeWindows.ofSizeWithNoGrace(60s)).count()
+    //     .toStream().to("out")
     //
     // No selectKey → no key change → no repartition. The aggregate store is a
     // WINDOW store (auto-named), so its changelog gets cleanup.policy=compact,delete
@@ -53,7 +53,7 @@ fn windowed_count_matches_jvm() {
 fn stream_stream_join_matches_jvm() {
     use crabka_client_streams::{JoinWindows, StreamJoined, StringSerde};
     // Mirrors Capture.java `streamStreamJoin()`:
-    //   stream("left").join(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to_explicit("out")
+    //   stream("left").join(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to("out")
     //
     // One subtopology, source_topics ["left","right"], copartition [0,1]. Two
     // retainDuplicates window stores named after the JVM join processors —
@@ -81,7 +81,7 @@ fn stream_stream_join_matches_jvm() {
 fn stream_stream_outer_join_matches_jvm() {
     use crabka_client_streams::{JoinWindows, StreamJoined, StringSerde};
     // Mirrors Capture.java `streamStreamOuterJoin()`:
-    //   stream("left").outerJoin(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to_explicit("out")
+    //   stream("left").outerJoin(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to("out")
     //
     // Like the inner join but KIP-633 left/outer renames the per-side join
     // processors (THIS → KSTREAM-OUTERTHIS-0000000004, OTHER →
@@ -116,7 +116,7 @@ fn stream_stream_outer_join_matches_jvm() {
 fn session_count_matches_jvm() {
     use crabka_client_streams::{I64Serde, Materialized, SessionWindowedSerde, SessionWindows};
     // Mirrors Capture.java `sessionCount()`:
-    //   stream("in").groupByKey().windowedBy(SessionWindows gap 60s).count_explicit().toStream().to_explicit("out")
+    //   stream("in").groupByKey().windowedBy(SessionWindows gap 60s).count().toStream().to("out")
     //
     // Session store (the third typed store), auto-named at the JVM aggregate-store
     // counter position with the `count` name-burn; changelog cleanup.policy=
@@ -228,7 +228,7 @@ fn branch_merge_matches_jvm() {
     //     .branch((k,v)->true, grab)
     //     .branch((k,v)->false, grab)
     //     .noDefaultBranch()
-    //   captured[0].merge(captured[1]).to_explicit("out")
+    //   captured[0].merge(captured[1]).to("out")
     //
     // Wire result: ONE subtopology "0", source_topics=["in"], everything else empty.
     // Branch/merge are stateless (no internal/repartition/changelog topics).

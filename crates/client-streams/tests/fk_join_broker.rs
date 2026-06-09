@@ -119,7 +119,7 @@ fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     .to_stream()
     .to("fk-out");
     // The builder refuses `build`/`build_optimized` while typed handles are still
-    // live; the join result is consumed by `to_stream().to_explicit(...)`, but the two
+    // live; the join result is consumed by `to_stream().to(...)`, but the two
     // source tables must be released explicitly (same as the FK exec tests).
     drop(ta);
     drop(tb);

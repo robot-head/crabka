@@ -2,7 +2,7 @@
 //! write-back loop.
 //!
 //! Under `build_optimized()`, the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
-//! materialized `builder.table_explicit(topic, …)` store's changelog at its own source
+//! materialized `builder.table(topic, …)` store's changelog at its own source
 //! `topic` (instead of a derived `<app>-<store>-changelog`). The runtime must NOT
 //! re-produce that store's changelog entries — the source topic already IS the
 //! log, so re-producing onto it feeds the source node an unbounded re-emit loop
@@ -161,7 +161,7 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
 
 // ─── topology: the canonical REUSE_KTABLE_SOURCE_TOPICS shape ───────────────────
 
-/// `builder.table_explicit("rt-in", as "rt-store").mapValues(id).toStream().to_explicit("rt-out")`,
+/// `builder.table("rt-in", "rt-store").mapValues(id).toStream().to("rt-out")`,
 /// built with `build_optimized` so the `rt-store` changelog reuses the `rt-in`
 /// source topic (matches the `table_reuse` wire golden).
 fn reuse_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {

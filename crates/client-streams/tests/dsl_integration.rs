@@ -168,7 +168,7 @@ async fn dsl_count_and_restart_restore() {
     // writes to it; no explicit creation needed.
 
     // ── 1. Produce ["a","a","b"] to dsl-in ───────────────────────────────────
-    // key = value so group_by_key().count_explicit() counts per value.
+    // key = value so group_by_key().count() counts per value.
     let producer = crabka_client_producer::Producer::builder()
         .bootstrap(&bootstrap)
         .build()
