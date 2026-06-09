@@ -1,6 +1,6 @@
 //! Applied Avro Streams pipeline over **rich compound types** (a realistic
-//! e-commerce scenario), using the default-serde DSL. Requires a running broker
-//! (`127.0.0.1:9092`) and a Confluent-compatible registry
+//! e-commerce scenario), using `StreamsApp` + the default-serde DSL. Requires a
+//! running broker (`127.0.0.1:9092`) and a Confluent-compatible registry
 //! (`http://127.0.0.1:8081`).
 //!
 //! Pipeline: read Avro `Order` records from `orders`, keep the paid ones, project
@@ -12,10 +12,8 @@
 //! Run: `cargo run -p crabka-client-streams --example avro_pipeline`
 
 use apache_avro::AvroSchema;
-use crabka_client_streams::{DefaultSerde, KafkaStreams, SchemaSerde, StreamsBuilder};
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
+use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
 use crabka_schema_serde::format::avro::AvroSerde;
-use crabka_schema_serde::{RegistryClient, set_default_registry};
 use serde::{Deserialize, Serialize};
 
 /// A customer order — the inbound Avro value. Nested record + array + optional +
@@ -92,32 +90,20 @@ fn summarize(order: &Order) -> OrderSummary {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cache = SchemaCache::new(
-        RegistryClient::new("http://127.0.0.1:8081"),
-        CacheConfig::default(),
-    );
-    // Install the registry BEFORE building the topology: the default Avro serdes
-    // read it when the DSL constructs them during `build`.
-    set_default_registry(cache.clone());
+    let app = StreamsApp::builder()
+        .bootstrap("127.0.0.1:9092")
+        .application_id("orders-summary")
+        .schema_registry("http://127.0.0.1:8081")
+        .build();
 
-    let builder = StreamsBuilder::new();
-    builder
+    let topology = app.streams_builder();
+    topology
         .stream::<String, Order>(["orders"])
         .filter(|_id, order| order.status == OrderStatus::Paid)
         .map_values(summarize)
         .to("order-summaries");
-    let built = builder.build("orders-summary")?;
 
-    // Resolve/register the interned subjects (orders-value, order-summaries-value)
-    // before processing starts.
-    cache.prewarm().await?;
-
-    let mut streams = KafkaStreams::builder()
-        .bootstrap("127.0.0.1:9092")
-        .application_id("orders-summary")
-        .topology(built)
-        .build()
-        .await?;
+    let mut streams = app.run(topology).await?;
     streams.close().await?;
     Ok(())
 }

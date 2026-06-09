@@ -1,6 +1,6 @@
-//! JSON Schema schema-serde Streams pipeline using the default-serde DSL.
-//! Requires a running broker (`127.0.0.1:9092`) and a Confluent-compatible
-//! registry (`http://127.0.0.1:8081`).
+//! JSON Schema schema-serde Streams pipeline using `StreamsApp` + the
+//! default-serde DSL. Requires a running broker (`127.0.0.1:9092`) and a
+//! Confluent-compatible registry (`http://127.0.0.1:8081`).
 //!
 //! Reads JSON `Order` records from `orders-json`, doubles each total, and writes
 //! them to `orders-json-doubled`. Mirrors the Avro/Protobuf examples — only the
@@ -8,10 +8,8 @@
 //!
 //! Run: `cargo run -p crabka-client-streams --example json_pipeline`
 
-use crabka_client_streams::{DefaultSerde, KafkaStreams, SchemaSerde, StreamsBuilder};
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
+use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
 use crabka_schema_serde::format::json::JsonSerde;
-use crabka_schema_serde::{RegistryClient, set_default_registry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -30,32 +28,22 @@ impl DefaultSerde for Order {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cache = SchemaCache::new(
-        RegistryClient::new("http://127.0.0.1:8081"),
-        CacheConfig::default(),
-    );
-    // Install the registry BEFORE building: the default serdes read it when the
-    // DSL constructs them during `build`.
-    set_default_registry(cache.clone());
+    let app = StreamsApp::builder()
+        .bootstrap("127.0.0.1:9092")
+        .application_id("orders-json")
+        .schema_registry("http://127.0.0.1:8081")
+        .build();
 
-    let builder = StreamsBuilder::new();
-    builder
+    let topology = app.streams_builder();
+    topology
         .stream::<String, Order>(["orders-json"])
         .map_values(|o: &Order| Order {
             id: o.id.clone(),
             total: o.total * 2.0,
         })
         .to("orders-json-doubled");
-    let built = builder.build("orders-json")?;
 
-    cache.prewarm().await?;
-
-    let mut streams = KafkaStreams::builder()
-        .bootstrap("127.0.0.1:9092")
-        .application_id("orders-json")
-        .topology(built)
-        .build()
-        .await?;
+    let mut streams = app.run(topology).await?;
     streams.close().await?;
     Ok(())
 }

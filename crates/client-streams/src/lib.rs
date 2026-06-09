@@ -876,6 +876,7 @@ pub mod membership;
 pub mod processor;
 pub mod runtime;
 pub mod store;
+pub mod streams_app;
 pub mod test_driver;
 pub mod topology;
 
@@ -905,5 +906,6 @@ pub use runtime::{
 };
 pub use store::iq::StoreKind;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
+pub use streams_app::StreamsApp;
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};
