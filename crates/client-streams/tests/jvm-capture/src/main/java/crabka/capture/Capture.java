@@ -771,12 +771,12 @@ public final class Capture {
     static Topology versionedTable() {
         StreamsBuilder b = new StreamsBuilder();
         b.table("in",
-                Consumed.with(Serdes.String(), Serdes.Integer()),
-                Materialized.<String, Integer>as(
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
                         Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
-                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Integer()))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
             .toStream()
-            .to("out", Produced.with(Serdes.String(), Serdes.Integer()));
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
         return b.build(optimizedProps());
     }
 
@@ -787,12 +787,12 @@ public final class Capture {
     static Topology versionedTableUnoptimized() {
         StreamsBuilder b = new StreamsBuilder();
         b.table("in",
-                Consumed.with(Serdes.String(), Serdes.Integer()),
-                Materialized.<String, Integer>as(
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
                         Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
-                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Integer()))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
             .toStream()
-            .to("out", Produced.with(Serdes.String(), Serdes.Integer()));
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
         return b.build();
     }
 

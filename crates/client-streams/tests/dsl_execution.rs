@@ -3166,3 +3166,119 @@ fn versioned_table_keeps_latest_on_out_of_order() {
         Some(20)
     );
 }
+
+/// The bytes the versioned table's changelog produces must match the JVM 4.1
+/// capture exactly: KEY = raw key, VALUE = bare serialized value, version
+/// timestamp in the record-timestamp field (KIP-889). Built UNOPTIMIZED so the
+/// changelog is the derived `app-vt-changelog` topic the JVM oracle captured.
+#[test]
+fn versioned_table_changelog_matches_jvm() {
+    fn hex(b: &[u8]) -> String {
+        use std::fmt::Write as _;
+        b.iter().fold(String::new(), |mut s, x| {
+            let _ = write!(s, "{x:02x}");
+            s
+        })
+    }
+    let golden: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/golden/dsl/behavioral/versioned_changelog.json")
+            .expect("changelog golden present"),
+    )
+    .unwrap();
+    let expected: Vec<(String, Option<String>, i64)> = golden
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["keyHex"].as_str().unwrap().to_string(),
+                e["valueHex"].as_str().map(str::to_string),
+                e["ts"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+
+    let b = StreamsBuilder::new();
+    b.table_explicit(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, v, ts) in [
+        ("k", 10, 100),
+        ("k", 20, 200),
+        ("k", 15, 150),
+        ("k", 30, 300),
+        ("j", 5, 120),
+    ] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, I64Serde),
+            Some(k.to_string()),
+            i64::from(v),
+            ts,
+        );
+    }
+    let actual: Vec<(String, Option<String>, i64)> = d
+        .drain_changelog()
+        .into_iter()
+        .filter(|(topic, _, _, _)| topic == "app-vt-changelog")
+        .map(|(_, k, v, ts)| (hex(&k), v.as_ref().map(|b| hex(b)), ts.expect("version ts")))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+/// Replaying the JVM behavioral battery through the Rust versioned table must
+/// reproduce the JVM's emitted (key, value) sequence on `out`.
+#[test]
+fn versioned_table_behavioral_matches_jvm() {
+    let golden: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/golden/dsl/behavioral/versioned_table.json")
+            .expect("behavioral golden present"),
+    )
+    .unwrap();
+    let expected: Vec<(Option<String>, i64)> = golden
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["key"].as_str().map(str::to_string),
+                e["value"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+
+    let b = StreamsBuilder::new();
+    b.table_explicit(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    )
+    .to_stream()
+    .to("out");
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, v, ts) in [
+        ("k", 10, 100),
+        ("k", 20, 200),
+        ("k", 15, 150),
+        ("k", 30, 300),
+        ("j", 5, 120),
+    ] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, I64Serde),
+            Some(k.to_string()),
+            i64::from(v),
+            ts,
+        );
+    }
+    let mut actual = Vec::new();
+    while let Some((k, v)) = d.read_output("out", Produced::with(StringSerde, I64Serde)) {
+        actual.push((k, v));
+    }
+    assert_eq!(actual, expected);
+}

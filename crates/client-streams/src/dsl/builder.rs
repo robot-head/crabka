@@ -202,15 +202,34 @@ impl StreamsBuilder {
                             },
                             [&src],
                         );
-                    state
-                        .topology
-                        .add_versioned_store::<KS::Target, VS::Target, KS, VS>(
-                            store_for_thunk.clone(),
-                            key_serde_for_lower,
-                            value_serde_for_lower,
-                            vc.history_retention_ms,
-                            [h.name().to_string()],
-                        );
+                    // REUSE_KTABLE_SOURCE_TOPICS applies to versioned tables too:
+                    // under optimization the changelog is the source topic, else
+                    // the default `<app>-<store>-changelog`.
+                    match state.reuse_changelog.get(&id).cloned() {
+                        Some(changelog_topic) => {
+                            state
+                                .topology
+                                .add_versioned_store_with_changelog::<KS::Target, VS::Target, KS, VS>(
+                                    store_for_thunk.clone(),
+                                    key_serde_for_lower,
+                                    value_serde_for_lower,
+                                    vc.history_retention_ms,
+                                    [h.name().to_string()],
+                                    changelog_topic,
+                                );
+                        }
+                        None => {
+                            state
+                                .topology
+                                .add_versioned_store::<KS::Target, VS::Target, KS, VS>(
+                                    store_for_thunk.clone(),
+                                    key_serde_for_lower,
+                                    value_serde_for_lower,
+                                    vc.history_retention_ms,
+                                    [h.name().to_string()],
+                                );
+                        }
+                    }
                     state.handle_name.insert(id, h.name().to_string());
                 } else {
                     // ── Standard KV KTable branch ──────────────────────────────

@@ -58,13 +58,20 @@ fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
     ]
 }
 
-/// Versioned-store changelog topic configs: `cleanup.policy=compact` +
-/// `min.compaction.lag.ms` so recent versions survive until restore (KIP-889).
+/// Versioned-store changelog topic configs (KIP-889): `cleanup.policy=compact` +
+/// `message.timestamp.type=CreateTime` + `min.compaction.lag.ms` so recent
+/// versions survive (un-compacted) until restore reads them. Keys are in sorted
+/// order (same rule as the other changelog configs).
 fn versioned_changelog_topic_configs(min_compaction_lag_ms: i64) -> Vec<KeyValue> {
     vec![
         KeyValue {
             key: "cleanup.policy".into(),
             value: "compact".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "message.timestamp.type".into(),
+            value: "CreateTime".into(),
             ..Default::default()
         },
         KeyValue {
@@ -666,6 +673,7 @@ mod tests {
         let cfgs = versioned_changelog_topic_configs(686_400_000);
         let get = |k: &str| cfgs.iter().find(|c| c.key == k).map(|c| c.value.clone());
         assert_eq!(get("cleanup.policy").as_deref(), Some("compact"));
+        assert_eq!(get("message.timestamp.type").as_deref(), Some("CreateTime"));
         assert_eq!(get("min.compaction.lag.ms").as_deref(), Some("686400000"));
     }
 

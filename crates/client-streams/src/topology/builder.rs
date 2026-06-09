@@ -688,15 +688,76 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        self.add_versioned_store_inner::<K, V, KS, VS>(
+            name,
+            key_serde,
+            value_serde,
+            history_retention_ms,
+            processors,
+            None,
+        )
+    }
+
+    /// Like [`add_versioned_store`] but whose changelog is an existing **source
+    /// topic** (the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a versioned
+    /// `builder.table_explicit(topic, …)` store's changelog at its own source
+    /// `topic`). Mirrors [`add_state_store_with_changelog`].
+    ///
+    /// [`add_versioned_store`]: Topology::add_versioned_store
+    /// [`add_state_store_with_changelog`]: Topology::add_state_store_with_changelog
+    pub fn add_versioned_store_with_changelog<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        history_retention_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_topic: impl Into<String>,
+    ) -> &mut Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        self.add_versioned_store_inner::<K, V, KS, VS>(
+            name,
+            key_serde,
+            value_serde,
+            history_retention_ms,
+            processors,
+            Some(changelog_topic.into()),
+        )
+    }
+
+    fn add_versioned_store_inner<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        history_retention_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_override: Option<String>,
+    ) -> &mut Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
         let name: String = name.into();
         let min_compaction_lag_ms = history_retention_ms + 86_400_000;
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
-        self.reg
-            .add_versioned_store(&name, procs, None, min_compaction_lag_ms);
+        self.reg.add_versioned_store(
+            &name,
+            procs,
+            changelog_override.clone(),
+            min_compaction_lag_ms,
+        );
         self.store_factories.insert(
             name.clone(),
             (
-                None,
+                changelog_override,
                 Box::new(
                     move |store_name: &str,
                           changelog: String,
