@@ -134,3 +134,17 @@ pub(crate) const GLOBAL_PROCESSOR: &str = "KTABLE-SOURCE-";
 pub(crate) const KSTREAM_PROCESSOR: &str = "KSTREAM-PROCESSOR-";
 /// JVM `KStream.processValues` node prefix. Not wire-visible.
 pub(crate) const KSTREAM_PROCESSVALUES: &str = "KSTREAM-PROCESSVALUES-";
+
+// ── KIP-150 cogroup node prefixes ───────────────────────────────────────────
+// Pinned by the `cogroup` golden capture (Kafka Streams 4.1.0). The processor
+// names are NOT wire-visible (the wire carries topics/stores/copartition only),
+// so these drive the internal node-name counter + diagnostics; the JVM constant
+// is `COGROUPKSTREAM-` (NOT `COGROUP-`).
+/// Per-input cogroup aggregate processor prefix (one node per input stream; all
+/// share the cogroup state store).
+#[allow(dead_code)]
+pub(crate) const COGROUP_AGGREGATE: &str = "COGROUPKSTREAM-AGGREGATE-";
+/// Cogroup passthrough merge node prefix (fans the per-input aggregate
+/// processors into the single result `KTable` source).
+#[allow(dead_code)]
+pub(crate) const COGROUP_MERGE: &str = "COGROUPKSTREAM-MERGE-";

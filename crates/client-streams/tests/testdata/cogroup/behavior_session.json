@@ -1,0 +1,10 @@
+[
+  {"key": "a", "windowStart": 0, "windowEnd": 0, "value": 2},
+  {"key": "a", "windowStart": 0, "windowEnd": 0, "value": null},
+  {"key": "a", "windowStart": 0, "windowEnd": 1, "value": 3},
+  {"key": "a", "windowStart": 0, "windowEnd": 1, "value": null},
+  {"key": "a", "windowStart": 0, "windowEnd": 2, "value": 4},
+  {"key": "b", "windowStart": 3, "windowEnd": 3, "value": 4},
+  {"key": "b", "windowStart": 3, "windowEnd": 3, "value": null},
+  {"key": "b", "windowStart": 3, "windowEnd": 4, "value": 5}
+]
