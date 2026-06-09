@@ -20,9 +20,7 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
-use crabka_client_streams::{
-    Consumed, KafkaStreams, Materialized, Produced, StreamsBuilder, StringSerde,
-};
+use crabka_client_streams::{KafkaStreams, StreamsBuilder};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -168,14 +166,10 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
 /// source topic (matches the `table_reuse` wire golden).
 fn reuse_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    b.table_explicit(
-        "rt-in",
-        Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_store("rt-store"),
-    )
-    .map_values(|v: &String| v.clone())
-    .to_stream()
-    .to_explicit("rt-out", Produced::with(StringSerde, StringSerde));
+    b.table::<String, String>("rt-in", "rt-store")
+        .map_values(|v: &String| v.clone())
+        .to_stream()
+        .to("rt-out");
     b.build_optimized(app_id).unwrap()
 }
 

@@ -1,4 +1,4 @@
-﻿//! JVM golden-parity tests for Interactive-Query read semantics.
+//! JVM golden-parity tests for Interactive-Query read semantics.
 //!
 //! Ground truth is `tests/testdata/iq/behavior.json`, captured from a real JVM
 //! Kafka Streams 4.1 `TopologyTestDriver` run (`jvm-capture/run.sh --iq`). Each
@@ -16,8 +16,7 @@
 
 use crabka_client_streams::dsl::StreamsBuilder;
 use crabka_client_streams::{
-    Consumed, Grouped, I64Serde, Materialized, SessionWindows, StringSerde, TimeWindows,
-    TopologyTestDriver,
+    Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, TopologyTestDriver,
 };
 use serde_json::Value;
 
@@ -50,9 +49,9 @@ async fn iq_kv_golden_parity() {
     let kv = &g["kv"];
 
     let b = StreamsBuilder::new();
-    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"));
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .count("counts");
     let built = b.build("app").unwrap();
     let mut d = TopologyTestDriver::new(&built).unwrap();
     // Each record's key equals its value (matches the JVM capture).
@@ -126,10 +125,10 @@ async fn iq_window_golden_parity() {
 
     let builder = StreamsBuilder::new();
     builder
-        .stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .stream::<String, String>(["in"])
+        .group_by_key()
         .windowed_by(TimeWindows::of_size(size))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("wc"));
+        .count("wc");
     let built = builder.build("app").unwrap();
     let mut driver = TopologyTestDriver::new(&built).unwrap();
     // The capture keys every record "k"; the record's first field is that key.
@@ -177,10 +176,10 @@ async fn iq_session_golden_parity() {
 
     let builder = StreamsBuilder::new();
     builder
-        .stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .stream::<String, String>(["in"])
+        .group_by_key()
         .windowed_by_session(SessionWindows::of_inactivity_gap(gap))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("sc"));
+        .count("sc");
     let built = builder.build("app").unwrap();
     let mut driver = TopologyTestDriver::new(&built).unwrap();
     for (k, ts) in records(sess) {

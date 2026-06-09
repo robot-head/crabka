@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
-use crabka_client_streams::{
-    Consumed, Grouped, I64Serde, KafkaStreams, Materialized, Produced, StreamsBuilder, StringSerde,
-};
+use crabka_client_streams::{KafkaStreams, StreamsBuilder};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -73,11 +71,11 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 /// stream (key is not changed upstream).
 fn dsl_counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    b.stream_explicit(["dsl-in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+    b.stream::<String, String>(["dsl-in"])
+        .group_by_key()
+        .count("counts")
         .to_stream()
-        .to_explicit("dsl-out", Produced::with(StringSerde, I64Serde));
+        .to("dsl-out");
     b.build_optimized(app_id).unwrap()
 }
 

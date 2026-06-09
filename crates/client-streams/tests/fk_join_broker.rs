@@ -29,9 +29,7 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
-use crabka_client_streams::{
-    Consumed, KafkaStreams, Materialized, Produced, StreamsBuilder, StringSerde,
-};
+use crabka_client_streams::{KafkaStreams, StreamsBuilder, StringSerde};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -110,16 +108,8 @@ async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: 
 /// FK join requires; the foreign-key extractor is identity on `a`'s value.
 fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    let ta = b.table_explicit(
-        "fk-a",
-        Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_store("fk-sa"),
-    );
-    let tb = b.table_explicit(
-        "fk-b",
-        Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_store("fk-sb"),
-    );
+    let ta = b.table::<String, String>("fk-a", "fk-sa");
+    let tb = b.table::<String, String>("fk-b", "fk-sb");
     ta.join_on_foreign_key(
         &tb,
         |va: &String| va.clone(),
@@ -127,7 +117,7 @@ fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
         StringSerde,
     )
     .to_stream()
-    .to_explicit("fk-out", Produced::with(StringSerde, StringSerde));
+    .to("fk-out");
     // The builder refuses `build`/`build_optimized` while typed handles are still
     // live; the join result is consumed by `to_stream().to_explicit(...)`, but the two
     // source tables must be released explicitly (same as the FK exec tests).
