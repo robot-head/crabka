@@ -2,8 +2,12 @@
 //! keyed by `validFrom` (epoch millis); a version's value is `Some` (live) or
 //! `None` (tombstone). `get` returns the latest; `get_as_of(t)` returns the
 //! version valid at `t`. History older than `history_retention` (relative to the
-//! max observed timestamp) is expired. Changelog VALUE = `validFrom:8B ‖ value`
-//! (`versioned_schema`); the raw key is the changelog key (JVM-exact).
+//! max observed timestamp) is expired.
+//!
+//! Changelog format (KIP-889 / JVM-exact):
+//! - Changelog KEY  = raw key bytes.
+//! - Changelog VALUE = bare serialized value bytes (`Some`) or `None` (tombstone).
+//! - The version timestamp lives in the Kafka RECORD timestamp field.
 use std::any::Any;
 use std::collections::BTreeMap;
 
@@ -12,7 +16,6 @@ use bytes::Bytes;
 
 use crate::processor::serde::Serde;
 use crate::store::api::StateStore;
-use crate::store::versioned_schema::{unwrap_versioned, wrap_versioned};
 
 /// A single resolved version: its value, the timestamp it became valid, and the
 /// timestamp the next version superseded it (`None` = still the latest, ∞).
@@ -50,7 +53,8 @@ pub struct VersionedBytesStore<K, V> {
     // key bytes -> (validFrom -> Some(value bytes) | None tombstone)
     chains: BTreeMap<Bytes, BTreeMap<i64, Option<Bytes>>>,
     observed_stream_time: i64,
-    changelog: Vec<(Bytes, Option<Bytes>)>,
+    // (key, bare value | None tombstone, version_ts)
+    changelog: Vec<(Bytes, Option<Bytes>, i64)>,
     logging: bool,
 }
 
@@ -146,16 +150,21 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for VersionedBytesStore<K,
         &self.changelog_topic
     }
     fn take_changelog(&mut self) -> Vec<(Bytes, Option<Bytes>)> {
-        std::mem::take(&mut self.changelog)
+        self.changelog.drain(..).map(|(k, v, _ts)| (k, v)).collect()
     }
-    async fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
-        // A bare null changelog value cannot carry a timestamp; with the
-        // value-packed encoding it never occurs. Ignore it defensively and
-        // reconstruct the version chain from each `ts ‖ value` entry.
-        if let Some(wrapped) = value {
-            let (ts, inner) = unwrap_versioned(&wrapped);
-            self.insert_raw(key, ts, inner);
-        }
+    fn take_changelog_ts(&mut self) -> Vec<(Bytes, Option<Bytes>, Option<i64>)> {
+        self.changelog
+            .drain(..)
+            .map(|(k, v, ts)| (k, v, Some(ts)))
+            .collect()
+    }
+    async fn apply_changelog(&mut self, _key: Bytes, _value: Option<Bytes>) {
+        // Bare changelog value without a timestamp cannot be placed into the
+        // version chain; callers should use apply_changelog_ts instead.
+        // This no-op fallback keeps the trait object safe.
+    }
+    async fn apply_changelog_ts(&mut self, key: Bytes, value: Option<Bytes>, timestamp: i64) {
+        self.insert_raw(key, timestamp, value);
     }
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
@@ -181,8 +190,9 @@ impl<K: Send + Sync + 'static, V: Send + 'static> VersionedKeyValueStore<K, V>
             .map(|v| self.value_serde.serialize(&self.changelog_topic, v));
         let inserted = self.insert_raw(kb.clone(), timestamp, vb.clone());
         if inserted && self.logging {
-            let wrapped = wrap_versioned(timestamp, vb.as_deref());
-            self.changelog.push((kb, Some(wrapped)));
+            // Changelog VALUE = bare serialized value (KIP-889 / JVM-exact).
+            // The version timestamp lives in the Kafka record timestamp field.
+            self.changelog.push((kb, vb, timestamp));
         }
     }
 
@@ -191,8 +201,8 @@ impl<K: Send + Sync + 'static, V: Send + 'static> VersionedKeyValueStore<K, V>
         let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let inserted = self.insert_raw(kb.clone(), timestamp, None);
         if inserted && self.logging {
-            let wrapped = wrap_versioned(timestamp, None);
-            self.changelog.push((kb, Some(wrapped)));
+            // Tombstone: None value; timestamp in record timestamp field.
+            self.changelog.push((kb, None, timestamp));
         }
         prev
     }
@@ -322,11 +332,11 @@ mod tests {
         s.put("k".into(), Some(10), 100).await;
         s.delete(&"k".into(), 150).await;
         s.put("k".into(), Some(30), 300).await;
-        let cl = s.take_changelog();
+        let cl = s.take_changelog_ts();
         let mut r = store(1_000_000);
         r.set_logging(false);
-        for (k, v) in cl {
-            r.apply_changelog(k, v).await;
+        for (k, v, ts) in cl {
+            r.apply_changelog_ts(k, v, ts.unwrap()).await;
         }
         assert!(r.take_changelog().is_empty());
         assert_eq!(r.get(&"k".into()).await.map(|x| x.value), Some(30));

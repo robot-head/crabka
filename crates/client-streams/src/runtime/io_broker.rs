@@ -97,7 +97,7 @@ impl RecordFetcher for BrokerFetcher {
                 offset: r.offset,
                 key: r.key,
                 value: r.value,
-                timestamp: -1,
+                timestamp: r.timestamp,
             })
             .collect();
 
@@ -197,6 +197,29 @@ impl RecordProducer for BrokerProducer {
         Ok(())
     }
 
+    async fn send_with_timestamp(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+        timestamp_ms: Option<i64>,
+    ) -> Result<(), StreamsClientError> {
+        let rx = self
+            .inner
+            .send(ProducerRecord {
+                topic: topic.to_string(),
+                partition,
+                key,
+                value,
+                timestamp_ms,
+                ..Default::default()
+            })
+            .await;
+        self.pending.lock().await.push(rx);
+        Ok(())
+    }
+
     /// Flush: first ask the inner producer to drain its batch buffer, then
     /// await every pending per-record ack. Any `Err` result from a record ack
     /// is surfaced so the caller knows a commit would be unsafe.
@@ -268,6 +291,29 @@ impl RecordProducer for BrokerTransactionalProducer {
                     partition,
                     key,
                     value,
+                    ..Default::default()
+                })
+                .await,
+        );
+        Ok(())
+    }
+
+    async fn send_with_timestamp(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+        timestamp_ms: Option<i64>,
+    ) -> Result<(), StreamsClientError> {
+        drop(
+            self.inner
+                .send(ProducerRecord {
+                    topic: topic.to_string(),
+                    partition,
+                    key,
+                    value,
+                    timestamp_ms,
                     ..Default::default()
                 })
                 .await,

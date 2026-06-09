@@ -129,6 +129,7 @@ impl StreamTask {
                             &name,
                             rec.key.clone().unwrap_or_default(),
                             rec.value.clone(),
+                            rec.timestamp,
                         )
                         .await;
                     let next = rec.offset + 1;
@@ -180,6 +181,7 @@ impl StreamTask {
                         &name,
                         rec.key.clone().unwrap_or_default(),
                         rec.value.clone(),
+                        rec.timestamp,
                     )
                     .await;
                 if rec.offset + 1 > next_offset {
@@ -297,9 +299,9 @@ impl StreamTask {
             // but BEFORE the flush/commit barrier (at-least-once).
             // Changelog sends are pinned to self.partition so restore() can
             // read them back by fetching only the task partition.
-            for (cl_topic, key, value) in self.graph.drain_changelogs(&self.source_topics) {
+            for (cl_topic, key, value, ts_opt) in self.graph.drain_changelogs(&self.source_topics) {
                 self.producer
-                    .send(&cl_topic, Some(self.partition), Some(key), value)
+                    .send_with_timestamp(&cl_topic, Some(self.partition), Some(key), value, ts_opt)
                     .await?;
             }
             // Fire any due STREAM_TIME punctuators after this partition's batch,
@@ -344,9 +346,9 @@ impl StreamTask {
                 .send(&out.topic, None, out.key, out.value)
                 .await?;
         }
-        for (cl_topic, key, value) in self.graph.drain_changelogs(&self.source_topics) {
+        for (cl_topic, key, value, ts_opt) in self.graph.drain_changelogs(&self.source_topics) {
             self.producer
-                .send(&cl_topic, Some(self.partition), Some(key), value)
+                .send_with_timestamp(&cl_topic, Some(self.partition), Some(key), value, ts_opt)
                 .await?;
         }
         Ok(())

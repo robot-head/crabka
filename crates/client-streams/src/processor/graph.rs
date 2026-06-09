@@ -287,17 +287,17 @@ impl Graph {
     pub fn drain_changelogs(
         &mut self,
         reuse_source_topics: &std::collections::HashSet<String>,
-    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
+    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
         let mut out = Vec::new();
         for name in self.stores.names() {
             if let Some(store) = self.stores.get_mut(&name) {
                 let topic = store.changelog_topic().to_string();
-                let entries = store.take_changelog();
+                let entries = store.take_changelog_ts();
                 if reuse_source_topics.contains(&topic) {
                     continue; // reuse-source store: drained, but never re-produced
                 }
-                for (k, v) in entries {
-                    out.push((topic.clone(), k, v));
+                for (k, v, ts) in entries {
+                    out.push((topic.clone(), k, v, ts));
                 }
             }
         }
@@ -311,9 +311,10 @@ impl Graph {
         store_name: &str,
         key: bytes::Bytes,
         value: Option<bytes::Bytes>,
+        timestamp: i64,
     ) {
         if let Some(store) = self.stores.get_mut(store_name) {
-            store.apply_changelog(key, value).await;
+            store.apply_changelog_ts(key, value, timestamp).await;
         }
     }
 

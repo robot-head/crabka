@@ -79,6 +79,20 @@ pub trait RecordProducer: Send + Sync + 'static {
         key: Option<Bytes>,
         value: Option<Bytes>,
     ) -> Result<(), StreamsClientError>;
+    /// Like `send`, but sets the record's timestamp (epoch millis) when
+    /// `timestamp_ms` is `Some`. Default delegates to `send` (producer fills
+    /// wall-clock time). Overridden by the broker producer so versioned-store
+    /// changelog records carry the version timestamp (KIP-889).
+    async fn send_with_timestamp(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+        _timestamp_ms: Option<i64>,
+    ) -> Result<(), StreamsClientError> {
+        self.send(topic, partition, key, value).await
+    }
     /// Block until all enqueued records are acknowledged (durability barrier).
     async fn flush(&self) -> Result<(), StreamsClientError>;
 }
