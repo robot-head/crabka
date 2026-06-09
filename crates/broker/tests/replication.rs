@@ -1,7 +1,3 @@
-//! Multi-node in-process tests for basic replication. Gated
-//! `#[cfg(not(target_os = "windows"))]` to mirror `quorum.rs` (openraft
-//! `debug_assert!` race on the hosted Windows runner).
-//!
 //! Spins up a 3-broker cluster on loopback, creates a topic with
 //! replication-factor 3, produces records to the leader, and asserts
 //! every follower's local log converges to the leader's
@@ -14,7 +10,6 @@
 //! seconds for openraft to converge, and `cluster_lock` serializes the
 //! tests so slow startups accumulate.
 
-#![cfg(not(target_os = "windows"))]
 // Test-file pragmatism: deadlines are expressed as
 // `if Instant::now() > … { panic!(…) }` for readability, and casts
 // turn 1-based `i` into broker ids. Hoisting these into named helpers

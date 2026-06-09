@@ -33,7 +33,6 @@
 //!
 //! Re-running this test regenerates both fixture files verbatim.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use std::net::SocketAddr;

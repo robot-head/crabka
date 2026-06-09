@@ -123,6 +123,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, St
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: new_directories,
+        partition_epoch: pr.partition_epoch + 1,
     }))
 }
 
@@ -165,6 +166,7 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
         adding_replicas: new,
         removing_replicas: old,
         directories: new_directories,
+        partition_epoch: pr.partition_epoch + 1,
     })
 }
 
@@ -347,6 +349,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: n,
                     broker_epoch: 0,
+                    incarnation_id: uuid::Uuid::nil(),
                     host: "localhost".into(),
                     port: 9092,
                     rack: None,
@@ -370,6 +373,7 @@ mod tests {
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
             directories: vec![],
+            partition_epoch: 0,
         }));
         img
     }

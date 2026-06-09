@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! REST conformance: verifies our router's responses structurally match the
 //! byte-exact golden fixtures captured from a real `confluentinc/cp-schema-registry:7.4.0`.
 //!

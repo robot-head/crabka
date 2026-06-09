@@ -20,7 +20,6 @@
 //! Windows-gated like the other multi-broker tests (openraft's `debug_assert!`
 //! races on the hosted Windows scheduler).
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::too_many_lines)]
 
 use assert2::assert;

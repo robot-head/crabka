@@ -82,7 +82,7 @@ mod tests {
     use crate::runtime::global::GlobalStateManager;
     use crate::store::backend::StoreBackend;
     use crate::store::registry::StoreRegistry;
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
 
     /// Build a shared `GlobalStateManager` holding a global
     /// `KeyValueBytesStore<String,String>` named `"g-store"` pre-seeded with
@@ -99,13 +99,8 @@ mod tests {
             Consumed::with(StringSerde, StringSerde),
         );
         // A topology needs a non-global source/sink to build (global is invisible).
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            crate::processor::serde::Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         let built = t.build("app").unwrap();
         let globals = GlobalStateManager::build(
             built.global_store_factories(),

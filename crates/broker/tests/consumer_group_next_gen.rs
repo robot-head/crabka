@@ -1,7 +1,6 @@
 //! Raw-RPC integration tests for KIP-848 next-gen consumer groups,
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;

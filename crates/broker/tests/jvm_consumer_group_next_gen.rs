@@ -2,7 +2,6 @@
 //! against an in-process Crabka broker. `group.protocol=consumer`
 //! activates the next-gen heartbeat path on the client.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;

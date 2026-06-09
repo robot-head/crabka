@@ -40,6 +40,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             jvm_differential:
               - 'crates/protocol/**'
@@ -50,6 +51,7 @@ jobs:
               - 'tools/oracle/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             cargo_deny:
               - 'deny.toml'
@@ -64,6 +66,7 @@ jobs:
               - 'crates/rebalancer/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_core:
               - 'crates/client-core/**'
@@ -72,6 +75,7 @@ jobs:
               - 'crates/security/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             log:
               - 'crates/log/**'
@@ -80,6 +84,7 @@ jobs:
               - 'crates/remote-storage/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_consumer:
               - 'crates/client-consumer/**'
@@ -91,6 +96,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_streams:
               - 'crates/client-streams/**'
@@ -103,6 +109,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             grpc_gateway:
               - 'crates/grpc-gateway/**'
@@ -116,6 +123,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             schema_registry:
               - 'crates/schema-registry/**'
@@ -128,6 +136,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             broker_jvm:
               - 'crates/authz/**'
@@ -143,6 +152,7 @@ jobs:
               - 'tools/oracle/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             broker_integration:
               - 'crates/authz/**'
@@ -158,6 +168,7 @@ jobs:
               - 'crates/security/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -185,20 +196,45 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
+      - uses: taiki-e/install-action@nextest
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-        if: matrix.os != 'ubuntu-latest'
+      - name: Run tests
+        if: matrix.os == 'macos-latest'
+        run: cargo nextest run --workspace --profile ci --filter-expr 'not test(topic_rlmm_sasl_loopback_copy_then_fetch_round_trip)'
+      - name: Run tests
+        if: matrix.os == 'windows-latest'
+        run: cargo nextest run --workspace --profile ci --lib --bins
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && matrix.os != 'ubuntu-latest' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: rust-${{ matrix.os }}
+          fail_ci_if_error: false
       - name: Unit test coverage
         if: matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --lib --bins --lcov --output-path coverage/unit.lcov
+          cargo llvm-cov nextest --workspace --profile ci --lib --bins --lcov --output-path coverage/unit.lcov
       - uses: codecov/codecov-action@v7
         if: matrix.os == 'ubuntu-latest'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/unit.lcov
+          disable_search: true
+          flags: unit
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: unit
           fail_ci_if_error: false
@@ -219,6 +255,7 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -241,11 +278,21 @@ jobs:
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
+          cargo llvm-cov nextest --workspace --profile ci --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/jvm-differential.lcov
+          disable_search: true
+          flags: jvm-differential
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: jvm-differential
           fail_ci_if_error: false
@@ -313,14 +360,25 @@ jobs:
         with:
           key: client-core-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-core --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
+          cargo llvm-cov nextest -p crabka-client-core --profile ci --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-core-integration.lcov
+          disable_search: true
+          flags: client-core-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: client-core-integration
           fail_ci_if_error: false
@@ -341,14 +399,25 @@ jobs:
         with:
           key: log-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Log integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-log --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
+          cargo llvm-cov nextest -p crabka-log --profile ci --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/log-integration.lcov
+          disable_search: true
+          flags: log-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: log-integration
           fail_ci_if_error: false
@@ -371,14 +440,25 @@ jobs:
         with:
           key: client-consumer-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-consumer --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-client-consumer --profile ci --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-consumer-integration.lcov
+          disable_search: true
+          flags: client-consumer-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: client-consumer-integration
           fail_ci_if_error: false
@@ -402,15 +482,14 @@ jobs:
         with:
           key: client-streams-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
           # `--features schema-serde` also exercises the Avro/Protobuf/JSON
-          # bridge tests (build.rs compiles the protobuf example via protox,
-          # no protoc needed). The `schema_serde_*_golden` tests are `#[ignore]`
-          # placeholders (real Confluent goldens captured out-of-band), so the
-          # default run (no `--include-ignored`) correctly skips them.
-          cargo llvm-cov -p crabka-client-streams --features schema-serde --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+          # bridge tests + byte-exact Confluent golden tests (build.rs compiles
+          # the protobuf example via protox, no protoc needed).
+          cargo llvm-cov nextest -p crabka-client-streams --features schema-serde --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -418,9 +497,19 @@ jobs:
           disable_search: true
           flags: client-streams-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: client-streams-integration
+          fail_ci_if_error: false
       - name: Schema-serde unit coverage
         run: |
-          cargo llvm-cov -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
+          cargo llvm-cov nextest -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -448,14 +537,25 @@ jobs:
         with:
           key: grpc-gateway-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-grpc-gateway --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-grpc-gateway --profile ci --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/grpc-gateway-integration.lcov
+          disable_search: true
+          flags: grpc-gateway-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: grpc-gateway-integration
           fail_ci_if_error: false
@@ -480,10 +580,11 @@ jobs:
         with:
           key: schema-registry-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-schema-registry --profile ci --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -491,7 +592,16 @@ jobs:
           disable_search: true
           flags: schema-registry-integration
           fail_ci_if_error: false
-
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: schema-registry-integration
+          fail_ci_if_error: false
 
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
@@ -500,7 +610,7 @@ jobs:
   #
   # 30-minute job timeout: each acceptance test is 1-2 min of docker-driven
   # broker boot + kafka-console-* round trip, and we currently run ~10 of
-  # them serially (--test-threads=1). The default 360-minute GitHub timeout
+  # them serially through a nextest test group. The default 360-minute GitHub timeout
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
@@ -508,7 +618,7 @@ jobs:
     if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
     # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
-    # multi-voter cases) and runs serially under `llvm-cov` instrumentation
+    # multi-voter cases) and runs serially via a nextest test group under `llvm-cov`
     # (~2x slowdown), so the ~25 docker-driven acceptance tests no longer fit
     # the old 30-minute wall. A genuinely wedged test still surfaces well
     # inside the CI cap. (Per-test stalls are caught by the in-test timeouts.)
@@ -535,21 +645,22 @@ jobs:
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Preload Docker images
         run: |
           docker pull confluentinc/cp-kafka:7.4.0
           docker pull apache/kafka:4.0.0
-      # --test-threads=1: tests bind the Rust broker to a fixed host port
-      # (so the `docker run --add-host` Kafka tools have a known bootstrap
-      # target). Parallel execution would hit `AddrInUse`.
+      # The nextest `broker-jvm-acceptance` test group serializes these tests:
+      # they bind the Rust broker to a fixed host port so the Dockerized Kafka
+      # tools have a known bootstrap target. Parallel execution would hit `AddrInUse`.
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-broker \
+          cargo llvm-cov nextest -p crabka-broker --profile ci \
             --test jvm_acceptance \
             --test jvm_consumer_group_next_gen \
-            --lcov --output-path coverage/broker-jvm-acceptance.lcov \
-            -- --ignored --nocapture --test-threads=1
+            --run-ignored only \
+            --lcov --output-path coverage/broker-jvm-acceptance.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -557,11 +668,21 @@ jobs:
           disable_search: true
           flags: broker-jvm-acceptance
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: broker-jvm-acceptance
+          fail_ci_if_error: false
 
   # Non-ignored broker + client-admin integration tests (the
   # in-process Broker-driven suites under `crates/broker/tests/*.rs`
   # and `crates/client-admin/tests/*.rs`). These don't show up in the
-  # `unit` flag — that flag's `cargo llvm-cov --lib --bins` only walks
+  # `unit` flag — that flag's `cargo llvm-cov nextest --lib --bins` only walks
   # in-`src/` tests — so before this job KIP-113 handler + dispatch
   # branches that are only exercised end-to-end appeared as uncovered
   # in the patch view. Two `--no-report` runs share a profraw set,
@@ -597,17 +718,28 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-report -p crabka-broker --tests
-          cargo llvm-cov --no-report -p crabka-client-admin --tests
+          cargo llvm-cov nextest --no-report --profile ci -p crabka-broker --tests
+          cargo llvm-cov nextest --no-report --profile ci -p crabka-client-admin --tests
           cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/broker-integration.lcov
+          disable_search: true
+          flags: broker-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
@@ -633,10 +765,11 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-operator \
+          cargo llvm-cov nextest -p crabka-operator --profile ci \
             --test ca_renewal_cronjob \
             --test rebalance_e2e \
             --test reconcile_ca \
@@ -663,6 +796,16 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/operator-integration.lcov
+          disable_search: true
+          flags: operator-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
           disable_search: true
           flags: operator-integration
           fail_ci_if_error: false

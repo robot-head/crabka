@@ -19,8 +19,6 @@
 //! fixture path resolution and tempfile semantics are easier to keep
 //! consistent with the existing TLS integration tests.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::sync::Arc;

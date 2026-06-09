@@ -40,6 +40,7 @@ fn partition_record(topic: &str, p: i32) -> MetadataRecord {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     })
 }
 
@@ -47,6 +48,7 @@ fn broker_record(node_id: u64) -> MetadataRecord {
     MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
         node_id,
         broker_epoch: 0,
+        incarnation_id: Uuid::nil(),
         host: format!("broker-{node_id}.example.com"),
         port: 9092,
         rack: Some("us-east-1a".to_string()),

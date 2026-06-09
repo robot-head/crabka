@@ -70,7 +70,7 @@ const QUORUM_STATE_FILE: &str = "quorum-state";
 
 /// Crabka-internal "snapshot not available" signal in a `FetchSnapshot`
 /// response (voter↔voter).
-const SNAPSHOT_NOT_FOUND: i16 = 1;
+const SNAPSHOT_NOT_FOUND: i16 = 98;
 
 /// Subdirectory under the data dir holding KIP-630 `.checkpoint` artifacts for
 /// the single metadata partition. Matches the on-disk layout the broker's
@@ -2315,6 +2315,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]
     }
@@ -2500,6 +2501,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: id,
                     broker_epoch: 0, // overwritten by the leader at append
+                    incarnation_id: uuid::Uuid::from_u128(u128::from(id)),
                     host: "h".into(),
                     port: 9092,
                     rack: None,

@@ -216,6 +216,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
+            partition_epoch: 0,
         }));
         let dir = uuid::Uuid::from_u128(0xAA);
         let changes = assignment_changes(&image, 2, topic_id, 0, dir);
@@ -249,6 +250,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), dir],
+            partition_epoch: 0,
         }));
         assert!(assignment_changes(&image, 2, topic_id, 0, dir).is_empty());
     }
@@ -273,6 +275,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
+            partition_epoch: 0,
         }));
         assert!(
             assignment_changes(&image, 99, topic_id, 0, uuid::Uuid::from_u128(0xAA)).is_empty()
@@ -302,6 +305,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
+            partition_epoch: 0,
         }));
         (image, topic_id)
     }

@@ -64,7 +64,6 @@
 //! Windows-gated like the other broker integration tests (openraft's
 //! `debug_assert!` races on the hosted Windows scheduler).
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::too_many_lines)]
 
 use assert2::assert;
@@ -315,6 +314,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     broker
         .submit_metadata_record_for_test(forged)

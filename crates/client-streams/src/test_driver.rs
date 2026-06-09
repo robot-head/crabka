@@ -354,7 +354,7 @@ mod tests {
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
     use crate::processor::serde::StringSerde;
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use async_trait::async_trait;
 
@@ -396,15 +396,10 @@ mod tests {
 
     fn map_filter() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
         let flt = t.add_processor("flt", || DropEmpty, [&up]);
-        t.add_sink(
-            "out",
-            "out",
-            [&flt],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out", [&flt]);
         t.build("app").unwrap()
     }
 
@@ -441,22 +436,12 @@ mod tests {
         // src(in) -> identity -> sink(rp, internal repartition) ; src(rp) -> up -> sink(out)
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        let s1 = t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
+        let s1: NodeHandle<String, String> = t.add_source("s1", ["in"]);
         let id = t.add_processor("id", || Identity, [&s1]);
-        t.add_sink(
-            "to_rp",
-            "rp",
-            [&id],
-            Produced::with(StringSerde, StringSerde),
-        );
-        let s2 = t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink("to_rp", "rp", [&id]);
+        let s2: NodeHandle<String, String> = t.add_source("s2", ["rp"]);
         let up = t.add_processor("up", || Upper, [&s2]);
-        t.add_sink(
-            "out",
-            "out",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out", [&up]);
         let built = t.build("app").unwrap();
 
         let mut d = TopologyTestDriver::new(&built).unwrap();
@@ -476,20 +461,10 @@ mod tests {
     #[test]
     fn branch_to_two_sinks() {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
-        t.add_sink(
-            "a",
-            "out-a",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
-        t.add_sink(
-            "b",
-            "out-b",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("a", "out-a", [&up]);
+        t.add_sink("b", "out-b", [&up]);
         let built = t.build("app").unwrap();
         let mut d = TopologyTestDriver::new(&built).unwrap();
         d.pipe_input(
@@ -530,10 +505,10 @@ mod tests {
             }
         }
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor("c", || Counter, [&src]);
         t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&c]);
         let mut d = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
         d.pipe_input(
             "in",

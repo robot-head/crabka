@@ -120,8 +120,7 @@ pub struct DeleteSubjectValue {
 #[derive(Debug, Clone)]
 pub enum SchemaRecord {
     Schema(SchemaKey, SchemaValue),
-    /// A `CONFIG` record. `None` value = a CONFIG tombstone: clears the
-    /// per-subject compat override (or, for a global key, a no-op).
+    /// A `CONFIG` record. `None` value = a CONFIG tombstone (clears the per-subject override).
     Config(ConfigKey, Option<ConfigValue>),
     /// A `MODE` record. `None` value = a MODE tombstone (clears the override).
     Mode(ModeKey, Option<ModeValue>),
@@ -156,7 +155,7 @@ impl SchemaRecord {
             Some("CONFIG") => match serde_json::from_slice::<ConfigKey>(key) {
                 Ok(k) => match value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()) {
                     Some(val) => Self::Config(k, Some(val)),
-                    None => Self::Config(k, None), // null value = clear compat override
+                    None => Self::Config(k, None), // null value = clear config override
                 },
                 Err(_) => Self::Unknown,
             },

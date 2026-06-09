@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 //! JVM differential / interop test for KIP-932 share groups.

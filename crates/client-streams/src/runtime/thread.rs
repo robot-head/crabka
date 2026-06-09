@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -510,7 +510,7 @@ mod tests {
     use crate::runtime::io::{
         FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
     };
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -532,14 +532,9 @@ mod tests {
 
     fn built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
-        t.add_sink(
-            "out",
-            "out",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out", [&up]);
         t.build("app").unwrap()
     }
 
@@ -565,10 +560,10 @@ mod tests {
 
     fn stateful_built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor("c", || Counter, [&src]);
         t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&c]);
         t.build("app").unwrap()
     }
 
@@ -604,9 +599,9 @@ mod tests {
 
     fn wall_clock_built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let p = t.add_processor("p", || WallClockScheduler, [&src]);
-        t.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&p]);
         t.build("app").unwrap()
     }
 

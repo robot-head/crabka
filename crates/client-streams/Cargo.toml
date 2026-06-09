@@ -34,11 +34,11 @@ default = []
 schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json", "dep:protox", "dep:prost-build"]
 
 [dependencies]
-crabka-protocol = { version = "0.3.2", path = "../protocol", default-features = false }
-crabka-schema-serde = { version = "0.3.2", path = "../schema-serde", optional = true }
-crabka-client-core = { version = "0.3.2", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.2", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.2", path = "../client-producer" }
+crabka-protocol = { version = "0.3.3", path = "../protocol", default-features = false }
+crabka-schema-serde = { version = "0.3.3", path = "../schema-serde", optional = true }
+crabka-client-core = { version = "0.3.3", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.3", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.3", path = "../client-producer" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
@@ -61,8 +61,8 @@ prost-build = { version = "0.14", optional = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
-crabka-broker = { version = "0.3.2", path = "../broker", features = ["test-helpers"] }
-crabka-schema-serde = { version = "0.3.2", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
+crabka-broker = { version = "0.3.3", path = "../broker", features = ["test-helpers"] }
+crabka-schema-serde = { version = "0.3.3", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }

@@ -24,8 +24,6 @@ struct RegisterBody {
     version: Option<i32>,
 }
 
-/// `?normalize=true` query flag on register/lookup (KIP-compatible). Public
-/// because it appears in the `register`/`lookup` handler signatures.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct NormalizeQuery {
     #[serde(default)]

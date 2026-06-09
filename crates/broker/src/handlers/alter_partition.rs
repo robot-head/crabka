@@ -220,6 +220,7 @@ fn handle_partition(
     }
 
     // Success: submit the ISR change.
+    let new_partition_epoch = part_rec.partition_epoch + 1;
     changes.push(MetadataRecord::V1Partition(PartitionRecord {
         topic: topic_name.to_string(),
         partition: partition_index,
@@ -230,6 +231,7 @@ fn handle_partition(
         adding_replicas: part_rec.adding_replicas.clone(),
         removing_replicas: part_rec.removing_replicas.clone(),
         directories: part_rec.directories.clone(),
+        partition_epoch: new_partition_epoch,
     }));
 
     RespPartitionData {
@@ -239,7 +241,7 @@ fn handle_partition(
         leader_epoch: part_rec.leader_epoch,
         isr: effective_isr_i32.to_vec(),
         leader_recovery_state: 0,
-        partition_epoch: 0,
+        partition_epoch: new_partition_epoch,
         ..Default::default()
     }
 }
@@ -314,6 +316,7 @@ mod tests {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id,
             broker_epoch: epoch,
+            incarnation_id: uuid::Uuid::nil(),
             host: "h".into(),
             port: 9092,
             rack: None,
@@ -341,6 +344,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         for &(id, ep) in epochs {
             image.apply(&reg(id, ep));

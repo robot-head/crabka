@@ -3,7 +3,7 @@
 # realm, principals, enctypes, and keytab export precisely.
 #
 #   docker compose up --build        # brings the realm up; keytabs land in ./
-#   docker compose logs | grep READY # KDC_READY printed once setup completes
+#   docker compose logs | grep READY # KDC_READY printed once bootstrap completes
 #   docker compose down              # tears it down
 #
 # Port 88 (tcp+udp) is mapped to localhost so the sspi client can reach the KDC
@@ -19,6 +19,6 @@ services:
       - "88:88/tcp"
       - "88:88/udp"
     volumes:
-      # Shared volume: setup.sh writes kafka.keytab / alice.keytab here, which is
+      # Shared volume: bootstrap.sh writes kafka.keytab / alice.keytab here, which is
       # this very directory on the host, so the spike can read them directly.
       - ./:/fixtures

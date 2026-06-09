@@ -24,7 +24,6 @@
 // `if l.is_some() && l != Some(1)` in `jvm_kafka_leader_election_preferred`
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 use std::io::Write;
@@ -1272,7 +1271,7 @@ async fn transactional_console_producer_eos() {
 //
 // Fixed ports above 10000 — the other multi-broker tests use 9092-9992;
 // this test steps into 10000+ to dodge TIME_WAIT + raft-quorum collisions
-// when JVM tests run sequentially via --test-threads=1.
+// when JVM tests run sequentially via the nextest broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -1467,7 +1466,8 @@ async fn acks_all_durability() {
 //
 // Fixed ports 10392/10492/10592 + 10393/10493/10593 — next free hundred
 // above acks_all_durability (10092/10192/10292) to dodge
-// TIME_WAIT collisions when JVM tests run sequentially via --test-threads=1.
+// TIME_WAIT collisions when JVM tests run sequentially via the nextest
+// broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -3983,7 +3983,6 @@ async fn jvm_inter_broker_replication_authed() {
 /// `host.docker.internal:<port>` so the JVM containers can reach them via
 /// `--add-host=host.docker.internal:host-gateway` AND so each broker can
 /// dial its peer using the same host name.
-#[cfg(not(target_os = "windows"))]
 #[allow(clippy::too_many_lines)]
 async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     ctrl_protocol: crabka_security::ListenerProtocol,
@@ -5645,6 +5644,7 @@ async fn jvm_kafka_leader_election_preferred() {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         },
     ))
     .await

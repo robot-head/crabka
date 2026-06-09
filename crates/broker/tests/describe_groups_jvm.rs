@@ -1,5 +1,4 @@
 #![allow(clippy::pedantic)]
-#![cfg(not(target_os = "windows"))]
 
 //! cp/JVM cross-validation for `DescribeGroups` (`api_key=15`) metadata.
 //!

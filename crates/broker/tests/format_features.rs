@@ -7,8 +7,6 @@
 //! would otherwise re-seed every feature at the latest release — proving the
 //! `--feature` overrides survive boot rather than being clobbered.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::process::Command;
 

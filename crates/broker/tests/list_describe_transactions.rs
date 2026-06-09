@@ -6,8 +6,6 @@
 //! state — `(transactional_id, producer_id, state)` summary for List,
 //! full per-tid detail (timeout, start time, partitions) for Describe.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::time::Duration;
 

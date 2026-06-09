@@ -1,6 +1,6 @@
 [package]
 name = "crabka-integration-tests"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 license.workspace = true
 publish = false
@@ -11,14 +11,14 @@ publish = false
 assert2 = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
-crabka-broker = { path = "../broker", version = "0.3.2", features = ["test-helpers"] }
-crabka-client-admin = { path = "../client-admin", version = "0.3.2" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.2" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.2" }
-crabka-client-core = { path = "../client-core", version = "0.3.2" }
-crabka-protocol = { path = "../protocol", version = "0.3.2", default-features = false }
-crabka-security = { path = "../security", version = "0.3.2" }
-crabka-log = { path = "../log", version = "0.3.2" }
+crabka-broker = { path = "../broker", version = "0.3.3", features = ["test-helpers"] }
+crabka-client-admin = { path = "../client-admin", version = "0.3.3" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.3" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.3" }
+crabka-client-core = { path = "../client-core", version = "0.3.3" }
+crabka-protocol = { path = "../protocol", version = "0.3.3", default-features = false }
+crabka-security = { path = "../security", version = "0.3.3" }
+crabka-log = { path = "../log", version = "0.3.3" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
 tracing = { workspace = true }

@@ -259,7 +259,6 @@ impl StoreState {
         self.subject_compat.insert(subject.to_string(), level);
     }
 
-    /// Remove a per-subject compat override, reverting the subject to global.
     pub fn clear_subject_compat(&mut self, subject: &str) {
         self.subject_compat.remove(subject);
     }

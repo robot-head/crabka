@@ -26,7 +26,6 @@
 //! single-broker helper that also boots in Bootstrap mode and is its own
 //! controller).
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::default_trait_access)]
 
 use assert2::assert;

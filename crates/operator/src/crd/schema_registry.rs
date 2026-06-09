@@ -50,6 +50,10 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
 
+    /// SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_client: Option<SchemaRegistryKafkaClient>,
+
     /// Server TLS (HTTPS REST). None = plain HTTP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<SchemaRegistryTls>,
@@ -67,12 +71,31 @@ pub struct SchemaRegistrySpec {
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
 }
 
-/// Server TLS: cert/key (and optional client-cert verification) from Secrets.
+/// Reference to a cert-manager `Issuer` or `ClusterIssuer`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CertManagerIssuerRef {
+    pub name: String,
+    /// Defaults to `Issuer`; set `ClusterIssuer` for cluster-scoped issuers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// API group. Default `cert-manager.io`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// Server TLS: cert/key from a Secret or a cert-manager issuer, plus optional
+/// client-cert verification.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaRegistryTls {
     /// Secret (type kubernetes.io/tls) with `tls.crt` + `tls.key`.
-    pub secret_name: String,
+    /// Mutually exclusive with `issuerRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_name: Option<String>,
+    /// cert-manager issuer reference. Mutually exclusive with `secretName`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_ref: Option<CertManagerIssuerRef>,
     /// Client-cert mode. Default `Disabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_auth: Option<TlsClientAuth>,
@@ -119,17 +142,38 @@ pub struct BasicAuthn {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BearerAuthn {
-    /// Bearer mode. Only `Unsecured` (dev) is supported today; JWKS is a
-    /// future SR enhancement.
     pub mode: BearerMode,
     /// JWT claim used as the principal name. Default `sub`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
+    /// JWKS endpoint URI (required when `mode` = `Jwks`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_endpoint_uri: Option<String>,
+    /// Expected `iss` claim value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_valid_issuer: Option<String>,
+    /// Expected `aud` claim value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_expected_audience: Option<String>,
+    /// Secret name whose `ca.crt` key is mounted and passed as
+    /// `--bearer-jwks-ca`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_tls_secret_name: Option<String>,
+    /// JWT claim to use as the principal when mode is `Jwks`. Overrides
+    /// `principalClaim` for JWKS paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_principal_claim: Option<String>,
+    /// JWKS key-set refresh interval in milliseconds. Default 60 000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks_refresh_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum BearerMode {
+    /// Dev-only: accept unsigned JWTs (no signature verification).
     Unsecured,
+    /// Production: verify JWT signatures against a remote JWKS endpoint.
+    Jwks,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -142,6 +186,41 @@ pub struct SchemaRegistryAuthz {
     /// ACL-cache refresh interval (seconds). Default 30.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acl_refresh_seconds: Option<i64>,
+}
+
+/// SR → broker client security. Maps to the binary's `--kafka-*` flags.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaRegistryKafkaClient {
+    /// e.g. `PLAINTEXT`, `SASL_PLAINTEXT`, `SSL`, `SASL_SSL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sasl: Option<KafkaClientSasl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<KafkaClientTls>,
+}
+
+/// SASL credentials for the SR → broker connection.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaClientSasl {
+    /// e.g. `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
+    pub mechanism: String,
+    /// Name of the Secret holding `username` and `password` keys.
+    pub secret_ref: String,
+}
+
+/// TLS settings for the SR → broker connection.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaClientTls {
+    /// Secret with a `ca.crt` key used as the broker CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_secret_name: Option<String>,
+    /// Override the server name used for TLS SNI / hostname verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_name_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]

@@ -3,7 +3,6 @@
 //!
 //! Windows-gated like the other multi-broker tests.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::default_trait_access,

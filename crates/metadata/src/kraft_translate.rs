@@ -419,7 +419,7 @@ pub fn to_kraft_values(
         .map(|kr| {
             let version: i16 = match kr {
                 // KIP-858: directories field only present at v1+.
-                KraftMetadataRecord::Partition(_) => 1,
+                KraftMetadataRecord::Partition(_) | KraftMetadataRecord::RegisterBroker(_) => 1,
                 // All other modeled record types frame at the defaulted v0.
                 _ => 0,
             };
@@ -711,6 +711,11 @@ fn register_broker_to_kraft(
         rack: b.rack.clone(),
         end_points,
         broker_epoch: b.broker_epoch,
+        incarnation_id: to_kuuid(b.incarnation_id),
+        // Crabka brokers are always-active; there is no fence/unfence lifecycle.
+        // Emit false rather than the schema default (true) so JVM tools do not
+        // interpret our brokers as fenced on startup.
+        fenced: false,
         ..Default::default()
     })
 }
@@ -741,6 +746,7 @@ fn partition_to_kraft(
             detail: format!("leader {} exceeds i32", p.leader),
         })?,
         leader_epoch: p.leader_epoch,
+        partition_epoch: p.partition_epoch,
         // KIP-858: per-replica log-directory assignment, carried at KRaft v1+.
         directories: p.directories.iter().map(|u| to_kuuid(*u)).collect(),
         ..Default::default()
@@ -938,6 +944,7 @@ fn register_broker_from_kraft(
     Ok(BrokerRegistrationRecord {
         node_id: b.broker_id as u64,
         broker_epoch: b.broker_epoch,
+        incarnation_id: from_kuuid(b.incarnation_id),
         host,
         port,
         rack: b.rack.clone(),
@@ -981,6 +988,7 @@ fn partition_from_kraft(
         replicas: cast(&p.replicas),
         isr: cast(&p.isr),
         leader_epoch: p.leader_epoch,
+        partition_epoch: p.partition_epoch,
         adding_replicas: cast(&p.adding_replicas),
         removing_replicas: cast(&p.removing_replicas),
         // KIP-858: per-replica log-directory assignment, present at KRaft v1+.
@@ -1136,6 +1144,7 @@ mod tests {
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: 7,
                 broker_epoch: 42,
+                incarnation_id: uuid::Uuid::from_u128(0xdeadbeef_cafe_babe_0123_456789abcdef),
                 host: "192.168.1.10".into(),
                 port: 9092,
                 rack: Some("us-east-1a".into()),
@@ -1153,6 +1162,7 @@ mod tests {
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 7,
+                incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
                 host: "h".into(),
                 port: 9092,
                 rack: None,
@@ -1173,6 +1183,49 @@ mod tests {
             }),
             &img(),
         );
+    }
+
+    #[test]
+    fn register_broker_incarnation_id_survives_round_trip() {
+        let id = uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
+        round_trip(
+            &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+                node_id: 3,
+                broker_epoch: 5,
+                incarnation_id: id,
+                host: "127.0.0.1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            }),
+            &img(),
+        );
+    }
+
+    #[test]
+    fn partition_epoch_survives_round_trip() {
+        let mut image = img();
+        let tid = uuid::Uuid::from_u128(99);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "epoch-test".into(),
+            topic_id: tid,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let rec = MetadataRecord::V1Partition(PartitionRecord {
+            topic: "epoch-test".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 7,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 42,
+        });
+        image.apply(&rec);
+        round_trip(&rec, &image);
     }
 
     #[test]
@@ -1472,6 +1525,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 3,
         });
         image.apply(&part);
         for rec in [&topic, &part] {
@@ -1629,6 +1683,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::from_u128(0xAA), uuid::Uuid::from_u128(0xBB)],
+            partition_epoch: 0,
         });
         let values = super::to_kraft_values(&rec, &image).expect("encode");
         assert!(values.len() == 1);
@@ -1659,6 +1714,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
         assert!(image.topic_partition_count("t") == 3);

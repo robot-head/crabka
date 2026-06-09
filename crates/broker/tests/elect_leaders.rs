@@ -35,8 +35,6 @@
 //! slices 10b/12b (openraft `debug_assert!` races on the hosted Windows
 //! task scheduler are unrelated to the protocol under test).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
@@ -470,6 +468,7 @@ async fn unclean_election_via_wire_picks_alive_replica() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     h0.submit_metadata_record_for_test(forged)
         .await
@@ -572,6 +571,7 @@ async fn wait_partition_record_known(
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             };
         }
         assert!(
