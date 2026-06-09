@@ -90,6 +90,10 @@ pub struct KGroupedStream<K, V> {
     grouped_name: Option<String>,
     /// Typed repartition-lowering thunk (taken once by the terminal op).
     repartition_lower: Option<RepartitionLowerFn>,
+    /// The single source topic this grouped stream traces to, when applicable
+    /// (i.e. `groupByKey` on a single-source, key-unchanged stream). Used by
+    /// cogroup to register a copartition group over all input source topics.
+    pub(crate) source_topic: Option<String>,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -111,8 +115,15 @@ where
             key_changing_upstream,
             grouped_name,
             repartition_lower: Some(repartition_lower),
+            source_topic: None,
             _pd: PhantomData,
         }
+    }
+
+    /// Set the single source-topic lineage for cogroup copartition registration.
+    pub(crate) fn with_source_topic(mut self, topic: Option<String>) -> Self {
+        self.source_topic = topic;
+        self
     }
 
     /// `count`: count records per key into a materialized `KTable<K, i64>`.
@@ -311,7 +322,7 @@ where
         A: Fn(&K, &V, VOut) -> VOut + Send + Sync + 'static,
     {
         let builder = Rc::clone(&self.builder);
-        let (parent, key_changing, rp_lower) = self.into_cogroup_parts();
+        let (parent, key_changing, rp_lower, source_topic) = self.into_cogroup_parts();
         crate::dsl::cogrouped::CogroupedKStream::new(
             builder,
             vec![crate::dsl::cogrouped::CogroupInput {
@@ -319,16 +330,21 @@ where
                 key_changing_upstream: key_changing,
                 repartition_lower: rp_lower,
                 make_agg: crate::dsl::cogrouped::make_agg_for_input::<K, V, VOut, A>(agg),
+                source_topic,
             }],
         )
     }
 
     /// Decompose into the lineage parts a cogroup input needs (consumes the handle).
-    pub(crate) fn into_cogroup_parts(mut self) -> (NodeId, bool, Option<RepartitionLowerFn>) {
+    /// Returns `(parent_id, key_changing, repartition_lower, source_topic)`.
+    pub(crate) fn into_cogroup_parts(
+        mut self,
+    ) -> (NodeId, bool, Option<RepartitionLowerFn>, Option<String>) {
         (
             self.parent,
             self.key_changing_upstream,
             self.repartition_lower.take(),
+            self.source_topic,
         )
     }
 

@@ -77,6 +77,9 @@ pub(crate) struct CogroupInput<K, VOut> {
     pub key_changing_upstream: bool,
     pub repartition_lower: Option<RepartitionLowerFn>,
     pub make_agg: MakeAggFn<K, VOut>,
+    /// The single source topic this input traces to (when not key-changing),
+    /// used to register a copartition group over all cogroup inputs.
+    pub source_topic: Option<String>,
 }
 
 /// Handle accumulating cogrouped inputs; terminal `aggregate`/`windowed_by*`
@@ -254,12 +257,13 @@ where
         Vn: Any + Send + Sync + Clone,
         A: Fn(&K, &Vn, VOut) -> VOut + Send + Sync + 'static,
     {
-        let (parent, key_changing, rp_lower) = grouped.into_cogroup_parts();
+        let (parent, key_changing, rp_lower, source_topic) = grouped.into_cogroup_parts();
         self.inputs.push(CogroupInput {
             parent,
             key_changing_upstream: key_changing,
             repartition_lower: rp_lower,
             make_agg: make_agg_for_input::<K, Vn, VOut, A>(agg),
+            source_topic,
         });
         self
     }
@@ -383,12 +387,19 @@ where
 {
     let mut g = builder.borrow_mut();
     let mut agg_ids: Vec<NodeId> = Vec::with_capacity(inputs.len());
+    // Collect source topics for the copartition group declaration (only include
+    // inputs whose lineage traces to a single non-repartitioned source topic).
+    let copartition_sources: Vec<String> = inputs
+        .iter()
+        .filter_map(|i| i.source_topic.clone())
+        .collect();
     for input in inputs {
         let CogroupInput {
             parent,
             key_changing_upstream,
             repartition_lower,
             make_agg,
+            source_topic: _,
         } = input;
         let agg_parent = KGroupedStream::<K, ()>::record_repartition(
             &mut g,
@@ -446,6 +457,13 @@ where
             .map(|id| state.handle_name[id].clone())
             .collect();
         registrar(state, proc_names);
+        // Declare the copartition group when all inputs trace to a single source
+        // topic (i.e. none needed a repartition). The JVM cogroup does the same.
+        if copartition_sources.len() >= 2 {
+            state
+                .topology
+                .add_copartition_group(copartition_sources.clone());
+        }
         state.handle_name.insert(merge_id, h.name().to_string());
     }));
     // Release the RefCell borrow so `KTable::new` can borrow the builder again.

@@ -1425,6 +1425,11 @@ where
                 grouped.value_serde,
             ),
         )
+        .with_source_topic(if self.key_changing {
+            None
+        } else {
+            self.source_topic.clone()
+        })
     }
 
     /// `groupByKey` using the stream's existing serdes.
@@ -1443,6 +1448,11 @@ where
                 self.value_serde.clone(),
             ),
         )
+        .with_source_topic(if self.key_changing {
+            None
+        } else {
+            self.source_topic.clone()
+        })
     }
 
     /// `groupBy`: re-key via `f`, then group by the new key.
