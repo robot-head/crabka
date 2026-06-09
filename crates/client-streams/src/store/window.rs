@@ -19,6 +19,10 @@ use crate::store::window_schema::{
 pub trait WindowStore<K: Send + Sync, V: Send>: StateStore {
     async fn fetch_single(&self, key: &K, window_start: i64) -> Option<(i64, V)>;
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)>;
+    /// Like `fetch`, but also returns each window's stored record timestamp:
+    /// `(windowStart, recordTs, value)`. Used by the sliding-window aggregator,
+    /// which needs `windowMaxRecordTimestamp` to place left/right windows.
+    async fn fetch_with_ts(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, i64, V)>;
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64);
 }
 
@@ -174,6 +178,27 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
         out
     }
 
+    async fn fetch_with_ts(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, i64, V)> {
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
+        let lo = store_key(&kb, time_from, 0);
+        let hi = store_key(&kb, time_to.saturating_add(1), 0);
+        let mut out = Vec::new();
+        for (k, wrapped) in self.backend.range(&lo, &hi).await {
+            if key_bytes_of(&k) != kb.as_ref() {
+                continue;
+            }
+            let (ts, raw) = unwrap_value(&wrapped);
+            out.push((
+                window_start_of(&k),
+                ts,
+                self.value_serde
+                    .deserialize(&self.changelog_topic, raw)
+                    .expect("window value deserialize"),
+            ));
+        }
+        out
+    }
+
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64) {
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let sk = store_key(&kb, window_start, 0);
@@ -210,5 +235,19 @@ mod tests {
             vec![(0, 2), (10, 9)]
         );
         assert_eq!(s.take_changelog().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_with_ts_returns_window_start_and_record_ts() {
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-w-changelog".into(),
+        );
+        s.put("k".into(), 0, 10, 5).await; // window start 0, value 10, recordTs 5
+        s.put("k".into(), 10, 20, 17).await; // window start 10, value 20, recordTs 17
+        let got = s.fetch_with_ts(&"k".to_string(), 0, 10).await;
+        assert_eq!(got, vec![(0, 5, 10), (10, 17, 20)]); // (windowStart, recordTs, value)
     }
 }
