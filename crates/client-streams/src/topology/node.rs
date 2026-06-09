@@ -37,6 +37,12 @@ pub(crate) enum ChangelogKind {
     /// Join window store: `cleanup.policy=delete` + `retention.ms`
     /// (retainDuplicates prevents compaction).
     JoinWindow { retention_ms: i64 },
+    /// Versioned store: `cleanup.policy=compact` + `min.compaction.lag.ms`
+    /// (= `historyRetention` + `86_400_000`) so recent version history is not
+    /// compacted away before restore reads it.
+    // used by Topology::add_versioned_store (Task 6)
+    #[allow(dead_code)]
+    Versioned { min_compaction_lag_ms: i64 },
 }
 
 /// A registered state store: its name, the processors it connects (used to
@@ -170,6 +176,27 @@ impl NodeRegistry {
             processors,
             changelog_override,
             changelog_kind: ChangelogKind::AggWindow { retention_ms },
+        });
+    }
+
+    /// Register a versioned state store. The changelog gets `compact` policy +
+    /// `min.compaction.lag.ms=<min_compaction_lag_ms>`.
+    // used by Topology::add_versioned_store (Task 6)
+    #[allow(dead_code)]
+    pub fn add_versioned_store(
+        &mut self,
+        name: &str,
+        processors: Vec<String>,
+        changelog_override: Option<String>,
+        min_compaction_lag_ms: i64,
+    ) {
+        self.stores.push(StoreEntry {
+            name: name.to_string(),
+            processors,
+            changelog_override,
+            changelog_kind: ChangelogKind::Versioned {
+                min_compaction_lag_ms,
+            },
         });
     }
 

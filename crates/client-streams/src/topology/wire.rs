@@ -58,6 +58,23 @@ fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
     ]
 }
 
+/// Versioned-store changelog topic configs: `cleanup.policy=compact` +
+/// `min.compaction.lag.ms` so recent versions survive until restore (KIP-889).
+fn versioned_changelog_topic_configs(min_compaction_lag_ms: i64) -> Vec<KeyValue> {
+    vec![
+        KeyValue {
+            key: "cleanup.policy".into(),
+            value: "compact".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "min.compaction.lag.ms".into(),
+            value: min_compaction_lag_ms.to_string(),
+            ..Default::default()
+        },
+    ]
+}
+
 /// Topic configs the JVM 4.x client attaches to a **join-window-store changelog**
 /// topic: `delete`-only policy + `retention.ms`. Join window stores use
 /// `retainDuplicates=true`, which prohibits compaction.
@@ -159,6 +176,9 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
                 crate::topology::node::ChangelogKind::JoinWindow { retention_ms } => {
                     join_window_changelog_topic_configs(*retention_ms)
                 }
+                crate::topology::node::ChangelogKind::Versioned {
+                    min_compaction_lag_ms,
+                } => versioned_changelog_topic_configs(*min_compaction_lag_ms),
             },
             ..Default::default()
         })
@@ -639,6 +659,14 @@ mod tests {
         assert_eq!(cl.topic_configs[1].key, "message.timestamp.type");
         assert_eq!(cl.topic_configs[2].key, "retention.ms");
         assert_eq!(cl.topic_configs[2].value, "86520000");
+    }
+
+    #[test]
+    fn versioned_store_changelog_config_is_compact_with_min_compaction_lag() {
+        let cfgs = versioned_changelog_topic_configs(686_400_000);
+        let get = |k: &str| cfgs.iter().find(|c| c.key == k).map(|c| c.value.clone());
+        assert_eq!(get("cleanup.policy").as_deref(), Some("compact"));
+        assert_eq!(get("min.compaction.lag.ms").as_deref(), Some("686400000"));
     }
 
     #[test]
