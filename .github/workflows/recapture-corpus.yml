@@ -2,6 +2,9 @@ name: recapture-corpus
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   drift-check:
     runs-on: ubuntu-latest
