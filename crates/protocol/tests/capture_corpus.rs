@@ -5,7 +5,6 @@
 //!   `cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture`
 mod support;
 use support::driver;
-#[allow(unused_imports)]
 use support::oracle;
 
 use std::collections::BTreeMap;
@@ -120,6 +119,69 @@ fn wait_ready() {
     panic!("broker not ready");
 }
 
+fn corpus_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus")
+}
+
+fn hex_encode(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for x in b {
+        use std::fmt::Write;
+        let _ = write!(s, "{x:02x}");
+    }
+    s
+}
+
+/// Map `(api_key, direction)` to the message name via the included `CASES` table.
+fn name_for(api_key: i16, is_request: bool) -> Option<&'static str> {
+    CASES
+        .iter()
+        .find(|c| {
+            c.api_key == api_key
+                && matches!(
+                    (c.kind, is_request),
+                    (Kind::Request, true) | (Kind::Response, false)
+                )
+        })
+        .map(|c| c.name)
+}
+
+/// Mirror `name_conv::module_name`: '_' before interior uppercase, lowercased.
+fn to_snake(name: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn write_entry(
+    api_key: i16,
+    version: i16,
+    is_request: bool,
+    message_body: &[u8],
+    synthetic: bool,
+    desc: &str,
+) {
+    let dir = corpus_dir();
+    let name = name_for(api_key, is_request)
+        .unwrap_or_else(|| panic!("no CASES name for api_key {api_key}"));
+    let dirn = if is_request { "request" } else { "response" };
+    let stem = format!("{}_{dirn}_v{version}_001", to_snake(name));
+    std::fs::write(dir.join(format!("{stem}.hex")), hex_encode(message_body)).unwrap();
+    let toml = format!(
+        "api_key = {api_key}\nversion = {version}\ndirection = \"{dirn}\"\nsource_kafka_version = \"4.3.0\"\nsynthetic = {synthetic}\ndescription = \"{desc}\"\n"
+    );
+    std::fs::write(dir.join(format!("{stem}.toml")), toml).unwrap();
+}
+
 #[test]
 #[ignore = "requires docker + apache/kafka:4.3.0"]
 fn capture_and_generate_corpus() {
@@ -153,7 +215,79 @@ fn capture_and_generate_corpus() {
         pairs.len()
     );
 
-    // Task 6 inserts post-processing + synthesis here.
+    // Clear any previously generated corpus so a re-run is deterministic.
+    for e in std::fs::read_dir(corpus_dir()).unwrap() {
+        let p = e.unwrap().path();
+        if matches!(p.extension().and_then(|s| s.to_str()), Some("hex" | "toml")) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    // Post-process captured frames: strip header -> message body, synthetic=false.
+    let mut covered: std::collections::BTreeSet<(i16, i16, bool)> =
+        std::collections::BTreeSet::new();
+    for (&(api_key, version, is_request), frame) in pairs.iter() {
+        let Some(name) = name_for(api_key, is_request) else {
+            continue;
+        };
+        let body = strip_frame_header(name, version, is_request, frame);
+        let re = roundtrip(name, version, &body);
+        if re != body {
+            eprintln!(
+                "WARN captured {name} v{version} req={is_request} does not round-trip; skipping"
+            );
+            continue;
+        }
+        write_entry(
+            api_key,
+            version,
+            is_request,
+            &body,
+            false,
+            &format!("{name} v{version} captured from apache/kafka:4.3.0 client traffic"),
+        );
+        covered.insert((api_key, version, is_request));
+    }
+    eprintln!("wrote {} captured entries", covered.len());
+
+    // Synthesis pass: fill every uncovered CASES Request/Response pair via oracle.
+    let mut o = oracle::shared();
+    let mut synth = 0usize;
+    for c in CASES {
+        let is_request = match c.kind {
+            Kind::Request => true,
+            Kind::Response => false,
+            Kind::RequestHeader | Kind::ResponseHeader => continue,
+        };
+        if covered.contains(&(c.api_key, c.version, is_request)) {
+            continue;
+        }
+        let jval = default_json_for(c.name, c.version);
+        let body = o.encode(c.api_key, c.version, is_request, &jval);
+        let re = roundtrip(c.name, c.version, &body);
+        assert!(
+            re == body,
+            "synthetic {} v{} does not round-trip",
+            c.name,
+            c.version
+        );
+        write_entry(
+            c.api_key,
+            c.version,
+            is_request,
+            &body,
+            true,
+            &format!(
+                "{} v{} oracle-synthesized (not realistically client-emitted)",
+                c.name, c.version
+            ),
+        );
+        synth += 1;
+    }
+    eprintln!(
+        "wrote {synth} synthetic entries; total {} pairs",
+        covered.len() + synth
+    );
 
     docker_rm_f();
 }
