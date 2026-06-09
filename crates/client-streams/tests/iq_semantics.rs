@@ -11,18 +11,16 @@
 //! captured JVM `TopologyTestDriver` run.
 
 use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{
-    Consumed, Grouped, I64Serde, Materialized, SessionWindows, StringSerde, TimeWindows,
-};
+use crabka_client_streams::{Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows};
 
 /// KV count store: `get(present)` returns the count, `get(absent)` is `None`,
 /// `range` is inclusive `[lo, hi]`, `all`/`count` cover every key.
 #[tokio::test]
 async fn iq_kv_count_read_semantics() {
     let b = StreamsBuilder::new();
-    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"));
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .count("counts");
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // a,a,b → count(a)=2, count(b)=1.
@@ -101,10 +99,10 @@ async fn iq_kv_count_read_semantics() {
 #[tokio::test]
 async fn iq_window_count_read_semantics() {
     let b = StreamsBuilder::new();
-    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+    b.stream::<String, String>(["in"])
+        .group_by_key()
         .windowed_by(TimeWindows::of_size(10))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("wc"));
+        .count("wc");
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // ts 3,7 → window [0,10) count 2; ts 12 → window [10,20) count 1.
@@ -155,10 +153,10 @@ async fn iq_window_count_read_semantics() {
 #[tokio::test]
 async fn iq_session_count_read_semantics() {
     let b = StreamsBuilder::new();
-    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+    b.stream::<String, String>(["in"])
+        .group_by_key()
         .windowed_by_session(SessionWindows::of_inactivity_gap(60))
-        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("sc"));
+        .count("sc");
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // ts 0,30 merge into session [0,30] count 2; ts 200 is a new session [200,200] count 1.

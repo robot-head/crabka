@@ -15,8 +15,21 @@ pub struct SerdeError(pub String);
     note = "implement `Serde<{T}>` for `{Self}` or verify that the type parameter `{T}` matches the deserialized type of this serde"
 )]
 pub trait Serde<T>: Send + Sync + 'static {
-    fn serialize(&self, value: &T) -> Bytes;
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError>;
+    fn serialize(&self, topic: &str, value: &T) -> Bytes;
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SerdeError>;
+
+    /// Pre-register any per-topic state (e.g. a schema-registry subject) before
+    /// processing begins. Called once per `(topic, role)` at topology wiring
+    /// time. Default: no-op (stateless serdes need nothing).
+    fn prepare(&self, _topic: &str, _role: SerdeRole) {}
+}
+
+/// Whether a serde is wired for the record key or value — passed to
+/// [`Serde::prepare`] so schema serdes can derive `<topic>-key` / `<topic>-value`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerdeRole {
+    Key,
+    Value,
 }
 
 /// Associate a concrete Serde type with its target deserialized type to enable automatic type inference.
@@ -94,11 +107,14 @@ impl<T> Clone for SerdeArc<T> {
 }
 
 impl<T: Send + Sync + 'static> Serde<T> for SerdeArc<T> {
-    fn serialize(&self, value: &T) -> Bytes {
-        self.0.serialize(value)
+    fn serialize(&self, topic: &str, value: &T) -> Bytes {
+        self.0.serialize(topic, value)
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError> {
-        self.0.deserialize(bytes)
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SerdeError> {
+        self.0.deserialize(topic, bytes)
+    }
+    fn prepare(&self, topic: &str, role: SerdeRole) {
+        self.0.prepare(topic, role);
     }
 }
 
@@ -110,10 +126,10 @@ impl<T: Send + Sync + 'static> SerdeAssociate for SerdeArc<T> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BytesSerde;
 impl Serde<Bytes> for BytesSerde {
-    fn serialize(&self, value: &Bytes) -> Bytes {
+    fn serialize(&self, _topic: &str, value: &Bytes) -> Bytes {
         value.clone()
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<Bytes, SerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<Bytes, SerdeError> {
         Ok(Bytes::copy_from_slice(bytes))
     }
 }
@@ -126,10 +142,10 @@ impl SerdeAssociate for BytesSerde {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StringSerde;
 impl Serde<String> for StringSerde {
-    fn serialize(&self, value: &String) -> Bytes {
+    fn serialize(&self, _topic: &str, value: &String) -> Bytes {
         Bytes::copy_from_slice(value.as_bytes())
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<String, SerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<String, SerdeError> {
         String::from_utf8(bytes.to_vec()).map_err(|e| SerdeError(e.to_string()))
     }
 }
@@ -142,10 +158,10 @@ impl SerdeAssociate for StringSerde {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct I64Serde;
 impl Serde<i64> for I64Serde {
-    fn serialize(&self, value: &i64) -> Bytes {
+    fn serialize(&self, _topic: &str, value: &i64) -> Bytes {
         Bytes::copy_from_slice(&value.to_be_bytes())
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<i64, SerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<i64, SerdeError> {
         let arr: [u8; 8] = bytes
             .try_into()
             .map_err(|_| SerdeError(format!("expected 8 bytes, got {}", bytes.len())))?;
@@ -214,23 +230,23 @@ mod tests {
     #[test]
     fn string_serde_round_trips() {
         let s = StringSerde;
-        let b = s.serialize(&"héllo".to_string());
-        check!(s.deserialize(&b).unwrap() == "héllo");
+        let b = s.serialize("t", &"héllo".to_string());
+        check!(s.deserialize("t", &b).unwrap() == "héllo");
     }
 
     #[test]
     fn i64_serde_is_big_endian_8_bytes() {
         let s = I64Serde;
-        let b = s.serialize(&1i64);
+        let b = s.serialize("t", &1i64);
         check!(b.as_ref() == [0, 0, 0, 0, 0, 0, 0, 1]);
-        check!(s.deserialize(&b).unwrap() == 1);
-        check!(s.deserialize(&[0, 1]).is_err());
+        check!(s.deserialize("t", &b).unwrap() == 1);
+        check!(s.deserialize("t", &[0, 1]).is_err());
     }
 
     #[test]
     fn bytes_serde_is_identity() {
         let s = BytesSerde;
-        let b = s.serialize(&bytes::Bytes::from_static(b"xy"));
-        check!(s.deserialize(&b).unwrap() == bytes::Bytes::from_static(b"xy"));
+        let b = s.serialize("t", &bytes::Bytes::from_static(b"xy"));
+        check!(s.deserialize("t", &b).unwrap() == bytes::Bytes::from_static(b"xy"));
     }
 }

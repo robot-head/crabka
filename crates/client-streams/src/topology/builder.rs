@@ -220,12 +220,18 @@ impl Topology {
         )
     }
 
-    /// Add a source node reading the given external topics, returning a typed
-    /// [`NodeHandle`] used to wire children to it.
+    /// Add a source node reading the given external topics with explicit serdes,
+    /// returning a typed [`NodeHandle`] used to wire children to it.
     ///
     /// `consumed` carries the key + value serdes used to deserialize incoming
     /// bytes into typed `Record<K, V>` values at runtime — written
     /// `Consumed::with(key_serde, value_serde)` so the two roles are visible.
+    ///
+    /// Prefer [`Topology::add_source`] (the default-serde form) for types that
+    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
+    /// default serde, or to override the default for a topic — e.g. a hand-rolled
+    /// `Serde<T>`, a **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or
+    /// a validation-on JSON serde (`JsonSerde::value(&cache, true)`).
     pub fn add_source_explicit<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -244,6 +250,12 @@ impl Topology {
         } = consumed.into();
         let name: String = name.into();
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
+        // Let each serde pre-register any per-topic state (e.g. a schema-registry
+        // subject) so membership pre-warm can resolve ids before processing.
+        for t in &topics {
+            key_serde.prepare(t, crate::processor::serde::SerdeRole::Key);
+            value_serde.prepare(t, crate::processor::serde::SerdeRole::Value);
+        }
         let r = self.reg.add_source(&name, topics.clone());
         self.record(r);
 
@@ -343,13 +355,19 @@ impl Topology {
         );
     }
 
-    /// Add a sink node writing to `topic`, fed by the given parent
-    /// [`NodeHandle`]s. Every parent's output type must equal the sink's input
-    /// type `(K, V)` — enforced by the compiler.
+    /// Add a sink node writing to `topic` with explicit serdes, fed by the given
+    /// parent [`NodeHandle`]s. Every parent's output type must equal the sink's
+    /// input type `(K, V)` — enforced by the compiler.
     ///
     /// `produced` carries the key + value serdes used to serialize outgoing
     /// records — written `Produced::with(key_serde, value_serde)`. A sink is
     /// terminal, so nothing is returned.
+    ///
+    /// Prefer [`Topology::add_sink`] (the default-serde form) for types that
+    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
+    /// default serde, or to override the default for a topic — e.g. a hand-rolled
+    /// `Serde<T>`, a **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or
+    /// a validation-on JSON serde (`JsonSerde::value(&cache, true)`).
     pub fn add_sink_explicit<K, V, KS, VS, P, I>(
         &mut self,
         name: impl Into<String>,
@@ -370,6 +388,9 @@ impl Topology {
         } = produced.into();
         let name: String = name.into();
         let topic: String = topic.into();
+        // Pre-register per-topic serde state (e.g. schema-registry subject).
+        key_serde.prepare(&topic, crate::processor::serde::SerdeRole::Key);
+        value_serde.prepare(&topic, crate::processor::serde::SerdeRole::Value);
         let preds: Vec<String> = parents
             .into_iter()
             .map(|p| p.borrow().name.clone())

@@ -141,20 +141,20 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for WindowBytesStore<
 #[async_trait]
 impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBytesStore<K, V> {
     async fn fetch_single(&self, key: &K, window_start: i64) -> Option<(i64, V)> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let sk = store_key(&kb, window_start, 0);
         let wrapped = self.backend.get(&sk).await?;
         let (ts, raw) = unwrap_value(&wrapped);
         Some((
             ts,
             self.value_serde
-                .deserialize(raw)
+                .deserialize(&self.changelog_topic, raw)
                 .expect("window value deserialize"),
         ))
     }
 
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let lo = store_key(&kb, time_from, 0);
         let hi = store_key(&kb, time_to.saturating_add(1), 0);
         let mut out = Vec::new();
@@ -167,7 +167,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
             out.push((
                 window_start_of(&k),
                 self.value_serde
-                    .deserialize(raw)
+                    .deserialize(&self.changelog_topic, raw)
                     .expect("window value deserialize"),
             ));
         }
@@ -175,9 +175,9 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
     }
 
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64) {
-        let kb = self.key_serde.serialize(&key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let sk = store_key(&kb, window_start, 0);
-        let raw = self.value_serde.serialize(&value);
+        let raw = self.value_serde.serialize(&self.changelog_topic, &value);
         let wrapped = wrap_value(record_ts, &raw);
         self.backend.put(sk.clone(), wrapped.clone()).await;
         if self.logging {

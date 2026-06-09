@@ -2,7 +2,7 @@
 //! write-back loop.
 //!
 //! Under `build_optimized()`, the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
-//! materialized `builder.table_explicit(topic, …)` store's changelog at its own source
+//! materialized `builder.table(topic, …)` store's changelog at its own source
 //! `topic` (instead of a derived `<app>-<store>-changelog`). The runtime must NOT
 //! re-produce that store's changelog entries — the source topic already IS the
 //! log, so re-producing onto it feeds the source node an unbounded re-emit loop
@@ -20,9 +20,7 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
-use crabka_client_streams::{
-    Consumed, KafkaStreams, Materialized, Produced, StreamsBuilder, StringSerde,
-};
+use crabka_client_streams::{KafkaStreams, StreamsBuilder};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -163,19 +161,15 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
 
 // ─── topology: the canonical REUSE_KTABLE_SOURCE_TOPICS shape ───────────────────
 
-/// `builder.table_explicit("rt-in", as "rt-store").mapValues(id).toStream().to_explicit("rt-out")`,
+/// `builder.table("rt-in", "rt-store").mapValues(id).toStream().to("rt-out")`,
 /// built with `build_optimized` so the `rt-store` changelog reuses the `rt-in`
 /// source topic (matches the `table_reuse` wire golden).
 fn reuse_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    b.table_explicit(
-        "rt-in",
-        Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_store("rt-store"),
-    )
-    .map_values(|v: &String| v.clone())
-    .to_stream()
-    .to_explicit("rt-out", Produced::with(StringSerde, StringSerde));
+    b.table::<String, String>("rt-in", "rt-store")
+        .map_values(|v: &String| v.clone())
+        .to_stream()
+        .to("rt-out");
     b.build_optimized(app_id).unwrap()
 }
 

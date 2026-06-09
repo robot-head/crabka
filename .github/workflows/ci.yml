@@ -100,6 +100,7 @@ jobs:
               - '.github/workflows/ci.yml'
             client_streams:
               - 'crates/client-streams/**'
+              - 'crates/schema-serde/**'
               - 'crates/client-core/**'
               - 'crates/protocol/**'
               - 'crates/metadata/**'
@@ -182,6 +183,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      # Fail fast if any crate's html_root_url drifted from the workspace version
+      # (run: tools/html-root-url.sh --fix). No toolchain needed.
+      - name: html_root_url in sync
+        if: matrix.os == 'ubuntu-latest'
+        run: ./tools/html-root-url.sh
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -196,8 +202,16 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
       - uses: taiki-e/install-action@nextest
-      - run: cargo fmt --all -- --check
+      # rustfmt runs on nightly so `format_code_in_doc_comments` (unstable, set in
+      # rustfmt.toml) formats the code inside rustdoc examples too. clippy/tests
+      # stay on the matrix toolchain.
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
+      - run: cargo +nightly fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # nextest cannot run doctests, so run them explicitly (once, on Linux).
+      - name: Doctests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --doc
       - name: Run tests
         if: matrix.os == 'macos-latest'
         run: cargo nextest run --workspace --profile ci --filter-expr 'not test(topic_rlmm_sasl_loopback_copy_then_fetch_round_trip)'
@@ -485,6 +499,9 @@ jobs:
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
+          # Includes the Avro/Protobuf/JSON bridge tests + byte-exact Confluent
+          # golden tests (schema serdes are always-on; goldens use checked-in
+          # bytes, no broker/registry needed).
           cargo llvm-cov nextest -p crabka-client-streams --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
@@ -502,6 +519,16 @@ jobs:
           files: target/nextest/ci/junit.xml
           disable_search: true
           flags: client-streams-integration
+          fail_ci_if_error: false
+      - name: Schema-serde unit coverage
+        run: |
+          cargo llvm-cov nextest -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/schema-serde-unit.lcov
+          disable_search: true
+          flags: schema-serde
           fail_ci_if_error: false
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,

@@ -806,7 +806,6 @@ async fn handle_session_tick(
 /// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
 /// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
 /// failure (the caller exits the actor loop).
-///
 // TODO(kip-848): confirm exact downgrade trigger boundary against apache/kafka:4.0.0
 async fn maybe_downgrade(
     group: &mut Group,
@@ -1495,7 +1494,6 @@ fn classic_member_metadata(
 }
 
 /// freshly-respawned actor. Mirrors what bootstrap replay would produce.
-///
 // PERF: this deep-clones EVERY member's subscriptions/assignments into a
 // fresh `GroupSeed` on every persisted heartbeat, even when only one member
 // changed. An incremental cache update — applying just the affected-member

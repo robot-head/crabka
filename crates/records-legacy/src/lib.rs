@@ -36,9 +36,7 @@
 //!
 //! ```rust
 //! use bytes::{Bytes, BytesMut};
-//! use crabka_records_legacy::{
-//!     Magic, ParsedRecord, decode_message_set, encode_flat_message_set,
-//! };
+//! use crabka_records_legacy::{Magic, ParsedRecord, decode_message_set, encode_flat_message_set};
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let records = vec![ParsedRecord {

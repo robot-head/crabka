@@ -203,8 +203,10 @@ where
             }
         };
 
-        let key_bytes = key.as_ref().map(|k| self.key_serde.serialize(k));
-        let value_bytes = Some(self.value_serde.serialize(&value));
+        let key_bytes = key
+            .as_ref()
+            .map(|k| self.key_serde.serialize(&self.topic, k));
+        let value_bytes = Some(self.value_serde.serialize(&self.topic, &value));
 
         dispatch.output.push(OutputRecord {
             topic: self.topic.clone(),
@@ -259,7 +261,10 @@ where
             Some(kb) => {
                 let k = self
                     .key_serde
-                    .deserialize(kb)
+                    // Source deserialize is id-based (the framed schema id selects
+                    // the writer schema), so the topic is unused by decoders; pass
+                    // the node name as a stable label.
+                    .deserialize(&self.name, kb)
                     .map_err(|e| ProcessorError::Serde {
                         node: self.name.clone(),
                         message: e.to_string(),
@@ -270,7 +275,7 @@ where
 
         let v = self
             .value_serde
-            .deserialize(value)
+            .deserialize(&self.name, value)
             .map_err(|e| ProcessorError::Serde {
                 node: self.name.clone(),
                 message: e.to_string(),

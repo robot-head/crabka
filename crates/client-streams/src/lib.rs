@@ -19,8 +19,8 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use std::time::Duration;
 //! use crabka_client_streams::{NodeHandle, StreamsEvent, StreamsMembership, Topology};
+//! use std::time::Duration;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
@@ -39,7 +39,10 @@
 //!     match membership.next_event().await? {
 //!         StreamsEvent::Assigned(a) => {
 //!             for task in &a.active {
-//!                 println!("active task {} → {:?}", task.subtopology_id, task.source_topic_partitions);
+//!                 println!(
+//!                     "active task {} → {:?}",
+//!                     task.subtopology_id, task.source_topic_partitions
+//!                 );
 //!             }
 //!         }
 //!         StreamsEvent::NotReady(statuses) => println!("not ready: {statuses:?}"),
@@ -54,12 +57,18 @@
 //!
 //! ```
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
+//! use crabka_client_streams::{
+//!     NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver,
+//! };
 //!
 //! struct Upper;
 //! #[async_trait]
 //! impl Processor<String, String, String, String> for Upper {
-//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, String>, r: Record<String, String>) {
+//!     async fn process(
+//!         &mut self,
+//!         ctx: &mut ProcessorContext<'_, '_, String, String>,
+//!         r: Record<String, String>,
+//!     ) {
 //!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
 //!     }
 //! }
@@ -71,7 +80,13 @@
 //! let built = topo.build("my-app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
-//! driver.pipe_input("in", (StringSerde, StringSerde), Some("k".to_string()), "hello".to_string(), 0);
+//! driver.pipe_input(
+//!     "in",
+//!     (StringSerde, StringSerde),
+//!     Some("k".to_string()),
+//!     "hello".to_string(),
+//!     0,
+//! );
 //! assert_eq!(
 //!     driver.read_output("out", (StringSerde, StringSerde)),
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
@@ -100,14 +115,18 @@
 //! ```
 //! use async_trait::async_trait;
 //! use crabka_client_streams::{
-//!     I64Serde, Processor, ProcessorContext, NodeHandle, Record, StringSerde, Topology,
+//!     I64Serde, NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology,
 //!     TopologyTestDriver,
 //! };
 //!
 //! struct Counter;
 //! #[async_trait]
 //! impl Processor<String, String, String, i64> for Counter {
-//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>, r: Record<String, String>) {
+//!     async fn process(
+//!         &mut self,
+//!         ctx: &mut ProcessorContext<'_, '_, String, i64>,
+//!         r: Record<String, String>,
+//!     ) {
 //!         let n = {
 //!             let s = ctx.get_state_store::<String, i64>("counts").unwrap();
 //!             let n = s.get(&r.value).await.unwrap_or(0) + 1;
@@ -136,7 +155,10 @@
 //!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 2_i64)),
 //! );
-//! assert_eq!(driver.store_get::<String, i64>("counts", &"a".to_string()), Some(2_i64));
+//! assert_eq!(
+//!     driver.store_get::<String, i64>("counts", &"a".to_string()),
+//!     Some(2_i64)
+//! );
 //! ```
 //!
 //! ## DSL (KStream/KTable)
@@ -207,9 +229,9 @@
 //! let b = builder.table::<String, String>("b", "sb");
 //! a.join_on_foreign_key(
 //!     &b,
-//!     |left: &String| left.clone(),                       // foreign-key extractor
+//!     |left: &String| left.clone(), // foreign-key extractor
 //!     |left: &String, right: &String| format!("{left}{right}"), // joiner -> "AX"
-//!     StringSerde,                                         // foreign-key serde
+//!     StringSerde,                  // foreign-key serde
 //! )
 //! .to_stream()
 //! .to("out");
@@ -330,15 +352,89 @@
 //! let customers = b.global_table::<String, String>("customers", "customers-by-id");
 //!
 //! b.stream::<String, String>(["orders"])
-//! .left_join_global(
-//!     &customers,
-//!     |_order_id, order| order.split(':').next().unwrap_or("").to_string(),
-//!     |order, customer| format!("{order}|customer={}", customer.map_or("unknown", |v| v)),
-//! )
-//! .to("enriched-orders");
+//!     .left_join_global(
+//!         &customers,
+//!         |_order_id, order| order.split(':').next().unwrap_or("").to_string(),
+//!         |order, customer| format!("{order}|customer={}", customer.map_or("unknown", |v| v)),
+//!     )
+//!     .to("enriched-orders");
 //!
 //! drop(customers);
 //! let built = b.build("orders-enricher").unwrap();
+//! assert_eq!(built.list_source_topics(), vec!["orders".to_string()]);
+//! ```
+//!
+//! The same enrichment with **Avro** payloads and rich compound types — declare
+//! each type's default serde once and the DSL reads/writes Confluent-framed
+//! records resolved against the schema registry (no per-call serde wiring):
+//!
+//! ```
+//! use apache_avro::AvroSchema;
+//! use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsBuilder};
+//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
+//! use crabka_schema_serde::format::avro::AvroSerde;
+//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct Order {
+//!     order_id: String,
+//!     customer_id: String,
+//!     amount_cents: i64,
+//! }
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct Customer {
+//!     customer_id: String,
+//!     name: String,
+//!     tier: Tier,
+//!     region: String,
+//! }
+//! #[derive(Clone, Copy, Serialize, Deserialize, AvroSchema)]
+//! enum Tier {
+//!     Standard,
+//!     Gold,
+//!     Platinum,
+//! }
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct EnrichedOrder {
+//!     order_id: String,
+//!     customer: String,
+//!     tier: Tier,
+//!     amount_cents: i64,
+//! }
+//!
+//! impl DefaultSerde for Order {
+//!     type Serde = SchemaSerde<Order, AvroSerde<Order>>;
+//! }
+//! impl DefaultSerde for Customer {
+//!     type Serde = SchemaSerde<Customer, AvroSerde<Customer>>;
+//! }
+//! impl DefaultSerde for EnrichedOrder {
+//!     type Serde = SchemaSerde<EnrichedOrder, AvroSerde<EnrichedOrder>>;
+//! }
+//!
+//! // Point the default serdes at a registry (not contacted until the app runs).
+//! set_default_registry(SchemaCache::new(
+//!     RegistryClient::new("http://localhost:8081"),
+//!     CacheConfig::default(),
+//! ));
+//!
+//! let b = StreamsBuilder::new();
+//! let customers = b.global_table::<String, Customer>("customers", "customers-by-id");
+//! b.stream::<String, Order>(["orders"])
+//!     .left_join_global(
+//!         &customers,
+//!         |_order_key, order| order.customer_id.clone(),
+//!         |order, customer| EnrichedOrder {
+//!             order_id: order.order_id.clone(),
+//!             customer: customer.map_or_else(|| "unknown".into(), |c| c.name.clone()),
+//!             tier: customer.map_or(Tier::Standard, |c| c.tier),
+//!             amount_cents: order.amount_cents,
+//!         },
+//!     )
+//!     .to("enriched-orders");
+//! drop(customers);
+//! let built = b.build("orders-enricher-avro").unwrap();
 //! assert_eq!(built.list_source_topics(), vec!["orders".to_string()]);
 //! ```
 //!
@@ -349,9 +445,7 @@
 //! has elapsed:
 //!
 //! ```
-//! use crabka_client_streams::{
-//!     BufferConfig, StreamsBuilder, Suppressed, TimeWindows,
-//! };
+//! use crabka_client_streams::{BufferConfig, StreamsBuilder, Suppressed, TimeWindows};
 //!
 //! let b = StreamsBuilder::new();
 //! b.stream::<String, String>(["clicks"])
@@ -363,13 +457,77 @@
 //!     .to("click-counts-final");
 //!
 //! let built = b.build("click-analytics").unwrap();
-//! assert_eq!(built.list_sink_topics(), vec!["click-counts-final".to_string()]);
+//! assert_eq!(
+//!     built.list_sink_topics(),
+//!     vec!["click-counts-final".to_string()]
+//! );
+//! ```
+//!
+//! The same windowed aggregation over **Avro** orders, accumulating a compound
+//! per-window revenue record (the aggregation state is itself an Avro record in
+//! the windowed store):
+//!
+//! ```
+//! use apache_avro::AvroSchema;
+//! use crabka_client_streams::{
+//!     BufferConfig, DefaultSerde, SchemaSerde, StreamsBuilder, Suppressed, TimeWindows,
+//! };
+//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
+//! use crabka_schema_serde::format::avro::AvroSerde;
+//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct Order {
+//!     order_id: String,
+//!     region: String,
+//!     amount_cents: i64,
+//! }
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct Revenue {
+//!     order_count: i64,
+//!     gross_cents: i64,
+//! }
+//!
+//! impl DefaultSerde for Order {
+//!     type Serde = SchemaSerde<Order, AvroSerde<Order>>;
+//! }
+//! impl DefaultSerde for Revenue {
+//!     type Serde = SchemaSerde<Revenue, AvroSerde<Revenue>>;
+//! }
+//!
+//! set_default_registry(SchemaCache::new(
+//!     RegistryClient::new("http://localhost:8081"),
+//!     CacheConfig::default(),
+//! ));
+//!
+//! let b = StreamsBuilder::new();
+//! b.stream::<String, Order>(["orders"]) // keyed by region
+//!     .group_by_key()
+//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .aggregate(
+//!         || Revenue {
+//!             order_count: 0,
+//!             gross_cents: 0,
+//!         },
+//!         |_region, order, acc| Revenue {
+//!             order_count: acc.order_count + 1,
+//!             gross_cents: acc.gross_cents + order.amount_cents,
+//!         },
+//!         "revenue-by-window",
+//!     )
+//!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+//!     .to_stream()
+//!     .to("revenue-per-window");
+//! let built = b.build("revenue-analytics").unwrap();
+//! assert_eq!(
+//!     built.list_sink_topics(),
+//!     vec!["revenue-per-window".to_string()]
+//! );
 //! ```
 //!
 //! ```
-//! use crabka_client_streams::{
-//!     I64Serde, StreamsBuilder, StringSerde, TopologyTestDriver,
-//! };
+//! use crabka_client_streams::{I64Serde, StreamsBuilder, StringSerde, TopologyTestDriver};
 //!
 //! // Build a word-count topology: group by key, count, forward to "out".
 //! let b = StreamsBuilder::new();
@@ -407,8 +565,87 @@
 //! );
 //!
 //! // The materialized store holds the final count per key.
-//! assert_eq!(driver.store_get::<String, i64>("counts", &"a".to_string()), Some(2));
-//! assert_eq!(driver.store_get::<String, i64>("counts", &"b".to_string()), Some(1));
+//! assert_eq!(
+//!     driver.store_get::<String, i64>("counts", &"a".to_string()),
+//!     Some(2)
+//! );
+//! assert_eq!(
+//!     driver.store_get::<String, i64>("counts", &"b".to_string()),
+//!     Some(1)
+//! );
+//! ```
+//!
+//! ### Applied: projecting Avro records
+//!
+//! A realistic stateless projection over compound **Avro** types — keep paid
+//! orders and bill each into a summary (a nested `Vec` of line items, an
+//! `Option`, and an enum, all carried as one Avro record per topic):
+//!
+//! ```
+//! use apache_avro::AvroSchema;
+//! use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsBuilder};
+//! use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
+//! use crabka_schema_serde::format::avro::AvroSerde;
+//! use crabka_schema_serde::{RegistryClient, set_default_registry};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct Order {
+//!     order_id: String,
+//!     status: OrderStatus,
+//!     lines: Vec<LineItem>,
+//!     coupon: Option<String>,
+//! }
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct LineItem {
+//!     sku: String,
+//!     quantity: i32,
+//!     unit_price_cents: i64,
+//! }
+//! #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AvroSchema)]
+//! enum OrderStatus {
+//!     Placed,
+//!     Paid,
+//!     Shipped,
+//!     Cancelled,
+//! }
+//! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
+//! struct OrderSummary {
+//!     order_id: String,
+//!     item_count: i64,
+//!     total_cents: i64,
+//! }
+//!
+//! impl DefaultSerde for Order {
+//!     type Serde = SchemaSerde<Order, AvroSerde<Order>>;
+//! }
+//! impl DefaultSerde for OrderSummary {
+//!     type Serde = SchemaSerde<OrderSummary, AvroSerde<OrderSummary>>;
+//! }
+//!
+//! set_default_registry(SchemaCache::new(
+//!     RegistryClient::new("http://localhost:8081"),
+//!     CacheConfig::default(),
+//! ));
+//!
+//! let b = StreamsBuilder::new();
+//! b.stream::<String, Order>(["orders"])
+//!     .filter(|_id, o| o.status == OrderStatus::Paid)
+//!     .map_values(|o: &Order| OrderSummary {
+//!         order_id: o.order_id.clone(),
+//!         item_count: i64::try_from(o.lines.len()).unwrap_or(i64::MAX),
+//!         total_cents: o
+//!             .lines
+//!             .iter()
+//!             .map(|l| i64::from(l.quantity) * l.unit_price_cents)
+//!             .sum(),
+//!     })
+//!     .to("order-summaries");
+//! let built = b.build("order-billing").unwrap();
+//! assert_eq!(
+//!     built.list_sink_topics(),
+//!     vec!["order-summaries".to_string()]
+//! );
 //! ```
 //!
 //! ## Punctuation (timers)
@@ -436,11 +673,11 @@
 //!
 //! ```
 //! use async_trait::async_trait;
-//! use std::time::Duration;
 //! use crabka_client_streams::{
-//!     I64Serde, Processor, ProcessorContext, PunctuationType, Punctuator,
-//!     NodeHandle, Record, StringSerde, Topology, TopologyTestDriver,
+//!     I64Serde, NodeHandle, Processor, ProcessorContext, PunctuationType, Punctuator, Record,
+//!     StringSerde, Topology, TopologyTestDriver,
 //! };
+//! use std::time::Duration;
 //!
 //! // A punctuator that forwards the fire timestamp downstream.
 //! struct Emit;
@@ -457,7 +694,12 @@
 //!     async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
 //!         ctx.schedule(Duration::from_millis(10), PunctuationType::StreamTime, Emit);
 //!     }
-//!     async fn process(&mut self, _ctx: &mut ProcessorContext<'_, '_, String, i64>, _r: Record<String, String>) {}
+//!     async fn process(
+//!         &mut self,
+//!         _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+//!         _r: Record<String, String>,
+//!     ) {
+//!     }
 //! }
 //!
 //! let mut topo = Topology::new();
@@ -470,10 +712,22 @@
 //! // Stream-time advances with each record's timestamp; the punctuator fires once per
 //! // crossed 10ms boundary, stamped with the CURRENT stream-time (5 is skipped).
 //! for ts in [0_i64, 5, 10] {
-//!     driver.pipe_input("in", (StringSerde, StringSerde), Some("k".to_string()), "v".to_string(), ts);
+//!     driver.pipe_input(
+//!         "in",
+//!         (StringSerde, StringSerde),
+//!         Some("k".to_string()),
+//!         "v".to_string(),
+//!         ts,
+//!     );
 //! }
-//! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), Some((None, 0_i64)));
-//! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), Some((None, 10_i64)));
+//! assert_eq!(
+//!     driver.read_output("out", (StringSerde, I64Serde)),
+//!     Some((None, 0_i64))
+//! );
+//! assert_eq!(
+//!     driver.read_output("out", (StringSerde, I64Serde)),
+//!     Some((None, 10_i64))
+//! );
 //! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), None);
 //! ```
 //!
@@ -485,12 +739,18 @@
 //!
 //! ```no_run
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, Topology};
+//! use crabka_client_streams::{
+//!     KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, Topology,
+//! };
 //!
 //! struct Upper;
 //! #[async_trait]
 //! impl Processor<String, String, String, String> for Upper {
-//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, String>, r: Record<String, String>) {
+//!     async fn process(
+//!         &mut self,
+//!         ctx: &mut ProcessorContext<'_, '_, String, String>,
+//!         r: Record<String, String>,
+//!     ) {
 //!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
 //!     }
 //! }
@@ -541,7 +801,9 @@
 //! ```no_run
 //! # use crabka_client_streams::{KafkaStreams, StringSerde, I64Serde};
 //! # async fn example(streams: KafkaStreams) -> Result<(), Box<dyn std::error::Error>> {
-//! let counts = streams.key_value_store("counts", StringSerde, I64Serde).await?;
+//! let counts = streams
+//!     .key_value_store("counts", StringSerde, I64Serde)
+//!     .await?;
 //! let n: Option<i64> = counts.get(&"alice".to_string()).await?;
 //! let top = counts.range(&"a".to_string(), &"m".to_string()).await?;
 //! let total = counts.approximate_num_entries().await?;
@@ -606,7 +868,7 @@
 //! # Ok(())
 //! # }
 //! ```
-#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.2")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.4")]
 
 pub mod dsl;
 mod error;
@@ -614,6 +876,7 @@ pub mod membership;
 pub mod processor;
 pub mod runtime;
 pub mod store;
+pub mod streams_app;
 pub mod test_driver;
 pub mod topology;
 
@@ -625,9 +888,10 @@ pub use dsl::{
 };
 pub use error::StreamsClientError;
 pub use membership::{
-    StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
-    TaskOffsetTracker, TopicPartition,
+    SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
+    TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
+pub use processor::schema_serde::SchemaSerde;
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
     FixedKeyProcessorSupplier, FixedKeyRecord, I64Serde, Processor, ProcessorContext,
@@ -642,5 +906,6 @@ pub use runtime::{
 };
 pub use store::iq::StoreKind;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
+pub use streams_app::StreamsApp;
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};

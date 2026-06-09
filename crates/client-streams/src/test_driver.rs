@@ -72,8 +72,8 @@ impl TopologyTestDriver {
         VS: SerdeAssociate + Serde<VS::Target>,
     {
         let consumed = consumed.into();
-        let kb = key.as_ref().map(|k| consumed.key_serde.serialize(k));
-        let vb = consumed.value_serde.serialize(&value);
+        let kb = key.as_ref().map(|k| consumed.key_serde.serialize(topic, k));
+        let vb = consumed.value_serde.serialize(topic, &value);
         self.pipe_bytes(topic, kb.as_deref(), &vb, timestamp);
     }
 
@@ -196,9 +196,9 @@ impl TopologyTestDriver {
         vs: &dyn Serde<V>,
     ) -> Option<V> {
         let q = self.graph.stores.iq_get(store)?;
-        let kb = ks.serialize(key);
+        let kb = ks.serialize(store, key);
         let vb = q.iq_kv_get(&kb).await?;
-        Some(vs.deserialize(&vb).expect("iq deserialize"))
+        Some(vs.deserialize(store, &vb).expect("iq deserialize"))
     }
 
     /// Interactive-query KV range read over the inclusive `[lo, hi]` key span,
@@ -214,15 +214,15 @@ impl TopologyTestDriver {
         let Some(q) = self.graph.stores.iq_get(store) else {
             return Vec::new();
         };
-        let lob = ks.serialize(lo);
-        let hib = ks.serialize(hi);
+        let lob = ks.serialize(store, lo);
+        let hib = ks.serialize(store, hi);
         q.iq_kv_range(&lob, &hib)
             .await
             .into_iter()
             .map(|(k, v)| {
                 (
-                    ks.deserialize(&k).expect("iq deserialize"),
-                    vs.deserialize(&v).expect("iq deserialize"),
+                    ks.deserialize(store, &k).expect("iq deserialize"),
+                    vs.deserialize(store, &v).expect("iq deserialize"),
                 )
             })
             .collect()
@@ -243,8 +243,8 @@ impl TopologyTestDriver {
             .into_iter()
             .map(|(k, v)| {
                 (
-                    ks.deserialize(&k).expect("iq deserialize"),
-                    vs.deserialize(&v).expect("iq deserialize"),
+                    ks.deserialize(store, &k).expect("iq deserialize"),
+                    vs.deserialize(store, &v).expect("iq deserialize"),
                 )
             })
             .collect()
@@ -273,11 +273,11 @@ impl TopologyTestDriver {
         let Some(q) = self.graph.stores.iq_get(store) else {
             return Vec::new();
         };
-        let kb = ks.serialize(key);
+        let kb = ks.serialize(store, key);
         q.iq_window_fetch(&kb, from, to)
             .await
             .into_iter()
-            .map(|(start, v)| (start, vs.deserialize(&v).expect("iq deserialize")))
+            .map(|(start, v)| (start, vs.deserialize(store, &v).expect("iq deserialize")))
             .collect()
     }
 
@@ -292,9 +292,9 @@ impl TopologyTestDriver {
         vs: &dyn Serde<V>,
     ) -> Option<V> {
         let q = self.graph.stores.iq_get(store)?;
-        let kb = ks.serialize(key);
+        let kb = ks.serialize(store, key);
         let vb = q.iq_window_fetch_single(&kb, window_start).await?;
-        Some(vs.deserialize(&vb).expect("iq deserialize"))
+        Some(vs.deserialize(store, &vb).expect("iq deserialize"))
     }
 
     /// Interactive-query session read: `((start, end), value)` for every session
@@ -310,11 +310,11 @@ impl TopologyTestDriver {
         let Some(q) = self.graph.stores.iq_get(store) else {
             return Vec::new();
         };
-        let kb = ks.serialize(key);
+        let kb = ks.serialize(store, key);
         q.iq_session_fetch_key(&kb)
             .await
             .into_iter()
-            .map(|(win, v)| (win, vs.deserialize(&v).expect("iq deserialize")))
+            .map(|(win, v)| (win, vs.deserialize(store, &v).expect("iq deserialize")))
             .collect()
     }
 
@@ -337,12 +337,12 @@ impl TopologyTestDriver {
         let key = out.key.map(|b| {
             produced
                 .key_serde
-                .deserialize(&b)
+                .deserialize(topic, &b)
                 .expect("test: deserialize output key")
         });
         let value = produced
             .value_serde
-            .deserialize(&out.value.unwrap_or_default())
+            .deserialize(topic, &out.value.unwrap_or_default())
             .expect("test: deserialize output value");
         Some((key, value))
     }

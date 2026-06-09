@@ -33,9 +33,13 @@ async fn query(
         .map_err(StreamsClientError::InteractiveQuery)
 }
 
-fn deser<T: 'static>(serde: &dyn Serde<T>, bytes: &[u8]) -> Result<T, StreamsClientError> {
+fn deser<T: 'static>(
+    topic: &str,
+    serde: &dyn Serde<T>,
+    bytes: &[u8],
+) -> Result<T, StreamsClientError> {
     serde
-        .deserialize(bytes)
+        .deserialize(topic, bytes)
         .map_err(|e| StreamsClientError::Runtime(format!("iq deserialize: {e}")))
 }
 
@@ -66,7 +70,7 @@ pub struct ReadOnlyKeyValueStore<K, V> {
 impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     /// Value for `key`, or `None` if absent.
     pub async fn get(&self, key: &K) -> Result<Option<V>, StreamsClientError> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.store, key);
         match query(
             &self.tx,
             &self.store,
@@ -75,7 +79,7 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
         )
         .await?
         {
-            IqPayload::Value(Some(vb)) => Ok(Some(deser(&*self.value_serde, &vb)?)),
+            IqPayload::Value(Some(vb)) => Ok(Some(deser(&self.store, &*self.value_serde, &vb)?)),
             IqPayload::Value(None) => Ok(None),
             other => Err(unexpected(&other)),
         }
@@ -83,8 +87,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
 
     /// Inclusive `[lo, hi]` range, ascending memcmp key order.
     pub async fn range(&self, lo: &K, hi: &K) -> Result<Vec<(K, V)>, StreamsClientError> {
-        let lo_b = self.key_serde.serialize(lo);
-        let hi_b = self.key_serde.serialize(hi);
+        let lo_b = self.key_serde.serialize(&self.store, lo);
+        let hi_b = self.key_serde.serialize(&self.store, hi);
         match query(
             &self.tx,
             &self.store,
@@ -126,8 +130,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
             .into_iter()
             .map(|(kb, vb)| {
                 Ok((
-                    deser(&*self.key_serde, &kb)?,
-                    deser(&*self.value_serde, &vb)?,
+                    deser(&self.store, &*self.key_serde, &kb)?,
+                    deser(&self.store, &*self.value_serde, &vb)?,
                 ))
             })
             .collect()
@@ -149,7 +153,7 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
         key: &K,
         window_start: i64,
     ) -> Result<Option<V>, StreamsClientError> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.store, key);
         match query(
             &self.tx,
             &self.store,
@@ -161,7 +165,7 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
         )
         .await?
         {
-            IqPayload::Value(Some(vb)) => Ok(Some(deser(&*self.value_serde, &vb)?)),
+            IqPayload::Value(Some(vb)) => Ok(Some(deser(&self.store, &*self.value_serde, &vb)?)),
             IqPayload::Value(None) => Ok(None),
             other => Err(unexpected(&other)),
         }
@@ -175,7 +179,7 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
         time_from: i64,
         time_to: i64,
     ) -> Result<Vec<(i64, V)>, StreamsClientError> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.store, key);
         match query(
             &self.tx,
             &self.store,
@@ -190,7 +194,7 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
         {
             IqPayload::WindowEntries(rows) => rows
                 .into_iter()
-                .map(|(t, vb)| Ok((t, deser(&*self.value_serde, &vb)?)))
+                .map(|(t, vb)| Ok((t, deser(&self.store, &*self.value_serde, &vb)?)))
                 .collect(),
             other => Err(unexpected(&other)),
         }
@@ -209,7 +213,7 @@ pub struct ReadOnlySessionStore<K, V> {
 impl<K: 'static, V: 'static> ReadOnlySessionStore<K, V> {
     /// All sessions for `key`, in store order.
     pub async fn fetch(&self, key: &K) -> Result<Vec<(Windowed<K>, V)>, StreamsClientError> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.store, key);
         match query(
             &self.tx,
             &self.store,
@@ -222,13 +226,17 @@ impl<K: 'static, V: 'static> ReadOnlySessionStore<K, V> {
                 .into_iter()
                 .map(|((start, end), vb)| {
                     // Re-deserialize the key per row (avoids a `K: Clone` bound).
-                    let k = deser(&*self.key_serde, &self.key_serde.serialize(key))?;
+                    let k = deser(
+                        &self.store,
+                        &*self.key_serde,
+                        &self.key_serde.serialize(&self.store, key),
+                    )?;
                     Ok((
                         Windowed {
                             key: k,
                             window: Window { start, end },
                         },
-                        deser(&*self.value_serde, &vb)?,
+                        deser(&self.store, &*self.value_serde, &vb)?,
                     ))
                 })
                 .collect(),

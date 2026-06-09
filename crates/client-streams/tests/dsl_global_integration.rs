@@ -1,4 +1,4 @@
-﻿//! Broker integration test: DSL `GlobalKTable` stream-globaltable join.
+//! Broker integration test: DSL `GlobalKTable` stream-globaltable join.
 //!
 //! Proves the full `GlobalKTable` runtime path end-to-end against a real broker:
 //! the global consumer bootstraps a fully-replicated store from **every**
@@ -12,9 +12,7 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_producer::{Producer, ProducerRecord};
-use crabka_client_streams::{
-    Consumed, GlobalKTable, KafkaStreams, Materialized, Produced, StreamsBuilder, StringSerde,
-};
+use crabka_client_streams::{GlobalKTable, KafkaStreams, StreamsBuilder};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -75,12 +73,9 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 /// `in` → `join_global` (lookup key = stream value) → `out`.
 fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table_explicit(
-        "global",
-        Consumed::with(StringSerde, StringSerde),
-        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
-    );
-    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+    let g: GlobalKTable<String, String> =
+        b.global_table::<String, String>("global", "global-store");
+    b.stream::<String, String>(["in"])
         .join_global(
             &g,
             // key-mapper: the stream VALUE is the global lookup key.
@@ -88,7 +83,7 @@ fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
             // joiner: combine stream value and global value.
             |sv: &String, gv: &String| format!("{sv}-{gv}"),
         )
-        .to_explicit("out", Produced::with(StringSerde, StringSerde));
+        .to("out");
     // Drop the GlobalKTable handle (it holds an Rc clone of the internal builder)
     // so `build` can `Rc::try_unwrap` the shared graph.
     drop(g);

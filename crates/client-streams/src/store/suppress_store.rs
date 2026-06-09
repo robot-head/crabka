@@ -149,17 +149,17 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
         }
         let key = self
             .key_serde
-            .deserialize(&entry.key_bytes)
+            .deserialize(&self.changelog_topic, &entry.key_bytes)
             .expect("suppress key deserialize");
         let change = Change {
             old: entry.old_bytes.map(|b| {
                 self.value_serde
-                    .deserialize(&b)
+                    .deserialize(&self.changelog_topic, &b)
                     .expect("old value deserialize")
             }),
             new: entry.new_bytes.map(|b| {
                 self.value_serde
-                    .deserialize(&b)
+                    .deserialize(&self.changelog_topic, &b)
                     .expect("new value deserialize")
             }),
         };
@@ -221,9 +221,15 @@ impl<K: 'static, V: 'static> StateStore for SuppressBytesStore<K, V> {
 #[async_trait]
 impl<K: Send + Sync + 'static, V: Send + 'static> SuppressStore<K, V> for SuppressBytesStore<K, V> {
     async fn put(&mut self, key: K, buffer_time: i64, change: Change<V>, ctx: SuppressRecordCtx) {
-        let kb = self.key_serde.serialize(&key);
-        let new_bytes = change.new.as_ref().map(|v| self.value_serde.serialize(v));
-        let old_bytes = change.old.as_ref().map(|v| self.value_serde.serialize(v));
+        let kb = self.key_serde.serialize(&self.changelog_topic, &key);
+        let new_bytes = change
+            .new
+            .as_ref()
+            .map(|v| self.value_serde.serialize(&self.changelog_topic, v));
+        let old_bytes = change
+            .old
+            .as_ref()
+            .map(|v| self.value_serde.serialize(&self.changelog_topic, v));
         // prior = the value previously buffered for this key; on first buffering
         // there is none, so prior IS the incoming change's `old` (matching the JVM
         // reference-identity rule where the first put's prior == oldValue, which

@@ -13,9 +13,9 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use std::time::Duration;
 //! use bytes::Bytes;
 //! use crabka_client_producer::{Acks, Compression, Producer, ProducerRecord};
+//! use std::time::Duration;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let producer = Producer::builder()
@@ -51,7 +51,7 @@
 //! `key` and `value` are raw `Bytes`, so schema-registry or serde integration
 //! can be layered without constraining the producer API.
 
-#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.1")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.4")]
 
 mod accumulator;
 mod builder;

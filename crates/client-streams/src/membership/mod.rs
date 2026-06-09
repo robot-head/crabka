@@ -6,6 +6,7 @@ mod coordinator;
 mod status;
 mod types;
 
+pub use client::SchemaPrewarm;
 pub use client::StreamsMembership;
 pub use types::{
     StreamsAssignment, StreamsEvent, StreamsStatus, TaskAssignment, TaskOffsetTracker,

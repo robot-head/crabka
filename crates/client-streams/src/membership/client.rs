@@ -25,6 +25,13 @@ use crate::membership::assignment::resolve;
 
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
+/// Hook invoked once at membership start to resolve schema ids before
+/// processing. Implemented by `SchemaCache` under the `schema-serde` feature.
+#[async_trait::async_trait]
+pub trait SchemaPrewarm: Send + Sync {
+    async fn prewarm(&self) -> Result<(), StreamsClientError>;
+}
+
 /// A live streams-group membership. Construct via [`StreamsMembership::builder`].
 pub struct StreamsMembership {
     member_id: String,
@@ -52,9 +59,13 @@ impl StreamsMembership {
         #[builder(into)] instance_id: Option<String>,
         #[builder(default = Duration::from_secs(30))] rebalance_timeout: Duration,
         security: Option<crabka_client_core::security::ClientSecurity>,
+        schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
     ) -> Result<Self, StreamsClientError> {
         if group_id.is_empty() {
             return Err(StreamsClientError::Server(0));
+        }
+        if let Some(prewarm) = &schema_prewarm {
+            prewarm.prewarm().await?;
         }
         let process_id = process_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let member_id = uuid::Uuid::new_v4().to_string();

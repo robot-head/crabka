@@ -52,10 +52,10 @@
 //! ## In-process manager for tests and local tools
 //!
 //! ```no_run
-//! use std::{path::PathBuf, time::Duration};
 //! use crabka_remote_storage_topic::{
 //!     InProcessMetadataEventLog, TopicBasedRemoteLogMetadataManager,
 //! };
+//! use std::{path::PathBuf, time::Duration};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let event_log = InProcessMetadataEventLog::new(16);
@@ -64,14 +64,15 @@
 //!     tokio::runtime::Handle::current(),
 //!     PathBuf::from("/var/lib/crabka/rlmm-cache"),
 //!     Duration::from_secs(30),
-//! ).await?;
+//! )
+//! .await?;
 //!
 //! manager.reconcile_assignment(&[0, 1]).await;
 //! # Ok(())
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.3.1")]
+#![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.3.4")]
 
 pub mod error;
 pub mod kafka_log;

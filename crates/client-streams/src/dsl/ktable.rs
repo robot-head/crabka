@@ -1224,16 +1224,8 @@ mod fk_exec_tests {
     fn tables(
         b: &StreamsBuilder,
     ) -> (super::KTable<String, String>, super::KTable<String, String>) {
-        let ta = b.table_explicit(
-            "a",
-            Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sa"),
-        );
-        let tb = b.table_explicit(
-            "b",
-            Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sb"),
-        );
+        let ta = b.table::<String, String>("a", "sa");
+        let tb = b.table::<String, String>("b", "sb");
         (ta, tb)
     }
 

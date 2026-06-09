@@ -16,9 +16,9 @@ name = "crabka-docgen"
 path = "src/main.rs"
 
 [dependencies]
-crabka-operator = { version = "0.3.3", path = "../operator" }
-crabka-broker = { version = "0.3.3", path = "../broker" }
-crabka-protocol = { version = "0.3.3", path = "../protocol" }
+crabka-operator = { version = "0.3.4", path = "../operator" }
+crabka-broker = { version = "0.3.4", path = "../broker" }
+crabka-protocol = { version = "0.3.4", path = "../protocol" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = { workspace = true }

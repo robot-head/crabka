@@ -25,7 +25,8 @@
 //!     "broker-1",
 //!     "0.1.0",
 //!     "crabka-broker",
-//! ).unwrap();
+//! )
+//! .unwrap();
 //!
 //! assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
 //! assert_eq!(cfg.endpoint, "http://localhost:4317");

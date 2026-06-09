@@ -14,10 +14,10 @@ use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 pub(crate) struct SubscriptionWrapperSerde;
 
 impl Serde<SubscriptionWrapper> for SubscriptionWrapperSerde {
-    fn serialize(&self, value: &SubscriptionWrapper) -> Bytes {
+    fn serialize(&self, _topic: &str, value: &SubscriptionWrapper) -> Bytes {
         value.serialize()
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<SubscriptionWrapper, SerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<SubscriptionWrapper, SerdeError> {
         Ok(SubscriptionWrapper::deserialize(bytes))
     }
 }
@@ -31,10 +31,14 @@ impl SerdeAssociate for SubscriptionWrapperSerde {
 pub(crate) struct SubscriptionResponseWrapperSerde;
 
 impl Serde<SubscriptionResponseWrapper> for SubscriptionResponseWrapperSerde {
-    fn serialize(&self, value: &SubscriptionResponseWrapper) -> Bytes {
+    fn serialize(&self, _topic: &str, value: &SubscriptionResponseWrapper) -> Bytes {
         value.serialize()
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<SubscriptionResponseWrapper, SerdeError> {
+    fn deserialize(
+        &self,
+        _topic: &str,
+        bytes: &[u8],
+    ) -> Result<SubscriptionResponseWrapper, SerdeError> {
         Ok(SubscriptionResponseWrapper::deserialize(bytes))
     }
 }
@@ -58,8 +62,8 @@ mod tests {
             primary_partition: 3,
         };
         let s = SubscriptionWrapperSerde;
-        let b = s.serialize(&w);
-        assert_eq!(s.deserialize(&b).unwrap(), w);
+        let b = s.serialize("t", &w);
+        assert_eq!(s.deserialize("t", &b).unwrap(), w);
     }
 
     #[test]
@@ -69,7 +73,7 @@ mod tests {
             foreign_value: Some(Bytes::from_static(b"vfk")),
         };
         let s = SubscriptionResponseWrapperSerde;
-        let b = s.serialize(&w);
-        assert_eq!(s.deserialize(&b).unwrap(), w);
+        let b = s.serialize("t", &w);
+        assert_eq!(s.deserialize("t", &b).unwrap(), w);
     }
 }
