@@ -1,11 +1,10 @@
 //! Generate the `mod.rs` files for `crates/protocol/src/{owned,borrowed}/`.
 
-use std::fmt::Write;
-
 use crate::emit::common::banner;
 use crate::emit::wrappers::Flavor;
 use crate::ir::MessageSpec;
 use crate::name_conv;
+use quote::{format_ident, quote};
 
 /// Emit a `mod.rs` that declares one `pub mod` per active spec, sorted
 /// alphabetically by snake-case module name.
@@ -24,9 +23,6 @@ pub fn emit(
         Flavor::Owned => "Owned (heap-allocated) message types.",
         Flavor::Borrowed => "Borrowed-flavor generated message types.",
     };
-    let mut out = banner(schemas_version);
-    writeln!(out, "//! {flavor_comment}").unwrap();
-    writeln!(out).unwrap();
     // Collect snake-case names, sort, deduplicate.
     let mut entries: Vec<String> = specs
         .iter()
@@ -39,10 +35,29 @@ pub fn emit(
     }
     entries.sort();
     entries.dedup();
-    for snake in &entries {
-        writeln!(out, "pub mod {snake};").unwrap();
-    }
-    out
+    emit_modules(
+        schemas_version,
+        Some(flavor_comment),
+        entries.iter().map(String::as_str),
+    )
+}
+
+#[must_use]
+pub fn emit_modules<'a>(
+    schemas_version: &str,
+    inner_doc: Option<&str>,
+    entries: impl Iterator<Item = &'a str>,
+) -> String {
+    let inner_doc = inner_doc.map(|doc| quote!(#![doc = #doc]));
+    let modules = entries.map(|entry| {
+        let ident = format_ident!("{entry}");
+        quote!(pub mod #ident;)
+    });
+    let tokens = quote! {
+        #inner_doc
+        #(#modules)*
+    };
+    format!("{}{}", banner(schemas_version), tokens)
 }
 
 #[cfg(test)]
@@ -97,6 +112,6 @@ mod tests {
     fn borrowed_flavor_has_correct_doc_comment() {
         let refs: Vec<&MessageSpec> = vec![];
         let out = emit(&refs, Flavor::Borrowed, "sha123", false);
-        assert!(out.contains("//! Borrowed-flavor generated message types."));
+        assert!(out.contains("# ! [doc = \"Borrowed-flavor generated message types.\"]"));
     }
 }

@@ -34,6 +34,23 @@
 //! # Ok(())
 //! # }
 //! ```
+macro_rules! emitln {
+    ($dst:expr) => {{
+        $dst.push('\n');
+        Ok::<(), std::fmt::Error>(())
+    }};
+    ($dst:expr, $($arg:tt)*) => {{
+        use std::fmt::Write as _;
+        match $dst.write_fmt(format_args!($($arg)*)) {
+            Ok(()) => {
+                $dst.push('\n');
+                Ok::<(), std::fmt::Error>(())
+            }
+            Err(err) => Err(err),
+        }
+    }};
+}
+
 pub mod emit;
 pub mod fmt;
 pub mod ir;

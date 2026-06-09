@@ -1,11 +1,10 @@
 //! Generate the `include!` wrapper module bodies under
 //! `crates/protocol/src/{owned,borrowed}/<snake>.rs`.
 
-use std::fmt::Write;
-
 use crate::emit::common::banner;
 use crate::ir::{MessageSpec, MessageType};
 use crate::name_conv;
+use quote::{format_ident, quote};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
@@ -53,6 +52,26 @@ pub fn allow_header() -> &'static str {
     )
 }
 
+pub fn allow_attrs() -> proc_macro2::TokenStream {
+    quote! {
+        #![allow(
+            clippy::absurd_extreme_comparisons,
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss,
+            clippy::default_trait_access,
+            clippy::must_use_candidate,
+            clippy::new_without_default,
+            clippy::nonminimal_bool,
+            clippy::too_many_lines,
+            clippy::unnecessary_wraps,
+            clippy::unreadable_literal,
+            unused_mut,
+            unused_variables
+        )]
+    }
+}
+
 /// Emit a wrapper body for one message + flavor.
 #[must_use]
 pub fn emit(
@@ -62,148 +81,114 @@ pub fn emit(
     namespace: Option<&str>,
 ) -> String {
     let type_name = name_conv::type_name(&spec.name);
+    let type_ident = format_ident!("{type_name}");
     let suffix = match flavor {
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
     };
-    let mut out = banner(schemas_version);
-    // Comment explaining origin, matching the hand-written wrapper style.
-    writeln!(
-        out,
-        "// Clippy lints that fire on generated code patterns are suppressed here so"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "// that regenerating the file does not require manual allow annotations."
-    )
-    .unwrap();
-    out.push_str(allow_header());
-    writeln!(out).unwrap();
-    writeln!(out).unwrap();
     let path_prefix = match namespace {
         None => String::new(),
         Some(ns) => format!("{ns}/"),
     };
-    writeln!(
-        out,
-        "include!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/{path_prefix}{type_name}.{suffix}.rs\"\n));"
-    )
-    .unwrap();
-    writeln!(out).unwrap();
+    let include_path = format!("/generated/{path_prefix}{type_name}.{suffix}.rs");
+    let allow_attrs = allow_attrs();
     // Inline round-trip tests gated on the flavor.
-    match flavor {
-        Flavor::Owned => write_owned_tests(&mut out, &type_name),
-        Flavor::Borrowed => write_borrowed_tests(&mut out, &type_name),
+    let tests = match flavor {
+        Flavor::Owned => owned_tests(&type_ident),
+        Flavor::Borrowed => borrowed_tests(&type_ident),
+    };
+    let tokens = quote! {
+        #allow_attrs
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), #include_path));
+        #tests
+    };
+    format!("{}{}", banner(schemas_version), tokens)
+}
+
+fn owned_tests(type_name: &proc_macro2::Ident) -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(test)]
+        mod tests {
+            use assert2::assert;
+            use super::*;
+            use crate::{Decode, Encode};
+            use bytes::BytesMut;
+
+            fn roundtrip(msg: &#type_name, v: i16) {
+                let mut buf = BytesMut::new();
+                msg.encode(&mut buf, v).unwrap();
+                assert!(msg.encoded_len(v) == buf.len());
+                let bytes = buf.freeze();
+                let mut cur = &bytes[..];
+                let decoded = #type_name::decode(&mut cur, v).unwrap();
+                assert!(cur.is_empty());
+                let mut reencoded = BytesMut::new();
+                decoded.encode(&mut reencoded, v).unwrap();
+                assert!(&reencoded[..] == &bytes[..]);
+                let _ = default_json(v);
+            }
+
+            #[test]
+            fn default_roundtrips_all_versions() {
+                for v in MIN_VERSION..=MAX_VERSION {
+                    roundtrip(&#type_name::default(), v);
+                }
+            }
+
+            #[test]
+            fn populated_roundtrips_all_versions() {
+                for v in MIN_VERSION..=MAX_VERSION {
+                    roundtrip(&#type_name::populated(v), v);
+                }
+            }
+        }
     }
-    out
 }
 
-fn write_owned_tests(out: &mut String, type_name: &str) {
-    // Each message is round-tripped across EVERY supported version, in two
-    // shapes: `default()` (empty collections / zero scalars) and `populated()`
-    // (one element per array, recursively populated nested structs, non-default
-    // scalars). The populated form drives the array-element, nested-struct, and
-    // tagged-field encode/decode paths that an empty default never reaches.
-    //
-    // Rather than assert structural equality (which has version-dependent quirks,
-    // e.g. `None` vs `Some([])` for nullable arrays at old versions), the helper
-    // re-encodes the decoded value and asserts byte-equality with the original
-    // encoding — a stronger, quirk-free invariant. Bespoke integration tests
-    // under crates/protocol/tests/ cover semantic equality.
-    writeln!(
-        out,
-        "#[cfg(test)]
-mod tests {{
-    use assert2::assert;
-    use super::*;
-    use crate::{{Decode, Encode}};
-    use bytes::BytesMut;
+fn borrowed_tests(type_name: &proc_macro2::Ident) -> proc_macro2::TokenStream {
+    quote! {
+        #[cfg(test)]
+        mod tests {
+            use assert2::assert;
+            use super::*;
+            use crate::{DecodeBorrow, Encode};
+            use bytes::BytesMut;
 
-    fn roundtrip(msg: &{type_name}, v: i16) {{
-        let mut buf = BytesMut::new();
-        msg.encode(&mut buf, v).unwrap();
-        assert!(msg.encoded_len(v) == buf.len());
-        let bytes = buf.freeze();
-        let mut cur = &bytes[..];
-        let decoded = {type_name}::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
-        let mut reencoded = BytesMut::new();
-        decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &bytes[..]);
-        // Exercise the JVM-oracle default-JSON builder for this version.
-        let _ = default_json(v);
-    }}
+            fn check(msg_bytes: &bytes::Bytes, v: i16) {
+                let mut cur: &[u8] = msg_bytes;
+                let decoded = #type_name::decode_borrow(&mut cur, v).unwrap();
+                assert!(cur.is_empty());
+                assert!(decoded.encoded_len(v) == msg_bytes.len());
+                let mut reencoded = BytesMut::new();
+                decoded.encode(&mut reencoded, v).unwrap();
+                assert!(&reencoded[..] == &msg_bytes[..]);
+                let owned = decoded.to_owned();
+                let mut owned_buf = BytesMut::new();
+                owned.encode(&mut owned_buf, v).unwrap();
+                assert!(&owned_buf[..] == &msg_bytes[..]);
+            }
 
-    #[test]
-    fn default_roundtrips_all_versions() {{
-        for v in MIN_VERSION..=MAX_VERSION {{
-            roundtrip(&{type_name}::default(), v);
-        }}
-    }}
+            #[test]
+            fn default_roundtrips_all_versions() {
+                for v in MIN_VERSION..=MAX_VERSION {
+                    let msg = #type_name::default();
+                    let mut buf = BytesMut::new();
+                    msg.encode(&mut buf, v).unwrap();
+                    check(&buf.freeze(), v);
+                }
+            }
 
-    #[test]
-    fn populated_roundtrips_all_versions() {{
-        for v in MIN_VERSION..=MAX_VERSION {{
-            roundtrip(&{type_name}::populated(v), v);
-        }}
-    }}
-}}"
-    )
-    .unwrap();
-}
-
-fn write_borrowed_tests(out: &mut String, type_name: &str) {
-    // See `write_owned_tests` for rationale. The borrowed flavor is exercised by
-    // encoding a populated/default value, decoding it zero-copy, then re-encoding
-    // the decoded borrow and asserting byte-equality.
-    writeln!(
-        out,
-        "#[cfg(test)]
-mod tests {{
-    use assert2::assert;
-    use super::*;
-    use crate::{{DecodeBorrow, Encode}};
-    use bytes::BytesMut;
-
-    fn check(msg_bytes: &bytes::Bytes, v: i16) {{
-        let mut cur: &[u8] = msg_bytes;
-        let decoded = {type_name}::decode_borrow(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
-        assert!(decoded.encoded_len(v) == msg_bytes.len());
-        let mut reencoded = BytesMut::new();
-        decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &msg_bytes[..]);
-        // Exercise the zero-copy -> owned conversion, then confirm the owned
-        // value still encodes to the same bytes.
-        let owned = decoded.to_owned();
-        let mut owned_buf = BytesMut::new();
-        owned.encode(&mut owned_buf, v).unwrap();
-        assert!(&owned_buf[..] == &msg_bytes[..]);
-    }}
-
-    #[test]
-    fn default_roundtrips_all_versions() {{
-        for v in MIN_VERSION..=MAX_VERSION {{
-            let msg = {type_name}::default();
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
-        }}
-    }}
-
-    #[test]
-    fn populated_roundtrips_all_versions() {{
-        for v in MIN_VERSION..=MAX_VERSION {{
-            let msg = {type_name}::populated(v);
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
-        }}
-    }}
-}}"
-    )
-    .unwrap();
+            #[test]
+            fn populated_roundtrips_all_versions() {
+                for v in MIN_VERSION..=MAX_VERSION {
+                    let msg = #type_name::populated(v);
+                    let mut buf = BytesMut::new();
+                    msg.encode(&mut buf, v).unwrap();
+                    check(&buf.freeze(), v);
+                }
+            }
+        }
+    }
 }
 
 /// True if this spec should get a wrapper.

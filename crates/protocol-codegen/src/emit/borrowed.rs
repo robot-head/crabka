@@ -6,59 +6,19 @@
 //! the matching owned type.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 
-use crate::emit::EmittedMessage;
 use crate::emit::common::{banner, format_int_literal};
-use crate::emit::owned::EmitError;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
+use crate::resolve::{Resolution, StructKind};
 use crate::type_map;
 
-pub fn emit(
+pub(crate) fn emit_common_structs(
     spec: &MessageSpec,
     schemas_version: &str,
+    res_map: &HashMap<String, Resolution>,
     namespace: Option<&str>,
-) -> Result<EmittedMessage, EmitError> {
-    // Build resolution map — validates that all struct references resolve.
-    let res_map = resolve::resolve_message(spec)?;
-
-    let parent_module = name_conv::module_name(&spec.name);
-
-    let mut primary = banner(schemas_version);
-    emit_imports(&mut primary, spec, &res_map);
-    emit_constants(&mut primary, spec);
-    emit_struct(&mut primary, spec, &res_map, &parent_module);
-    emit_to_owned_impl(&mut primary, spec, &res_map, namespace);
-    emit_encode_impl(&mut primary, spec, &res_map);
-    emit_decode_borrow_impl(&mut primary, spec, &res_map, &parent_module);
-    {
-        let lt = if spec_needs_lifetime(spec, &res_map) {
-            "<'a>"
-        } else {
-            ""
-        };
-        emit_populated_impl(
-            &mut primary,
-            &name_conv::type_name(&spec.name),
-            lt,
-            &spec.fields,
-            &res_map,
-            &parent_module,
-        );
-    }
-
-    let fm = flex_min(spec);
-    emit_nested_structs_for_fields(
-        &mut primary,
-        &spec.fields,
-        fm,
-        &res_map,
-        &parent_module,
-        namespace,
-    );
-
+) -> Vec<(String, String)> {
     // Emit common structs into separate file bodies.
     //
     // `commonStructs` are message-local: each is emitted under a per-message
@@ -68,7 +28,7 @@ pub fn emit(
     let message_snake = name_conv::module_name(&spec.name);
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
-        let cs_flex_min = fm; // common structs inherit message flex threshold
+        let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
         // Build a modified res_map for the common-struct context:
         // - Common-struct references use sibling paths `super::<struct_snake>::TypeName`
         //   (the body lands under `src/{flavor}/common/<message_snake>/<struct_snake>.rs`,
@@ -109,7 +69,7 @@ pub fn emit(
         commons.push((format!("{message_snake}/{cs_snake}"), body));
     }
 
-    Ok(EmittedMessage { primary, commons })
+    commons
 }
 
 /// Emit a standalone `.rs` file body for a top-level `commonStruct` in the borrowed flavor.
@@ -132,9 +92,9 @@ fn emit_common_struct_file_borrowed(
     let mut out = banner(schemas_version);
 
     if use_bytes {
-        writeln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
+        emitln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
     } else {
-        writeln!(out, "\nuse bytes::BufMut;").unwrap();
+        emitln!(out, "\nuse bytes::BufMut;").unwrap();
     }
 
     let use_nullable_struct = uses_nullable_struct_recursive(fields);
@@ -163,7 +123,7 @@ fn emit_common_struct_file_borrowed(
             let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
             combined.sort_unstable();
             combined.dedup();
-            writeln!(
+            emitln!(
                 out,
                 "\nuse crate::primitives::fixed::{{{}}};",
                 combined.join(", ")
@@ -173,12 +133,12 @@ fn emit_common_struct_file_borrowed(
     }
     if use_string {
         if uses_nullable_string_recursive(fields) {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{\n    compact_nullable_string_len, compact_string_len, nullable_string_len,\n    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,\n    string_len,\n}};\nuse crate::primitives::string_bytes_borrowed::{{\n    get_compact_nullable_string_borrowed, get_compact_string_borrowed,\n    get_nullable_string_borrowed, get_string_borrowed,\n}};"
             ).unwrap();
         } else {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{\n    compact_string_len, put_compact_string, put_string, string_len,\n}};\nuse crate::primitives::string_bytes_borrowed::{{\n    get_compact_string_borrowed, get_string_borrowed,\n}};"
             ).unwrap();
@@ -202,7 +162,7 @@ fn emit_common_struct_file_borrowed(
         }
         put_items.sort_unstable();
         get_borrowed_items.sort_unstable();
-        writeln!(
+        emitln!(
             out,
             "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
             put_items.join(", "),
@@ -210,11 +170,11 @@ fn emit_common_struct_file_borrowed(
         ).unwrap();
     }
     if has_flex && tagged {
-        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+        emitln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
     } else if has_flex {
-        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+        emitln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
     }
-    writeln!(
+    emitln!(
         out,
         "use crate::{{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields}};"
     )
@@ -595,9 +555,9 @@ pub(crate) fn emit_imports(
     // `Bytes` is needed for to_owned() on bytes fields.
     // Records fields use `bytes::BytesMut::new()` inline (fully qualified), so no extra import.
     if use_bytes {
-        writeln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
+        emitln!(out, "\nuse bytes::{{Bytes, BufMut}};").unwrap();
     } else {
-        writeln!(out, "\nuse bytes::BufMut;").unwrap();
+        emitln!(out, "\nuse bytes::BufMut;").unwrap();
     }
 
     // Emit only the specific fixed-type imports actually used, to avoid unused-import warnings.
@@ -642,7 +602,7 @@ pub(crate) fn emit_imports(
                 v.sort_unstable();
                 v
             };
-            writeln!(
+            emitln!(
                 out,
                 "\nuse crate::primitives::fixed::{{{}}};",
                 sorted.join(", ")
@@ -653,7 +613,7 @@ pub(crate) fn emit_imports(
 
     if use_string {
         if use_nullable_string {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
@@ -667,7 +627,7 @@ use crate::primitives::string_bytes_borrowed::{{
             )
             .unwrap();
         } else {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{
     compact_string_len, put_compact_string, put_string, string_len,
@@ -696,7 +656,7 @@ use crate::primitives::string_bytes_borrowed::{{
         }
         put_items.sort_unstable();
         get_borrowed_items.sort_unstable();
-        writeln!(
+        emitln!(
             out,
             "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
             put_items.join(", "),
@@ -731,14 +691,14 @@ use crate::primitives::string_bytes_borrowed::{{
         get_borrowed_items.sort_unstable();
         get_borrowed_items.dedup();
         if get_borrowed_items.is_empty() {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{{}}};",
                 put_items.join(", "),
             )
             .unwrap();
         } else {
-            writeln!(
+            emitln!(
                 out,
                 "use crate::primitives::string_bytes::{{{}}};\nuse crate::primitives::string_bytes_borrowed::{{{}}};",
                 put_items.join(", "),
@@ -749,21 +709,21 @@ use crate::primitives::string_bytes_borrowed::{{
     }
 
     if flex && tagged {
-        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+        emitln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
     } else if flex {
-        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
+        emitln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
     }
 
     // `Decode` is needed when any tagged field uses owned decode (to call the trait method).
     let needs_owned_decode = has_tagged_fields_needing_owned(spec, res_map);
     if needs_owned_decode {
-        writeln!(
+        emitln!(
             out,
             "use crate::{{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields}};"
         )
         .unwrap();
     } else {
-        writeln!(
+        emitln!(
             out,
             "use crate::{{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields}};"
         )
@@ -783,13 +743,13 @@ pub(crate) fn emit_constants(out: &mut String, spec: &MessageSpec) {
             let api_key = spec
                 .api_key
                 .expect("Request/Response must have apiKey in schema");
-            writeln!(out, "\npub const API_KEY: i16 = {api_key};").unwrap();
+            emitln!(out, "\npub const API_KEY: i16 = {api_key};").unwrap();
         }
         MessageType::Header | MessageType::Data => {
             // No API_KEY const for framing/data types.
         }
     }
-    writeln!(
+    emitln!(
         out,
         "pub const MIN_VERSION: i16 = {min_version};
 pub const MAX_VERSION: i16 = {max_version};
@@ -799,101 +759,6 @@ pub const FLEXIBLE_MIN: i16 = {flex};
 fn is_flexible(version: i16) -> bool {{ version >= FLEXIBLE_MIN }}"
     )
     .unwrap();
-}
-
-// ── struct definition ──────────────────────────────────────────────────────
-
-fn emit_struct(
-    out: &mut String,
-    spec: &MessageSpec,
-    res_map: &HashMap<String, Resolution>,
-    parent_module: &str,
-) {
-    let type_name = name_conv::type_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec, res_map) {
-        "<'a>"
-    } else {
-        ""
-    };
-    let eq_derive = if has_float64_recursive(&spec.fields) {
-        ""
-    } else {
-        ", Eq"
-    };
-    writeln!(
-        out,
-        "
-#[derive(Debug, Clone, PartialEq{eq_derive})]
-pub struct {type_name}{lt} {{"
-    )
-    .unwrap();
-
-    for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f);
-        let struct_path = struct_path_for(f, res_map);
-        let rust_type = type_map::borrowed_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    for f in spec.fields.iter().filter(|f| is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let rust_type = if tagged_field_needs_owned(f, res_map) {
-            // Tagged struct/string fields must store owned data because the payload buffer
-            // is ephemeral and strings decoded from it cannot escape the read_tagged_fields closure.
-            let owned_path = owned_struct_path_for(f, parent_module, res_map);
-            type_map::owned_type(&f.field_type, nullable, owned_path.as_deref())
-        } else {
-            let struct_path = struct_path_for(f, res_map);
-            type_map::borrowed_type(&f.field_type, nullable, struct_path.as_deref())
-        };
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
-    writeln!(out, "}}").unwrap();
-
-    // Manual Default impl (required because `'a` lifetime makes derive unusable for &str)
-    emit_default_impl(out, spec, res_map, parent_module);
-}
-
-fn emit_default_impl(
-    out: &mut String,
-    spec: &MessageSpec,
-    res_map: &HashMap<String, Resolution>,
-    _parent_module: &str,
-) {
-    let type_name = name_conv::type_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec, res_map) {
-        "<'a>"
-    } else {
-        ""
-    };
-    writeln!(
-        out,
-        "
-impl{lt} Default for {type_name}{lt} {{
-    fn default() -> Self {{
-        Self {{"
-    )
-    .unwrap();
-
-    for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let default_expr = borrowed_default_expr(f, res_map);
-        writeln!(out, "            {field}: {default_expr},").unwrap();
-    }
-    for f in spec.fields.iter().filter(|f| is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        // Tagged fields using owned types still default to Vec::new() or None.
-        let default_expr = borrowed_default_expr(f, res_map);
-        writeln!(out, "            {field}: {default_expr},").unwrap();
-    }
-    writeln!(
-        out,
-        "            unknown_tagged_fields: Default::default(),"
-    )
-    .unwrap();
-    writeln!(out, "        }}\n    }}\n}}").unwrap();
 }
 
 /// Returns a Rust expression for the default value of a borrowed field.
@@ -964,70 +829,6 @@ fn borrowed_zero(base: &str) -> String {
         "float64" => "0.0f64".into(),
         _ => "Default::default()".into(),
     }
-}
-
-// ── to_owned() impl ────────────────────────────────────────────────────────
-
-fn emit_to_owned_impl(
-    out: &mut String,
-    spec: &MessageSpec,
-    res_map: &HashMap<String, Resolution>,
-    namespace: Option<&str>,
-) {
-    let type_name = name_conv::type_name(&spec.name);
-    let module_name = name_conv::module_name(&spec.name);
-    let lt = if spec_needs_lifetime(spec, res_map) {
-        "<'a>"
-    } else {
-        ""
-    };
-    let impl_lt = if spec_needs_lifetime(spec, res_map) {
-        "<'a>"
-    } else {
-        ""
-    };
-    let owned_root = match namespace {
-        None => "crate::owned".to_string(),
-        Some(ns) => format!("crate::{ns}::owned"),
-    };
-    writeln!(
-        out,
-        "
-impl{impl_lt} {type_name}{lt} {{
-    pub fn to_owned(&self) -> {owned_root}::{module_name}::{type_name} {{
-        {owned_root}::{module_name}::{type_name} {{"
-    )
-    .unwrap();
-
-    for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let expr = to_owned_field_expr(
-            &f.field_type,
-            &format!("self.{field}"),
-            is_nullable(f),
-            res_map,
-        );
-        writeln!(out, "            {field}: {expr},").unwrap();
-    }
-    for f in spec.fields.iter().filter(|f| is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let expr = if tagged_field_needs_owned(f, res_map) {
-            // Field is already the owned type — just clone it.
-            format!("self.{field}.clone()")
-        } else {
-            to_owned_field_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
-        };
-        writeln!(out, "            {field}: {expr},").unwrap();
-    }
-    writeln!(
-        out,
-        "            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
-        }}
-    }}
-}}"
-    )
-    .unwrap();
 }
 
 #[allow(clippy::only_used_in_recursion, unused_variables)]
@@ -1106,55 +907,6 @@ pub(crate) fn to_owned_field_expr(
     }
 }
 
-// ── encode impl ────────────────────────────────────────────────────────────
-
-fn emit_encode_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
-    let type_name = name_conv::type_name(&spec.name);
-    let has_flex = has_any_flex(spec);
-    let lt = if spec_needs_lifetime(spec, res_map) {
-        "<'a>"
-    } else {
-        ""
-    };
-    let version_err = match spec.message_type {
-        MessageType::Request | MessageType::Response => {
-            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
-                .to_owned()
-        }
-        MessageType::Header | MessageType::Data => {
-            let name = &spec.name;
-            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
-        }
-    };
-    writeln!(
-        out,
-        "
-impl{lt} Encode for {type_name}{lt} {{
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {{
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            {version_err}
-        }}
-        let flex = is_flexible(version);"
-    )
-    .unwrap();
-
-    encode_struct_body(out, &spec.fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        Ok(())\n    }}").unwrap();
-
-    writeln!(
-        out,
-        "    fn encoded_len(&self, version: i16) -> usize {{
-        let flex = is_flexible(version);
-        let mut n: usize = 0;"
-    )
-    .unwrap();
-
-    encoded_len_struct_body(out, &spec.fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        n\n    }}\n}}").unwrap();
-}
-
 fn encode_struct_body(
     out: &mut String,
     fields: &[FieldSpec],
@@ -1169,8 +921,8 @@ fn encode_struct_body(
     if has_flex {
         let has_tagged = fields.iter().any(is_tagged);
         let mut_kw = if has_tagged { "mut " } else { "" };
-        writeln!(out, "{indent}if flex {{").unwrap();
-        writeln!(
+        emitln!(out, "{indent}if flex {{").unwrap();
+        emitln!(
             out,
             "{indent}    let {mut_kw}tagged = WriteTaggedFields::new();"
         )
@@ -1178,12 +930,12 @@ fn encode_struct_body(
         for f in fields.iter().filter(|f| is_tagged(f)) {
             emit_encode_tagged(out, f, res_map, indent);
         }
-        writeln!(
+        emitln!(
             out,
             "{indent}    tagged.write(buf, &self.unknown_tagged_fields);"
         )
         .unwrap();
-        writeln!(out, "{indent}}}").unwrap();
+        emitln!(out, "{indent}}}").unwrap();
     }
 }
 
@@ -1201,7 +953,7 @@ fn encoded_len_struct_body(
     if has_flex {
         let has_tagged = fields.iter().any(is_tagged);
         let pairs_mut = if has_tagged { "mut " } else { "" };
-        writeln!(
+        emitln!(
             out,
             "{indent}if flex {{
 {indent}    let {pairs_mut}known_pairs: Vec<(u32, usize)> = Vec::new();"
@@ -1210,7 +962,7 @@ fn encoded_len_struct_body(
         for f in fields.iter().filter(|f| is_tagged(f)) {
             emit_encoded_len_tagged(out, f, res_map, indent);
         }
-        writeln!(
+        emitln!(
             out,
             "{indent}    n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
 {indent}}}"
@@ -1245,7 +997,7 @@ fn emit_encode_one(
         let nullable_body = encode_call(&f.field_type, &format!("self.{field}"), true, res_map);
         let non_nullable_body =
             encode_call_option_as_non_nullable(&f.field_type, &format!("self.{field}"), res_map);
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix} }}"
         ).unwrap();
@@ -1256,7 +1008,7 @@ fn emit_encode_one(
             is_nullable(f),
             res_map,
         );
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ {flex_prefix}{body}{flex_suffix} }}"
         )
@@ -1287,7 +1039,7 @@ fn emit_encoded_len_one(
             &format!("self.{field}"),
             res_map,
         );
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ n += {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix}; }}"
         ).unwrap();
@@ -1298,7 +1050,7 @@ fn emit_encoded_len_one(
             is_nullable(f),
             res_map,
         );
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ n += {flex_prefix}{body}{flex_suffix}; }}"
         )
@@ -1509,7 +1261,7 @@ fn emit_encode_tagged(
     } else {
         encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
     };
-    writeln!(
+    emitln!(
         out,
         "{indent}    if !({is_default_cond}) {{
 {indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode_body}; Ok(()) }});
@@ -1536,64 +1288,13 @@ fn emit_encoded_len_tagged(
         encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map)
     };
     let is_default_cond = tagged_is_default_cond(f);
-    writeln!(
+    emitln!(
         out,
         "{indent}    if !({is_default_cond}) {{
 {indent}        known_pairs.push(({tag}, {len}));
 {indent}    }}"
     )
     .unwrap();
-}
-
-// ── decode_borrow impl ────────────────────────────────────────────────────
-
-fn emit_decode_borrow_impl(
-    out: &mut String,
-    spec: &MessageSpec,
-    res_map: &HashMap<String, Resolution>,
-    parent_module: &str,
-) {
-    let type_name = name_conv::type_name(&spec.name);
-    let has_flex = has_any_flex(spec);
-    // Use 'de as the lifetime param if the struct has borrowed data; otherwise no lifetime needed.
-    let lt = if spec_needs_lifetime(spec, res_map) {
-        "<'de>"
-    } else {
-        ""
-    };
-    let version_err = match spec.message_type {
-        MessageType::Request | MessageType::Response => {
-            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
-                .to_owned()
-        }
-        MessageType::Header | MessageType::Data => {
-            let name = &spec.name;
-            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
-        }
-    };
-    writeln!(
-        out,
-        "
-impl<'de> DecodeBorrow<'de> for {type_name}{lt} {{
-    fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {{
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            {version_err}
-        }}
-        let flex = is_flexible(version);
-        let mut out = Self::default();"
-    )
-    .unwrap();
-
-    decode_borrow_struct_body(
-        out,
-        &spec.fields,
-        res_map,
-        "        ",
-        has_flex,
-        parent_module,
-    );
-
-    writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
 }
 
 fn decode_borrow_struct_body(
@@ -1610,16 +1311,16 @@ fn decode_borrow_struct_body(
 
     if has_flex {
         let has_tagged = fields.iter().any(is_tagged);
-        writeln!(out, "{indent}if flex {{").unwrap();
+        emitln!(out, "{indent}if flex {{").unwrap();
         if has_tagged {
-            writeln!(
+            emitln!(
                 out,
                 "{indent}    // Pre-declare typed slots for known tagged fields."
             )
             .unwrap();
             for f in fields.iter().filter(|f| is_tagged(f)) {
                 let field = name_conv::field_name(&f.name);
-                writeln!(out, "{indent}    let mut tag_{field} = None;").unwrap();
+                emitln!(out, "{indent}    let mut tag_{field} = None;").unwrap();
             }
         }
         let closure_args = if has_tagged {
@@ -1627,37 +1328,37 @@ fn decode_borrow_struct_body(
         } else {
             "|_tag, _payload|"
         };
-        writeln!(
+        emitln!(
             out,
             "{indent}    out.unknown_tagged_fields = read_tagged_fields(buf, {closure_args} {{"
         )
         .unwrap();
         if has_tagged {
-            writeln!(out, "{indent}        match tag {{").unwrap();
+            emitln!(out, "{indent}        match tag {{").unwrap();
             for f in fields.iter().filter(|f| is_tagged(f)) {
                 emit_decode_borrow_tagged_arm(out, f, res_map, indent, parent_module);
             }
-            writeln!(
+            emitln!(
                 out,
                 "{indent}            _ => Ok(false),
 {indent}        }}"
             )
             .unwrap();
         } else {
-            writeln!(out, "{indent}        Ok(false)").unwrap();
+            emitln!(out, "{indent}        Ok(false)").unwrap();
         }
-        writeln!(out, "{indent}    }})?;").unwrap();
+        emitln!(out, "{indent}    }})?;").unwrap();
         if has_tagged {
             for f in fields.iter().filter(|f| is_tagged(f)) {
                 let field = name_conv::field_name(&f.name);
-                writeln!(
+                emitln!(
                     out,
                     "{indent}    if let Some(v) = tag_{field} {{ out.{field} = v; }}"
                 )
                 .unwrap();
             }
         }
-        writeln!(out, "{indent}}}").unwrap();
+        emitln!(out, "{indent}}}").unwrap();
     }
 }
 
@@ -1680,13 +1381,13 @@ fn emit_decode_borrow_one(
     if let Some(ncond) = nullable_split_cond(f) {
         let nullable_call = decode_borrow_call(&f.field_type, true, res_map);
         let non_nullable_call = decode_borrow_call(&f.field_type, false, res_map);
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ out.{field} = {flex_prefix}if {ncond} {{ {nullable_call} }} else {{ Some({non_nullable_call}) }}{flex_suffix}; }}"
         ).unwrap();
     } else {
         let call = decode_borrow_call(&f.field_type, is_nullable(f), res_map);
-        writeln!(
+        emitln!(
             out,
             "{indent}if {cond} {{ out.{field} = {flex_prefix}{call}{flex_suffix}; }}"
         )
@@ -1710,11 +1411,11 @@ fn emit_decode_borrow_tagged_arm(
         // Use the owned Decode impl (which takes B: Buf, not &mut &'de [u8]).
         let call =
             decode_owned_call(&f.field_type, nullable, parent_module, res_map).replace("buf", "b");
-        writeln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
+        emitln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
     } else {
         // Primitive or lifetime-free struct: borrow-decode is fine.
         let call = decode_borrow_call(&f.field_type, nullable, res_map).replace("buf", "b");
-        writeln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
+        emitln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
     }
 }
 
@@ -1765,7 +1466,7 @@ fn emit_nested_struct(
     };
 
     // Struct definition
-    writeln!(
+    emitln!(
         out,
         "
 #[derive(Debug, Clone, PartialEq{eq_derive})]
@@ -1778,20 +1479,20 @@ pub struct {struct_name}{lt} {{"
         let nullable = is_nullable(f);
         let struct_path = struct_path_for(f, res_map);
         let rust_type = type_map::borrowed_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
+        emitln!(out, "    pub {field}: {rust_type},").unwrap();
     }
     for f in fields.iter().filter(|f| is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
         let struct_path = struct_path_for(f, res_map);
         let rust_type = type_map::borrowed_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
+        emitln!(out, "    pub {field}: {rust_type},").unwrap();
     }
-    writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
-    writeln!(out, "}}").unwrap();
+    emitln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
+    emitln!(out, "}}").unwrap();
 
     // Manual Default impl (only needed when there's a lifetime parameter)
-    writeln!(
+    emitln!(
         out,
         "
 impl{lt} Default for {struct_name}{lt} {{
@@ -1802,19 +1503,19 @@ impl{lt} Default for {struct_name}{lt} {{
     for f in fields.iter().filter(|f| !is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let default_expr = borrowed_default_expr(f, res_map);
-        writeln!(out, "            {field}: {default_expr},").unwrap();
+        emitln!(out, "            {field}: {default_expr},").unwrap();
     }
     for f in fields.iter().filter(|f| is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let default_expr = borrowed_default_expr(f, res_map);
-        writeln!(out, "            {field}: {default_expr},").unwrap();
+        emitln!(out, "            {field}: {default_expr},").unwrap();
     }
-    writeln!(
+    emitln!(
         out,
         "            unknown_tagged_fields: Default::default(),"
     )
     .unwrap();
-    writeln!(out, "        }}\n    }}\n}}").unwrap();
+    emitln!(out, "        }}\n    }}\n}}").unwrap();
 
     // to_owned() on nested struct — the owned type lives in the parent message's owned module.
     let owned_root = match namespace {
@@ -1822,7 +1523,7 @@ impl{lt} Default for {struct_name}{lt} {{
         Some(ns) => format!("crate::{ns}::owned"),
     };
     let module_path = format!("{owned_root}::{parent_module}");
-    writeln!(
+    emitln!(
         out,
         "
 impl{lt} {struct_name}{lt} {{
@@ -1838,15 +1539,15 @@ impl{lt} {struct_name}{lt} {{
             is_nullable(f),
             res_map,
         );
-        writeln!(out, "            {field}: {expr},").unwrap();
+        emitln!(out, "            {field}: {expr},").unwrap();
     }
     for f in fields.iter().filter(|f| is_tagged(f)) {
         let field = name_conv::field_name(&f.name);
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
         let expr = to_owned_field_expr(&f.field_type, &format!("self.{field}"), nullable, res_map);
-        writeln!(out, "            {field}: {expr},").unwrap();
+        emitln!(out, "            {field}: {expr},").unwrap();
     }
-    writeln!(
+    emitln!(
         out,
         "            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }}
@@ -1858,7 +1559,7 @@ impl{lt} {struct_name}{lt} {{
     let has_flex = flex_min_val < i16::MAX;
 
     // Encode impl — no version-range guard; version flows in from parent
-    writeln!(
+    emitln!(
         out,
         "
 impl{lt} Encode for {struct_name}{lt} {{
@@ -1869,9 +1570,9 @@ impl{lt} Encode for {struct_name}{lt} {{
 
     encode_struct_body(out, fields, res_map, "        ", has_flex);
 
-    writeln!(out, "        Ok(())\n    }}").unwrap();
+    emitln!(out, "        Ok(())\n    }}").unwrap();
 
-    writeln!(
+    emitln!(
         out,
         "    fn encoded_len(&self, version: i16) -> usize {{
         let flex = version >= {flex_min_val};
@@ -1881,10 +1582,10 @@ impl{lt} Encode for {struct_name}{lt} {{
 
     encoded_len_struct_body(out, fields, res_map, "        ", has_flex);
 
-    writeln!(out, "        n\n    }}\n}}").unwrap();
+    emitln!(out, "        n\n    }}\n}}").unwrap();
 
     // DecodeBorrow impl
-    writeln!(
+    emitln!(
         out,
         "
 impl<'de> DecodeBorrow<'de> for {struct_name}{lt_de} {{
@@ -1896,7 +1597,7 @@ impl<'de> DecodeBorrow<'de> for {struct_name}{lt_de} {{
 
     decode_borrow_struct_body(out, fields, res_map, "        ", has_flex, parent_module);
 
-    writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
+    emitln!(out, "        Ok(out)\n    }}\n}}").unwrap();
 
     emit_populated_impl(out, struct_name, lt, fields, res_map, parent_module);
 
@@ -1916,7 +1617,7 @@ fn emit_populated_impl(
     res_map: &HashMap<String, Resolution>,
     parent_module: &str,
 ) {
-    writeln!(
+    emitln!(
         out,
         "
 #[cfg(test)]
@@ -1933,7 +1634,7 @@ impl{lt} {type_name}{lt} {{
         let option = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
         emit_borrowed_populated_field(out, f, res_map, parent_module, option);
     }
-    writeln!(out, "        m\n    }}\n}}").unwrap();
+    emitln!(out, "        m\n    }}\n}}").unwrap();
 }
 
 /// Emit one conditional assignment, guarding the non-default value behind the
@@ -1952,7 +1653,7 @@ fn emit_borrowed_populated_field(
     let field = name_conv::field_name(&f.name);
     let value = borrowed_populated_value(f, res_map, parent_module, option);
     let cond = version_cond(f.versions, "version");
-    writeln!(out, "        if {cond} {{ m.{field} = {value}; }}").unwrap();
+    emitln!(out, "        if {cond} {{ m.{field} = {value}; }}").unwrap();
 }
 
 /// Build the populated-value expression for one borrowed field.

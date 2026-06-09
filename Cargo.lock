@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-kafka-tap"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "crabka-log"
@@ -1782,6 +1782,7 @@ name = "crabka-protocol-codegen"
 version = "0.3.4"
 dependencies = [
  "assert2",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "serde",

@@ -2,7 +2,7 @@ use assert2::assert;
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::emit::EmittedMessage;
-use crabka_protocol_codegen::{emit, ir, resolve};
+use crabka_protocol_codegen::{emit, fmt, ir, resolve};
 
 const CURATED: &[&str] = &[
     "ApiVersionsRequest",
@@ -60,9 +60,15 @@ fn check(snap_path: &std::path::Path, generated: &str) {
 
 fn check_emitted(flavor: &str, em: &EmittedMessage, name: &str) {
     let base = snap_dir();
-    check(&base.join(format!("{name}.{flavor}.rs")), &em.primary);
+    check(
+        &base.join(format!("{name}.{flavor}.rs")),
+        &fmt::prettyplease(&em.primary).unwrap(),
+    );
     for (cs_name, body) in &em.commons {
-        check(&base.join(format!("common/{cs_name}.{flavor}.rs")), body);
+        check(
+            &base.join(format!("common/{cs_name}.{flavor}.rs")),
+            &fmt::prettyplease(body).unwrap(),
+        );
     }
 }
 
@@ -112,7 +118,7 @@ fn curated_owned_snapshots() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
     for name in CURATED {
         let spec = specs.iter().find(|s| s.name == *name).unwrap();
-        let em = emit::owned::emit(spec, "test").unwrap();
+        let em = emit::owned_quote::emit(spec, "test").unwrap();
         check_emitted("owned", &em, name);
     }
 }
@@ -122,7 +128,7 @@ fn curated_borrowed_snapshots() {
     let specs = ir::load_dir(&schemas_dir()).unwrap();
     for name in CURATED {
         let spec = specs.iter().find(|s| s.name == *name).unwrap();
-        let em = emit::borrowed::emit(spec, "test", None).unwrap();
+        let em = emit::borrowed_quote::emit(spec, "test", None).unwrap();
         check_emitted("borrowed", &em, name);
     }
 }
@@ -155,11 +161,17 @@ fn curated_owned_snapshots_kafka_3_6_2() {
     let specs = ir::load_dir(&ns_schemas_dir("kafka_3_6_2")).unwrap();
     for name in CURATED_KAFKA_3_6_2 {
         let spec = specs.iter().find(|s| s.name == *name).unwrap();
-        let em = emit::owned::emit(spec, "test").unwrap();
+        let em = emit::owned_quote::emit(spec, "test").unwrap();
         let base = ns_snap_dir("kafka_3_6_2");
-        check(&base.join(format!("{name}.owned.rs")), &em.primary);
+        check(
+            &base.join(format!("{name}.owned.rs")),
+            &fmt::prettyplease(&em.primary).unwrap(),
+        );
         for (cs_name, body) in &em.commons {
-            check(&base.join(format!("common/{cs_name}.owned.rs")), body);
+            check(
+                &base.join(format!("common/{cs_name}.owned.rs")),
+                &fmt::prettyplease(body).unwrap(),
+            );
         }
     }
 }
@@ -169,11 +181,17 @@ fn curated_borrowed_snapshots_kafka_3_6_2() {
     let specs = ir::load_dir(&ns_schemas_dir("kafka_3_6_2")).unwrap();
     for name in CURATED_KAFKA_3_6_2 {
         let spec = specs.iter().find(|s| s.name == *name).unwrap();
-        let em = emit::borrowed::emit(spec, "test", None).unwrap();
+        let em = emit::borrowed_quote::emit(spec, "test", None).unwrap();
         let base = ns_snap_dir("kafka_3_6_2");
-        check(&base.join(format!("{name}.borrowed.rs")), &em.primary);
+        check(
+            &base.join(format!("{name}.borrowed.rs")),
+            &fmt::prettyplease(&em.primary).unwrap(),
+        );
         for (cs_name, body) in &em.commons {
-            check(&base.join(format!("common/{cs_name}.borrowed.rs")), body);
+            check(
+                &base.join(format!("common/{cs_name}.borrowed.rs")),
+                &fmt::prettyplease(body).unwrap(),
+            );
         }
     }
 }

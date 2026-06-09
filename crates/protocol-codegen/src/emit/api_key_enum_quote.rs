@@ -1,23 +1,21 @@
 //! The `ApiKey` enum, built as a `proc_macro2` token stream via `quote!`
 //! instead of hand-written `write!` string templating.
 //!
-//! Compare with `api_key_enum::emit`. The structural payload — which variants,
-//! discriminants, doc text — is identical; only the *emission mechanism*
-//! differs. Things to notice:
+//! The structural payload — which variants, discriminants, and doc text — is
+//! built directly as Rust tokens.
 //!
 //! * No manual brace/indent bookkeeping. The `quote!` block reads like the
 //!   target code; repetition is `#(#variants)*` instead of a `for` loop that
-//!   `writeln!`s fragments.
+//!   `emitln!`s fragments.
 //! * `syn::parse2` validates the output is real Rust *at generation time*. A
 //!   malformed template fails here with a parse error, not three crates
 //!   downstream when the generated file is compiled.
-//! * `emit` returns the raw token string; the `rustfmt` pass in `crate::fmt`
+//! * `emit` returns the raw token string; the `prettyplease` pass in `crate::fmt`
 //!   (run by the regeneration binary) does the formatting.
 //!
 //! The one wart: `//`-style line comments aren't tokens, so the
 //! `// AUTO-GENERATED` banner is prepended as a string. Doc comments become
-//! `#[doc = "…"]` attributes; rustfmt keeps them in that form (it does not
-//! rewrite them to `///` without the unstable `normalize_doc_attributes`).
+//! `#[doc = "…"]` attributes.
 
 use std::collections::BTreeMap;
 
@@ -28,7 +26,6 @@ use crate::ir::{MessageSpec, MessageType};
 
 #[must_use]
 pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
-    // Identical selection logic to api_key_enum::emit.
     let mut by_key: BTreeMap<i16, &MessageSpec> = BTreeMap::new();
     for s in specs {
         if matches!(s.message_type, MessageType::Request)
@@ -102,8 +99,8 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
         }
     };
 
-    // Validate at generation time; rustfmt (applied by the caller) does the
-    // actual formatting. See `crate::fmt`.
+    // Validate at generation time; prettyplease (applied by the caller) does
+    // the actual formatting. See `crate::fmt`.
     let _validate: syn::File =
         syn::parse2(tokens.clone()).expect("generated ApiKey enum must be valid Rust");
     let banner = format!(

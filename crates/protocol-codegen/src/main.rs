@@ -1,4 +1,3 @@
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crabka_protocol_codegen::{emit, fmt, ir, name_conv, validate};
@@ -49,11 +48,11 @@ enum RunError {
     MissingSha,
 }
 
-/// Format generated Rust source through rustfmt, then write it. The quote-based
-/// emitters return unformatted token text; rustfmt is the secondary processing
-/// step that turns it into the canonical committed form.
+/// Format generated Rust source through prettyplease, then write it. The
+/// quote-based emitters return unformatted token text; prettyplease is the
+/// secondary processing step that turns it into the canonical committed form.
 fn write_rs(path: impl AsRef<Path>, body: &str) -> Result<(), RunError> {
-    std::fs::write(path, fmt::rustfmt(body)?)?;
+    std::fs::write(path, fmt::prettyplease(body)?)?;
     Ok(())
 }
 
@@ -113,19 +112,26 @@ fn write_common_wrapper(
     flavor: emit::wrappers::Flavor,
     schemas_version: &str,
     message_src_dir: &Path,
-) -> std::io::Result<()> {
+) -> Result<(), RunError> {
     use emit::wrappers::Flavor;
     let suffix = match flavor {
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
     };
-    let allow = emit::wrappers::allow_header();
-    let body = format!(
-        "{}{allow}\n\ninclude!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{message_snake}/{struct_snake}.{suffix}.rs\"\n));\n",
-        emit::common::banner(schemas_version),
-        flavor_dir = flavor.dir(),
+    let allow = emit::wrappers::allow_attrs();
+    let include_path = format!(
+        "/generated/common/{}/{message_snake}/{struct_snake}.{suffix}.rs",
+        flavor.dir()
     );
-    std::fs::write(message_src_dir.join(format!("{struct_snake}.rs")), body)?;
+    let body = format!(
+        "{}{}",
+        emit::common::banner(schemas_version),
+        quote::quote! {
+            #allow
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), #include_path));
+        }
+    );
+    write_rs(message_src_dir.join(format!("{struct_snake}.rs")), &body)?;
     Ok(())
 }
 
@@ -142,7 +148,7 @@ fn write_common_wrapper_tree(
     flavor: emit::wrappers::Flavor,
     schemas_version: &str,
     protocol_src: &Path,
-) -> std::io::Result<usize> {
+) -> Result<usize, RunError> {
     if tree.is_empty() {
         return Ok(0);
     }
@@ -154,19 +160,12 @@ fn write_common_wrapper_tree(
     let src_common = protocol_src.join(flavor.dir()).join("common");
     std::fs::create_dir_all(&src_common)?;
 
-    let mut top_mod = emit::common::banner(schemas_version);
-    writeln!(
-        top_mod,
-        "//! {flavor_doc} common structs, scoped per owning message schema.\n"
-    )
-    .unwrap();
+    let top_doc = format!("{flavor_doc} common structs, scoped per owning message schema.");
 
     for (message_snake, structs) in tree {
-        writeln!(top_mod, "pub mod {message_snake};").unwrap();
         let message_dir = src_common.join(message_snake);
         std::fs::create_dir_all(&message_dir)?;
 
-        let mut message_mod = emit::common::banner(schemas_version);
         for struct_snake in structs {
             write_common_wrapper(
                 message_snake,
@@ -175,13 +174,19 @@ fn write_common_wrapper_tree(
                 schemas_version,
                 &message_dir,
             )?;
-            writeln!(message_mod, "pub mod {struct_snake};").unwrap();
             count += 1;
         }
-        std::fs::write(message_dir.join("mod.rs"), &message_mod)?;
+        let message_mod =
+            emit::mod_rs::emit_modules(schemas_version, None, structs.iter().map(String::as_str));
+        write_rs(message_dir.join("mod.rs"), &message_mod)?;
         count += 1;
     }
-    std::fs::write(src_common.join("mod.rs"), &top_mod)?;
+    let top_mod = emit::mod_rs::emit_modules(
+        schemas_version,
+        Some(&top_doc),
+        tree.keys().map(String::as_str),
+    );
+    write_rs(src_common.join("mod.rs"), &top_mod)?;
     count += 1;
     Ok(count)
 }
@@ -323,13 +328,13 @@ fn run(
     // but NOT inside a namespace dir — those files reference top-level types and
     // belong only in the root generated/ output.
     if namespace.is_none() {
-        let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("api_key.rs"), &api_key_src)?;
+        let api_key_src = emit::api_key_enum_quote::emit(&specs, &schemas_sha);
+        write_rs(out.join("api_key.rs"), &api_key_src)?;
         count += 1;
 
         // Emit the differential dispatch table for the parameterised sweep test.
         let diff_table = emit::differential_table::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("differential_table.rs"), diff_table)?;
+        write_rs(out.join("differential_table.rs"), &diff_table)?;
         count += 1;
     }
 

@@ -5,37 +5,26 @@
 //!
 //! Same approach as [`super::owned_quote`]: the structural scaffolding (struct,
 //! `Default`, `to_owned`, `Encode`, `DecodeBorrow`, nested structs, `populated`)
-//! is built as tokens, while the leaf codec expressions, import and constant
-//! blocks, and common-struct files are reused verbatim from `super::borrowed`
-//! (whose wire bytes are already test-covered). The `borrowed_quote_parity`
-//! test asserts token-stream equality with the string emitter for every schema.
+//! and leaf codec expressions are built as tokens. The generated-output
+//! snapshot and compile tests cover the emitted quote path directly.
 #![allow(clippy::doc_markdown, clippy::too_many_lines)]
-
-use std::str::FromStr;
 
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 
 use crate::emit::borrowed::{
-    self, base_type, borrowed_default_expr, borrowed_populated_value, decode_borrow_call,
-    decode_owned_call, encode_call, encode_call_option_as_non_nullable, encoded_len_expr,
-    encoded_len_expr_option_as_non_nullable, field_forces_non_flex, flex_min, has_any_flex,
-    has_float64_recursive, is_nullable, is_tagged, needs_lifetime, nullable_split_cond,
-    owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
-    tagged_is_default_cond, to_owned_field_expr, version_cond,
+    self, base_type, field_forces_non_flex, flex_min, has_any_flex, has_float64_recursive,
+    is_nullable, is_tagged, needs_lifetime, owned_struct_path_for, spec_needs_lifetime,
+    struct_path_for, tagged_field_needs_owned,
 };
 use crate::emit::owned::EmitError;
+use crate::emit::quote_helpers as qh;
 use crate::emit::{EmittedMessage, common};
 use crate::ir::{FieldSpec, MessageSpec, MessageType};
 use crate::name_conv;
 use crate::resolve::{self, Resolution};
-use crate::type_map;
 
 type ResMap = std::collections::HashMap<String, Resolution>;
-
-fn parse_expr(s: &str) -> TokenStream {
-    TokenStream::from_str(s).expect("leaf generator produced an unlexable fragment")
-}
 
 /// Shared context threaded through every struct block in one message file.
 struct Ctx<'a> {
@@ -68,9 +57,8 @@ pub fn emit(
     schemas_version: &str,
     namespace: Option<&str>,
 ) -> Result<EmittedMessage, EmitError> {
-    // Reuse the string emitter for common-struct files and resolution checks.
-    let reused = borrowed::emit(spec, schemas_version, namespace)?;
     let res_map = resolve::resolve_message(spec)?;
+    let commons = borrowed::emit_common_structs(spec, schemas_version, &res_map, namespace);
     let parent_module = name_conv::module_name(&spec.name);
     let owned_root = match namespace {
         None => "crate::owned".to_string(),
@@ -108,10 +96,7 @@ pub fn emit(
         ))
     })?;
 
-    Ok(EmittedMessage {
-        primary,
-        commons: reused.commons,
-    })
+    Ok(EmittedMessage { primary, commons })
 }
 
 fn version_err(spec: &MessageSpec) -> TokenStream {
@@ -160,23 +145,23 @@ fn struct_block(
 
     let field_defs = ordered(fields).map(|f| {
         let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let ty = parse_expr(&field_type(ctx, f, top_level));
+        let ty = field_type(ctx, f, top_level);
         quote!(pub #fname: #ty,)
     });
 
     let default_assigns = ordered(fields).map(|f| {
         let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let expr = parse_expr(&borrowed_default_expr(f, ctx.res_map));
+        let expr = qh::borrowed_default_tokens(f);
         quote!(#fname: #expr,)
     });
 
-    let owned_target = parse_expr(&format!(
+    let owned_target = qh::path_tokens(&format!(
         "{}::{}::{name}",
         ctx.owned_root, ctx.parent_module
     ));
     let to_owned_assigns = ordered(fields).map(|f| {
         let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let expr = parse_expr(&to_owned_expr(ctx, f, top_level));
+        let expr = to_owned_expr(ctx, f, top_level);
         quote!(#fname: #expr,)
     });
 
@@ -255,37 +240,37 @@ fn default_is_null(f: &FieldSpec) -> bool {
 
 /// Rust struct-field type. Top-level tagged fields that cannot borrow from the
 /// ephemeral tagged-payload buffer are stored owned.
-fn field_type(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> String {
+fn field_type(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> TokenStream {
     if is_tagged(f) {
         let nullable = is_nullable(f) || default_is_null(f);
         if top_level && tagged_field_needs_owned(f, ctx.res_map) {
             let owned_path = owned_struct_path_for(f, ctx.parent_module, ctx.res_map);
-            return type_map::owned_type(&f.field_type, nullable, owned_path.as_deref());
+            return qh::owned_type_tokens(&f.field_type, nullable, owned_path.as_deref());
         }
-        return type_map::borrowed_type(
+        return qh::borrowed_type_tokens(
             &f.field_type,
             nullable,
             struct_path_for(f, ctx.res_map).as_deref(),
         );
     }
-    type_map::borrowed_type(
+    qh::borrowed_type_tokens(
         &f.field_type,
         is_nullable(f),
         struct_path_for(f, ctx.res_map).as_deref(),
     )
 }
 
-fn to_owned_expr(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> String {
-    let field = name_conv::field_name(&f.name);
-    let expr = format!("self.{field}");
+fn to_owned_expr(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> TokenStream {
+    let field = format_ident!("{}", name_conv::field_name(&f.name));
+    let expr = quote!(self.#field);
     if is_tagged(f) {
         let nullable = is_nullable(f) || default_is_null(f);
         if top_level && tagged_field_needs_owned(f, ctx.res_map) {
-            return format!("self.{field}.clone()");
+            return quote!(self.#field.clone());
         }
-        return to_owned_field_expr(&f.field_type, &expr, nullable, ctx.res_map);
+        return qh::borrowed_to_owned_field_tokens(&f.field_type, expr, nullable, ctx.res_map);
     }
-    to_owned_field_expr(&f.field_type, &expr, is_nullable(f), ctx.res_map)
+    qh::borrowed_to_owned_field_tokens(&f.field_type, expr, is_nullable(f), ctx.res_map)
 }
 
 // --- encode / encoded_len (identical shape to owned, borrowed leaf codecs) ---
@@ -325,27 +310,23 @@ fn non_flex_wrap(f: &FieldSpec, body: TokenStream) -> TokenStream {
 }
 
 fn encode_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
-    let field = name_conv::field_name(&f.name);
-    let cond = parse_expr(&version_cond(f.versions, "version"));
-    let expr = format!("self.{field}");
-    let inner = if let Some(ncond) = nullable_split_cond(f) {
-        let nb = parse_expr(&encode_call(&f.field_type, &expr, true, ctx.res_map));
-        let nnb = parse_expr(&encode_call_option_as_non_nullable(
+    let field = format_ident!("{}", name_conv::field_name(&f.name));
+    let cond = qh::version_cond_tokens(f.versions);
+    let expr = quote!(self.#field);
+    let buf = format_ident!("buf");
+    let inner = if let Some(nc) = qh::nullable_split_cond_tokens(f) {
+        let nb = qh::borrowed_encode_call(&f.field_type, expr.clone(), true, ctx.res_map, &buf);
+        let nnb = qh::borrowed_encode_call_option_as_non_nullable(
             &f.field_type,
-            &expr,
+            expr.clone(),
             ctx.res_map,
-        ));
-        let nc = parse_expr(&ncond);
+            &buf,
+        );
         non_flex_wrap(f, quote!(if #nc { #nb } else { #nnb }))
     } else {
         non_flex_wrap(
             f,
-            parse_expr(&encode_call(
-                &f.field_type,
-                &expr,
-                is_nullable(f),
-                ctx.res_map,
-            )),
+            qh::borrowed_encode_call(&f.field_type, expr, is_nullable(f), ctx.res_map, &buf),
         )
     };
     quote!(if #cond { #inner })
@@ -359,18 +340,18 @@ fn tagged_owned_codec(ctx: &Ctx, f: &FieldSpec) -> bool {
 }
 
 fn encode_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
-    let field = name_conv::field_name(&f.name);
+    let field = format_ident!("{}", name_conv::field_name(&f.name));
     let tag = Literal::u32_unsuffixed(f.tag.expect("tagged field has tag"));
     let nullable = is_nullable(f) || default_is_null(f);
-    let expr = format!("self.{field}");
-    let body_str = if tagged_owned_codec(ctx, f) {
-        borrowed::owned_encode_call(&f.field_type, &expr, nullable, ctx.res_map)
+    let expr = quote!(self.#field);
+    let b = format_ident!("b");
+    let body = if tagged_owned_codec(ctx, f) {
+        qh::borrowed_owned_encode_call(&f.field_type, expr.clone(), nullable, ctx.res_map, &b)
     } else {
-        encode_call(&f.field_type, &expr, nullable, ctx.res_map)
+        qh::borrowed_encode_call(&f.field_type, expr.clone(), nullable, ctx.res_map, &b)
     };
-    let body = parse_expr(&body_str.replace("buf", "b"));
-    let len = parse_expr(&tagged_len_str(ctx, f, &expr, nullable));
-    let is_default = parse_expr(&tagged_is_default_cond(f));
+    let len = tagged_len(ctx, f, expr, nullable);
+    let is_default = qh::tagged_is_default_tokens(f, true);
     quote! {
         if !(#is_default) {
             let payload = encode_to_bytes(#len, |b| { #body; Ok(()) });
@@ -379,11 +360,11 @@ fn encode_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
     }
 }
 
-fn tagged_len_str(ctx: &Ctx, f: &FieldSpec, expr: &str, nullable: bool) -> String {
+fn tagged_len(ctx: &Ctx, f: &FieldSpec, expr: TokenStream, nullable: bool) -> TokenStream {
     if tagged_owned_codec(ctx, f) {
-        borrowed::owned_encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
+        qh::borrowed_owned_encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
     } else {
-        encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
+        qh::borrowed_encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
     }
 }
 
@@ -414,38 +395,32 @@ fn len_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
 }
 
 fn len_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
-    let field = name_conv::field_name(&f.name);
-    let cond = parse_expr(&version_cond(f.versions, "version"));
-    let expr = format!("self.{field}");
-    let inner = if let Some(ncond) = nullable_split_cond(f) {
-        let nb = parse_expr(&encoded_len_expr(&f.field_type, &expr, true, ctx.res_map));
-        let nnb = parse_expr(&encoded_len_expr_option_as_non_nullable(
+    let field = format_ident!("{}", name_conv::field_name(&f.name));
+    let cond = qh::version_cond_tokens(f.versions);
+    let expr = quote!(self.#field);
+    let inner = if let Some(nc) = qh::nullable_split_cond_tokens(f) {
+        let nb = qh::borrowed_encoded_len_expr(&f.field_type, expr.clone(), true, ctx.res_map);
+        let nnb = qh::borrowed_encoded_len_expr_option_as_non_nullable(
             &f.field_type,
-            &expr,
+            expr.clone(),
             ctx.res_map,
-        ));
-        let nc = parse_expr(&ncond);
+        );
         non_flex_wrap(f, quote!(if #nc { #nb } else { #nnb }))
     } else {
         non_flex_wrap(
             f,
-            parse_expr(&encoded_len_expr(
-                &f.field_type,
-                &expr,
-                is_nullable(f),
-                ctx.res_map,
-            )),
+            qh::borrowed_encoded_len_expr(&f.field_type, expr, is_nullable(f), ctx.res_map),
         )
     };
     quote!(if #cond { n += #inner; })
 }
 
 fn len_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
-    let field = name_conv::field_name(&f.name);
+    let field = format_ident!("{}", name_conv::field_name(&f.name));
     let tag = Literal::u32_unsuffixed(f.tag.expect("tagged field has tag"));
     let nullable = is_nullable(f) || default_is_null(f);
-    let len = parse_expr(&tagged_len_str(ctx, f, &format!("self.{field}"), nullable));
-    let is_default = parse_expr(&tagged_is_default_cond(f));
+    let len = tagged_len(ctx, f, quote!(self.#field), nullable);
+    let is_default = qh::tagged_is_default_tokens(f, true);
     quote! {
         if !(#is_default) {
             known_pairs.push((#tag, #len));
@@ -466,20 +441,16 @@ fn decode_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
 
 fn decode_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
     let field = format_ident!("{}", name_conv::field_name(&f.name));
-    let cond = parse_expr(&version_cond(f.versions, "version"));
-    let inner = if let Some(ncond) = nullable_split_cond(f) {
-        let nb = parse_expr(&decode_borrow_call(&f.field_type, true, ctx.res_map));
-        let nnb = parse_expr(&decode_borrow_call(&f.field_type, false, ctx.res_map));
-        let nc = parse_expr(&ncond);
+    let cond = qh::version_cond_tokens(f.versions);
+    let buf = format_ident!("buf");
+    let inner = if let Some(nc) = qh::nullable_split_cond_tokens(f) {
+        let nb = qh::borrowed_decode_borrow_call(&f.field_type, true, ctx.res_map, &buf);
+        let nnb = qh::borrowed_decode_borrow_call(&f.field_type, false, ctx.res_map, &buf);
         non_flex_wrap(f, quote!(if #nc { #nb } else { Some(#nnb) }))
     } else {
         non_flex_wrap(
             f,
-            parse_expr(&decode_borrow_call(
-                &f.field_type,
-                is_nullable(f),
-                ctx.res_map,
-            )),
+            qh::borrowed_decode_borrow_call(&f.field_type, is_nullable(f), ctx.res_map, &buf),
         )
     };
     quote!(if #cond { out.#field = #inner; })
@@ -501,13 +472,18 @@ fn decode_tagged_block(ctx: &Ctx, fields: &[FieldSpec]) -> TokenStream {
         let slot = format_ident!("tag_{}", name_conv::field_name(&f.name));
         let tag = Literal::u32_unsuffixed(f.tag.expect("tagged field has tag"));
         let nullable = is_nullable(f) || default_is_null(f);
+        let b = format_ident!("b");
         let call = if tagged_field_needs_owned(f, ctx.res_map) {
-            decode_owned_call(&f.field_type, nullable, ctx.parent_module, ctx.res_map)
-                .replace("buf", "b")
+            qh::borrowed_decode_owned_call(
+                &f.field_type,
+                nullable,
+                ctx.parent_module,
+                ctx.res_map,
+                &b,
+            )
         } else {
-            decode_borrow_call(&f.field_type, nullable, ctx.res_map).replace("buf", "b")
+            qh::borrowed_decode_borrow_call(&f.field_type, nullable, ctx.res_map, &b)
         };
-        let call = parse_expr(&call);
         quote!(#tag => { #slot = Some({ let b: &mut &[u8] = payload; #call }); Ok(true) })
     });
     let writebacks = fields.iter().filter(|f| is_tagged(f)).map(|f| {
@@ -542,13 +518,9 @@ fn populated_impl(
         .map(|f| {
             let field = format_ident!("{}", name_conv::field_name(&f.name));
             let option = is_nullable(f) || (is_tagged(f) && default_is_null(f));
-            let value = parse_expr(&borrowed_populated_value(
-                f,
-                ctx.res_map,
-                ctx.parent_module,
-                option,
-            ));
-            let cond = parse_expr(&version_cond(f.versions, "version"));
+            let value =
+                qh::borrowed_populated_value_tokens(f, ctx.res_map, ctx.parent_module, option);
+            let cond = qh::version_cond_tokens(f.versions);
             quote!(if #cond { m.#field = #value; })
         });
     quote! {
