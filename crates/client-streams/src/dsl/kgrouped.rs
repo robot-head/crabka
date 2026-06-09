@@ -312,16 +312,15 @@ where
     {
         let builder = Rc::clone(&self.builder);
         let (parent, key_changing, rp_lower) = self.into_cogroup_parts();
-        crate::dsl::cogrouped::CogroupedKStream {
+        crate::dsl::cogrouped::CogroupedKStream::new(
             builder,
-            inputs: vec![crate::dsl::cogrouped::CogroupInput {
+            vec![crate::dsl::cogrouped::CogroupInput {
                 parent,
                 key_changing_upstream: key_changing,
                 repartition_lower: rp_lower,
                 make_agg: crate::dsl::cogrouped::make_agg_for_input::<K, V, VOut, A>(agg),
             }],
-            _pd: PhantomData,
-        }
+        )
     }
 
     /// Decompose into the lineage parts a cogroup input needs (consumes the handle).

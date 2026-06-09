@@ -31,6 +31,8 @@ use crate::topology::NodeHandle;
 
 /// Which window flavor the terminal aggregation uses. Carries the window spec;
 /// the shared init + (session) merger live alongside in [`CogroupSpec`].
+// `dead_code`: the windowed variants are only constructed by the windowed
+// cogroup terminals (Batch 1, Tasks 1.x); non-windowed alone reads `NonWindowed`.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum CogroupKind {
@@ -78,12 +80,27 @@ pub(crate) struct CogroupInput<K, VOut> {
 }
 
 /// Handle accumulating cogrouped inputs; terminal `aggregate`/`windowed_by*`
-/// consume it. Fields are `pub(crate)` so the windowed-handle modules can move
-/// the inputs into their own handles.
+/// consume it. `builder`/`inputs` are `pub(crate)` so the windowed-handle modules
+/// can move the inputs into their own handles; construct via [`Self::new`].
 pub struct CogroupedKStream<K, VOut> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) inputs: Vec<CogroupInput<K, VOut>>,
-    pub(crate) _pd: PhantomData<fn() -> (K, VOut)>,
+    _pd: PhantomData<fn() -> (K, VOut)>,
+}
+
+impl<K, VOut> CogroupedKStream<K, VOut> {
+    /// Construct from the builder + accumulated inputs. Keeps the `_pd` marker
+    /// private so call sites don't depend on the field set.
+    pub(crate) fn new(
+        builder: Rc<RefCell<InternalStreamsBuilder>>,
+        inputs: Vec<CogroupInput<K, VOut>>,
+    ) -> Self {
+        Self {
+            builder,
+            inputs,
+            _pd: PhantomData,
+        }
+    }
 }
 
 /// Build the erased `make_agg` for one input, closing over concrete `Vn` + the
@@ -108,7 +125,7 @@ where
                   -> String {
                 let parent = NodeHandle::<K, Vn>::from_name(parent_name);
                 let init = spec.init.clone();
-                match spec.kind.clone() {
+                match spec.kind {
                     CogroupKind::NonWindowed => {
                         let agg = agg.clone();
                         let store = store_name.clone();
@@ -385,6 +402,9 @@ where
             proc_name.clone(),
             GraphNodeKind::Aggregate {
                 store_name: store_name.clone(),
+                // Per-input nodes share the store; only the merge node owns the
+                // changelog (set `changelog: logging` below). The actual store
+                // registration happens once, in the merge thunk via `registrar`.
                 changelog: false,
             },
             vec![agg_parent],
@@ -428,6 +448,7 @@ where
         registrar(state, proc_names);
         state.handle_name.insert(merge_id, h.name().to_string());
     }));
+    // Release the RefCell borrow so `KTable::new` can borrow the builder again.
     drop(g);
     merge_id
 }
