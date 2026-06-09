@@ -506,7 +506,7 @@ mod tests {
     use crate::membership::{StreamsAssignment, TaskAssignment, TaskOffsetTracker, TopicPartition};
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
-    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+    use crate::processor::serde::{I64Serde, StringSerde};
     use crate::runtime::io::{
         FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
     };
@@ -1065,22 +1065,18 @@ mod tests {
     /// shared manager into the task graph in the real runtime.
     #[tokio::test]
     async fn global_apply_assignment_bootstraps_store_before_join() {
-        use crate::dsl::{GlobalKTable, Materialized, StreamsBuilder};
+        use crate::dsl::{GlobalKTable, StreamsBuilder};
 
         // Build the global-table join topology via the DSL.
         let b = StreamsBuilder::new();
-        let g: GlobalKTable<String, String> = b.global_table_explicit(
-            "global",
-            Consumed::with(StringSerde, StringSerde),
-            Materialized::with(StringSerde, StringSerde).as_store("g-store"),
-        );
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        let g: GlobalKTable<String, String> = b.global_table::<String, String>("global", "g-store");
+        b.stream::<String, String>(["in"])
             .join_global(
                 &g,
                 |_k: &String, v: &String| v.clone(),
                 |sv: &String, gv: &String| format!("{sv}{gv}"),
             )
-            .to_explicit("out", Produced::with(StringSerde, StringSerde));
+            .to("out");
         drop(g);
         let built = b.build("app").unwrap();
 

@@ -1835,16 +1835,15 @@ where
 #[cfg(test)]
 mod tests {
     use crate::dsl::builder::StreamsBuilder;
-    use crate::processor::serde::{Consumed, Produced, StringSerde};
     use assert2::check;
 
     #[test]
     fn stateless_chain_records_named_nodes() {
         let b = StreamsBuilder::new();
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream::<String, String>(["in"])
             .map_values(|v: &String| v.to_uppercase())
             .filter(|_k: &String, _v: &String| true)
-            .to_explicit("out", Produced::with(StringSerde, StringSerde));
+            .to("out");
         let g = b.internal.borrow();
         let names: Vec<&str> = g.graph.nodes.iter().map(|n| n.name.as_str()).collect();
         check!(
@@ -1861,7 +1860,7 @@ mod tests {
     #[test]
     fn select_key_marks_key_changing() {
         let b = StreamsBuilder::new();
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream::<String, String>(["in"])
             .select_key(|_k: &String, v: &String| v.clone());
         let g = b.internal.borrow();
         check!(g.graph.nodes[1].key_changing_operation);

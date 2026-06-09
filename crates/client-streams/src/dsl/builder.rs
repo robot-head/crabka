@@ -501,7 +501,6 @@ impl Default for StreamsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processor::serde::StringSerde;
     use assert2::check;
 
     #[test]
@@ -517,10 +516,7 @@ mod tests {
     #[test]
     fn stream_records_a_source_node() {
         let builder = StreamsBuilder::new();
-        let _s = builder.stream_explicit(
-            ["in"],
-            crate::processor::serde::Consumed::with(StringSerde, StringSerde),
-        );
+        let _s = builder.stream::<String, String>(["in"]);
         let g = builder.internal.borrow();
         check!(g.graph.nodes.len() == 1);
         check!(matches!(
@@ -532,10 +528,8 @@ mod tests {
 
     #[test]
     fn build_lowers_source_sink_to_wire_topology() {
-        use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-            .to_explicit("out", Produced::with(StringSerde, StringSerde));
+        b.stream::<String, String>(["in"]).to("out");
         let built = b.build("app").unwrap();
         let wire = built.to_wire();
         check!(wire.epoch == 0);
@@ -547,11 +541,10 @@ mod tests {
 
     #[test]
     fn build_optimized_matches_build_for_stateless_chain() {
-        use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream::<String, String>(["in"])
             .map_values(|v: &String| v.clone())
-            .to_explicit("out", Produced::with(StringSerde, StringSerde));
+            .to("out");
         let wire = b.build_optimized("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
@@ -563,16 +556,9 @@ mod tests {
         // the JVM-default `<app>-<store>-changelog` — REUSE_KTABLE_SOURCE_TOPICS
         // must NOT fire.
         let b = StreamsBuilder::new();
-        b.table_explicit(
-            "in",
-            Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
-        )
-        .to_stream()
-        .to_explicit(
-            "out",
-            crate::processor::serde::Produced::with(StringSerde, StringSerde),
-        );
+        b.table::<String, String>("in", "store")
+            .to_stream()
+            .to("out");
         let wire = b.build("app").unwrap().to_wire();
         let cl: Vec<&str> = wire.subtopologies[0]
             .state_changelog_topics
@@ -587,16 +573,9 @@ mod tests {
         // With the optimizer (`build_optimized`), the `table()` store's changelog
         // is the SOURCE topic ("in"), not "app-store-changelog".
         let b = StreamsBuilder::new();
-        b.table_explicit(
-            "in",
-            Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
-        )
-        .to_stream()
-        .to_explicit(
-            "out",
-            crate::processor::serde::Produced::with(StringSerde, StringSerde),
-        );
+        b.table::<String, String>("in", "store")
+            .to_stream()
+            .to("out");
         let wire = b.build_optimized("app").unwrap().to_wire();
         let cl: Vec<&str> = wire.subtopologies[0]
             .state_changelog_topics
@@ -609,11 +588,7 @@ mod tests {
     #[test]
     fn global_table_returns_handle_with_store_name() {
         let builder = StreamsBuilder::new();
-        let gt = builder.global_table_explicit(
-            "global",
-            crate::processor::serde::Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
-        );
+        let gt = builder.global_table::<String, String>("global", "g-store");
         check!(gt.store_name() == "g-store");
         check!(gt.source_topic == "global");
         // The global source is the FIRST logical node (so it takes index 0 at
@@ -627,20 +602,14 @@ mod tests {
 
     #[test]
     fn global_table_before_stream_bumps_stream_subtopology_to_one() {
-        use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
         // Declared FIRST: the global source is registered before the stream source,
         // so it consumes node-group index 0 and the stream emits as "1".
-        let gt = b.global_table_explicit(
-            "global",
-            Consumed::with(StringSerde, StringSerde),
-            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
-        );
+        let gt = b.global_table::<String, String>("global", "g-store");
         // The GlobalKTable handle holds an `Rc` clone of the internal builder; drop
         // it before `build()` (which requires `Rc::try_unwrap` to succeed).
         drop(gt);
-        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
-            .to_explicit("out", Produced::with(StringSerde, StringSerde));
+        b.stream::<String, String>(["in"]).to("out");
         let wire = b.build("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].subtopology_id == "1");
@@ -655,7 +624,7 @@ mod tests {
 
     #[test]
     fn add_state_store_records_a_connect_thunk() {
-        use crate::processor::serde::I64Serde;
+        use crate::processor::serde::{I64Serde, StringSerde};
         let b = StreamsBuilder::new();
         // Chains (returns &Self) and records a thunk under the given name.
         b.add_state_store("counts", StringSerde, I64Serde);
@@ -669,10 +638,7 @@ mod tests {
         let b = StreamsBuilder::new();
         // Hold a live KStream handle across the build call: it keeps an `Rc`
         // clone of the internal builder alive, so `Rc::try_unwrap` fails.
-        let _held = b.stream_explicit(
-            ["in"],
-            crate::processor::serde::Consumed::with(StringSerde, StringSerde),
-        );
+        let _held = b.stream::<String, String>(["in"]);
         let _ = b.build("app");
     }
 }
