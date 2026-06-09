@@ -765,8 +765,9 @@ public final class Capture {
 
     /**
      * 22. versioned_table: table("in", Consumed, Materialized.as(persistentVersionedKeyValueStore("vt", 600s)))
-     * .toStream().to("out"). The versioned store's changelog must carry
-     * min.compaction.lag.ms = history_retention_ms. Built with optimization=all.
+     * .toStream().to("out"). The versioned store's changelog carries
+     * min.compaction.lag.ms = history_retention_ms + 86_400_000 (24h grace).
+     * Built with optimization=all.
      */
     static Topology versionedTable() {
         StreamsBuilder b = new StreamsBuilder();
