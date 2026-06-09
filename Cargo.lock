@@ -1868,6 +1868,7 @@ dependencies = [
  "crabka-remote-storage",
  "crabka-security",
  "futures-util",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",
