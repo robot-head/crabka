@@ -127,4 +127,14 @@ fn corpus_covers_all_pairs() {
         missing.len(),
         missing
     );
+    // Reverse: no stale entry for a pair that is no longer a valid CASES
+    // request/response (e.g. an out-of-range version left behind after a
+    // schema-pin bump).
+    let stale: Vec<_> = have.difference(&want).collect();
+    assert!(
+        stale.is_empty(),
+        "corpus has {} stale pair(s) not in CASES: {:?}",
+        stale.len(),
+        stale
+    );
 }

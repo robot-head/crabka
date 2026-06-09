@@ -14,12 +14,9 @@ jobs:
         with:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 17
-      - name: Build JVM oracle
-        run: (cd tools/oracle && ./gradlew installDist --no-daemon)
+      # Check-only mode replays the committed corpus against freshly-captured
+      # bytes; it skips the synthesis pass, so no JVM oracle (and no Java) is
+      # needed here — only Docker + the broker image.
       - name: Pull broker image
         run: docker pull apache/kafka:4.3.0
       - name: Capture-and-compare (fails on drift)
