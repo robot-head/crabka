@@ -1,0 +1,6 @@
+api_key = 69
+version = 0
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "ConsumerGroupDescribeResponse v0 oracle-synthesized (not realistically client-emitted)"

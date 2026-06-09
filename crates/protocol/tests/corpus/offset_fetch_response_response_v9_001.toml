@@ -1,0 +1,6 @@
+api_key = 9
+version = 9
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "OffsetFetchResponse v9 captured from apache/kafka:4.3.0 client traffic"

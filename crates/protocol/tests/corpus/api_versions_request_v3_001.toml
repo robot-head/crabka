@@ -1,6 +1,0 @@
-api_key = 18
-version = 3
-direction = "request"
-source_kafka_version = "4.2.0"
-synthetic = true
-description = "ApiVersions v3 with librdkafka/2.4.0 client signature"

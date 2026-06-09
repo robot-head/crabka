@@ -1,0 +1,6 @@
+api_key = 43
+version = 2
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "ElectLeadersResponse v2 captured from apache/kafka:4.3.0 client traffic"

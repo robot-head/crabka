@@ -1,0 +1,6 @@
+api_key = 20
+version = 1
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "DeleteTopicsRequest v1 oracle-synthesized (not realistically client-emitted)"

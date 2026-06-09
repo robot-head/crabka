@@ -1,0 +1,6 @@
+api_key = 75
+version = 0
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "DescribeTopicPartitionsResponse v0 captured from apache/kafka:4.3.0 client traffic"

@@ -1,0 +1,6 @@
+api_key = 9
+version = 7
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "OffsetFetchRequest v7 oracle-synthesized (not realistically client-emitted)"

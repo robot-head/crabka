@@ -1,0 +1,6 @@
+api_key = 32
+version = 3
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "DescribeConfigsResponse v3 oracle-synthesized (not realistically client-emitted)"

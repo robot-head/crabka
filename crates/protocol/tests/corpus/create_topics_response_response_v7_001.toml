@@ -1,0 +1,6 @@
+api_key = 19
+version = 7
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "CreateTopicsResponse v7 captured from apache/kafka:4.3.0 client traffic"
