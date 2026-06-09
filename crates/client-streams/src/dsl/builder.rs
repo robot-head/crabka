@@ -128,6 +128,7 @@ impl StreamsBuilder {
     /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
     /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
     /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
+    #[allow(clippy::too_many_lines)]
     pub fn table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
@@ -169,6 +170,8 @@ impl StreamsBuilder {
             },
             vec![],
         );
+        // Capture versioned config before destructuring moves the serdes.
+        let versioned_cfg = materialized.versioned;
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -187,45 +190,70 @@ impl StreamsBuilder {
                         consumed,
                     );
                 let store_for_proc = store_for_thunk.clone();
-                // The KTable source forwards Change<V> (prior store value as old).
-                let h = state
-                    .topology
-                    .add_processor::<KS::Target, VS::Target, KS::Target, crate::dsl::processors::change::Change<VS::Target>, _, _, _>(
-                        proc_name,
-                        move || crate::dsl::processors::table::KTableSourceProcessor {
-                            store_name: store_for_proc.clone(),
-                            _pd: std::marker::PhantomData,
-                        },
-                        [&src],
-                    );
-                // REUSE_KTABLE_SOURCE_TOPICS: if the optimizer flagged this
-                // TableSource, register the store with the source topic as its
-                // changelog; otherwise the default `<app>-<store>-changelog`.
-                match state.reuse_changelog.get(&id).cloned() {
-                    Some(changelog_topic) => {
-                        state
-                            .topology
-                            .add_state_store_with_changelog::<KS::Target, VS::Target, KS, VS>(
-                                store_for_thunk.clone(),
-                                key_serde_for_lower,
-                                value_serde_for_lower,
-                                [h.name().to_string()],
-                                changelog_topic,
-                            );
+                if let Some(vc) = versioned_cfg {
+                    // ── Versioned KTable branch (KIP-889/914) ──────────────────
+                    let h = state
+                        .topology
+                        .add_processor::<KS::Target, VS::Target, KS::Target, crate::dsl::processors::change::Change<VS::Target>, _, _, _>(
+                            proc_name,
+                            move || crate::dsl::processors::table::VersionedKTableSourceProcessor {
+                                store_name: store_for_proc.clone(),
+                                _pd: std::marker::PhantomData,
+                            },
+                            [&src],
+                        );
+                    state
+                        .topology
+                        .add_versioned_store::<KS::Target, VS::Target, KS, VS>(
+                            store_for_thunk.clone(),
+                            key_serde_for_lower,
+                            value_serde_for_lower,
+                            vc.history_retention_ms,
+                            [h.name().to_string()],
+                        );
+                    state.handle_name.insert(id, h.name().to_string());
+                } else {
+                    // ── Standard KV KTable branch ──────────────────────────────
+                    // The KTable source forwards Change<V> (prior store value as old).
+                    let h = state
+                        .topology
+                        .add_processor::<KS::Target, VS::Target, KS::Target, crate::dsl::processors::change::Change<VS::Target>, _, _, _>(
+                            proc_name,
+                            move || crate::dsl::processors::table::KTableSourceProcessor {
+                                store_name: store_for_proc.clone(),
+                                _pd: std::marker::PhantomData,
+                            },
+                            [&src],
+                        );
+                    // REUSE_KTABLE_SOURCE_TOPICS: if the optimizer flagged this
+                    // TableSource, register the store with the source topic as its
+                    // changelog; otherwise the default `<app>-<store>-changelog`.
+                    match state.reuse_changelog.get(&id).cloned() {
+                        Some(changelog_topic) => {
+                            state
+                                .topology
+                                .add_state_store_with_changelog::<KS::Target, VS::Target, KS, VS>(
+                                    store_for_thunk.clone(),
+                                    key_serde_for_lower,
+                                    value_serde_for_lower,
+                                    [h.name().to_string()],
+                                    changelog_topic,
+                                );
+                        }
+                        None => {
+                            state
+                                .topology
+                                .add_state_store::<KS::Target, VS::Target, KS, VS>(
+                                    store_for_thunk.clone(),
+                                    key_serde_for_lower,
+                                    value_serde_for_lower,
+                                    [h.name().to_string()],
+                                );
+                        }
                     }
-                    None => {
-                        state
-                            .topology
-                            .add_state_store::<KS::Target, VS::Target, KS, VS>(
-                                store_for_thunk.clone(),
-                                key_serde_for_lower,
-                                value_serde_for_lower,
-                                [h.name().to_string()],
-                            );
-                    }
+                    // Children of the TableSource wire to the processor output.
+                    state.handle_name.insert(id, h.name().to_string());
                 }
-                // Children of the TableSource wire to the processor output.
-                state.handle_name.insert(id, h.name().to_string());
             },
         ));
         drop(g);

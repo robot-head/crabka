@@ -3118,3 +3118,51 @@ fn sliding_window_reduce_nonexplicit() {
         ))
     );
 }
+
+/// `table_explicit` with `Materialized::as_versioned` materializes records into a
+/// versioned key-value store. Out-of-order records are stored under their own
+/// timestamp without overwriting the latest pointer; the store returns the
+/// most-recent record by commit timestamp on `get`.
+#[test]
+fn versioned_table_keeps_latest_on_out_of_order() {
+    use crabka_client_streams::{I64Serde, Materialized, StringSerde};
+    let b = StreamsBuilder::new();
+    b.table_explicit(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    )
+    .to_stream()
+    .to("out");
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Pipe @ts=200 first, then the earlier @ts=100 (out-of-order).
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Some("k".to_string()),
+        20_i64,
+        200,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Some("k".to_string()),
+        10_i64,
+        100,
+    );
+    // to_stream extracts Change.new; two records were piped so two outputs.
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("k".into()), 20_i64))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("k".into()), 10_i64))
+    );
+    // The versioned store's latest (highest-timestamp) value must be 20.
+    assert_eq!(
+        d.store_get_versioned::<String, i64>("vt", &"k".to_string()),
+        Some(20)
+    );
+}

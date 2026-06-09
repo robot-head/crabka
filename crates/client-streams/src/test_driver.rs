@@ -165,6 +165,16 @@ impl TopologyTestDriver {
         pollster::block_on(s.get(key))
     }
 
+    /// Latest live value of a key in a versioned store (test helper).
+    pub fn store_get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        store_name: &str,
+        key: &K,
+    ) -> Option<V> {
+        let store = self.graph.stores.get_versioned::<K, V>(store_name)?;
+        pollster::block_on(store.get(key)).map(|r| r.value)
+    }
+
     /// Populate a GLOBAL store directly (test-only). In a real app the global
     /// consumer reads all partitions of the source topic and applies them to the
     /// fully-replicated global store; the test driver injects values straight into

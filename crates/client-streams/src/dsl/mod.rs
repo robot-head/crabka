@@ -20,7 +20,7 @@ pub mod sliding_windowed_kgrouped;
 pub mod suppress;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
-pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
+pub use config::{Grouped, Materialized, Repartitioned, StreamJoined, VersionedConfig};
 pub use global_table::GlobalKTable;
 pub use kgrouped::KGroupedStream;
 pub use kstream::{BranchedStream, KStream};

@@ -879,6 +879,13 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Versioned tables (KIP-889)
+//!
+//! `builder.table(..., Materialized::as_versioned(name, history_retention_ms))`
+//! materializes a table into a versioned key-value store, so out-of-order
+//! records are recorded as historical versions without clobbering the latest,
+//! and point-in-time reads are available via `get_as_of`.
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.4")]
 
 pub mod dsl;
@@ -895,7 +902,8 @@ pub use dsl::{
     BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
     KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream, SessionWindowedSerde,
     SessionWindows, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined, StreamsBuilder,
-    Suppressed, TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    Suppressed, TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows, VersionedConfig,
+    Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{
@@ -916,6 +924,7 @@ pub use runtime::{
     ReadOnlyWindowStore,
 };
 pub use store::iq::StoreKind;
+pub use store::versioned::VersionedRecord;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
 pub use streams_app::StreamsApp;
 pub use test_driver::TopologyTestDriver;
