@@ -23,6 +23,11 @@ pub trait WindowStore<K: Send + Sync, V: Send>: StateStore {
     /// `(windowStart, recordTs, value)`. Used by the sliding-window aggregator,
     /// which needs `windowMaxRecordTimestamp` to place left/right windows.
     async fn fetch_with_ts(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, i64, V)>;
+    /// Every window across ALL keys whose `windowStart` is in `[start_from,
+    /// start_to]`, as `(key, windowStart, recordTs, value)`. Backs emit-final's
+    /// closed-window scan (the byte layout is key-prefixed, so this is a filtered
+    /// full scan, mirroring the JVM `fetchAll`).
+    async fn fetch_all_in_range(&self, start_from: i64, start_to: i64) -> Vec<(K, i64, i64, V)>;
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64);
 }
 
@@ -199,6 +204,27 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
         out
     }
 
+    async fn fetch_all_in_range(&self, start_from: i64, start_to: i64) -> Vec<(K, i64, i64, V)> {
+        let mut out = Vec::new();
+        for (k, wrapped) in self.backend.scan_all().await {
+            let ws = window_start_of(&k);
+            if ws < start_from || ws > start_to {
+                continue;
+            }
+            let key = self
+                .key_serde
+                .deserialize(&self.changelog_topic, key_bytes_of(&k))
+                .expect("window key deserialize");
+            let (ts, raw) = unwrap_value(&wrapped);
+            let value = self
+                .value_serde
+                .deserialize(&self.changelog_topic, raw)
+                .expect("window value deserialize");
+            out.push((key, ws, ts, value));
+        }
+        out
+    }
+
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64) {
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let sk = store_key(&kb, window_start, 0);
@@ -249,5 +275,32 @@ mod tests {
         s.put("k".into(), 10, 20, 17).await; // window start 10, value 20, recordTs 17
         let got = s.fetch_with_ts(&"k".to_string(), 0, 10).await;
         assert_eq!(got, vec![(0, 5, 10), (10, 17, 20)]); // (windowStart, recordTs, value)
+    }
+
+    #[tokio::test]
+    async fn fetch_all_in_range_scans_across_keys() {
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-w-changelog".into(),
+        );
+        // Two keys, three windows. windowStart ∈ {0, 0, 10}.
+        s.put("a".into(), 0, 1, 5).await;
+        s.put("b".into(), 0, 7, 6).await;
+        s.put("a".into(), 10, 9, 12).await;
+
+        // Range [0,0] returns both windowStart==0 entries (sort to make order-independent).
+        let mut got = s.fetch_all_in_range(0, 0).await;
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 0, 6, 7)]
+        );
+
+        // Range [0,10] returns all three.
+        assert_eq!(s.fetch_all_in_range(0, 10).await.len(), 3);
+        // Range above everything returns nothing.
+        assert!(s.fetch_all_in_range(11, 100).await.is_empty());
     }
 }
