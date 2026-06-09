@@ -577,6 +577,13 @@ async fn copy_one(
             return false;
         }
     };
+    // KIP-405 txnIndexEmpty: set true when the log segment has no transaction
+    // index file (non-transactional topics or segments written before txn support).
+    let metadata = if ex.transaction_index_path.is_none() {
+        metadata.with_txn_index_empty(true)
+    } else {
+        metadata
+    };
 
     let md_started = metadata.clone();
     if let Err(e) = rlmm_mutate(rlmm, move |m| m.add_remote_log_segment_metadata(md_started)).await
