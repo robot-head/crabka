@@ -73,6 +73,20 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::session::SessionStore<K, V>)
     }
 
+    /// Typed mutable access: downcast the erased store to the versioned store
+    /// of the requested types. `None` if absent or the types don't match.
+    #[allow(dead_code)] // wired in ProcessorContext::get_versioned_store (Task 7)
+    pub fn get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::versioned::VersionedKeyValueStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        let concrete = store
+            .as_any_mut()
+            .downcast_mut::<crate::store::versioned::VersionedBytesStore<K, V>>()?;
+        Some(concrete as &mut dyn crate::store::versioned::VersionedKeyValueStore<K, V>)
+    }
+
     /// Typed mutable access: downcast the erased store to the suppress store
     /// of the requested types. `None` if absent or the types don't match.
     pub(crate) fn get_suppress<K: Send + Sync + 'static, V: Send + 'static>(
@@ -116,6 +130,24 @@ mod tests {
     use crate::processor::serde::{I64Serde, StringSerde};
     use crate::store::kv::KeyValueBytesStore;
     use assert2::check;
+
+    #[tokio::test]
+    async fn register_and_downcast_versioned_store() {
+        use crate::store::versioned::VersionedBytesStore;
+        let mut reg = StoreRegistry::default();
+        reg.insert(Box::new(VersionedBytesStore::<String, i64>::in_memory(
+            "v".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "v-changelog".into(),
+        )));
+        let s = reg.get_versioned::<String, i64>("v").unwrap();
+        s.put("x".into(), Some(5), 10).await;
+        check!(s.get(&"x".to_string()).await.map(|r| r.value) == Some(5));
+        check!(reg.get_versioned::<i64, i64>("v").is_none());
+        check!(reg.get_versioned::<String, i64>("missing").is_none());
+    }
 
     #[tokio::test]
     async fn register_and_downcast_typed_store() {
