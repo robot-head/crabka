@@ -6,6 +6,7 @@
 //! [`Topology`]: crate::topology::Topology
 pub(crate) mod builder;
 pub mod config;
+pub mod emit;
 pub mod global_table;
 pub(crate) mod graph;
 pub mod kgrouped;
@@ -21,6 +22,7 @@ pub mod suppress;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
+pub use emit::EmitStrategy;
 pub use global_table::GlobalKTable;
 pub use kgrouped::KGroupedStream;
 pub use kstream::{BranchedStream, KStream};
