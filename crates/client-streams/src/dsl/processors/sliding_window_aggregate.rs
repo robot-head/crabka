@@ -1361,4 +1361,92 @@ mod tests {
             "expected left window [15,25]=\"v|v\", got {out:?}"
         );
     }
+
+    /// Emit-on-close reduce variant of `sliding_count_emit_final_emits_only_on_close`:
+    /// build a reduce processor with grace=100 so every window stays open while
+    /// records arrive, snapshot the store's closed windows, then a far-future
+    /// record closes them and each is forwarded exactly once as a final
+    /// `Change { old: None, new: Some(reduced) }` carrying the stored value.
+    fn reduce_proc_close()
+    -> KStreamSlidingWindowReduceProcessor<String, String, fn(&String, &String) -> String> {
+        let mut p = reduce_proc();
+        p.windows = SlidingWindows::of_time_difference_and_grace(10, 100);
+        p.emit = crate::dsl::emit::EmitStrategy::on_window_close();
+        p
+    }
+
+    #[tokio::test]
+    async fn sliding_reduce_emit_final_emits_only_on_close() {
+        let mut stores = str_store();
+        let mut p = reduce_proc_close();
+
+        // grace=100 keeps every window open (close_time = stream_time - 100 is far
+        // below any window end), so emit-on-close must forward NOTHING here.
+        let out1 = run_reduce(&mut p, &mut stores, "a", "p", 10).await;
+        assert!(
+            out1.is_empty(),
+            "emit-on-close must not forward on update (ts=10), got {out1:?}"
+        );
+        let out2 = run_reduce(&mut p, &mut stores, "a", "q", 12).await;
+        assert!(
+            out2.is_empty(),
+            "emit-on-close must not forward on update (ts=12), got {out2:?}"
+        );
+
+        // Snapshot the windows that will have closed once stream-time jumps to
+        // 1000 (close_time = 1000 - grace(100) = 900; windows with end <= 900).
+        let w = 10i64;
+        let close_time = 900i64;
+        let expected: std::collections::HashMap<i64, String> = {
+            let s = stores.get_window::<String, String>("w").unwrap();
+            s.fetch_all_in_range(i64::MIN / 2, close_time - w)
+                .await
+                .into_iter()
+                .filter(|(_, ws, _, _)| ws + w <= close_time)
+                .map(|(_, ws, _, v)| (ws, v))
+                .collect()
+        };
+        assert!(
+            !expected.is_empty(),
+            "test setup: expected some closed windows in the store"
+        );
+
+        // Far-future record closes all the earlier windows.
+        let out3 = run_reduce(&mut p, &mut stores, "a", "r", 1000).await;
+
+        let mut emitted: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        for (win, old, new) in &out3 {
+            assert_eq!(
+                *old, None,
+                "final emission must have old=None, got {out3:?}"
+            );
+            assert_eq!(
+                win.end,
+                win.start + w,
+                "sliding window end must be start + W, got {out3:?}"
+            );
+            if win.end <= close_time {
+                let prev = emitted.insert(win.start, new.clone().expect("final has Some value"));
+                assert!(
+                    prev.is_none(),
+                    "window start={} emitted twice as final, got {out3:?}",
+                    win.start
+                );
+            }
+        }
+
+        // Every snapshotted closed window must have been emitted with its stored
+        // reduced value.
+        for (ws, v) in &expected {
+            assert_eq!(
+                emitted.get(ws),
+                Some(v),
+                "window start={ws} expected final value {v:?}, emitted map {emitted:?}, raw {out3:?}"
+            );
+        }
+        assert!(
+            !emitted.is_empty(),
+            "expected at least one final emission after close, got {out3:?}"
+        );
+    }
 }

@@ -78,12 +78,16 @@ where
             grouped_name,
             repartition_lower,
             windows,
-            emit: EmitStrategy::on_window_update(),
+            emit: EmitStrategy::default(),
             _pd: PhantomData,
         }
     }
 
     /// Emit on every update (default) or only on window close (KIP-825).
+    ///
+    /// In `on_window_close`, records whose window has already closed are dropped
+    /// (so no duplicate final is emitted — unlike the session variant, which may
+    /// re-emit under `grace < gap`).
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;

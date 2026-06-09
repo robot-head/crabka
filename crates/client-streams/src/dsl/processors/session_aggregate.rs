@@ -730,4 +730,94 @@ mod tests {
             Some("xy".to_string())
         );
     }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn session_reduce_emit_final_emits_only_on_close() {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(SessionBytesStore::<String, String>::in_memory(
+            "s".into(),
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "app-s-changelog".into(),
+        )));
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KStreamSessionReduceProcessor {
+            store_name: "s".into(),
+            gap_ms: 10,
+            reducer: |a: &String, b: &String| format!("{a}{b}"),
+            emit: crate::dsl::emit::EmitStrategy::on_window_close(),
+            // Session ends are inclusive; grace 10 keeps the data-defined [0,4]
+            // session open at its own stream_time (close_time = ts - 10), closing
+            // only when stream_time jumps far ahead. Mirrors the aggregate test.
+            grace_ms: 10,
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            _pd: PhantomData::<fn() -> (String, String)>,
+        };
+
+        // "x"@0 then "y"@4 (within gap 10) → one session [0,4] reducing to "xy".
+        // Emit-final suppresses both the per-update tombstone and the merged
+        // update; window_close_time stays negative so nothing closes yet.
+        for (v, ts) in [("x", 0i64), ("y", 4)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<String>>::new(&mut d);
+            proc.process(&mut ctx, Record::new(Some("a".into()), v.into(), ts))
+                .await;
+        }
+        assert!(
+            buffer.is_empty(),
+            "emit-final must suppress on-update forwards"
+        );
+
+        // "z"@1000 advances stream_time → window_close_time 1000; session [0,4]
+        // (end 4 <= 1000) closes. The new session [1000,1000] is NOT yet closed.
+        {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<String>>::new(&mut d);
+            proc.process(&mut ctx, Record::new(Some("a".into()), "z".into(), 1000))
+                .await;
+        }
+        assert_eq!(buffer.len(), 1, "exactly one closed-session emit");
+        let (_, rec) = buffer.pop_front().unwrap();
+        let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(wk.key, "a");
+        assert_eq!(wk.window, Window { start: 0, end: 4 });
+        let ch = rec.value.downcast::<Change<String>>().unwrap();
+        assert_eq!((ch.old, ch.new), (None, Some("xy".to_string())));
+    }
 }

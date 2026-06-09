@@ -60,7 +60,7 @@ where
             grouped_name,
             repartition_lower,
             windows,
-            emit: EmitStrategy::on_window_update(),
+            emit: EmitStrategy::default(),
             _pd: PhantomData,
         }
     }

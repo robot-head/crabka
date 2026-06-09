@@ -447,4 +447,81 @@ mod tests {
         assert_eq!(key.window, Window { start: 0, end: 10 });
         assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
     }
+
+    #[tokio::test]
+    async fn windowed_reduce_emit_final_emits_only_on_close() {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-w-changelog".into(),
+        )));
+
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+
+        // Reducer sums values; the first value in a window seeds the accumulator.
+        let mut proc = KStreamWindowReduceProcessor {
+            store_name: "w".into(),
+            windows: TimeWindows::of_size(10),
+            reducer: |a: &i64, b: &i64| a + b,
+            emit: crate::dsl::emit::EmitStrategy::on_window_close(),
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            _pd: PhantomData::<fn() -> (String, i64)>,
+        };
+
+        macro_rules! drive {
+            ($v:expr, $ts:expr) => {{
+                let globals = crate::runtime::global::GlobalStateManager::default();
+                let mut scheds = Vec::new();
+                let mut d = Dispatch {
+                    buffer: &mut buffer,
+                    children: &children,
+                    output: &mut output,
+                    record_ctx: &rc,
+                    stores: &mut stores,
+                    globals: &globals,
+                    node_idx: 0,
+                    schedules: &mut scheds,
+                    sched_stream_time: i64::MIN,
+                    sched_wall_clock: 0,
+                };
+                let mut ctx =
+                    ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+                proc.process(&mut ctx, Record::new(Some("a".into()), $v, $ts))
+                    .await;
+            }};
+        }
+
+        // 4@ts=3 and 6@ts=7 both in window [0,10) → reduced value 10. Emit-final
+        // does not emit while the window is open.
+        drive!(4i64, 3);
+        assert!(buffer.is_empty(), "no emit while window [0,10) is open");
+        drive!(6i64, 7);
+        assert!(
+            buffer.is_empty(),
+            "still no emit while window [0,10) is open"
+        );
+
+        // ts=15 → window [10,20) opens, stream_time=15, window [0,10) closes
+        // (end 10 <= close_time 15). Exactly one final, carrying the reduced 10.
+        drive!(99i64, 15);
+
+        assert_eq!(buffer.len(), 1, "exactly one final emit on close");
+        let (_, rec) = buffer.pop_front().unwrap();
+        let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(key.key, "a");
+        assert_eq!(key.window, Window { start: 0, end: 10 });
+        let ch = rec.value.downcast::<Change<i64>>().unwrap();
+        assert_eq!((ch.old, ch.new), (None, Some(10)));
+    }
 }
