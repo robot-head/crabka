@@ -42,7 +42,7 @@ pub struct SlidingWindowedKGroupedStream<K, V> {
 impl<K, V> SlidingWindowedKGroupedStream<K, V>
 where
     K: Any + Send + Sync + Clone,
-    V: Any + Send + Clone,
+    V: Any + Send + Sync + Clone,
 {
     pub(crate) fn new(
         builder: Rc<RefCell<InternalStreamsBuilder>>,
@@ -101,7 +101,7 @@ where
         materialized: impl Into<Materialized<KS, VS>>,
     ) -> KTable<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>
     where
-        VA: Any + Send + Clone,
+        VA: Any + Send + Sync + Clone,
         KS: Serde<K> + Clone + 'static,
         VS: Serde<VA> + Clone + 'static,
         I: Fn() -> VA + Clone + Send + Sync + 'static,
@@ -197,7 +197,7 @@ where
         agg: A,
     ) -> KTable<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>
     where
-        VA: Any + Send + Clone,
+        VA: Any + Send + Sync + Clone,
         KS: Serde<K> + Clone + 'static,
         VS: Serde<VA> + Clone + 'static,
         I: Fn() -> VA + Clone + Send + Sync + 'static,
@@ -216,7 +216,7 @@ where
         agg: A,
     ) -> KTable<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>
     where
-        VA: Any + Send + Clone,
+        VA: Any + Send + Sync + Clone,
         KS: Serde<K> + Clone + 'static,
         VS: Serde<VA> + Clone + 'static,
         I: Fn() -> VA + Clone + Send + Sync + 'static,

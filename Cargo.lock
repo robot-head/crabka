@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-kafka-tap"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "crabka-log"

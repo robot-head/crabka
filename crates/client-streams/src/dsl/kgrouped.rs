@@ -284,7 +284,10 @@ where
     pub fn windowed_by_sliding(
         mut self,
         windows: crate::dsl::windows::SlidingWindows,
-    ) -> crate::dsl::sliding_windowed_kgrouped::SlidingWindowedKGroupedStream<K, V> {
+    ) -> crate::dsl::sliding_windowed_kgrouped::SlidingWindowedKGroupedStream<K, V>
+    where
+        V: Sync,
+    {
         crate::dsl::sliding_windowed_kgrouped::SlidingWindowedKGroupedStream::new(
             Rc::clone(&self.builder),
             self.parent,
