@@ -439,6 +439,48 @@ fn fk_join_inner_matches_jvm() {
 }
 
 #[test]
+fn sliding_window_count_matches_jvm() {
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "sliding_window_count");
+}
+
+#[test]
+fn sliding_window_aggregate_matches_jvm() {
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .aggregate_explicit(
+            || 0i64,
+            |_k: &String, _v: &String, a: i64| a + 1,
+            Materialized::with(StringSerde, I64Serde),
+        )
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "sliding_window_aggregate");
+}
+
+#[test]
 fn fk_join_left_matches_jvm() {
     // Like the inner FK join but `left_join_on_foreign_key`. The wire topology is
     // byte-identical to the inner golden (the left/inner difference is runtime

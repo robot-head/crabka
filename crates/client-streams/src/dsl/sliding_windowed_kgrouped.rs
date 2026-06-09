@@ -274,11 +274,15 @@ where
                     },
                     [parent],
                 );
+            // Sliding window retention formula (JVM-exact):
+            // timeDifferenceMs + timeDifferenceMs + gracePeriodMs + 86_400_000
+            // (a sliding window spans [t - timeDiff, t + timeDiff] so the effective
+            // window size for changelog retention is 2 * timeDifferenceMs).
             state.topology.add_window_store::<K, VA, KS, VS>(
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
-                windows.time_difference_ms,
+                windows.time_difference_ms * 2,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
@@ -362,11 +366,12 @@ where
                     },
                     [parent],
                 );
+            // Sliding window retention formula (JVM-exact): 2 * timeDifferenceMs + grace + 1day.
             state.topology.add_window_store::<K, V, KS, VS>(
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
-                windows.time_difference_ms,
+                windows.time_difference_ms * 2,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
