@@ -12,6 +12,7 @@ pub(crate) mod session_schema;
 pub(crate) mod suppress_bufval;
 pub mod suppress_store;
 pub(crate) mod turso;
+pub(crate) mod versioned_schema;
 pub mod window;
 pub(crate) mod window_schema;
 pub use api::{KeyValueStore, StateStore};
