@@ -91,6 +91,53 @@ pub async fn bind_and_drop_ports(n: usize) -> (Vec<SocketAddr>, Vec<SocketAddr>)
     (client_addrs, controller_addrs)
 }
 
+/// Race-free replacement for [`bind_and_drop_ports`]: bind `n` pairs of
+/// ephemeral loopback listeners (client + controller per broker) and return
+/// their concrete addrs **alongside the still-open listeners**, index-aligned.
+///
+/// Hand `client_listeners[i]` / `controller_listeners[i]` to
+/// [`crabka_broker::Broker::start_with_listeners`] (or
+/// `start_with_controller_listener`) so the OS port is never released before
+/// the broker adopts it — closing the [`bind_and_drop_ports`] TOCTOU window
+/// where a concurrently-running test binary steals the freed port
+/// (`AddrInUse`) under parallel `cargo nextest`.
+///
+/// The returned `SocketAddr`s are the listeners' real `local_addr()`s, so the
+/// caller builds its static voter set / advertised addresses from them exactly
+/// as with [`bind_and_drop_ports`]; the only call-site change is passing the
+/// matching listener into `start_with_listeners` instead of letting
+/// `Broker::start` re-bind the address.
+#[allow(dead_code)] // not every test binary that includes `support` uses this
+pub async fn bind_and_hold_ports(
+    n: usize,
+) -> (
+    Vec<SocketAddr>,
+    Vec<SocketAddr>,
+    Vec<tokio::net::TcpListener>,
+    Vec<tokio::net::TcpListener>,
+) {
+    let mut client_listeners = Vec::with_capacity(n);
+    let mut controller_listeners = Vec::with_capacity(n);
+    for _ in 0..n {
+        client_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        controller_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let client_addrs = client_listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap())
+        .collect();
+    let controller_addrs = controller_listeners
+        .iter()
+        .map(|l| l.local_addr().unwrap())
+        .collect();
+    (
+        client_addrs,
+        controller_addrs,
+        client_listeners,
+        controller_listeners,
+    )
+}
+
 /// Build a `BrokerConfig` for broker `i` (0-indexed) in an `n`-broker
 /// cluster using the supplied ephemeral port lists + static voter map.
 /// This is the *static-voter* bootstrap-then-join helper, kept for tests
