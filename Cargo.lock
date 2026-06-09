@@ -1744,6 +1744,7 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crabka-compression",
+ "crabka-kafka-tap",
  "crc32c",
  "hex",
  "proptest",
