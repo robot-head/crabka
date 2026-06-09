@@ -55,4 +55,5 @@ pub mod tagged_fields;
 
 pub use codec::{Decode, DecodeBorrow, Encode, ProtocolRequest};
 pub use error::ProtocolError;
+pub use records::remote_log_metadata::RemoteLogMetadataRecord;
 pub use tagged_fields::{UnknownTaggedField, UnknownTaggedFields};

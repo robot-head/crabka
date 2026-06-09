@@ -141,6 +141,10 @@ pub struct RemoteLogSegmentMetadata {
     custom_metadata: Option<CustomMetadata>,
     state: RemoteLogSegmentState,
     segment_leader_epochs: BTreeMap<i32, i64>,
+    /// KIP-405 `txnIndexEmpty`: `true` when the segment carries no transaction
+    /// index. Serialized as tagged field (tag 0) in the JVM record format.
+    /// Defaults to `false`.
+    txn_index_empty: bool,
 }
 
 impl RemoteLogSegmentMetadata {
@@ -189,6 +193,7 @@ impl RemoteLogSegmentMetadata {
             custom_metadata: None,
             state,
             segment_leader_epochs,
+            txn_index_empty: false,
         })
     }
 
@@ -296,6 +301,20 @@ impl RemoteLogSegmentMetadata {
     #[must_use]
     pub fn with_custom_metadata(mut self, custom: CustomMetadata) -> Self {
         self.custom_metadata = Some(custom);
+        self
+    }
+
+    /// `true` if the segment has no transaction index (KIP-405 `txnIndexEmpty`).
+    /// Defaults to `false`. Serialized as the JVM record's tagged field (tag 0).
+    #[must_use]
+    pub fn txn_index_empty(&self) -> bool {
+        self.txn_index_empty
+    }
+
+    /// Builder-style setter for [`Self::txn_index_empty`].
+    #[must_use]
+    pub fn with_txn_index_empty(mut self, empty: bool) -> Self {
+        self.txn_index_empty = empty;
         self
     }
 }
@@ -563,6 +582,28 @@ mod tests {
         };
         let err = started.with_update(&update).unwrap_err();
         assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn txn_index_empty_defaults_false_and_is_settable() {
+        let md = RemoteLogSegmentMetadata::new(
+            RemoteLogSegmentId::new(
+                TopicIdPartition::new(Uuid::from_u128(1), "t", 0),
+                Uuid::from_u128(2),
+            ),
+            0,
+            9,
+            9,
+            1,
+            100,
+            1024,
+            RemoteLogSegmentState::CopySegmentStarted,
+            BTreeMap::from([(0, 0)]),
+        )
+        .unwrap();
+        assert!(!md.txn_index_empty());
+        let md = md.with_txn_index_empty(true);
+        assert!(md.txn_index_empty());
     }
 
     #[test]

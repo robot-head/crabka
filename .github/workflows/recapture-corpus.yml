@@ -1,0 +1,30 @@
+name: recapture-corpus
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # Check-only mode replays the committed corpus against freshly-captured
+      # bytes; it skips the synthesis pass, so no JVM oracle (and no Java) is
+      # needed here — only Docker + the broker image.
+      - name: Pull broker image
+        run: docker pull apache/kafka:4.3.0
+      - name: Capture-and-compare (fails on drift)
+        env:
+          CORPUS_CHECK_ONLY: "1"
+        run: cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture
+      - name: Confirm committed corpus still passes the replay gate
+        run: cargo test -p crabka-protocol --test corpus_replay

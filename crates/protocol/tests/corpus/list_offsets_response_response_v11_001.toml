@@ -1,0 +1,6 @@
+api_key = 2
+version = 11
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "ListOffsetsResponse v11 captured from apache/kafka:4.3.0 client traffic"

@@ -29,6 +29,9 @@ pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     emit_cases_table(&mut out, specs);
     emit_encode_default(&mut out, specs);
     emit_default_json_for(&mut out, specs);
+    emit_roundtrip(&mut out, specs);
+    emit_header_versions(&mut out, specs);
+    emit_strip_frame_header(&mut out);
     out
 }
 
@@ -169,4 +172,169 @@ fn emit_default_json_for(out: &mut String, specs: &[MessageSpec]) {
     .unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_roundtrip(out: &mut String, specs: &[MessageSpec]) {
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(clippy::too_many_lines)]").unwrap();
+    writeln!(
+        out,
+        "pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {{"
+    )
+    .unwrap();
+    writeln!(out, "    use crabka_protocol::Decode;").unwrap();
+    writeln!(out, "    match name {{").unwrap();
+    for s in specs {
+        if s.valid_versions.is_empty() || s.internal {
+            continue;
+        }
+        match s.message_type {
+            MessageType::Request | MessageType::Response | MessageType::Header => {}
+            MessageType::Data => continue,
+        }
+        let snake = name_conv::module_name(&s.name);
+        let type_name = name_conv::type_name(&s.name);
+        writeln!(out, "        \"{}\" => {{", s.name).unwrap();
+        writeln!(out, "            let mut cur = bytes;").unwrap();
+        writeln!(
+            out,
+            "            let msg = crabka_protocol::owned::{snake}::{type_name}::decode(&mut cur, version).unwrap();"
+        )
+        .unwrap();
+        writeln!(out, "            assert!(cur.is_empty());").unwrap();
+        writeln!(out, "            let mut buf = BytesMut::new();").unwrap();
+        writeln!(out, "            msg.encode(&mut buf, version).unwrap();").unwrap();
+        writeln!(out, "            buf.to_vec()").unwrap();
+        writeln!(out, "        }}").unwrap();
+    }
+    writeln!(
+        out,
+        "        _ => panic!(\"unknown message in roundtrip: {{name}}\"),"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_header_versions(out: &mut String, specs: &[MessageSpec]) {
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(clippy::absurd_extreme_comparisons)]").unwrap();
+    writeln!(out, "#[allow(clippy::match_same_arms)]").unwrap();
+    writeln!(out, "#[allow(clippy::too_many_lines)]").unwrap();
+    writeln!(
+        out,
+        "pub fn request_header_version(name: &str, version: i16) -> i16 {{"
+    )
+    .unwrap();
+    writeln!(out, "    match name {{").unwrap();
+    writeln!(
+        out,
+        "        \"ControlledShutdownRequest\" if version == 0 => 0,"
+    )
+    .unwrap();
+    for s in specs {
+        if s.valid_versions.is_empty() || s.internal {
+            continue;
+        }
+        if !matches!(s.message_type, MessageType::Request) {
+            continue;
+        }
+        let fm = super::owned::flex_min(s);
+        writeln!(
+            out,
+            "        \"{}\" => if version >= {fm} {{ 2 }} else {{ 1 }},",
+            s.name
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "        _ => panic!(\"unknown request in request_header_version: {{name}}\"),"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(out, "#[allow(clippy::absurd_extreme_comparisons)]").unwrap();
+    writeln!(out, "#[allow(clippy::match_same_arms)]").unwrap();
+    writeln!(out, "#[allow(clippy::too_many_lines)]").unwrap();
+    writeln!(
+        out,
+        "pub fn response_header_version(name: &str, version: i16) -> i16 {{"
+    )
+    .unwrap();
+    writeln!(out, "    match name {{").unwrap();
+    writeln!(out, "        \"ApiVersionsResponse\" => 0,").unwrap();
+    for s in specs {
+        if s.valid_versions.is_empty() || s.internal {
+            continue;
+        }
+        if !matches!(s.message_type, MessageType::Response) {
+            continue;
+        }
+        if s.name == "ApiVersionsResponse" {
+            continue;
+        }
+        let fm = super::owned::flex_min(s);
+        writeln!(
+            out,
+            "        \"{}\" => if version >= {fm} {{ 1 }} else {{ 0 }},",
+            s.name
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "        _ => panic!(\"unknown response in response_header_version: {{name}}\"),"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+}
+
+fn emit_strip_frame_header(out: &mut String) {
+    writeln!(
+        out,
+        "/// Decode and discard the request/response header from a full frame body,"
+    )
+    .unwrap();
+    writeln!(out, "/// returning the remaining message bytes.").unwrap();
+    writeln!(out, "#[must_use]").unwrap();
+    writeln!(
+        out,
+        "pub fn strip_frame_header(name: &str, version: i16, is_request: bool, frame: &[u8]) -> Vec<u8> {{"
+    )
+    .unwrap();
+    writeln!(out, "    use crabka_protocol::Decode;").unwrap();
+    writeln!(out, "    let mut cur = frame;").unwrap();
+    writeln!(out, "    if is_request {{").unwrap();
+    writeln!(
+        out,
+        "        let hv = request_header_version(name, version);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, hv).unwrap();"
+    )
+    .unwrap();
+    writeln!(out, "    }} else {{").unwrap();
+    writeln!(
+        out,
+        "        let hv = response_header_version(name, version);"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "        crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, hv).unwrap();"
+    )
+    .unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    cur.to_vec()").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
 }

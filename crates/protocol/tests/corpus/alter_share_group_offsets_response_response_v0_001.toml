@@ -1,0 +1,6 @@
+api_key = 91
+version = 0
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "AlterShareGroupOffsetsResponse v0 oracle-synthesized (not realistically client-emitted)"

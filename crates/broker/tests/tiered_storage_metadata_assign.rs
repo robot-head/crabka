@@ -32,7 +32,8 @@ async fn start_bare_broker() -> (BrokerHandle, TempDir) {
 
     // Pin a loopback port so the metadata-log bootstrap address is
     // knowable before the listener binds.
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(1).await;
     let listen = client_addrs[0];
 
     let log_dir = TempDir::new().expect("log tempdir");
@@ -43,7 +44,11 @@ async fn start_bare_broker() -> (BrokerHandle, TempDir) {
     cfg.controller_listen_addr = controller_addrs[0];
     cfg.controller_quorum_voters = vec![(1, controller_addrs[0])];
 
-    let broker = Broker::start(cfg).await.expect("broker start");
+    let data_listener = client_listeners.into_iter().next().unwrap();
+    let controller_listener = controller_listeners.into_iter().next().unwrap();
+    let broker = Broker::start_with_listeners(cfg, Some(controller_listener), Some(data_listener))
+        .await
+        .expect("broker start");
     (broker, log_dir)
 }
 

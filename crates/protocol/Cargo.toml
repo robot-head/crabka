@@ -59,6 +59,7 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
+crabka-kafka-tap = { path = "../kafka-tap" }
 
 [[bench]]
 name = "codec"

@@ -1,0 +1,6 @@
+api_key = 75
+version = 0
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "DescribeTopicPartitionsRequest v0 captured from apache/kafka:4.3.0 client traffic"

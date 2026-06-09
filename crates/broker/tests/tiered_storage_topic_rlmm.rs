@@ -47,7 +47,10 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     // Pin a loopback port so the RLMM bootstrap can dial the broker's own
     // listener: `KafkaRlmmConfig::bootstrap` is resolved before the
     // listener binds, so an ephemeral `:0` wouldn't be knowable in time.
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    // Held listeners eliminate the bind-and-drop TOCTOU race under parallel
+    // nextest (`AddrInUse` flakes).
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(1).await;
     let listen = client_addrs[0];
 
     let log_dir = TempDir::new().expect("log tempdir");
@@ -71,7 +74,11 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
         security: None,
     });
 
-    let broker = Broker::start(cfg).await.expect("broker start");
+    let data_listener = client_listeners.into_iter().next().unwrap();
+    let controller_listener = controller_listeners.into_iter().next().unwrap();
+    let broker = Broker::start_with_listeners(cfg, Some(controller_listener), Some(data_listener))
+        .await
+        .expect("broker start");
     (broker, log_dir, remote_dir)
 }
 
@@ -349,7 +356,11 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     use crabka_security::{ListenerProtocol, SaslMechanism};
 
     support::init_tracing();
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    // Held listeners eliminate the bind-and-drop TOCTOU race. The data
+    // listener matches `spec.bind_addr == listen` in `start_with_listeners`
+    // even for the custom SASL_PLAINTEXT ListenerSpec, so both can be passed.
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(1).await;
     let listen = client_addrs[0];
     let log_dir = TempDir::new().expect("log tempdir");
     let remote_dir = TempDir::new().expect("remote tempdir");
@@ -390,7 +401,11 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
         security: None,
     });
 
-    let broker = Broker::start(cfg).await.expect("broker start");
+    let data_listener = client_listeners.into_iter().next().unwrap();
+    let controller_listener = controller_listeners.into_iter().next().unwrap();
+    let broker = Broker::start_with_listeners(cfg, Some(controller_listener), Some(data_listener))
+        .await
+        .expect("broker start");
     (broker, log_dir, remote_dir)
 }
 
@@ -410,7 +425,12 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 
     support::init_tracing();
 
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    // Held listeners eliminate the bind-and-drop TOCTOU race under parallel
+    // nextest. The RLMM bootstrap here is a dead port (127.0.0.1:1) so the
+    // data-plane port itself is never dialled by the RLMM — but we still hold
+    // both ports race-free.
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(1).await;
     let listen = client_addrs[0];
 
     let log_dir = TempDir::new().expect("log tempdir");
@@ -437,7 +457,11 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         security: None,
     });
 
-    let broker = Broker::start(cfg).await.expect("broker starts");
+    let data_listener = client_listeners.into_iter().next().unwrap();
+    let controller_listener = controller_listeners.into_iter().next().unwrap();
+    let broker = Broker::start_with_listeners(cfg, Some(controller_listener), Some(data_listener))
+        .await
+        .expect("broker starts");
     let client = build_client(&broker).await;
 
     // Create the same tiered topic config as the loopback round-trip test.

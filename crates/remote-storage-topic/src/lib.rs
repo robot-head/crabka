@@ -96,6 +96,6 @@ pub use log::{
 pub use manager::TopicBasedRemoteLogMetadataManager;
 pub use not_ready::NotReadyRlmm;
 pub use partitioning::{metadata_partition_for, metadata_partitions_for};
-pub use serde::{MetadataEvent, WIRE_VERSION};
+pub use serde::MetadataEvent;
 pub use snapshot::{SNAPSHOT_FILE_NAME, SNAPSHOT_FORMAT_VERSION, Snapshot};
 pub use swappable::SwappableRlmm;

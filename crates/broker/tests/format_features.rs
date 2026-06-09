@@ -68,7 +68,8 @@ async fn standalone_format_feature_overrides_surface_in_api_versions() {
 
     // Pre-bind a concrete controller port so it can be baked into the
     // VotersRecord at format time and re-bound by the broker on boot.
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(1).await;
     let client_addr = client_addrs[0];
     let controller_addr = controller_addrs[0];
 
@@ -93,7 +94,11 @@ async fn standalone_format_feature_overrides_surface_in_api_versions() {
     cfg.controller_quorum_voters = vec![(1, controller_addr)];
     cfg.bootstrap_mode = crabka_broker::BootstrapMode::Bootstrap;
 
-    let handle = Broker::start(cfg).await.expect("broker start");
+    let data_listener = client_listeners.into_iter().next().unwrap();
+    let controller_listener = controller_listeners.into_iter().next().unwrap();
+    let handle = Broker::start_with_listeners(cfg, Some(controller_listener), Some(data_listener))
+        .await
+        .expect("broker start");
     let bootstrap = handle.listen_addr().to_string();
     let client = Client::builder()
         .bootstrap(&bootstrap)

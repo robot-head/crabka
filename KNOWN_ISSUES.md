@@ -34,17 +34,27 @@ their operator CRDs.
 
 Status: open. These remain ecosystem gaps outside the broker core.
 
-## Mixed JVM + Crabka tiered-storage metadata topics are unsupported
+## Tiered-storage segment-data interop is narrower than metadata interop
 
-Tiered storage uses the topic-backed `RemoteLogMetadataManager` and the
-`__remote_log_metadata` internal topic when enabled, but Crabka's remote-log
-metadata record format is not byte-compatible with the JVM
-`RemoteLogMetadataSerde`. A real cluster should run one RLMM implementation for
-that internal topic.
+Crabka's `__remote_log_metadata` records are now byte-exact with the JVM
+`RemoteLogMetadataSerde`: the topic-backed `RemoteLogMetadataManager` serializes
+through the same `AbstractApiMessageSerde` value envelope (frameVersion=1 +
+apiKey + apiVersion, flexible message bodies) and the same
+`RemoteLogSegmentMetadataRecord` / `RemoteLogSegmentMetadataUpdateRecord` /
+`RemotePartitionDeleteMetadataRecord` schemas. This is verified byte-for-byte
+against `apache/kafka:4.0.0` golden vectors
+(`crates/remote-storage-topic/tests/jvm_serde_golden.rs`), so a mixed JVM +
+Crabka cluster can share the internal metadata topic.
 
-Status: intentional limitation. Crabka broker interoperability is validated at
-the Kafka data/control protocol boundary, not by mixing RLMM implementations on
-one metadata topic.
+Sharing the *segment data* tier additionally requires both brokers to use the
+same `RemoteStorageManager` object layout and producer-snapshot conventions.
+Crabka's `RemoteStorageManager` path scheme, and its (currently absent)
+producer-snapshot upload, are not yet validated against the JVM
+`LocalTieredStorageManager`, so full segment-level interop in a mixed cluster is
+not claimed.
+
+Status: the metadata-topic record-format incompatibility is resolved. Open:
+segment-data (RSM layout + producer-snapshot) interop validation.
 
 ## ZooKeeper mode and ZooKeeper-to-KRaft migration are out of scope
 
@@ -52,20 +62,3 @@ Crabka is KRaft-only. ZooKeeper-backed broker mode and ZK-to-KRaft migration
 support are deliberate non-goals.
 
 Status: intentional non-goal.
-
-## Captured-traffic corpus deviation from coverage acceptance criterion #9
-
-The coverage meta-spec
-(`docs/superpowers/specs/2026-05-11-crabka-protocol-coverage-design.md`)
-acceptance criterion #9 requires a captured-traffic corpus entry per
-`(api_key, version)` pair. Sub-plan 1d explicitly does not build the
-corpus. Differential testing (default-fixture per pair on PR CI;
-256 proptest per pair nightly) is the substitute.
-
-Rationale: building ~1000 corpus entries via real broker captures
-(high setup cost) or oracle-synthetic generation (which proves
-nothing differential testing doesn't) is not worth the work for the
-validation value it adds. The corpus remains useful for regression
-reproduction; growth is deferred to a future maintenance task.
-
-Status: open. Tracked here pending a future maintenance pass.

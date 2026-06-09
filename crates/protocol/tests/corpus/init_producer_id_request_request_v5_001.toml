@@ -1,0 +1,6 @@
+api_key = 22
+version = 5
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "InitProducerIdRequest v5 captured from apache/kafka:4.3.0 client traffic"

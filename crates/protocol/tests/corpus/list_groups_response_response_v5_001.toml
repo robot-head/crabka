@@ -1,0 +1,6 @@
+api_key = 16
+version = 5
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "ListGroupsResponse v5 captured from apache/kafka:4.3.0 client traffic"

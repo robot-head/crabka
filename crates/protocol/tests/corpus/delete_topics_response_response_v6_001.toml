@@ -1,0 +1,6 @@
+api_key = 20
+version = 6
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "DeleteTopicsResponse v6 captured from apache/kafka:4.3.0 client traffic"

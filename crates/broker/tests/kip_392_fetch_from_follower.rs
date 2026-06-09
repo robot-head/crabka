@@ -22,12 +22,11 @@
 
 use assert2::assert;
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crabka_broker::replica_selector::ReplicaSelectorKind;
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
@@ -58,48 +57,22 @@ const RACK_B: &str = "rack-b"; // broker 2 (follower)
 /// the `RackAware` replica selector, via KIP-595 Slice 3c static multi-voter
 /// bootstrap (all brokers boot in `Bootstrap` mode with the same static voter
 /// set and elect among themselves — no add_learner / change_membership).
-/// Injects the KIP-392 config before `Broker::start`. `racks[i]` is broker
-/// `i+1`'s rack.
+/// Injects the KIP-392 config into each broker before it starts. `racks[i]`
+/// is broker `i+1`'s rack.
 async fn start_rack_aware_cluster(racks: &[&str]) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
-    support::init_tracing();
-    let n = racks.len();
-
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(n).await;
-    let voters: Vec<(u64, SocketAddr)> = (0..n)
-        .map(|i| (u64::try_from(i + 1).unwrap(), controller_addrs[i]))
-        .collect();
-
-    let with_rack = |i: usize, dir: &std::path::Path| -> BrokerConfig {
-        let mut cfg = support::broker_config(
-            i,
-            &client_addrs,
-            &controller_addrs,
-            &voters,
-            dir,
-            BootstrapMode::Bootstrap,
-        );
-        cfg.rack = Some(racks[i].to_string());
+    // Reuse the shared race-free static-voter bootstrap (it holds the ephemeral
+    // listeners live until each broker adopts them, so there is no
+    // bind-and-drop TOCTOU window for a concurrently running test binary to
+    // steal a just-released port — the `AddrInUse` flake). Layer the KIP-392
+    // per-broker config (distinct rack + `RackAware` selector) via the
+    // customizer hook.
+    let racks: Vec<String> = racks.iter().map(|r| (*r).to_string()).collect();
+    support::start_n_node_with(u64::try_from(racks.len()).unwrap(), |i, cfg| {
+        cfg.rack = Some(racks[i].clone());
         cfg.replica_selector = ReplicaSelectorKind::RackAware;
-        cfg
-    };
-
-    // Start all n brokers statically; they elect among themselves over the wire.
-    let mut handles = Vec::with_capacity(n);
-    let mut metas: Vec<(TempDir, BrokerConfig)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let dir = TempDir::new().unwrap();
-        let cfg = with_rack(i, dir.path());
-        let cfg_clone = cfg.clone();
-        handles.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
-        metas.push((dir, cfg));
-    }
-
-    let mut out = Vec::with_capacity(n);
-    for (h, (dir, cfg)) in handles.into_iter().zip(metas) {
-        let broker = h.await.expect("broker spawn").expect("static broker start");
-        out.push((broker, cfg, dir));
-    }
-    out
+    })
+    .await
+    .expect("rack-aware static cluster start")
 }
 
 async fn wait_for_partition_on_all(

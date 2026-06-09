@@ -22,10 +22,17 @@ mod support;
 async fn broker_only_node_observes_and_forwards() {
     support::init_tracing();
 
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(2).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(2).await;
     // Only the controller (node 1) is a voter. The broker-only node (node 2)
     // observes via fetch and must never appear in the quorum.
     let voters = vec![(1u64, controller_addrs[0])];
+
+    // Unpack held listeners for each node up front, before any broker starts.
+    let mut data_ls = client_listeners.into_iter();
+    let mut ctrl_ls = controller_listeners.into_iter();
+    let (data0, controller0) = (data_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (data1, controller1) = (data_ls.next().unwrap(), ctrl_ls.next().unwrap());
 
     // Controller-only node (node 1): bootstrap singleton, elects itself.
     let ctrl_dir = TempDir::new().unwrap();
@@ -38,7 +45,7 @@ async fn broker_only_node_observes_and_forwards() {
         BootstrapMode::Bootstrap,
     );
     ctrl_cfg.roles = vec![NodeRole::Controller];
-    let controller = Broker::start(ctrl_cfg)
+    let controller = Broker::start_with_listeners(ctrl_cfg, Some(controller0), Some(data0))
         .await
         .expect("controller-only start");
 
@@ -65,7 +72,9 @@ async fn broker_only_node_observes_and_forwards() {
         BootstrapMode::Join,
     );
     broker_cfg.roles = vec![NodeRole::Broker];
-    let broker_only = Broker::start(broker_cfg).await.expect("broker-only start");
+    let broker_only = Broker::start_with_listeners(broker_cfg, Some(controller1), Some(data1))
+        .await
+        .expect("broker-only start");
     let broker_only_id = broker_only.node_id();
 
     // The broker-only node self-registers (it IS a broker) by forwarding the

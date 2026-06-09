@@ -1658,6 +1658,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-kafka-tap"
+version = "0.3.3"
+
+[[package]]
 name = "crabka-log"
 version = "0.3.4"
 dependencies = [
@@ -1760,6 +1764,7 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crabka-compression",
+ "crabka-kafka-tap",
  "crc32c",
  "hex",
  "proptest",
@@ -1888,6 +1893,7 @@ dependencies = [
  "crabka-remote-storage",
  "crabka-security",
  "futures-util",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-util",

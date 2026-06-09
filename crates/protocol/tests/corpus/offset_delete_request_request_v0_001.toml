@@ -1,0 +1,6 @@
+api_key = 47
+version = 0
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "OffsetDeleteRequest v0 oracle-synthesized (not realistically client-emitted)"

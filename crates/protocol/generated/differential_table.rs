@@ -5306,3 +5306,2506 @@ pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
         _ => panic!("unknown message in default_json_for: {name}"),
     }
 }
+
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
+    use crabka_protocol::Decode;
+    match name {
+        "AddOffsetsToTxnRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AddOffsetsToTxnResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AddPartitionsToTxnRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AddPartitionsToTxnResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AddRaftVoterRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AddRaftVoterResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AllocateProducerIdsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::allocate_producer_ids_request::AllocateProducerIdsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AllocateProducerIdsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::allocate_producer_ids_response::AllocateProducerIdsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterClientQuotasRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_client_quotas_request::AlterClientQuotasRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterClientQuotasResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterConfigsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_configs_request::AlterConfigsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterConfigsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterPartitionReassignmentsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterPartitionReassignmentsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterPartitionRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterPartitionResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterReplicaLogDirsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterReplicaLogDirsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterShareGroupOffsetsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterShareGroupOffsetsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterUserScramCredentialsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AlterUserScramCredentialsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ApiVersionsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ApiVersionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::api_versions_response::ApiVersionsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AssignReplicasToDirsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "AssignReplicasToDirsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BeginQuorumEpochRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BeginQuorumEpochResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BrokerHeartbeatRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BrokerHeartbeatResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BrokerRegistrationRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::broker_registration_request::BrokerRegistrationRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "BrokerRegistrationResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::broker_registration_response::BrokerRegistrationResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ConsumerGroupDescribeRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ConsumerGroupDescribeResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ConsumerGroupHeartbeatRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ConsumerGroupHeartbeatResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ControllerRegistrationRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::controller_registration_request::ControllerRegistrationRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ControllerRegistrationResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::controller_registration_response::ControllerRegistrationResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateAclsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_acls_request::CreateAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateAclsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_acls_response::CreateAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateDelegationTokenRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateDelegationTokenResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreatePartitionsRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreatePartitionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_partitions_response::CreatePartitionsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateTopicsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_topics_request::CreateTopicsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "CreateTopicsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::create_topics_response::CreateTopicsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteAclsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteAclsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_acls_response::DeleteAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteGroupsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteGroupsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteRecordsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteRecordsResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteShareGroupOffsetsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteShareGroupOffsetsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteShareGroupStateRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_share_group_state_request::DeleteShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteShareGroupStateResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_share_group_state_response::DeleteShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteTopicsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DeleteTopicsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeAclsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeAclsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeClientQuotasRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_client_quotas_request::DescribeClientQuotasRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeClientQuotasResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_client_quotas_response::DescribeClientQuotasResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeClusterRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeClusterResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeConfigsRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeConfigsResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeDelegationTokenRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeDelegationTokenResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_delegation_token_response::DescribeDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeGroupsRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeGroupsResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeLogDirsRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeLogDirsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_log_dirs_response::DescribeLogDirsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeProducersRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_producers_request::DescribeProducersRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeProducersResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_producers_response::DescribeProducersResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeQuorumRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeQuorumResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeShareGroupOffsetsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeShareGroupOffsetsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeTopicPartitionsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeTopicPartitionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeTransactionsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeTransactionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_transactions_response::DescribeTransactionsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeUserScramCredentialsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "DescribeUserScramCredentialsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ElectLeadersRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ElectLeadersResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EndQuorumEpochRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EndQuorumEpochResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EndTxnRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::end_txn_request::EndTxnRequest::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EndTxnResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::end_txn_response::EndTxnResponse::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EnvelopeRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::envelope_request::EnvelopeRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "EnvelopeResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::envelope_response::EnvelopeResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ExpireDelegationTokenRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ExpireDelegationTokenResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FetchRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::fetch_request::FetchRequest::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FetchResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::fetch_response::FetchResponse::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FetchSnapshotRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FetchSnapshotResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FindCoordinatorRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "FindCoordinatorResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "GetTelemetrySubscriptionsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "GetTelemetrySubscriptionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "HeartbeatRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::heartbeat_request::HeartbeatRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "HeartbeatResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::heartbeat_response::HeartbeatResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "IncrementalAlterConfigsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "IncrementalAlterConfigsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "InitProducerIdRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "InitProducerIdResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "InitializeShareGroupStateRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "InitializeShareGroupStateResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::initialize_share_group_state_response::InitializeShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "JoinGroupRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::join_group_request::JoinGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "JoinGroupResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::join_group_response::JoinGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "LeaveGroupRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::leave_group_request::LeaveGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "LeaveGroupResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::leave_group_response::LeaveGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListConfigResourcesRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListConfigResourcesResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_config_resources_response::ListConfigResourcesResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListGroupsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_groups_request::ListGroupsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListGroupsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_groups_response::ListGroupsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListOffsetsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_offsets_request::ListOffsetsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListOffsetsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_offsets_response::ListOffsetsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListPartitionReassignmentsRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListPartitionReassignmentsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListTransactionsRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ListTransactionsResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::list_transactions_response::ListTransactionsResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "MetadataRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::metadata_request::MetadataRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "MetadataResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::metadata_response::MetadataResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetCommitRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_commit_request::OffsetCommitRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetCommitResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetDeleteRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_delete_request::OffsetDeleteRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetDeleteResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetFetchRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetFetchResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_fetch_response::OffsetFetchResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetForLeaderEpochRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "OffsetForLeaderEpochResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ProduceRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::produce_request::ProduceRequest::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ProduceResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::produce_response::ProduceResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "PushTelemetryRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "PushTelemetryResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ReadShareGroupStateRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::read_share_group_state_request::ReadShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ReadShareGroupStateResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::read_share_group_state_response::ReadShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ReadShareGroupStateSummaryRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::read_share_group_state_summary_request::ReadShareGroupStateSummaryRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ReadShareGroupStateSummaryResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "RemoveRaftVoterRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "RemoveRaftVoterResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::remove_raft_voter_response::RemoveRaftVoterResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "RenewDelegationTokenRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "RenewDelegationTokenResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "RequestHeader" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ResponseHeader" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SaslAuthenticateRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SaslAuthenticateResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SaslHandshakeRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SaslHandshakeResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareAcknowledgeRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareAcknowledgeResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareFetchRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_fetch_request::ShareFetchRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareFetchResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_fetch_response::ShareFetchResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareGroupDescribeRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareGroupDescribeResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_group_describe_response::ShareGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareGroupHeartbeatRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "ShareGroupHeartbeatResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::share_group_heartbeat_response::ShareGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "StreamsGroupDescribeRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::streams_group_describe_request::StreamsGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "StreamsGroupDescribeResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::streams_group_describe_response::StreamsGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "StreamsGroupHeartbeatRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "StreamsGroupHeartbeatResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SyncGroupRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::sync_group_request::SyncGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "SyncGroupResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::sync_group_response::SyncGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "TxnOffsetCommitRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "TxnOffsetCommitResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UnregisterBrokerRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UnregisterBrokerResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::unregister_broker_response::UnregisterBrokerResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UpdateFeaturesRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UpdateFeaturesResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UpdateRaftVoterRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "UpdateRaftVoterResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::update_raft_voter_response::UpdateRaftVoterResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "VoteRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::vote_request::VoteRequest::decode(&mut cur, version)
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "VoteResponse" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::vote_response::VoteResponse::decode(&mut cur, version)
+                    .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "WriteShareGroupStateRequest" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::write_share_group_state_request::WriteShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "WriteShareGroupStateResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "WriteTxnMarkersRequest" => {
+            let mut cur = bytes;
+            let msg =
+                crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        "WriteTxnMarkersResponse" => {
+            let mut cur = bytes;
+            let msg = crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty());
+            let mut buf = BytesMut::new();
+            msg.encode(&mut buf, version).unwrap();
+            buf.to_vec()
+        }
+        _ => panic!("unknown message in roundtrip: {name}"),
+    }
+}
+
+#[must_use]
+#[allow(clippy::absurd_extreme_comparisons)]
+#[allow(clippy::match_same_arms)]
+#[allow(clippy::too_many_lines)]
+pub fn request_header_version(name: &str, version: i16) -> i16 {
+    match name {
+        "ControlledShutdownRequest" if version == 0 => 0,
+        "AddOffsetsToTxnRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "AddPartitionsToTxnRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "AddRaftVoterRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "AllocateProducerIdsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterClientQuotasRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterConfigsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterPartitionReassignmentsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterPartitionRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterReplicaLogDirsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterShareGroupOffsetsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "AlterUserScramCredentialsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ApiVersionsRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "AssignReplicasToDirsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "BeginQuorumEpochRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        "BrokerHeartbeatRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "BrokerRegistrationRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ConsumerGroupDescribeRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ConsumerGroupHeartbeatRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ControllerRegistrationRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "CreateAclsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "CreateDelegationTokenRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "CreatePartitionsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "CreateTopicsRequest" => {
+            if version >= 5 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteAclsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteGroupsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteRecordsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteShareGroupOffsetsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteShareGroupStateRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DeleteTopicsRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeAclsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeClientQuotasRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeClusterRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeConfigsRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeDelegationTokenRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeGroupsRequest" => {
+            if version >= 5 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeLogDirsRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeProducersRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeQuorumRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeShareGroupOffsetsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeTopicPartitionsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeTransactionsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "DescribeUserScramCredentialsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ElectLeadersRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "EndQuorumEpochRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        "EndTxnRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "EnvelopeRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ExpireDelegationTokenRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "FetchRequest" => {
+            if version >= 12 {
+                2
+            } else {
+                1
+            }
+        }
+        "FetchSnapshotRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "FindCoordinatorRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "GetTelemetrySubscriptionsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "HeartbeatRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "IncrementalAlterConfigsRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        "InitProducerIdRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "InitializeShareGroupStateRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "JoinGroupRequest" => {
+            if version >= 6 {
+                2
+            } else {
+                1
+            }
+        }
+        "LeaveGroupRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "ListConfigResourcesRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ListGroupsRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "ListOffsetsRequest" => {
+            if version >= 6 {
+                2
+            } else {
+                1
+            }
+        }
+        "ListPartitionReassignmentsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ListTransactionsRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "MetadataRequest" => {
+            if version >= 9 {
+                2
+            } else {
+                1
+            }
+        }
+        "OffsetCommitRequest" => {
+            if version >= 8 {
+                2
+            } else {
+                1
+            }
+        }
+        "OffsetDeleteRequest" => {
+            if version >= 32767 {
+                2
+            } else {
+                1
+            }
+        }
+        "OffsetFetchRequest" => {
+            if version >= 6 {
+                2
+            } else {
+                1
+            }
+        }
+        "OffsetForLeaderEpochRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "ProduceRequest" => {
+            if version >= 9 {
+                2
+            } else {
+                1
+            }
+        }
+        "PushTelemetryRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ReadShareGroupStateRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ReadShareGroupStateSummaryRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "RemoveRaftVoterRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "RenewDelegationTokenRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "SaslAuthenticateRequest" => {
+            if version >= 2 {
+                2
+            } else {
+                1
+            }
+        }
+        "SaslHandshakeRequest" => {
+            if version >= 32767 {
+                2
+            } else {
+                1
+            }
+        }
+        "ShareAcknowledgeRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ShareFetchRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ShareGroupDescribeRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "ShareGroupHeartbeatRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "StreamsGroupDescribeRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "StreamsGroupHeartbeatRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "SyncGroupRequest" => {
+            if version >= 4 {
+                2
+            } else {
+                1
+            }
+        }
+        "TxnOffsetCommitRequest" => {
+            if version >= 3 {
+                2
+            } else {
+                1
+            }
+        }
+        "UnregisterBrokerRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "UpdateFeaturesRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "UpdateRaftVoterRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "VoteRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "WriteShareGroupStateRequest" => {
+            if version >= 0 {
+                2
+            } else {
+                1
+            }
+        }
+        "WriteTxnMarkersRequest" => {
+            if version >= 1 {
+                2
+            } else {
+                1
+            }
+        }
+        _ => panic!("unknown request in request_header_version: {name}"),
+    }
+}
+
+#[must_use]
+#[allow(clippy::absurd_extreme_comparisons)]
+#[allow(clippy::match_same_arms)]
+#[allow(clippy::too_many_lines)]
+pub fn response_header_version(name: &str, version: i16) -> i16 {
+    match name {
+        "ApiVersionsResponse" => 0,
+        "AddOffsetsToTxnResponse" => i16::from(version >= 3),
+        "AddPartitionsToTxnResponse" => i16::from(version >= 3),
+        "AddRaftVoterResponse" => i16::from(version >= 0),
+        "AllocateProducerIdsResponse" => i16::from(version >= 0),
+        "AlterClientQuotasResponse" => i16::from(version >= 1),
+        "AlterConfigsResponse" => i16::from(version >= 2),
+        "AlterPartitionReassignmentsResponse" => i16::from(version >= 0),
+        "AlterPartitionResponse" => i16::from(version >= 0),
+        "AlterReplicaLogDirsResponse" => i16::from(version >= 2),
+        "AlterShareGroupOffsetsResponse" => i16::from(version >= 0),
+        "AlterUserScramCredentialsResponse" => i16::from(version >= 0),
+        "AssignReplicasToDirsResponse" => i16::from(version >= 0),
+        "BeginQuorumEpochResponse" => i16::from(version >= 1),
+        "BrokerHeartbeatResponse" => i16::from(version >= 0),
+        "BrokerRegistrationResponse" => i16::from(version >= 0),
+        "ConsumerGroupDescribeResponse" => i16::from(version >= 0),
+        "ConsumerGroupHeartbeatResponse" => i16::from(version >= 0),
+        "ControllerRegistrationResponse" => i16::from(version >= 0),
+        "CreateAclsResponse" => i16::from(version >= 2),
+        "CreateDelegationTokenResponse" => i16::from(version >= 2),
+        "CreatePartitionsResponse" => i16::from(version >= 2),
+        "CreateTopicsResponse" => i16::from(version >= 5),
+        "DeleteAclsResponse" => i16::from(version >= 2),
+        "DeleteGroupsResponse" => i16::from(version >= 2),
+        "DeleteRecordsResponse" => i16::from(version >= 2),
+        "DeleteShareGroupOffsetsResponse" => i16::from(version >= 0),
+        "DeleteShareGroupStateResponse" => i16::from(version >= 0),
+        "DeleteTopicsResponse" => i16::from(version >= 4),
+        "DescribeAclsResponse" => i16::from(version >= 2),
+        "DescribeClientQuotasResponse" => i16::from(version >= 1),
+        "DescribeClusterResponse" => i16::from(version >= 0),
+        "DescribeConfigsResponse" => i16::from(version >= 4),
+        "DescribeDelegationTokenResponse" => i16::from(version >= 2),
+        "DescribeGroupsResponse" => i16::from(version >= 5),
+        "DescribeLogDirsResponse" => i16::from(version >= 2),
+        "DescribeProducersResponse" => i16::from(version >= 0),
+        "DescribeQuorumResponse" => i16::from(version >= 0),
+        "DescribeShareGroupOffsetsResponse" => i16::from(version >= 0),
+        "DescribeTopicPartitionsResponse" => i16::from(version >= 0),
+        "DescribeTransactionsResponse" => i16::from(version >= 0),
+        "DescribeUserScramCredentialsResponse" => i16::from(version >= 0),
+        "ElectLeadersResponse" => i16::from(version >= 2),
+        "EndQuorumEpochResponse" => i16::from(version >= 1),
+        "EndTxnResponse" => i16::from(version >= 3),
+        "EnvelopeResponse" => i16::from(version >= 0),
+        "ExpireDelegationTokenResponse" => i16::from(version >= 2),
+        "FetchResponse" => i16::from(version >= 12),
+        "FetchSnapshotResponse" => i16::from(version >= 0),
+        "FindCoordinatorResponse" => i16::from(version >= 3),
+        "GetTelemetrySubscriptionsResponse" => i16::from(version >= 0),
+        "HeartbeatResponse" => i16::from(version >= 4),
+        "IncrementalAlterConfigsResponse" => i16::from(version >= 1),
+        "InitProducerIdResponse" => i16::from(version >= 2),
+        "InitializeShareGroupStateResponse" => i16::from(version >= 0),
+        "JoinGroupResponse" => i16::from(version >= 6),
+        "LeaveGroupResponse" => i16::from(version >= 4),
+        "ListConfigResourcesResponse" => i16::from(version >= 0),
+        "ListGroupsResponse" => i16::from(version >= 3),
+        "ListOffsetsResponse" => i16::from(version >= 6),
+        "ListPartitionReassignmentsResponse" => i16::from(version >= 0),
+        "ListTransactionsResponse" => i16::from(version >= 0),
+        "MetadataResponse" => i16::from(version >= 9),
+        "OffsetCommitResponse" => i16::from(version >= 8),
+        "OffsetDeleteResponse" => i16::from(version >= 32767),
+        "OffsetFetchResponse" => i16::from(version >= 6),
+        "OffsetForLeaderEpochResponse" => i16::from(version >= 4),
+        "ProduceResponse" => i16::from(version >= 9),
+        "PushTelemetryResponse" => i16::from(version >= 0),
+        "ReadShareGroupStateResponse" => i16::from(version >= 0),
+        "ReadShareGroupStateSummaryResponse" => i16::from(version >= 0),
+        "RemoveRaftVoterResponse" => i16::from(version >= 0),
+        "RenewDelegationTokenResponse" => i16::from(version >= 2),
+        "SaslAuthenticateResponse" => i16::from(version >= 2),
+        "SaslHandshakeResponse" => i16::from(version >= 32767),
+        "ShareAcknowledgeResponse" => i16::from(version >= 0),
+        "ShareFetchResponse" => i16::from(version >= 0),
+        "ShareGroupDescribeResponse" => i16::from(version >= 0),
+        "ShareGroupHeartbeatResponse" => i16::from(version >= 0),
+        "StreamsGroupDescribeResponse" => i16::from(version >= 0),
+        "StreamsGroupHeartbeatResponse" => i16::from(version >= 0),
+        "SyncGroupResponse" => i16::from(version >= 4),
+        "TxnOffsetCommitResponse" => i16::from(version >= 3),
+        "UnregisterBrokerResponse" => i16::from(version >= 0),
+        "UpdateFeaturesResponse" => i16::from(version >= 0),
+        "UpdateRaftVoterResponse" => i16::from(version >= 0),
+        "VoteResponse" => i16::from(version >= 0),
+        "WriteShareGroupStateResponse" => i16::from(version >= 0),
+        "WriteTxnMarkersResponse" => i16::from(version >= 1),
+        _ => panic!("unknown response in response_header_version: {name}"),
+    }
+}
+
+/// Decode and discard the request/response header from a full frame body,
+/// returning the remaining message bytes.
+#[must_use]
+pub fn strip_frame_header(name: &str, version: i16, is_request: bool, frame: &[u8]) -> Vec<u8> {
+    use crabka_protocol::Decode;
+    let mut cur = frame;
+    if is_request {
+        let hv = request_header_version(name, version);
+        crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, hv).unwrap();
+    } else {
+        let hv = response_header_version(name, version);
+        crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, hv).unwrap();
+    }
+    cur.to_vec()
+}

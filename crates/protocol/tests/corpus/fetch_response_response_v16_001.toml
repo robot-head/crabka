@@ -1,0 +1,6 @@
+api_key = 1
+version = 16
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "FetchResponse v16 oracle-synthesized (not realistically client-emitted)"

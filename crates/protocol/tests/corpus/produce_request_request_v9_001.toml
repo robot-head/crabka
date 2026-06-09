@@ -1,0 +1,6 @@
+api_key = 0
+version = 9
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "ProduceRequest v9 oracle-synthesized (not realistically client-emitted)"

@@ -95,7 +95,8 @@ async fn start_three_tiered_brokers() -> (
     // the controller image before the listener binds (a `:0` would register
     // port 0 and break inter-broker replication); controller ports go into the
     // static voter set so peers can dial each other.
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(3).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(3).await;
 
     let log_dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().expect("log dir")).collect();
     // **Shared** remote dir: all brokers point at the same Local object store.
@@ -145,9 +146,23 @@ async fn start_three_tiered_brokers() -> (
     // Static cold-boot: all 3 start concurrently (sequential would deadlock —
     // a leader needs a majority of the static voter set up).
     let (cfg0, cfg1, cfg2) = (cfgs.remove(0), cfgs.remove(0), cfgs.remove(0));
-    let j0 = tokio::spawn(async move { Broker::start(cfg0).await });
-    let j1 = tokio::spawn(async move { Broker::start(cfg1).await });
-    let j2 = tokio::spawn(async move { Broker::start(cfg2).await });
+    let mut client_ls = client_listeners.into_iter();
+    let mut ctrl_ls = controller_listeners.into_iter();
+    let (cl0, ctl0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (cl1, ctl1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (cl2, ctl2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let j0 =
+        tokio::spawn(
+            async move { Broker::start_with_listeners(cfg0, Some(ctl0), Some(cl0)).await },
+        );
+    let j1 =
+        tokio::spawn(
+            async move { Broker::start_with_listeners(cfg1, Some(ctl1), Some(cl1)).await },
+        );
+    let j2 =
+        tokio::spawn(
+            async move { Broker::start_with_listeners(cfg2, Some(ctl2), Some(cl2)).await },
+        );
     let b1 = j0.await.expect("b1 spawn join").expect("b1 start");
     let b2 = j1.await.expect("b2 spawn join").expect("b2 start");
     let b3 = j2.await.expect("b3 spawn join").expect("b3 start");
