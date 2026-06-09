@@ -30,9 +30,9 @@ use crate::processor::serde::{DefaultSerde, Serde};
 use crate::topology::NodeHandle;
 
 /// Which window flavor the terminal aggregation uses. Carries the window spec;
-/// the shared init + (session) merger live alongside in [`CogroupSpec`].
-// `dead_code`: the windowed variants are only constructed by the windowed
-// cogroup terminals use all four variants.
+/// the shared init + (session) merger live alongside in [`CogroupSpec`]. Each
+/// variant is constructed by its cogroup terminal (`aggregate`/`windowed_by*`)
+/// and matched in [`make_agg_for_input`].
 #[derive(Clone)]
 pub(crate) enum CogroupKind {
     NonWindowed,
@@ -65,7 +65,6 @@ impl<K, VOut> Clone for CogroupSpec<K, VOut> {
 /// per-window aggregate processor wired to `parent_name`, named `proc_name`,
 /// pointing at `store_name`, and returns the lowered processor's handle name.
 type AggNodeThunk = Box<dyn FnOnce(&mut LowerState, String, String, String) -> String + Send>;
-#[allow(dead_code)]
 pub(crate) type MakeAggFn<K, VOut> = Box<dyn FnOnce(CogroupSpec<K, VOut>) -> AggNodeThunk + Send>;
 
 /// One cogrouped input: its grouped lineage plus the erased per-window aggregate

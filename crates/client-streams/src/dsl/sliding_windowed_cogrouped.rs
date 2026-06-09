@@ -58,6 +58,11 @@ where
     ///
     /// Store retention uses the KIP-450 formula: `size = 2 * timeDifferenceMs`
     /// (matching `sliding_windowed_kgrouped.rs::lower_aggregate`).
+    ///
+    /// Note: the returned table carries no suppress factory, so calling
+    /// `.suppress(...)` on it fails at topology-build time. Suppress on windowed
+    /// cogroup outputs is a deferred follow-up (emit semantics are emit-on-update
+    /// across the cogroup surface, per the KIP-150 slice scope).
     pub fn aggregate_explicit<KS, VS, I>(
         self,
         init: I,

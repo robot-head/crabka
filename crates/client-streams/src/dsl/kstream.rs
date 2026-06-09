@@ -58,7 +58,8 @@ pub struct KStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerd
     /// in those cases the stream no longer corresponds to a single original source
     /// topic. [`join`](Self::join) reads this as the stream-side copartition group
     /// member when the key is unchanged (otherwise it repartitions and uses the
-    /// repartition topic as the member).
+    /// repartition topic as the member). `group_by_key` likewise propagates it so
+    /// a downstream cogroup can register its inputs' copartition group.
     pub(crate) source_topic: Option<String>,
     pub(crate) key_serde: KS,
     pub(crate) value_serde: VS,

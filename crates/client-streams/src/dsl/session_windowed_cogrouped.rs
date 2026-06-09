@@ -63,6 +63,11 @@ where
     ///
     /// The `merger` combines two session aggregates when sessions are merged
     /// (required for session windows — no default merger exists).
+    ///
+    /// Note: the returned table carries no suppress factory, so calling
+    /// `.suppress(...)` on it fails at topology-build time. Suppress on windowed
+    /// cogroup outputs is a deferred follow-up (emit semantics are emit-on-update
+    /// across the cogroup surface, per the KIP-150 slice scope).
     pub fn aggregate_explicit<KS, VS, I, M>(
         self,
         init: I,
