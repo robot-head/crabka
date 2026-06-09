@@ -244,6 +244,12 @@ impl Topology {
         } = consumed.into();
         let name: String = name.into();
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
+        // Let each serde pre-register any per-topic state (e.g. a schema-registry
+        // subject) so membership pre-warm can resolve ids before processing.
+        for t in &topics {
+            key_serde.prepare(t, crate::processor::serde::SerdeRole::Key);
+            value_serde.prepare(t, crate::processor::serde::SerdeRole::Value);
+        }
         let r = self.reg.add_source(&name, topics.clone());
         self.record(r);
 
@@ -370,6 +376,9 @@ impl Topology {
         } = produced.into();
         let name: String = name.into();
         let topic: String = topic.into();
+        // Pre-register per-topic serde state (e.g. schema-registry subject).
+        key_serde.prepare(&topic, crate::processor::serde::SerdeRole::Key);
+        value_serde.prepare(&topic, crate::processor::serde::SerdeRole::Value);
         let preds: Vec<String> = parents
             .into_iter()
             .map(|p| p.borrow().name.clone())

@@ -12,11 +12,12 @@ use serde::de::DeserializeOwned;
 
 use crate::cache::SchemaCache;
 use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer};
-use crate::subject::SchemaKind;
+use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
+use crate::subject::{Role, SchemaKind};
 use crate::wire;
 
-/// Avro serializer/deserializer for `T: AvroSchema`, bound to a subject.
+/// Avro serializer/deserializer for `T: AvroSchema`, bound to a key/value role.
+/// The subject is derived from the topic at (de)serialize time.
 pub struct AvroSerde<T> {
     binding: Binding,
     reader_schema: Schema,
@@ -36,19 +37,44 @@ impl<T> Clone for AvroSerde<T> {
 }
 
 impl<T: AvroSchema> AvroSerde<T> {
-    /// Bind `T`'s derived schema to `subject` and intern it for pre-warm.
-    pub fn new(cache: &Arc<SchemaCache>, subject: impl Into<String>) -> Self {
-        let subject = subject.into();
+    fn make(cache: &Arc<SchemaCache>, role: Role) -> Self {
         let reader_schema = T::get_schema();
-        cache.intern(&subject, SchemaKind::Avro, &reader_schema.canonical_form());
         Self {
             binding: Binding {
                 cache: Arc::clone(cache),
-                subject,
+                role,
+                kind: SchemaKind::Avro,
+                schema: reader_schema.canonical_form(),
             },
             reader_schema,
             _marker: PhantomData,
         }
+    }
+
+    /// An Avro serde for record **values** (`<topic>-value`).
+    pub fn value(cache: &Arc<SchemaCache>) -> Self {
+        Self::make(cache, Role::Value)
+    }
+
+    /// An Avro serde for record **keys** (`<topic>-key`).
+    pub fn key(cache: &Arc<SchemaCache>) -> Self {
+        Self::make(cache, Role::Key)
+    }
+}
+
+/// A value serde over the process [`default_registry`](crate::default_registry)
+/// — enables `T` to declare a default schema serde for `add_source`/`add_sink`.
+impl<T: AvroSchema> Default for AvroSerde<T> {
+    fn default() -> Self {
+        let cache = crate::default_registry()
+            .expect("schema-serde: call set_default_registry(cache) before a default AvroSerde");
+        Self::value(&cache)
+    }
+}
+
+impl<T: Send + Sync + 'static> SchemaSubject for AvroSerde<T> {
+    fn register_subject(&self, topic: &str) {
+        self.binding.register(topic);
     }
 }
 
@@ -56,8 +82,8 @@ impl<T> SchemaSerializer<T> for AvroSerde<T>
 where
     T: Serialize + AvroSchema + Send + Sync + 'static,
 {
-    fn serialize(&self, value: &T) -> Result<Bytes, SchemaSerdeError> {
-        let id = self.binding.id()?;
+    fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, SchemaSerdeError> {
+        let id = self.binding.id(topic)?;
         let avro_value = to_value(value).map_err(|e| SchemaSerdeError::Serialize(e.to_string()))?;
         let body = to_avro_datum(&self.reader_schema, avro_value)
             .map_err(|e| SchemaSerdeError::Serialize(e.to_string()))?;
@@ -69,7 +95,7 @@ impl<T> SchemaDeserializer<T> for AvroSerde<T>
 where
     T: DeserializeOwned + AvroSchema + Send + Sync + 'static,
 {
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
         let writer_text = self.binding.cache.writer_schema(id)?;
         let writer_schema =
@@ -99,7 +125,8 @@ mod tests {
     #[test]
     fn round_trips_with_seeded_id() {
         let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
-        let serde = AvroSerde::<Order>::new(&cache, "orders-value");
+        let serde = AvroSerde::<Order>::value(&cache);
+        serde.register_subject("orders");
         cache.seed_subject_id("orders-value", 11);
         cache.seed_writer_schema(11, Order::get_schema().canonical_form());
 
@@ -107,10 +134,10 @@ mod tests {
             id: "o-1".into(),
             total: 9.5,
         };
-        let framed = serde.serialize(&order).unwrap();
+        let framed = serde.serialize("orders", &order).unwrap();
         check!(framed[0] == 0x00);
         check!(u32::from_be_bytes([framed[1], framed[2], framed[3], framed[4]]) == 11);
-        let back: Order = serde.deserialize(&framed).unwrap();
+        let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
     }
 }

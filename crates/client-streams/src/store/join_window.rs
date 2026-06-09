@@ -115,10 +115,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> JoinWindowStore<K, V>
     for JoinWindowBytesStore<K, V>
 {
     async fn put(&mut self, key: K, timestamp: i64, value: V) {
-        let kb = self.key_serde.serialize(&key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let seq = self.next_seqnum();
         let sk = store_key(&kb, timestamp, seq);
-        let raw = self.value_serde.serialize(&value); // RAW — no ValueAndTimestamp wrap
+        let raw = self.value_serde.serialize(&self.changelog_topic, &value); // RAW — no ValueAndTimestamp wrap
         self.backend.put(sk.clone(), raw.clone()).await;
         if self.logging {
             self.changelog.push((sk, Some(raw)));
@@ -126,7 +126,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> JoinWindowStore<K, V>
     }
 
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         // Clamp to 0: negative timestamps encode to 0xFF… in BE, which sorts
         // after all positive entries in the lexicographic BTreeMap backend.
         // Kafka's segment-scoped range fetch does the same (`Math.max(0, timeFrom)`).
@@ -141,7 +141,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> JoinWindowStore<K, V>
             out.push((
                 window_start_of(&k),
                 self.value_serde
-                    .deserialize(&raw)
+                    .deserialize(&self.changelog_topic, &raw)
                     .expect("join window value deserialize"),
             ));
         }

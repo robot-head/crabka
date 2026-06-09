@@ -174,15 +174,15 @@ where
     K: Send + Sync + 'static,
     KS: Serde<K>,
 {
-    fn serialize(&self, value: &Windowed<K>) -> Bytes {
-        let kb = self.inner.serialize(&value.key);
+    fn serialize(&self, topic: &str, value: &Windowed<K>) -> Bytes {
+        let kb = self.inner.serialize(topic, &value.key);
         let mut b = BytesMut::with_capacity(kb.len() + 16);
         b.extend_from_slice(&kb);
         b.put_i64(value.window.end);
         b.put_i64(value.window.start);
         b.freeze()
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<Windowed<K>, SerdeError> {
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<Windowed<K>, SerdeError> {
         if bytes.len() < 16 {
             return Err(SerdeError(format!(
                 "session key too short: {}",
@@ -190,7 +190,7 @@ where
             )));
         }
         let split = bytes.len() - 16;
-        let key = self.inner.deserialize(&bytes[..split])?;
+        let key = self.inner.deserialize(topic, &bytes[..split])?;
         let end = i64::from_be_bytes(bytes[split..split + 8].try_into().expect("8 bytes"));
         let start = i64::from_be_bytes(bytes[split + 8..].try_into().expect("8 bytes"));
         Ok(Windowed {
@@ -224,14 +224,14 @@ where
     K: Send + Sync + 'static,
     KS: Serde<K>,
 {
-    fn serialize(&self, value: &Windowed<K>) -> Bytes {
-        let kb = self.inner.serialize(&value.key);
+    fn serialize(&self, topic: &str, value: &Windowed<K>) -> Bytes {
+        let kb = self.inner.serialize(topic, &value.key);
         let mut b = BytesMut::with_capacity(kb.len() + 8);
         b.extend_from_slice(&kb);
         b.put_i64(value.window.start);
         b.freeze()
     }
-    fn deserialize(&self, bytes: &[u8]) -> Result<Windowed<K>, SerdeError> {
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<Windowed<K>, SerdeError> {
         if bytes.len() < 8 {
             return Err(SerdeError(format!(
                 "windowed key too short: {}",
@@ -239,7 +239,7 @@ where
             )));
         }
         let split = bytes.len() - 8;
-        let key = self.inner.deserialize(&bytes[..split])?;
+        let key = self.inner.deserialize(topic, &bytes[..split])?;
         let start = i64::from_be_bytes(bytes[split..].try_into().expect("8 bytes"));
         Ok(Windowed {
             key,
@@ -293,10 +293,10 @@ mod tests {
             key: "k".to_string(),
             window: Window { start: 20, end: 30 },
         };
-        let b = s.serialize(&wk);
+        let b = s.serialize("t", &wk);
         assert_eq!(b.len(), 9); // "k"(1) ‖ 20i64 BE(8)
         assert_eq!(&b[1..9], &20i64.to_be_bytes());
-        let back = s.deserialize(&b).unwrap();
+        let back = s.deserialize("t", &b).unwrap();
         assert_eq!(back.key, "k");
         assert_eq!(back.window, Window { start: 20, end: 30 }); // end = start + size
     }
@@ -317,11 +317,11 @@ mod tests {
             key: "k".to_string(),
             window: Window { start: 5, end: 9 },
         };
-        let b = s.serialize(&wk);
+        let b = s.serialize("t", &wk);
         assert_eq!(b.len(), 17); // "k"(1) ‖ end:8 ‖ start:8
         assert_eq!(&b[1..9], &9i64.to_be_bytes()); // end first
         assert_eq!(&b[9..17], &5i64.to_be_bytes()); // start second
-        let back = s.deserialize(&b).unwrap();
+        let back = s.deserialize("t", &b).unwrap();
         assert_eq!(back.key, "k");
         assert_eq!(back.window, Window { start: 5, end: 9 });
     }

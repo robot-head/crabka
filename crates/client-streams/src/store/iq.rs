@@ -76,7 +76,7 @@ mod tests {
             s.put(k.into(), v).await;
         }
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        assert_eq!(q.iq_kv_get(b"b").await, Some(I64Serde.serialize(&2)));
+        assert_eq!(q.iq_kv_get(b"b").await, Some(I64Serde.serialize("t", &2)));
         assert_eq!(q.iq_kv_get(b"z").await, None);
         let r = q.iq_kv_range(b"a", b"b").await; // inclusive => a,b
         assert_eq!(r.len(), 2);
@@ -100,7 +100,7 @@ mod tests {
         let q: &dyn IqQueryable = s.as_iq().unwrap();
         assert_eq!(
             q.iq_window_fetch_single(b"k", 0).await,
-            Some(I64Serde.serialize(&10))
+            Some(I64Serde.serialize("t", &10))
         );
         assert_eq!(q.iq_window_fetch_single(b"k", 500).await, None);
         let r = q.iq_window_fetch(b"k", 0, 1000).await;

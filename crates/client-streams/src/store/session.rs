@@ -144,7 +144,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
         earliest_end: i64,
         latest_start: i64,
     ) -> Vec<(i64, i64, V)> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         // Lower bound: smallest qualifying end (clamped to 0 — stored ends are
         // non-negative epoch millis; a negative earliest_end means "all qualify").
         let lo = session_key(&kb, 0, earliest_end.max(0));
@@ -162,7 +162,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
                     start,
                     end,
                     self.value_serde
-                        .deserialize(&raw)
+                        .deserialize(&self.changelog_topic, &raw)
                         .expect("session value deserialize"),
                 ));
             }
@@ -171,9 +171,9 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
     }
 
     async fn put(&mut self, key: K, start: i64, end: i64, value: V) {
-        let kb = self.key_serde.serialize(&key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let sk = session_key(&kb, start, end);
-        let raw = self.value_serde.serialize(&value);
+        let raw = self.value_serde.serialize(&self.changelog_topic, &value);
         self.backend.put(sk.clone(), raw.clone()).await;
         if self.logging {
             self.changelog.push((sk, Some(raw)));
@@ -181,7 +181,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
     }
 
     async fn remove(&mut self, key: &K, start: i64, end: i64) {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let sk = session_key(&kb, start, end);
         self.backend.delete(&sk).await;
         if self.logging {

@@ -13,7 +13,7 @@ pub mod wire;
 
 pub mod format;
 
-pub use cache::{CacheConfig, RegisterMode, SchemaCache};
+pub use cache::{CacheConfig, RegisterMode, SchemaCache, default_registry, set_default_registry};
 pub use error::SchemaSerdeError;
 pub use registry::RegistryClient;
 pub use subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};

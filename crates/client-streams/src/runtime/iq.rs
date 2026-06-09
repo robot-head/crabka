@@ -186,13 +186,13 @@ mod tests {
             vec![q],
             StoreKind::KeyValue,
             &IqOp::KvGet {
-                key: StringSerde.serialize(&"x".to_string()),
+                key: StringSerde.serialize("t", &"x".to_string()),
             },
             "c",
             true,
         )
         .await;
-        assert_eq!(got, Ok(IqPayload::Value(Some(I64Serde.serialize(&7)))));
+        assert_eq!(got, Ok(IqPayload::Value(Some(I64Serde.serialize("t", &7)))));
         assert!(matches!(
             answer_iq(vec![q], StoreKind::Window, &IqOp::Validate, "c", true).await,
             Err(IqError::WrongStoreKind { .. })

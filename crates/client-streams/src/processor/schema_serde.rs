@@ -4,11 +4,11 @@
 
 use bytes::Bytes;
 use crabka_schema_serde::SchemaCache;
-use crabka_schema_serde::format::{SchemaDeserializer, SchemaSerializer};
+use crabka_schema_serde::format::{SchemaDeserializer, SchemaSerializer, SchemaSubject};
 
 use crate::error::StreamsClientError;
 use crate::membership::SchemaPrewarm;
-use crate::processor::serde::{Serde, SerdeError};
+use crate::processor::serde::{Serde, SerdeAssociate, SerdeError, SerdeRole};
 
 /// Wraps a schema-serde serializer+deserializer pair as a Streams `Serde<T>`.
 pub struct SchemaSerde<T, S> {
@@ -37,23 +37,42 @@ impl<T, S> SchemaSerde<T, S> {
     }
 }
 
+/// Default wraps the inner serde's `Default` (e.g. `AvroSerde<T>::default()`,
+/// which reads the process default registry) — lets `T` declare a default
+/// schema serde via `DefaultSerde` for use with `add_source`/`add_sink`.
+impl<T, S: Default> Default for SchemaSerde<T, S> {
+    fn default() -> Self {
+        Self::new(S::default())
+    }
+}
+
+impl<T: Send + Sync + 'static, S> SerdeAssociate for SchemaSerde<T, S> {
+    type Target = T;
+}
+
 impl<T, S> Serde<T> for SchemaSerde<T, S>
 where
     T: Send + Sync + 'static,
-    S: SchemaSerializer<T> + SchemaDeserializer<T>,
+    S: SchemaSerializer<T> + SchemaDeserializer<T> + SchemaSubject,
 {
-    fn serialize(&self, value: &T) -> Bytes {
+    fn serialize(&self, topic: &str, value: &T) -> Bytes {
         // The Streams sink path is infallible; a missing id means pre-warm was
         // skipped — surface it loudly rather than writing a bad frame.
         self.inner
-            .serialize(value)
+            .serialize(topic, value)
             .expect("schema serialize failed (did membership prewarm run?)")
     }
 
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError> {
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SerdeError> {
         self.inner
-            .deserialize(bytes)
+            .deserialize(topic, bytes)
             .map_err(|e| SerdeError(e.to_string()))
+    }
+
+    fn prepare(&self, topic: &str, _role: SerdeRole) {
+        // The serde was constructed with its key/value role; intern its subject
+        // for `topic` so membership pre-warm resolves the id.
+        self.inner.register_subject(topic);
     }
 }
 

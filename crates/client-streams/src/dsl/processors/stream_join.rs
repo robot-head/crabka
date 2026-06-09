@@ -107,7 +107,7 @@ where
             .value_serde
             .as_ref()
             .expect("left/outer requires a value serde");
-        let kb = key_serde.serialize(&key);
+        let kb = key_serde.serialize(&os, &key);
         tracker.lock().expect("tracker lock").advance(t);
 
         // 3b) KIP-633: a matched OTHER-side record is no longer "non-joined" —
@@ -135,7 +135,7 @@ where
                 let out = (self.joiner)(&r.value, None);
                 ctx.forward(Record::new(Some(key.clone()), out, t));
             } else {
-                let raw = value_serde.serialize(&r.value);
+                let raw = value_serde.serialize(&os, &r.value);
                 let tagged = if self.side_left {
                     outer_value_left(&raw)
                 } else {
@@ -175,10 +175,10 @@ where
                 .map(|(k, v)| {
                     let (_is_left, raw) = outer_value_decode(&v);
                     let val = value_serde
-                        .deserialize(raw)
+                        .deserialize(&os, raw)
                         .expect("outer value deserialize");
                     let ekey = key_serde
-                        .deserialize(outer_key_key_bytes(&k))
+                        .deserialize(&os, outer_key_key_bytes(&k))
                         .expect("outer key deserialize");
                     (outer_key_ts(&k), k, val, ekey)
                 })

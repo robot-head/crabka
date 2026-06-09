@@ -27,13 +27,13 @@ fn protobuf_frame_matches_confluent_golden() {
         .expect("valid hex");
 
     let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
-    let serde = ProtobufSerde::<Order>::new(&cache, "orders-pb-value");
+    let serde = ProtobufSerde::<Order>::value(&cache);
     cache.seed_subject_id("orders-pb-value", 2);
 
     let order = Order {
         id: "o-1".into(),
         total: 9.5,
     };
-    let ours = serde.serialize(&order).unwrap();
+    let ours = serde.serialize("orders-pb", &order).unwrap();
     check!(ours.as_ref() == golden.as_slice());
 }

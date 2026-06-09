@@ -1019,14 +1019,14 @@ mod tests {
                 store: "counts".into(),
                 kind: StoreKind::KeyValue,
                 op: IqOp::KvGet {
-                    key: StringSerde.serialize(&"a".to_string()),
+                    key: StringSerde.serialize("t", &"a".to_string()),
                 },
                 reply,
             })
             .await;
         assert_eq!(
             rx.await.unwrap().unwrap(),
-            IqPayload::Value(Some(I64Serde.serialize(&7_i64)))
+            IqPayload::Value(Some(I64Serde.serialize("t", &7_i64)))
         );
 
         // empty thread (no tasks) -> RebalanceInProgress
@@ -1041,7 +1041,7 @@ mod tests {
                 store: "counts".into(),
                 kind: StoreKind::KeyValue,
                 op: IqOp::KvGet {
-                    key: StringSerde.serialize(&"a".to_string()),
+                    key: StringSerde.serialize("t", &"a".to_string()),
                 },
                 reply: reply2,
             })

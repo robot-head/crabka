@@ -69,6 +69,24 @@ impl std::fmt::Debug for SchemaCache {
     }
 }
 
+/// Process-wide default registry cache, read by the `Default` impls of the
+/// format serdes (so a type can declare a default schema serde without
+/// threading a cache to the call site — analogous to Confluent serdes reading
+/// `schema.registry.url` from config). Set once at application startup.
+static DEFAULT_REGISTRY: std::sync::OnceLock<Arc<SchemaCache>> = std::sync::OnceLock::new();
+
+/// Install the process-wide default registry cache (first call wins). Required
+/// before constructing any default (`Default::default()`) format serde.
+pub fn set_default_registry(cache: Arc<SchemaCache>) {
+    let _ = DEFAULT_REGISTRY.set(cache);
+}
+
+/// The process-wide default registry cache, if [`set_default_registry`] ran.
+#[must_use]
+pub fn default_registry() -> Option<Arc<SchemaCache>> {
+    DEFAULT_REGISTRY.get().cloned()
+}
+
 impl SchemaCache {
     /// Build a cache from a registry client and config, using `TopicNameStrategy`.
     #[must_use]

@@ -11,11 +11,12 @@ use serde::de::DeserializeOwned;
 
 use crate::cache::SchemaCache;
 use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer};
-use crate::subject::SchemaKind;
+use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
+use crate::subject::{Role, SchemaKind};
 use crate::wire;
 
-/// JSON serializer/deserializer for `T: JsonSchema`, bound to a subject.
+/// JSON serializer/deserializer for `T: JsonSchema`, bound to a key/value role;
+/// the subject is derived from the topic at call time.
 pub struct JsonSerde<T> {
     binding: Binding,
     validate: bool,
@@ -35,22 +36,47 @@ impl<T> Clone for JsonSerde<T> {
 }
 
 impl<T: JsonSchema> JsonSerde<T> {
-    /// Bind `T`'s `schemars` JSON Schema to `subject` and intern it.
-    /// `validate` enables draft validation of decoded payloads.
-    pub fn new(cache: &Arc<SchemaCache>, subject: impl Into<String>, validate: bool) -> Self {
-        let subject = subject.into();
+    fn make(cache: &Arc<SchemaCache>, role: Role, validate: bool) -> Self {
         // schemars 1.x: schema_for! returns schemars::Schema (newtype over serde_json::Value).
         let schema = schemars::schema_for!(T);
         let schema_text = serde_json::to_string(&schema).expect("schemars schema serializes");
-        cache.intern(&subject, SchemaKind::Json, &schema_text);
         Self {
             binding: Binding {
                 cache: Arc::clone(cache),
-                subject,
+                role,
+                kind: SchemaKind::Json,
+                schema: schema_text,
             },
             validate,
             _marker: PhantomData,
         }
+    }
+
+    /// A JSON serde for record **values** (`<topic>-value`). `validate` enables
+    /// draft validation of decoded payloads against the writer schema.
+    pub fn value(cache: &Arc<SchemaCache>, validate: bool) -> Self {
+        Self::make(cache, Role::Value, validate)
+    }
+
+    /// A JSON serde for record **keys** (`<topic>-key`).
+    pub fn key(cache: &Arc<SchemaCache>, validate: bool) -> Self {
+        Self::make(cache, Role::Key, validate)
+    }
+}
+
+/// A value serde over the process [`default_registry`](crate::default_registry),
+/// with payload validation disabled (enable it via [`JsonSerde::value`]).
+impl<T: JsonSchema> Default for JsonSerde<T> {
+    fn default() -> Self {
+        let cache = crate::default_registry()
+            .expect("schema-serde: call set_default_registry(cache) before a default JsonSerde");
+        Self::value(&cache, false)
+    }
+}
+
+impl<T: Send + Sync + 'static> SchemaSubject for JsonSerde<T> {
+    fn register_subject(&self, topic: &str) {
+        self.binding.register(topic);
     }
 }
 
@@ -58,8 +84,8 @@ impl<T> SchemaSerializer<T> for JsonSerde<T>
 where
     T: Serialize + JsonSchema + Send + Sync + 'static,
 {
-    fn serialize(&self, value: &T) -> Result<Bytes, SchemaSerdeError> {
-        let id = self.binding.id()?;
+    fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, SchemaSerdeError> {
+        let id = self.binding.id(topic)?;
         let body =
             serde_json::to_vec(value).map_err(|e| SchemaSerdeError::Serialize(e.to_string()))?;
         Ok(wire::encode(id, &body))
@@ -70,7 +96,7 @@ impl<T> SchemaDeserializer<T> for JsonSerde<T>
 where
     T: DeserializeOwned + JsonSchema + Send + Sync + 'static,
 {
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         let (id, body) = wire::decode(bytes)?;
         if self.validate {
             let writer_text = self.binding.cache.writer_schema(id)?;
@@ -108,7 +134,8 @@ mod tests {
     #[test]
     fn round_trips_with_validation() {
         let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
-        let serde = JsonSerde::<Order>::new(&cache, "orders-value", true);
+        let serde = JsonSerde::<Order>::value(&cache, true);
+        serde.register_subject("orders");
         let schema_text = serde_json::to_string(&schemars::schema_for!(Order)).unwrap();
         cache.seed_subject_id("orders-value", 5);
         cache.seed_writer_schema(5, schema_text);
@@ -117,9 +144,9 @@ mod tests {
             id: "o-1".into(),
             total: 3.0,
         };
-        let framed = serde.serialize(&order).unwrap();
+        let framed = serde.serialize("orders", &order).unwrap();
         check!(framed[0] == 0x00);
-        let back: Order = serde.deserialize(&framed).unwrap();
+        let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
     }
 }

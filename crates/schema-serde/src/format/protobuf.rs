@@ -11,11 +11,12 @@ use prost_reflect::ReflectMessage;
 
 use crate::cache::SchemaCache;
 use crate::error::SchemaSerdeError;
-use crate::format::{Binding, SchemaDeserializer, SchemaSerializer};
-use crate::subject::SchemaKind;
+use crate::format::{Binding, SchemaDeserializer, SchemaSerializer, SchemaSubject};
+use crate::subject::{Role, SchemaKind};
 use crate::wire;
 
-/// Protobuf serializer/deserializer for a `prost` message `T: ReflectMessage`.
+/// Protobuf serializer/deserializer for a `prost` message `T: ReflectMessage`,
+/// bound to a key/value role; the subject is derived from the topic at call time.
 pub struct ProtobufSerde<T> {
     binding: Binding,
     message_index: Vec<i32>,
@@ -35,21 +36,46 @@ impl<T> Clone for ProtobufSerde<T> {
 }
 
 impl<T: ReflectMessage + Default> ProtobufSerde<T> {
-    /// Bind `T`'s descriptor to `subject` and intern its `.proto` schema.
-    pub fn new(cache: &Arc<SchemaCache>, subject: impl Into<String>) -> Self {
-        let subject = subject.into();
+    fn make(cache: &Arc<SchemaCache>, role: Role) -> Self {
         let descriptor = T::default().descriptor();
         let proto_text = proto_source(&descriptor);
         let message_index = message_index(&descriptor);
-        cache.intern(&subject, SchemaKind::Protobuf, &proto_text);
         Self {
             binding: Binding {
                 cache: Arc::clone(cache),
-                subject,
+                role,
+                kind: SchemaKind::Protobuf,
+                schema: proto_text,
             },
             message_index,
             _marker: PhantomData,
         }
+    }
+
+    /// A Protobuf serde for record **values** (`<topic>-value`).
+    pub fn value(cache: &Arc<SchemaCache>) -> Self {
+        Self::make(cache, Role::Value)
+    }
+
+    /// A Protobuf serde for record **keys** (`<topic>-key`).
+    pub fn key(cache: &Arc<SchemaCache>) -> Self {
+        Self::make(cache, Role::Key)
+    }
+}
+
+/// A value serde over the process [`default_registry`](crate::default_registry).
+impl<T: ReflectMessage + Default> Default for ProtobufSerde<T> {
+    fn default() -> Self {
+        let cache = crate::default_registry().expect(
+            "schema-serde: call set_default_registry(cache) before a default ProtobufSerde",
+        );
+        Self::value(&cache)
+    }
+}
+
+impl<T: Send + Sync + 'static> SchemaSubject for ProtobufSerde<T> {
+    fn register_subject(&self, topic: &str) {
+        self.binding.register(topic);
     }
 }
 
@@ -57,8 +83,8 @@ impl<T> SchemaSerializer<T> for ProtobufSerde<T>
 where
     T: Message + ReflectMessage + Send + Sync + 'static,
 {
-    fn serialize(&self, value: &T) -> Result<Bytes, SchemaSerdeError> {
-        let id = self.binding.id()?;
+    fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, SchemaSerdeError> {
+        let id = self.binding.id(topic)?;
         let body = value.encode_to_vec();
         Ok(wire::encode_protobuf(id, &self.message_index, &body))
     }
@@ -68,7 +94,7 @@ impl<T> SchemaDeserializer<T> for ProtobufSerde<T>
 where
     T: Message + ReflectMessage + Default + Send + Sync + 'static,
 {
-    fn deserialize(&self, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
         // prost decodes structurally; id/index validated by framing
         let (_id, _idx, body) = wire::decode_protobuf(bytes)?;
         T::decode(body).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))

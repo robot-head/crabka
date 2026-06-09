@@ -21,5 +21,6 @@ pub use fixed_key::{
 pub use punctuation::{Cancellable, PunctuationType, Punctuator};
 pub use record::{Record, RecordContext};
 pub use serde::{
-    BytesSerde, Consumed, DefaultSerde, I64Serde, Produced, Serde, SerdeError, StringSerde,
+    BytesSerde, Consumed, DefaultSerde, I64Serde, Produced, Serde, SerdeError, SerdeRole,
+    StringSerde,
 };

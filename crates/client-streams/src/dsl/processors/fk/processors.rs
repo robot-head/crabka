@@ -73,7 +73,9 @@ where
         hash: Option<Vec<u8>>,
         timestamp: i64,
     ) {
-        let primary_key = self.k_serde.serialize(key);
+        // FK-internal byte computations (repartition key / hash / FK compare):
+        // topic is irrelevant, only consistency matters.
+        let primary_key = self.k_serde.serialize("", key);
         let primary_partition = ctx.record_context().partition;
         ctx.forward(Record::new(
             Some(fk),
@@ -109,7 +111,7 @@ where
             .value
             .new
             .as_ref()
-            .map(|v| hash128(&self.va_serde.serialize(v)).to_vec());
+            .map(|v| hash128(&self.va_serde.serialize("", v)).to_vec());
         let old_fk = r.value.old.as_ref().map(|v| (self.fk_extractor)(v));
         let new_fk = r.value.new.as_ref().map(|v| (self.fk_extractor)(v));
         let had_old = r.value.old.is_some();
@@ -132,7 +134,7 @@ where
     /// True iff `serialize(a) != serialize(b)` (the JVM compares FKs by their
     /// serialized bytes, not by `Eq`). `a`/`b` here are both `Some`.
     fn fk_differs(&self, a: &KO, b: &KO) -> bool {
-        self.ko_serde.serialize(a) != self.ko_serde.serialize(b)
+        self.ko_serde.serialize("", a) != self.ko_serde.serialize("", b)
     }
 
     /// JVM `leftJoinInstructions`.
@@ -251,7 +253,7 @@ where
         let fk = r
             .key
             .expect("FK subscription-receive requires a non-null key");
-        let fk_bytes = self.ko_serde.serialize(&fk);
+        let fk_bytes = self.ko_serde.serialize(&self.store_name, &fk);
         let w = r.value;
         let pk = w.primary_key.clone();
         let is_delete = matches!(
@@ -304,8 +306,10 @@ where
             Some(s) => s.get(&fk).await,
             None => None,
         };
-        let fk_val_bytes = fk_val.as_ref().map(|v| self.vb_serde.serialize(v));
-        let pk = self.k_serde.deserialize(&w.primary_key).ok();
+        let fk_val_bytes = fk_val
+            .as_ref()
+            .map(|v| self.vb_serde.serialize(&self.b_store, v));
+        let pk = self.k_serde.deserialize(&self.b_store, &w.primary_key).ok();
 
         let response = match w.instruction {
             Instruction::DeleteKeyAndPropagate => Some(SubscriptionResponseWrapper {
@@ -360,9 +364,13 @@ where
         let fk = r
             .key
             .expect("FK foreign-table-join requires a non-null key");
-        let fk_bytes = self.ko_serde.serialize(&fk);
+        let fk_bytes = self.ko_serde.serialize(&self.store_name, &fk);
         // The current right value (None on a tombstone).
-        let new_vb: Option<Bytes> = r.value.new.as_ref().map(|v| self.vb_serde.serialize(v));
+        let new_vb: Option<Bytes> = r
+            .value
+            .new
+            .as_ref()
+            .map(|v| self.vb_serde.serialize(&self.store_name, v));
         // Prefix-scan every subscriber of this foreign key.
         let subs: Vec<(Bytes, SubscriptionWrapper)> = {
             let store = ctx
@@ -371,7 +379,7 @@ where
             store.range_by_foreign(&fk_bytes).await
         };
         for (pk_bytes, w) in subs {
-            let Ok(pk) = self.k_serde.deserialize(&pk_bytes) else {
+            let Ok(pk) = self.k_serde.deserialize(&self.store_name, &pk_bytes) else {
                 continue;
             };
             ctx.forward(Record::new(
@@ -426,7 +434,7 @@ where
         };
         let current_hash: Option<Vec<u8>> = current_va
             .as_ref()
-            .map(|v| hash128(&self.va_serde.serialize(v)).to_vec());
+            .map(|v| hash128(&self.va_serde.serialize("", v)).to_vec());
 
         // Staleness check: drop if the message hash != the current value's hash.
         if resp.hash != current_hash {
@@ -436,7 +444,7 @@ where
         let foreign_vb: Option<VB> = resp
             .foreign_value
             .as_ref()
-            .and_then(|b| self.vb_serde.deserialize(b).ok());
+            .and_then(|b| self.vb_serde.deserialize(&self.a_store, b).ok());
 
         let result: Option<VR> =
             if resp.foreign_value.is_none() && (!self.is_left || current_va.is_none()) {

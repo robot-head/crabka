@@ -26,13 +26,13 @@ fn json_frame_matches_confluent_golden() {
         .expect("valid hex");
 
     let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
-    let serde = JsonSerde::<Order>::new(&cache, "orders-json-value", false);
+    let serde = JsonSerde::<Order>::value(&cache, false);
     cache.seed_subject_id("orders-json-value", 3);
 
     let order = Order {
         id: "o-1".into(),
         total: 9.5,
     };
-    let ours = serde.serialize(&order).unwrap();
+    let ours = serde.serialize("orders-json", &order).unwrap();
     check!(ours.as_ref() == golden.as_slice());
 }

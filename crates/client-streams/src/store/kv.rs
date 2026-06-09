@@ -122,26 +122,26 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for KeyValueBytesStor
 #[async_trait]
 impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyValueBytesStore<K, V> {
     async fn get(&self, key: &K) -> Option<V> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         self.backend.get(&kb).await.map(|vb| {
             self.value_serde
-                .deserialize(&vb)
+                .deserialize(&self.changelog_topic, &vb)
                 .expect("store value deserialize")
         })
     }
     async fn put(&mut self, key: K, value: V) {
-        let kb = self.key_serde.serialize(&key);
-        let vb = self.value_serde.serialize(&value);
+        let kb = self.key_serde.serialize(&self.changelog_topic, &key);
+        let vb = self.value_serde.serialize(&self.changelog_topic, &value);
         self.backend.put(kb.clone(), vb.clone()).await;
         if self.logging {
             self.changelog.push((kb, Some(vb)));
         }
     }
     async fn delete(&mut self, key: &K) -> Option<V> {
-        let kb = self.key_serde.serialize(key);
+        let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let prev = self.backend.delete(&kb).await.map(|vb| {
             self.value_serde
-                .deserialize(&vb)
+                .deserialize(&self.changelog_topic, &vb)
                 .expect("store value deserialize")
         });
         if self.logging {
@@ -150,8 +150,8 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
         prev
     }
     async fn range(&self, lo: &K, hi: &K) -> Vec<(K, V)> {
-        let lo_b = self.key_serde.serialize(lo);
-        let hi_b = self.key_serde.serialize(hi);
+        let lo_b = self.key_serde.serialize(&self.changelog_topic, lo);
+        let hi_b = self.key_serde.serialize(&self.changelog_topic, hi);
         self.backend
             .range(&lo_b, &hi_b)
             .await
@@ -159,10 +159,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
             .map(|(kb, vb)| {
                 (
                     self.key_serde
-                        .deserialize(&kb)
+                        .deserialize(&self.changelog_topic, &kb)
                         .expect("kv range key deserialize"),
                     self.value_serde
-                        .deserialize(&vb)
+                        .deserialize(&self.changelog_topic, &vb)
                         .expect("kv range value deserialize"),
                 )
             })

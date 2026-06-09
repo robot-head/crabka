@@ -24,13 +24,13 @@ fn avro_frame_matches_confluent_golden() {
     let golden = hex::decode(golden_hex).expect("valid hex");
 
     let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
-    let serde = AvroSerde::<Order>::new(&cache, "orders-value");
+    let serde = AvroSerde::<Order>::value(&cache);
     cache.seed_subject_id("orders-value", 1);
 
     let order = Order {
         id: "o-1".into(),
         total: 9.5,
     };
-    let ours = serde.serialize(&order).unwrap();
+    let ours = serde.serialize("orders", &order).unwrap();
     check!(ours.as_ref() == golden.as_slice());
 }
