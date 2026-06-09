@@ -1,0 +1,8 @@
+[
+    { "keyHex": "6b", "valueHex": "0000000a", "ts": 100 },
+    { "keyHex": "6b", "valueHex": "00000014", "ts": 200 },
+    { "keyHex": "6b", "valueHex": "0000000f", "ts": 150 },
+    { "keyHex": "6b", "valueHex": null, "ts": 250 },
+    { "keyHex": "6b", "valueHex": "0000001e", "ts": 300 },
+    { "keyHex": "6a", "valueHex": "00000005", "ts": 120 }
+  ]

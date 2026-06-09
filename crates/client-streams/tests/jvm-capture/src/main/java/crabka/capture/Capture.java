@@ -19,6 +19,7 @@ import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
+import java.time.Duration;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -92,8 +93,9 @@ public final class Capture {
         write(outDir, "fk_join_left", fkJoinLeft());
         write(outDir, "sliding_window_count", slidingWindowCount());
         write(outDir, "sliding_window_aggregate", slidingWindowAggregate());
+        write(outDir, "versioned_table", versionedTable());
 
-        System.out.println("Capture complete. Wrote 21 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 22 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -759,6 +761,39 @@ public final class Capture {
         }
         sb.append("\"");
         return sb.toString();
+    }
+
+    /**
+     * 22. versioned_table: table("in", Consumed, Materialized.as(persistentVersionedKeyValueStore("vt", 600s)))
+     * .toStream().to("out"). The versioned store's changelog must carry
+     * min.compaction.lag.ms = history_retention_ms. Built with optimization=all.
+     */
+    static Topology versionedTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Integer()),
+                Materialized.<String, Integer>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Integer()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Integer()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * Unoptimized versioned table topology for the behavioral oracle
+     * ({@link VersionedTableBehavior}).
+     */
+    static Topology versionedTableUnoptimized() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Integer()),
+                Materialized.<String, Integer>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Integer()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Integer()));
+        return b.build();
     }
 
     private Capture() {

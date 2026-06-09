@@ -1,0 +1,8 @@
+[
+    { "key": "k", "value": 10, "ts": 100 },
+    { "key": "k", "value": 20, "ts": 200 },
+    { "key": "k", "value": 15, "ts": 150 },
+    { "key": "k", "value": null, "ts": 250 },
+    { "key": "k", "value": 30, "ts": 300 },
+    { "key": "j", "value": 5, "ts": 120 }
+  ]
