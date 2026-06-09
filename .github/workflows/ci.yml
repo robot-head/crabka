@@ -486,10 +486,10 @@ jobs:
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
-          # `--features schema-serde` also exercises the Avro/Protobuf/JSON
-          # bridge tests + byte-exact Confluent golden tests (build.rs compiles
-          # the protobuf example via protox, no protoc needed).
-          cargo llvm-cov nextest -p crabka-client-streams --features schema-serde --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+          # Includes the Avro/Protobuf/JSON bridge tests + byte-exact Confluent
+          # golden tests (schema serdes are always-on; goldens use checked-in
+          # bytes, no broker/registry needed).
+          cargo llvm-cov nextest -p crabka-client-streams --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

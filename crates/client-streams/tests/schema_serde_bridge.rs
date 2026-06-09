@@ -1,5 +1,3 @@
-#![cfg(feature = "schema-serde")]
-
 use apache_avro::AvroSchema;
 use assert2::check;
 use crabka_client_streams::SchemaSerde;

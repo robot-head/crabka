@@ -2,7 +2,7 @@
 //! a running broker (`127.0.0.1:9092`) and a Confluent-compatible registry
 //! (`http://127.0.0.1:8081`).
 //!
-//! Run: `cargo run -p crabka-client-streams --features schema-serde --example protobuf_pipeline`
+//! Run: `cargo run -p crabka-client-streams --example protobuf_pipeline`
 
 use std::sync::Arc;
 
@@ -13,12 +13,11 @@ use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
 use crabka_schema_serde::format::protobuf::ProtobufSerde;
 use crabka_schema_serde::{RegistryClient, set_default_registry};
 
-/// Embedded descriptor set referenced by the generated `Order` (see build.rs).
-pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
+/// Embedded descriptor set referenced by the generated `Order` (see examples/gen/regenerate.sh).
+pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] = include_bytes!("gen/file_descriptor_set.bin");
 
 mod order {
-    include!(concat!(env!("OUT_DIR"), "/demo.rs"));
+    include!("gen/order.rs");
 }
 use order::Order;
 

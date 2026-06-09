@@ -16,26 +16,11 @@ categories = ["api-bindings", "network-programming"]
 [lints]
 workspace = true
 
-# Schema-serde examples need the optional dep + generated protobuf types.
-[[example]]
-name = "avro_pipeline"
-required-features = ["schema-serde"]
-
-[[example]]
-name = "protobuf_pipeline"
-required-features = ["schema-serde"]
-
-[[example]]
-name = "json_pipeline"
-required-features = ["schema-serde"]
-
-[features]
-default = []
-schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json", "dep:protox", "dep:prost-build"]
-
 [dependencies]
 crabka-protocol = { version = "0.3.3", path = "../protocol", default-features = false }
-crabka-schema-serde = { version = "0.3.3", path = "../schema-serde", optional = true }
+# Schema-registry serdes (Avro/Protobuf/JSON) are a first-class, always-on part
+# of the streams client — no feature gate.
+crabka-schema-serde = { version = "0.3.3", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
 crabka-client-core = { version = "0.3.3", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.3", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.3", path = "../client-producer" }
@@ -51,18 +36,10 @@ tracing = { workspace = true }
 turso = "0.6"
 pollster = "0.4"
 
-[build-dependencies]
-# Only compiled under the `schema-serde` feature; compiles the protobuf
-# example's .proto via protox (pure Rust, no protoc) into prost structs that
-# derive prost_reflect::ReflectMessage. See build.rs.
-protox = { version = "0.9", optional = true }
-prost-build = { version = "0.14", optional = true }
-
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
 crabka-broker = { version = "0.3.3", path = "../broker", features = ["test-helpers"] }
-crabka-schema-serde = { version = "0.3.3", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }

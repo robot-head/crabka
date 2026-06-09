@@ -1,4 +1,3 @@
-#![cfg(feature = "schema-serde")]
 //! Asserts our Protobuf framing (magic+id+message-index+body) matches bytes
 //! captured from Confluent's `ProtobufSerializer`. The golden in
 //! `testdata/schema_serde/protobuf/order.hex` was captured against
@@ -11,13 +10,13 @@ use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
 use crabka_schema_serde::format::SchemaSerializer;
 use crabka_schema_serde::format::protobuf::ProtobufSerde;
 
-/// Embedded descriptor set referenced by the generated `Order` (see build.rs).
+/// Embedded descriptor set referenced by the generated `Order` (see ../examples/gen/regenerate.sh).
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
+    include_bytes!("../examples/gen/file_descriptor_set.bin");
 
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 mod order {
-    include!(concat!(env!("OUT_DIR"), "/demo.rs"));
+    include!("../examples/gen/order.rs");
 }
 use order::Order;
 

@@ -2,7 +2,7 @@
 //! Requires a running broker (`127.0.0.1:9092`) and a Confluent-compatible
 //! registry (`http://127.0.0.1:8081`).
 //!
-//! Run: `cargo run -p crabka-client-streams --features schema-serde --example json_pipeline`
+//! Run: `cargo run -p crabka-client-streams --example json_pipeline`
 
 use std::sync::Arc;
 

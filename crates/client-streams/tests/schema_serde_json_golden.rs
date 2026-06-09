@@ -1,4 +1,3 @@
-#![cfg(feature = "schema-serde")]
 //! Asserts our JSON framing/body matches bytes captured from Confluent's
 //! `JSONSerializer`. The golden in `testdata/schema_serde/json/order.hex` was
 //! captured against `confluentinc/cp-schema-registry` (schema id 3) via

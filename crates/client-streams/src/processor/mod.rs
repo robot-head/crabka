@@ -10,7 +10,6 @@ pub mod punctuation;
 pub mod record;
 pub mod serde;
 
-#[cfg(feature = "schema-serde")]
 pub mod schema_serde;
 
 pub use api::{Processor, ProcessorContext, ProcessorSupplier};
