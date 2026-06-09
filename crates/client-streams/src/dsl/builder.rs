@@ -55,7 +55,13 @@ impl StreamsBuilder {
         }
     }
 
-    /// Source a `KStream` from one or more topics.
+    /// Source a `KStream` from one or more topics with explicit serdes.
+    ///
+    /// Prefer [`StreamsBuilder::stream`] (the default-serde form) for types that
+    /// implement [`DefaultSerde`]. Reach for this escape hatch when a type has no
+    /// default serde, or to override it — e.g. a hand-rolled `Serde<T>`, a
+    /// **key**-role schema serde (`AvroSerde::<T>::key(&cache)`), or a
+    /// validation-on JSON serde (`JsonSerde::value(&cache, true)`).
     pub fn stream_explicit<KS, VS>(
         &self,
         topics: impl IntoIterator<Item = impl Into<String>>,
@@ -111,7 +117,10 @@ impl StreamsBuilder {
         .with_source_topic(single_source_topic)
     }
 
-    /// Source a materialized `KTable` from a changelog-style topic.
+    /// Source a materialized `KTable` from a changelog-style topic with explicit
+    /// serdes. Prefer [`StreamsBuilder::table`] (the default-serde form) for
+    /// [`DefaultSerde`] types; use this when a type has no default serde or to
+    /// override it (custom `Serde<T>`, key-role schema serde, validated JSON).
     ///
     /// Records a single `TableSource` logical node whose thunk lowers a source
     /// node, the table-source processor, and the materialized state store. The
@@ -231,8 +240,11 @@ impl StreamsBuilder {
         .with_suppress_factory(Some(suppress_factory))
     }
 
-    /// Source a [`GlobalKTable`] from a topic: a fully-replicated lookup table,
-    /// usable only as a join target.
+    /// Source a [`GlobalKTable`] from a topic with explicit serdes: a
+    /// fully-replicated lookup table, usable only as a join target. Prefer
+    /// [`StreamsBuilder::global_table`] (the default-serde form) for
+    /// [`DefaultSerde`] types; use this when a type has no default serde or to
+    /// override it (custom `Serde<T>`, key-role schema serde, validated JSON).
     ///
     /// Records a single `GlobalSource` logical node whose thunk lowers (via
     /// [`Topology::add_global_store`]) a source + update-processor + a global KV
@@ -312,7 +324,8 @@ impl StreamsBuilder {
         )
     }
 
-    /// Sourced stream utilizing default associated serdes.
+    /// Source a `KStream` using each type's [`DefaultSerde`]. Use
+    /// [`StreamsBuilder::stream_explicit`] to supply custom serdes.
     pub fn stream<K, V>(
         &self,
         topics: impl IntoIterator<Item = impl Into<String>>,
@@ -331,7 +344,8 @@ impl StreamsBuilder {
         )
     }
 
-    /// Sourced table utilizing default associated serdes.
+    /// Source a materialized `KTable` using each type's [`DefaultSerde`]. Use
+    /// [`StreamsBuilder::table_explicit`] to supply custom serdes / `Materialized`.
     pub fn table<K, V>(
         &self,
         topic: impl Into<String>,
@@ -353,7 +367,10 @@ impl StreamsBuilder {
         )
     }
 
-    /// Sourced global table utilizing default associated serdes.
+    /// Source a [`GlobalKTable`] using each type's [`DefaultSerde`]. Use
+    /// [`StreamsBuilder::global_table_explicit`] to supply custom serdes.
+    ///
+    /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     pub fn global_table<K, V>(
         &self,
         topic: impl Into<String>,
