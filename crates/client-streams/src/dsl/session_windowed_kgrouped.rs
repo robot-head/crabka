@@ -66,6 +66,12 @@ where
     }
 
     /// Emit on every update (default) or only on window close (KIP-825).
+    ///
+    /// For `on_window_close`, configure the session grace `>=` the inactivity
+    /// gap. With `grace < gap` a late, in-gap record can re-open and re-merge a
+    /// session that already emitted its final result, producing a duplicate
+    /// final — the processor does not yet drop such late records (exact
+    /// late-record semantics are pinned by the JVM golden).
     #[must_use]
     pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
         self.emit = emit;
