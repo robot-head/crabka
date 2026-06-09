@@ -12,9 +12,9 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use std::time::Duration;
 //! use crabka_metadata::{MetadataRecord, TopicRecord};
 //! use crabka_raft::{Controller, ControllerConfig};
+//! use std::time::Duration;
 //! use uuid::Uuid;
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,14 +22,14 @@
 //! let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
 //! let controller = Controller::start(cfg).await?;
 //!
-//! controller.submit_change(vec![
-//!     MetadataRecord::V1Topic(TopicRecord {
+//! controller
+//!     .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
 //!         name: "my-topic".into(),
 //!         topic_id: Uuid::new_v4(),
 //!         partitions: 3,
 //!         replication_factor: 1,
-//!     }),
-//! ]).await?;
+//!     })])
+//!     .await?;
 //!
 //! assert!(controller.current_image().topic("my-topic").is_some());
 //! controller.shutdown().await;

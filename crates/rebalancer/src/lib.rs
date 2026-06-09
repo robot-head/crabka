@@ -9,30 +9,38 @@
 //! ## Optimization workflow
 //!
 //! ```no_run
-//! use std::sync::Arc;
 //! use crabka_rebalancer::capacity::BrokerCapacities;
 //! use crabka_rebalancer::goals::{GoalContext, leader_distribution::LeaderDistribution};
 //! use crabka_rebalancer::model::{BrokerView, ClusterState, PartitionView};
 //! use crabka_rebalancer::optimizer;
 //! use crabka_rebalancer::scraper::UsageStore;
+//! use std::sync::Arc;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let state = ClusterState {
 //!     cluster_id: Some("cluster-a".into()),
 //!     snapshot_at_ms: 1_713_000_000_000,
 //!     brokers: vec![
-//!         BrokerView { id: 1, host: "b1".into(), port: 9092, rack: None },
-//!         BrokerView { id: 2, host: "b2".into(), port: 9092, rack: None },
-//!     ],
-//!     partitions: vec![
-//!         PartitionView {
-//!             topic: "orders".into(),
-//!             partition: 0,
-//!             replicas: vec![1, 2],
-//!             leader: 1,
-//!             isr: vec![1, 2],
+//!         BrokerView {
+//!             id: 1,
+//!             host: "b1".into(),
+//!             port: 9092,
+//!             rack: None,
+//!         },
+//!         BrokerView {
+//!             id: 2,
+//!             host: "b2".into(),
+//!             port: 9092,
+//!             rack: None,
 //!         },
 //!     ],
+//!     partitions: vec![PartitionView {
+//!         topic: "orders".into(),
+//!         partition: 0,
+//!         replicas: vec![1, 2],
+//!         leader: 1,
+//!         isr: vec![1, 2],
+//!     }],
 //!     in_flight_reassignments: Vec::new(),
 //! };
 //! let ctx = GoalContext {

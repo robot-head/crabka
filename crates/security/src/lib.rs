@@ -10,8 +10,8 @@
 //! ## SASL/PLAIN verification
 //!
 //! ```rust
-//! use std::collections::HashMap;
 //! use crabka_security::{AuthMethod, verify_plain};
+//! use std::collections::HashMap;
 //!
 //! let mut users = HashMap::new();
 //! users.insert("alice".to_string(), "wonderland".to_string());
@@ -26,7 +26,11 @@
 //! ```rust
 //! use crabka_security::{SaslMechanism, hash_scram_password};
 //!
-//! let credential = hash_scram_password(b"correct horse battery staple", SaslMechanism::ScramSha512, 4096);
+//! let credential = hash_scram_password(
+//!     b"correct horse battery staple",
+//!     SaslMechanism::ScramSha512,
+//!     4096,
+//! );
 //! assert_eq!(credential.iterations, 4096);
 //! ```
 

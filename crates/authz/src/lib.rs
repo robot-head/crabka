@@ -10,12 +10,10 @@
 //! ## Authorizing a request
 //!
 //! ```rust
-//! use std::net::SocketAddr;
-//! use crabka_authz::{
-//!     AllowAllAuthorizer, AuthorizationRequest, AuthorizationResult, Authorizer,
-//! };
-//! use crabka_metadata::{MetadataImage, AclOperation, ResourceType};
+//! use crabka_authz::{AllowAllAuthorizer, AuthorizationRequest, AuthorizationResult, Authorizer};
+//! use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
 //! use crabka_security::{AuthMethod, Principal};
+//! use std::net::SocketAddr;
 //! use uuid::Uuid;
 //!
 //! let image = MetadataImage::new(Uuid::nil());

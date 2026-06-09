@@ -3743,7 +3743,6 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
 
 /// Prepend the response header (`corr_id` + optional tagged-fields byte)
 /// in front of the handler's body bytes.
-///
 // PERF: this copies the whole body to prepend a 4-5 byte header. A
 // `bytes::Buf::chain(header, body)` would avoid the copy, but the sink is a
 // `Framed<S, LengthDelimitedCodec>` and `LengthDelimitedCodec` only implements

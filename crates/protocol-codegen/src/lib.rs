@@ -9,8 +9,8 @@
 //! ## Loading and validating schemas
 //!
 //! ```no_run
-//! use std::path::Path;
 //! use crabka_protocol_codegen::{ir, validate};
+//! use std::path::Path;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let specs = ir::load_dir(Path::new("crates/protocol/schemas"))?;
@@ -23,8 +23,8 @@
 //! ## Resolving generated type paths
 //!
 //! ```no_run
-//! use std::path::Path;
 //! use crabka_protocol_codegen::{ir, resolve};
+//! use std::path::Path;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let specs = ir::load_dir(Path::new("crates/protocol/schemas"))?;
@@ -34,7 +34,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
 pub mod emit;
 pub mod fmt;
 pub mod ir;
