@@ -47,14 +47,6 @@ pub enum CodecError {
     #[error("unexpected end of input at offset {0}")]
     UnexpectedEof(usize),
 
-    /// A version byte the codec does not know how to read.
-    #[error("unsupported wire version {0}")]
-    UnsupportedVersion(u8),
-
-    /// An event-type tag the codec does not know how to read.
-    #[error("unknown event tag {0}")]
-    UnknownTag(u8),
-
     /// A state byte the codec does not know how to read.
     #[error("unknown state byte {0} for {ctx}", ctx = .1)]
     UnknownState(u8, &'static str),
@@ -62,10 +54,6 @@ pub enum CodecError {
     /// A length prefix that does not fit in `usize`.
     #[error("length prefix {0} too large")]
     LengthOverflow(u64),
-
-    /// A field was not valid UTF-8.
-    #[error("invalid utf-8 in {0}")]
-    InvalidUtf8(&'static str),
 
     /// Reconstructing the event-domain type from the decoded fields
     /// violated a precondition (e.g. empty leader-epoch map).
