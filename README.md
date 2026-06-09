@@ -129,11 +129,13 @@ metadata-partition assignment, and TLS/SASL on the metadata client are all in
 tree. JVM interoperability is validated via a single-broker restart-durability
 test (MinIO/S3) and an in-process multi-broker failover test that proves a
 survivor broker can serve remote reads from metadata it consumed off
-`__remote_log_metadata` after leader failover. Deliberate non-goal: the
-`__remote_log_metadata` record format is not byte-compatible with the JVM's
-`RemoteLogMetadataSerde`, so a mixed JVM+Crabka tiered cluster sharing the
-internal topic is unsupported — real clusters run a single RLMM implementation,
-making this a non-issue in practice. The broker-side Streams rebalance protocol
+`__remote_log_metadata` after leader failover. The `__remote_log_metadata`
+record format is byte-exact with the JVM's `RemoteLogMetadataSerde`
+(`AbstractApiMessageSerde` envelope + flexible message bodies, verified against
+`apache/kafka:4.0.0` golden vectors), so a mixed JVM+Crabka cluster can share
+the internal metadata topic. Full segment-data interop additionally requires a
+shared `RemoteStorageManager` layout and producer-snapshot conventions, which
+are not yet validated against the JVM, so segment-level mixing is not claimed. The broker-side Streams rebalance protocol
 (KIP-1071) is implemented and serves real JVM Streams-group admin clients, and
 `crabka-client-streams` provides a Rust Streams client/runtime, but it is still
 not a full JVM Kafka Streams replacement. Kafka Connect and MirrorMaker
