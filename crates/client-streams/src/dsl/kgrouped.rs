@@ -298,6 +298,41 @@ where
         )
     }
 
+    /// `cogroup`: begin a KIP-150 cogroup with this stream as the first input and
+    /// `agg` its aggregator. Returns a [`CogroupedKStream<K, VOut>`] to chain more
+    /// inputs and terminate with `aggregate` / `windowed_by*`.
+    ///
+    /// [`CogroupedKStream<K, VOut>`]: crate::dsl::cogrouped::CogroupedKStream
+    #[must_use]
+    pub fn cogroup<VOut, A>(self, agg: A) -> crate::dsl::cogrouped::CogroupedKStream<K, VOut>
+    where
+        V: Sync,
+        VOut: Any + Send + Sync + Clone,
+        A: Fn(&K, &V, VOut) -> VOut + Send + Sync + 'static,
+    {
+        let builder = Rc::clone(&self.builder);
+        let (parent, key_changing, rp_lower) = self.into_cogroup_parts();
+        crate::dsl::cogrouped::CogroupedKStream {
+            builder,
+            inputs: vec![crate::dsl::cogrouped::CogroupInput {
+                parent,
+                key_changing_upstream: key_changing,
+                repartition_lower: rp_lower,
+                make_agg: crate::dsl::cogrouped::make_agg_for_input::<K, V, VOut, A>(agg),
+            }],
+            _pd: PhantomData,
+        }
+    }
+
+    /// Decompose into the lineage parts a cogroup input needs (consumes the handle).
+    pub(crate) fn into_cogroup_parts(mut self) -> (NodeId, bool, Option<RepartitionLowerFn>) {
+        (
+            self.parent,
+            self.key_changing_upstream,
+            self.repartition_lower.take(),
+        )
+    }
+
     /// Shared body for `count`/`aggregate`: mint the store name at the JVM
     /// counter position, then lower the (optional) repartition + aggregate node.
     fn aggregate_inner<KS, VS, VA, I, A>(
