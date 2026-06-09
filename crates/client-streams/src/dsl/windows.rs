@@ -154,6 +154,42 @@ impl SessionWindows {
     }
 }
 
+/// Sliding windows (KIP-450). A record at time `t` belongs to every window of
+/// fixed size `time_difference_ms` (`W`) that contains it — i.e. windows
+/// `[ws, ws + W]` with `ws ∈ [t - W, t]`. Windows are **inclusive on both ends**
+/// and **data-defined** (not epoch-aligned), so there is no `windows_for`: the
+/// affected windows are discovered by scanning the window store. `grace_ms`
+/// allows out-of-order records up to `W + grace_ms` behind stream time and feeds
+/// changelog retention.
+#[derive(Debug, Clone, Copy)]
+pub struct SlidingWindows {
+    /// Window size `W`; window `[start, start + time_difference_ms]` (inclusive).
+    pub time_difference_ms: i64,
+    pub grace_ms: i64,
+}
+
+impl SlidingWindows {
+    /// Time difference of `time_difference_ms` with no grace.
+    #[must_use]
+    pub fn of_time_difference_with_no_grace(time_difference_ms: i64) -> Self {
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
+        Self {
+            time_difference_ms,
+            grace_ms: 0,
+        }
+    }
+    /// Time difference + grace period.
+    #[must_use]
+    pub fn of_time_difference_and_grace(time_difference_ms: i64, grace_ms: i64) -> Self {
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
+        assert!(grace_ms >= 0, "grace must be >= 0");
+        Self {
+            time_difference_ms,
+            grace_ms,
+        }
+    }
+}
+
 /// `Serde<Windowed<K>>` producing the JVM session **output-topic** format:
 /// `inner_key_bytes ‖ end:8B BE ‖ start:8B BE` (both bounds in the bytes; distinct
 /// from `TimeWindowedSerde`, which encodes only the start and derives `end`).
@@ -324,5 +360,19 @@ mod tests {
         let back = s.deserialize("t", &b).unwrap();
         assert_eq!(back.key, "k");
         assert_eq!(back.window, Window { start: 5, end: 9 });
+    }
+
+    #[test]
+    fn sliding_windows_constructors() {
+        let w = SlidingWindows::of_time_difference_with_no_grace(100);
+        assert_eq!((w.time_difference_ms, w.grace_ms), (100, 0));
+        let g = SlidingWindows::of_time_difference_and_grace(100, 50);
+        assert_eq!((g.time_difference_ms, g.grace_ms), (100, 50));
+    }
+
+    #[test]
+    #[should_panic(expected = "time difference must be >= 0")]
+    fn sliding_windows_rejects_negative_difference() {
+        let _ = SlidingWindows::of_time_difference_with_no_grace(-1);
     }
 }
