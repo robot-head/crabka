@@ -18,12 +18,11 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crabka_protocol::RemoteLogMetadataRecord;
 use crabka_protocol::owned::remote_log_segment_metadata_record::{
-    RemoteLogSegmentIdEntry as SegIdEntry, RemoteLogSegmentMetadataRecord,
-    SegmentLeaderEpochEntry, TopicIdPartitionEntry as TpEntry,
+    RemoteLogSegmentIdEntry as SegIdEntry, RemoteLogSegmentMetadataRecord, SegmentLeaderEpochEntry,
+    TopicIdPartitionEntry as TpEntry,
 };
 use crabka_protocol::owned::remote_log_segment_metadata_update_record::{
-    RemoteLogSegmentIdEntry as SegIdEntryUpd,
-    RemoteLogSegmentMetadataUpdateRecord,
+    RemoteLogSegmentIdEntry as SegIdEntryUpd, RemoteLogSegmentMetadataUpdateRecord,
     TopicIdPartitionEntry as TpEntryUpd,
 };
 use crabka_protocol::owned::remote_partition_delete_metadata_record::{
@@ -86,24 +85,20 @@ impl MetadataEvent {
         let record = RemoteLogMetadataRecord::decode_value(bytes)
             .map_err(|e| CodecError::Protocol(e.to_string()))?;
         match record {
-            RemoteLogMetadataRecord::SegmentMetadata(r) => {
-                Ok(Self::AddSegment(from_proto_add(r)?))
-            }
+            RemoteLogMetadataRecord::SegmentMetadata(r) => Ok(Self::AddSegment(from_proto_add(r)?)),
             RemoteLogMetadataRecord::SegmentMetadataUpdate(r) => {
                 Ok(Self::UpdateSegment(from_proto_update(r)?))
             }
             RemoteLogMetadataRecord::PartitionDelete(r) => {
                 Ok(Self::PartitionDelete(from_proto_partition_delete(r)?))
             }
-            RemoteLogMetadataRecord::SegmentMetadataSnapshot(_) => {
-                Err(CodecError::Protocol(
-                    "apiKey 3 (SegmentMetadataSnapshot) must not appear on __remote_log_metadata"
-                        .into(),
-                ))
-            }
-            RemoteLogMetadataRecord::Unknown { api_key, .. } => Err(CodecError::Protocol(
-                format!("unknown __remote_log_metadata apiKey {api_key}"),
+            RemoteLogMetadataRecord::SegmentMetadataSnapshot(_) => Err(CodecError::Protocol(
+                "apiKey 3 (SegmentMetadataSnapshot) must not appear on __remote_log_metadata"
+                    .into(),
             )),
+            RemoteLogMetadataRecord::Unknown { api_key, .. } => Err(CodecError::Protocol(format!(
+                "unknown __remote_log_metadata apiKey {api_key}"
+            ))),
         }
     }
 }
@@ -190,7 +185,10 @@ fn seg_id_to_proto_add(id: &RemoteLogSegmentId) -> SegIdEntry {
 }
 
 fn proto_seg_id_add_to_domain(id: SegIdEntry) -> RemoteLogSegmentId {
-    RemoteLogSegmentId::new(proto_tp_add_to_domain(id.topic_id_partition), proto_uuid_to_domain(id.id))
+    RemoteLogSegmentId::new(
+        proto_tp_add_to_domain(id.topic_id_partition),
+        proto_uuid_to_domain(id.id),
+    )
 }
 
 fn epochs_to_proto(epochs: &BTreeMap<i32, i64>) -> Vec<SegmentLeaderEpochEntry> {
@@ -228,7 +226,9 @@ fn to_proto_add(md: &RemoteLogSegmentMetadata) -> RemoteLogSegmentMetadataRecord
     }
 }
 
-fn from_proto_add(r: RemoteLogSegmentMetadataRecord) -> Result<RemoteLogSegmentMetadata, CodecError> {
+fn from_proto_add(
+    r: RemoteLogSegmentMetadataRecord,
+) -> Result<RemoteLogSegmentMetadata, CodecError> {
     let id = proto_seg_id_add_to_domain(r.remote_log_segment_id);
     let state = i8_to_segment_state(r.remote_log_segment_state)?;
     let segment_leader_epochs = proto_epochs_to_domain(r.segment_leader_epochs);
@@ -276,7 +276,10 @@ fn seg_id_to_proto_upd(id: &RemoteLogSegmentId) -> SegIdEntryUpd {
 }
 
 fn proto_seg_id_upd_to_domain(id: SegIdEntryUpd) -> RemoteLogSegmentId {
-    RemoteLogSegmentId::new(proto_tp_upd_to_domain(id.topic_id_partition), proto_uuid_to_domain(id.id))
+    RemoteLogSegmentId::new(
+        proto_tp_upd_to_domain(id.topic_id_partition),
+        proto_uuid_to_domain(id.id),
+    )
 }
 
 fn to_proto_update(u: &RemoteLogSegmentMetadataUpdate) -> RemoteLogSegmentMetadataUpdateRecord {
@@ -290,7 +293,9 @@ fn to_proto_update(u: &RemoteLogSegmentMetadataUpdate) -> RemoteLogSegmentMetada
     }
 }
 
-fn from_proto_update(r: RemoteLogSegmentMetadataUpdateRecord) -> Result<RemoteLogSegmentMetadataUpdate, CodecError> {
+fn from_proto_update(
+    r: RemoteLogSegmentMetadataUpdateRecord,
+) -> Result<RemoteLogSegmentMetadataUpdate, CodecError> {
     let remote_log_segment_id = proto_seg_id_upd_to_domain(r.remote_log_segment_id);
     let state = i8_to_segment_state(r.remote_log_segment_state)?;
     Ok(RemoteLogSegmentMetadataUpdate {
@@ -317,7 +322,9 @@ fn proto_tp_del_to_domain(tp: TpEntryDel) -> TopicIdPartition {
     TopicIdPartition::new(proto_uuid_to_domain(tp.id), tp.name, tp.partition)
 }
 
-fn to_proto_partition_delete(d: &RemotePartitionDeleteMetadata) -> RemotePartitionDeleteMetadataRecord {
+fn to_proto_partition_delete(
+    d: &RemotePartitionDeleteMetadata,
+) -> RemotePartitionDeleteMetadataRecord {
     RemotePartitionDeleteMetadataRecord {
         topic_id_partition: tp_to_proto_del(&d.topic_id_partition),
         broker_id: d.broker_id,
@@ -327,7 +334,9 @@ fn to_proto_partition_delete(d: &RemotePartitionDeleteMetadata) -> RemotePartiti
     }
 }
 
-fn from_proto_partition_delete(r: RemotePartitionDeleteMetadataRecord) -> Result<RemotePartitionDeleteMetadata, CodecError> {
+fn from_proto_partition_delete(
+    r: RemotePartitionDeleteMetadataRecord,
+) -> Result<RemotePartitionDeleteMetadata, CodecError> {
     let topic_id_partition = proto_tp_del_to_domain(r.topic_id_partition);
     let state = i8_to_partition_state(r.remote_partition_delete_state)?;
     Ok(RemotePartitionDeleteMetadata {
