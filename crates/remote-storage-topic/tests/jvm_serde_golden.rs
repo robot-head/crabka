@@ -1,0 +1,151 @@
+//! Byte-exactness proof: Crabka's [`MetadataEvent`] codec produces and
+//! consumes the *same* bytes as the real JVM `RemoteLogMetadataSerde`.
+//!
+//! The golden vectors in `tests/fixtures/rlmm_golden.json` were captured from
+//! `apache/kafka:4.0.0`'s
+//! `org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde`
+//! by `scripts/capture-rlmm-golden.sh` (which compiles + runs
+//! `scripts/capture-rlmm/Capture.java`). The fixture is the committed source of
+//! truth; the script documents how to reproduce it.
+//!
+//! For every case we assert BOTH directions:
+//!   1. `event.encode() == golden`   — Crabka encodes byte-identically to the JVM.
+//!   2. `MetadataEvent::decode(golden) == event` — Crabka decodes JVM bytes.
+//!
+//! The FIXED constants below MUST match `Capture.java` exactly:
+//!   topicId   = `Uuid::from_u128(0xCA)`
+//!   topic     = "orders", partition = 7
+//!   segmentId = `Uuid::from_u128(0xFE)`
+//!   startOffset=0 endOffset=99 brokerId=42 maxTimestampMs=100
+//!   eventTimestampMs=123 (add cases) segmentSizeInBytes=4096
+//!   segmentLeaderEpochs = {0->0, 1->50}
+//!   customMetadata (with-custom case) = [1,2,3,4]
+
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
+
+use crabka_remote_storage::{
+    CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
+    RemoteLogSegmentState, RemotePartitionDeleteMetadata, RemotePartitionDeleteState,
+    TopicIdPartition,
+};
+use crabka_remote_storage_topic::MetadataEvent;
+use uuid::Uuid;
+
+/// Load and hex-decode one named golden vector from the committed fixture.
+fn golden(name: &str) -> Vec<u8> {
+    let raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/rlmm_golden.json"
+    ))
+    .expect("read rlmm_golden.json");
+    let map: HashMap<String, String> = serde_json::from_str(&raw).expect("parse rlmm_golden.json");
+    let hex = map
+        .get(name)
+        .unwrap_or_else(|| panic!("no golden case {name}"));
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
+        .collect()
+}
+
+fn topic_id_partition() -> TopicIdPartition {
+    TopicIdPartition::new(Uuid::from_u128(0xCA), "orders", 7)
+}
+
+fn segment_id() -> RemoteLogSegmentId {
+    RemoteLogSegmentId::new(topic_id_partition(), Uuid::from_u128(0xFE))
+}
+
+fn epochs() -> BTreeMap<i32, i64> {
+    BTreeMap::from([(0, 0), (1, 50)])
+}
+
+/// Base add-segment metadata shared by the three add cases:
+/// `COPY_SEGMENT_STARTED`, eventTimestampMs=123, no custom, `txnIdxEmpty`=false.
+fn base_add() -> RemoteLogSegmentMetadata {
+    RemoteLogSegmentMetadata::new(
+        segment_id(),
+        0,    // start_offset
+        99,   // end_offset
+        100,  // max_timestamp_ms
+        42,   // broker_id
+        123,  // event_timestamp_ms
+        4096, // segment_size_in_bytes
+        RemoteLogSegmentState::CopySegmentStarted,
+        epochs(),
+    )
+    .expect("valid RemoteLogSegmentMetadata")
+}
+
+/// Assert Crabka round-trips byte-identically against a JVM golden vector.
+fn assert_byte_exact(case: &str, event: &MetadataEvent) {
+    let want = golden(case);
+    let got = event.encode();
+    assert_eq!(
+        got.as_ref(),
+        want.as_slice(),
+        "case `{case}`: Crabka encode != JVM golden\n  got : {}\n  want: {}",
+        hex(got.as_ref()),
+        hex(&want),
+    );
+    let decoded = MetadataEvent::decode(&want)
+        .unwrap_or_else(|e| panic!("case `{case}`: Crabka failed to decode JVM bytes: {e}"));
+    assert_eq!(
+        &decoded, event,
+        "case `{case}`: Crabka decode(JVM) != event"
+    );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+#[test]
+fn add_with_custom_matches_jvm() {
+    let md = base_add().with_custom_metadata(CustomMetadata(vec![1, 2, 3, 4]));
+    assert_byte_exact("add_with_custom", &MetadataEvent::AddSegment(md));
+}
+
+#[test]
+fn add_no_custom_matches_jvm() {
+    assert_byte_exact("add_no_custom", &MetadataEvent::AddSegment(base_add()));
+}
+
+#[test]
+fn add_txn_empty_matches_jvm() {
+    // JVM-captured via the RemoteLogSegmentMetadata(..., boolean) constructor
+    // present in apache/kafka:4.0.0; same as add_no_custom but txnIdxEmpty=true.
+    let md = base_add().with_txn_index_empty(true);
+    assert_byte_exact("add_txn_empty", &MetadataEvent::AddSegment(md));
+}
+
+#[test]
+fn update_finish_matches_jvm() {
+    let update = RemoteLogSegmentMetadataUpdate {
+        remote_log_segment_id: segment_id(),
+        event_timestamp_ms: 456,
+        custom_metadata: None,
+        state: RemoteLogSegmentState::CopySegmentFinished,
+        broker_id: 42,
+    };
+    assert_byte_exact("update_finish", &MetadataEvent::UpdateSegment(update));
+}
+
+#[test]
+fn partition_delete_marked_matches_jvm() {
+    let delete = RemotePartitionDeleteMetadata {
+        topic_id_partition: topic_id_partition(),
+        state: RemotePartitionDeleteState::DeletePartitionMarked,
+        event_timestamp_ms: 789,
+        broker_id: 42,
+    };
+    assert_byte_exact(
+        "partition_delete_marked",
+        &MetadataEvent::PartitionDelete(delete),
+    );
+}

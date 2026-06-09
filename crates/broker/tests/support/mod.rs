@@ -165,6 +165,18 @@ fn static_voter_broker_config(
 pub async fn start_n_node(
     n: u64,
 ) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
+    start_n_node_with(n, |_, _| {}).await
+}
+
+/// Like [`start_n_node`] but invokes `customize(i, &mut cfg)` on each broker's
+/// `BrokerConfig` before start, letting a test layer per-broker overrides
+/// (e.g. `rack`, `replica_selector`) while keeping the race-free held-listener
+/// bootstrap — no `bind_and_drop_ports` TOCTOU window for a concurrently
+/// running test to steal a just-released port (`AddrInUse`).
+pub async fn start_n_node_with(
+    n: u64,
+    mut customize: impl FnMut(usize, &mut BrokerConfig),
+) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
     init_tracing();
 
     let n_usize = usize::try_from(n).unwrap();
@@ -217,13 +229,14 @@ pub async fn start_n_node(
         .enumerate()
     {
         let dir = TempDir::new().unwrap();
-        let cfg = static_voter_broker_config(
+        let mut cfg = static_voter_broker_config(
             i,
             client_addrs[i],
             controller_addrs[i],
             &voters,
             dir.path(),
         );
+        customize(i, &mut cfg);
         let cfg_for_spawn = cfg.clone();
         starts.push(tokio::spawn(async move {
             Broker::start_with_listeners(
