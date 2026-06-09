@@ -71,6 +71,11 @@ pub enum CodecError {
     /// violated a precondition (e.g. empty leader-epoch map).
     #[error("decoded event rejected: {0}")]
     Domain(String),
+
+    /// An error propagated from the generated protocol codec (envelope
+    /// framing, schema mismatch, or trailing bytes).
+    #[error("protocol codec: {0}")]
+    Protocol(String),
 }
 
 /// Errors from the on-disk RLMM snapshot.
