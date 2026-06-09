@@ -1,0 +1,5 @@
+[
+  {"key": "a", "windowStart": 0, "windowEnd": 10, "value": 2},
+  {"key": "a", "windowStart": 10, "windowEnd": 20, "value": 1},
+  {"key": "a", "windowStart": 20, "windowEnd": 30, "value": 1}
+]

@@ -899,11 +899,12 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
-    KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream, SessionWindowedSerde,
-    SessionWindows, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined, StreamsBuilder,
-    Suppressed, TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows, VersionedConfig,
-    Window, Windowed,
+    BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows,
+    KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
+    SessionWindowedKGroupedStream, SessionWindowedSerde, SessionWindows,
+    SlidingWindowedCogroupedStream, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined,
+    StreamsBuilder, Suppressed, TimeWindowedCogroupedStream, TimeWindowedKGroupedStream,
+    TimeWindowedSerde, TimeWindows, VersionedConfig, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

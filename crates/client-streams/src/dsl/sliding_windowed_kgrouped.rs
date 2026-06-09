@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::config::Materialized;
+use crate::dsl::emit::EmitStrategy;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
 use crate::dsl::ktable::KTable;
@@ -36,6 +37,7 @@ pub struct SlidingWindowedKGroupedStream<K, V> {
     grouped_name: Option<String>,
     repartition_lower: Option<RepartitionLowerFn>,
     windows: SlidingWindows,
+    emit: EmitStrategy,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -59,8 +61,20 @@ where
             grouped_name,
             repartition_lower,
             windows,
+            emit: EmitStrategy::default(),
             _pd: PhantomData,
         }
+    }
+
+    /// Emit on every update (default) or only on window close (KIP-825).
+    ///
+    /// In `on_window_close`, records whose window has already closed are dropped
+    /// (so no duplicate final is emitted — unlike the session variant, which may
+    /// re-emit under `grace < gap`).
+    #[must_use]
+    pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
+        self.emit = emit;
+        self
     }
 
     pub fn count_explicit<KS, VS>(
@@ -236,6 +250,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -270,6 +285,8 @@ where
                         init: init.clone(),
                         agg: agg.clone(),
                         stream_time: i64::MIN,
+                        emit,
+                        last_emitted_close: i64::MIN,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -328,6 +345,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -362,6 +380,8 @@ where
                         windows,
                         reducer: reducer.clone(),
                         stream_time: i64::MIN,
+                        emit,
+                        last_emitted_close: i64::MIN,
                         _pd: PhantomData,
                     },
                     [parent],

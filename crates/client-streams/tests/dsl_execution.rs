@@ -2891,6 +2891,175 @@ fn sliding_window_count_matches_jvm_behavior() {
     );
 }
 
+/// Row shape shared by the emit-final behavioral goldens.
+#[derive(serde::Deserialize, PartialEq, Debug)]
+struct EmitFinalRow {
+    key: String,
+    #[serde(rename = "windowStart")]
+    window_start: i64,
+    #[serde(rename = "windowEnd")]
+    window_end: i64,
+    value: i64,
+}
+
+/// Emit-final (KIP-825) TIME-window count must match the JVM 4.1.0 capture in
+/// `testdata/emit_final/time.json` (`EmitStrategy.onWindowClose()`). Pins the
+/// strict close boundary: a window emits only once stream-time moves PAST its end.
+#[test]
+fn emit_final_time_window_matches_jvm_behavior() {
+    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, StringSerde, TimeWindowedSerde, TimeWindows,
+    };
+    let inputs: &[(&str, i64)] = &[("a", 1), ("a", 5), ("a", 11), ("a", 21), ("a", 40)];
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by(TimeWindows::of_size(10))
+        .emit_strategy(EmitStrategy::on_window_close())
+        .count("w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, ts) in inputs {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some((*k).to_string()),
+            "v".to_string(),
+            *ts,
+        );
+    }
+    let mut got: Vec<EmitFinalRow> = Vec::new();
+    while let Some((Some(wk), v)) = d.read_output(
+        "out",
+        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+    ) {
+        got.push(EmitFinalRow {
+            key: wk.key,
+            window_start: wk.window.start,
+            window_end: wk.window.end,
+            value: v,
+        });
+    }
+    let golden: Vec<EmitFinalRow> = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/emit_final/time.json").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(got, golden, "emit-final time-window sequence != JVM golden");
+}
+
+/// Emit-final SLIDING-window count must match `testdata/emit_final/sliding.json`.
+#[test]
+fn emit_final_sliding_window_matches_jvm_behavior() {
+    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    let inputs: &[(&str, i64)] = &[("a", 1), ("a", 5), ("a", 11), ("a", 21), ("a", 40)];
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .emit_strategy(EmitStrategy::on_window_close())
+        .count("w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, ts) in inputs {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some((*k).to_string()),
+            "v".to_string(),
+            *ts,
+        );
+    }
+    let mut got: Vec<EmitFinalRow> = Vec::new();
+    while let Some((Some(wk), v)) = d.read_output(
+        "out",
+        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+    ) {
+        got.push(EmitFinalRow {
+            key: wk.key,
+            window_start: wk.window.start,
+            window_end: wk.window.end,
+            value: v,
+        });
+    }
+    let golden: Vec<EmitFinalRow> = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/emit_final/sliding.json").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        got, golden,
+        "emit-final sliding-window sequence != JVM golden"
+    );
+}
+
+/// Emit-final SESSION-window count must match `testdata/emit_final/session.json`.
+/// The grace-0 script (`a@0,a@4` merge → `[0,4]`; `a@20` opens `[20,20]`; `a@100`
+/// closes both) is the discriminator that pinned the strict close boundary —
+/// the JVM emits NO zero-width `[0,0]` at stream-time 0.
+#[test]
+fn emit_final_session_window_matches_jvm_behavior() {
+    use crabka_client_streams::dsl::{EmitStrategy, StreamsBuilder};
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SessionWindowedSerde, SessionWindows, StringSerde,
+    };
+    let inputs: &[(&str, i64)] = &[("a", 0), ("a", 4), ("a", 20), ("a", 100)];
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_session(SessionWindows::of_inactivity_gap(10))
+        .emit_strategy(EmitStrategy::on_window_close())
+        .count("w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, ts) in inputs {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some((*k).to_string()),
+            "v".to_string(),
+            *ts,
+        );
+    }
+    let mut got: Vec<EmitFinalRow> = Vec::new();
+    while let Some((Some(wk), v)) = d.read_output(
+        "out",
+        Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+    ) {
+        got.push(EmitFinalRow {
+            key: wk.key,
+            window_start: wk.window.start,
+            window_end: wk.window.end,
+            value: v,
+        });
+    }
+    let golden: Vec<EmitFinalRow> = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/emit_final/session.json").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        got, golden,
+        "emit-final session-window sequence != JVM golden"
+    );
+}
+
 #[test]
 fn sliding_window_count_builds() {
     use crabka_client_streams::dsl::StreamsBuilder;
@@ -3027,6 +3196,58 @@ fn sliding_window_aggregate_executes() {
             }),
             1i64
         ))
+    );
+}
+
+/// Sliding-window emit-final (KIP-825): `.emit_strategy(on_window_close())`
+/// must suppress all per-update emits and forward finals only once windows
+/// close. With a large grace the windows from the two in-order records stay
+/// open (nothing emitted); a far-future record advances stream-time past their
+/// close, flushing the finals. The discriminator vs emit-on-update is that the
+/// first two records produce NO output.
+#[test]
+fn sliding_window_emit_final_emits_only_on_close() {
+    use crabka_client_streams::dsl::EmitStrategy;
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_and_grace(10, 100))
+        .emit_strategy(EmitStrategy::on_window_close())
+        .aggregate(|| 0i64, |_k: &String, _v: &String, a: i64| a + 1, "w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    let consume = || Consumed::with(StringSerde, StringSerde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    // Two in-window records (grace 100 keeps their windows open).
+    d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 20);
+    d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 25);
+    // Emit-final: nothing forwarded while windows are open.
+    assert_eq!(
+        d.read_output("out", p()),
+        None,
+        "emit-final must not emit while windows are open"
+    );
+    // Far-future record advances stream-time → close_time 900 closes the
+    // earlier windows, flushing their finals.
+    d.pipe_input(
+        "in",
+        consume(),
+        Some("k".to_string()),
+        "x".to_string(),
+        1000,
+    );
+    assert!(
+        d.read_output("out", p()).is_some(),
+        "closed windows must flush their finals once stream-time passes their close"
     );
 }
 

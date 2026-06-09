@@ -28,6 +28,9 @@ pub trait SessionStore<K: Send + Sync, V: Send>: StateStore {
     ) -> Vec<(i64, i64, V)>;
     async fn put(&mut self, key: K, start: i64, end: i64, value: V);
     async fn remove(&mut self, key: &K, start: i64, end: i64);
+    /// Every session across ALL keys whose `end <= close_time`, as
+    /// `(key, start, end, value)`. Backs emit-final's closed-session scan.
+    async fn find_closed_sessions(&self, close_time: i64) -> Vec<(K, i64, i64, V)>;
 }
 
 pub struct SessionBytesStore<K, V> {
@@ -188,6 +191,26 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
             self.changelog.push((sk, None));
         }
     }
+
+    async fn find_closed_sessions(&self, close_time: i64) -> Vec<(K, i64, i64, V)> {
+        let mut out = Vec::new();
+        for (k, raw) in self.backend.scan_all().await {
+            let end = session_end_of(&k);
+            if end > close_time {
+                continue;
+            }
+            let key = self
+                .key_serde
+                .deserialize(&self.changelog_topic, session_key_bytes_of(&k))
+                .expect("session key deserialize");
+            let value = self
+                .value_serde
+                .deserialize(&self.changelog_topic, &raw)
+                .expect("session value deserialize");
+            out.push((key, session_start_of(&k), end, value));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +262,30 @@ mod tests {
         s.put("kk".to_string(), 0, 10, 9).await; // longer key sharing the "k" prefix
         let found = s.find_sessions(&"k".to_string(), 0, 100).await;
         assert_eq!(found, vec![(0, 10, 1)]);
+    }
+
+    #[tokio::test]
+    async fn find_closed_sessions_scans_by_end() {
+        let mut s = SessionBytesStore::<String, i64>::in_memory(
+            "s".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-s-changelog".into(),
+        );
+        // (key, start, end, value)
+        s.put("a".into(), 0, 5, 1).await;
+        s.put("b".into(), 2, 8, 2).await;
+        s.put("a".into(), 20, 30, 3).await;
+
+        // end <= 8 → the first two (sort to make order-independent).
+        let mut got = s.find_closed_sessions(8).await;
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]
+        );
+        // end <= 4 → none.
+        assert!(s.find_closed_sessions(4).await.is_empty());
     }
 
     #[tokio::test]
