@@ -9,4 +9,8 @@ description = "Test-only TCP tap that records Kafka wire frames for corpus captu
 [lib]
 name = "crabka_kafka_tap"
 
+[[bin]]
+name = "kafka-tap"
+path = "src/main.rs"
+
 [dependencies]
