@@ -75,7 +75,6 @@ impl StoreRegistry {
 
     /// Typed mutable access: downcast the erased store to the versioned store
     /// of the requested types. `None` if absent or the types don't match.
-    #[allow(dead_code)] // wired in ProcessorContext::get_versioned_store (Task 7)
     pub fn get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,

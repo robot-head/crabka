@@ -40,8 +40,6 @@ pub(crate) enum ChangelogKind {
     /// Versioned store: `cleanup.policy=compact` + `min.compaction.lag.ms`
     /// (= `historyRetention` + `86_400_000`) so recent version history is not
     /// compacted away before restore reads it.
-    // used by Topology::add_versioned_store (Task 6)
-    #[allow(dead_code)]
     Versioned { min_compaction_lag_ms: i64 },
 }
 
@@ -181,8 +179,6 @@ impl NodeRegistry {
 
     /// Register a versioned state store. The changelog gets `compact` policy +
     /// `min.compaction.lag.ms=<min_compaction_lag_ms>`.
-    // used by Topology::add_versioned_store (Task 6)
-    #[allow(dead_code)]
     pub fn add_versioned_store(
         &mut self,
         name: &str,
