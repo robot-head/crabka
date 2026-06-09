@@ -22,11 +22,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: MarcoIeni/release-plz-action@v0.5
-        with:
-          # Publish + tag/release only. The release-pr step errors while no
-          # crate is on crates.io yet but v0.1.x git tags already exist; once
-          # the first publish lands this can revert to the default (both).
-          command: release
+        # Default command runs both `release-pr` (opens the version-bump PR)
+        # and `release` (publish + tag/release). The first publish has landed
+        # (all crates are on crates.io at 0.3.x), so the earlier `release`-only
+        # workaround is no longer needed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # crates.io publishing — release-plz.toml sets publish = true.
