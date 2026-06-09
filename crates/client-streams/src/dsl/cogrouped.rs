@@ -32,9 +32,8 @@ use crate::topology::NodeHandle;
 /// Which window flavor the terminal aggregation uses. Carries the window spec;
 /// the shared init + (session) merger live alongside in [`CogroupSpec`].
 // `dead_code`: the windowed variants are only constructed by the windowed
-// cogroup terminals (Batch 1, Tasks 1.x); non-windowed alone reads `NonWindowed`.
+// cogroup terminals use all four variants.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) enum CogroupKind {
     NonWindowed,
     Time(crate::dsl::windows::TimeWindows),

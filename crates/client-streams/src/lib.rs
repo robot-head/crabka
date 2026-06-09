@@ -893,11 +893,11 @@ pub mod topology;
 
 pub use dsl::{
     BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows,
-    KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream,
-    SessionWindowedSerde, SessionWindows, SlidingWindowedCogroupedStream,
-    SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined, StreamsBuilder, Suppressed,
-    TimeWindowedCogroupedStream, TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows,
-    Window, Windowed,
+    KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
+    SessionWindowedKGroupedStream, SessionWindowedSerde, SessionWindows,
+    SlidingWindowedCogroupedStream, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined,
+    StreamsBuilder, Suppressed, TimeWindowedCogroupedStream, TimeWindowedKGroupedStream,
+    TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{
