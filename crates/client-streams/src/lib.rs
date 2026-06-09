@@ -56,20 +56,16 @@
 //! Define a typed topology, then test it with the broker-free [`TopologyTestDriver`]:
 //!
 //! ```
-//! use async_trait::async_trait;
 //! use crabka_client_streams::{
-//!     NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver,
+//!     NodeHandle, Record, StringSerde, Topology, TopologyTestDriver, impl_processor,
 //! };
 //!
 //! struct Upper;
-//! #[async_trait]
-//! impl Processor<String, String, String, String> for Upper {
-//!     async fn process(
-//!         &mut self,
-//!         ctx: &mut ProcessorContext<'_, '_, String, String>,
-//!         r: Record<String, String>,
-//!     ) {
-//!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+//! impl_processor! {
+//!     impl Upper: (String, String) -> (String, String) {
+//!         async fn process(&mut self, ctx, r) {
+//!             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+//!         }
 //!     }
 //! }
 //!
@@ -113,27 +109,22 @@
 //! inside `process` via [`ProcessorContext::get_state_store`].
 //!
 //! ```
-//! use async_trait::async_trait;
 //! use crabka_client_streams::{
-//!     I64Serde, NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology,
-//!     TopologyTestDriver,
+//!     I64Serde, NodeHandle, Record, StringSerde, Topology, TopologyTestDriver, impl_processor,
 //! };
 //!
 //! struct Counter;
-//! #[async_trait]
-//! impl Processor<String, String, String, i64> for Counter {
-//!     async fn process(
-//!         &mut self,
-//!         ctx: &mut ProcessorContext<'_, '_, String, i64>,
-//!         r: Record<String, String>,
-//!     ) {
-//!         let n = {
-//!             let s = ctx.get_state_store::<String, i64>("counts").unwrap();
-//!             let n = s.get(&r.value).await.unwrap_or(0) + 1;
-//!             s.put(r.value.clone(), n).await;
-//!             n
-//!         };
-//!         ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+//! impl_processor! {
+//!     impl Counter: (String, String) -> (String, i64) {
+//!         async fn process(&mut self, ctx, r) {
+//!             let n = {
+//!                 let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+//!                 let n = s.get(&r.value).await.unwrap_or(0) + 1;
+//!                 s.put(r.value.clone(), n).await;
+//!                 n
+//!             };
+//!             ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+//!         }
 //!     }
 //! }
 //!
@@ -879,6 +870,9 @@ pub mod store;
 pub mod streams_app;
 pub mod test_driver;
 pub mod topology;
+
+#[doc(hidden)]
+pub use async_trait::async_trait as __async_trait;
 
 pub use dsl::{
     BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
