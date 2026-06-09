@@ -1,0 +1,6 @@
+api_key = 35
+version = 5
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "DescribeLogDirsResponse v5 oracle-synthesized (not realistically client-emitted)"

@@ -1,0 +1,6 @@
+api_key = 30
+version = 2
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "CreateAclsRequest v2 oracle-synthesized (not realistically client-emitted)"

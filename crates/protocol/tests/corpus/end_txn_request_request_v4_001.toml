@@ -1,0 +1,6 @@
+api_key = 26
+version = 4
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "EndTxnRequest v4 oracle-synthesized (not realistically client-emitted)"

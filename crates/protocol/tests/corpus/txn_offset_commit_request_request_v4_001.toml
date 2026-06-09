@@ -1,0 +1,6 @@
+api_key = 28
+version = 4
+direction = "request"
+source_kafka_version = "4.3.0"
+synthetic = true
+description = "TxnOffsetCommitRequest v4 oracle-synthesized (not realistically client-emitted)"

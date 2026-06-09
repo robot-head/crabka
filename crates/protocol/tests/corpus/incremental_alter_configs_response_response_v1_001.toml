@@ -1,0 +1,6 @@
+api_key = 44
+version = 1
+direction = "response"
+source_kafka_version = "4.3.0"
+synthetic = false
+description = "IncrementalAlterConfigsResponse v1 captured from apache/kafka:4.3.0 client traffic"
