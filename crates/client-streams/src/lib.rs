@@ -895,8 +895,8 @@ pub use dsl::{
     BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows,
     KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream,
     SessionWindowedSerde, SessionWindows, SlidingWindowedKGroupedStream, SlidingWindows,
-    StreamJoined, StreamsBuilder, Suppressed, TimeWindowedKGroupedStream, TimeWindowedSerde,
-    TimeWindows, Window, Windowed,
+    StreamJoined, StreamsBuilder, Suppressed, TimeWindowedCogroupedStream,
+    TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

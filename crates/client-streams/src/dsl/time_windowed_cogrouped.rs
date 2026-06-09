@@ -1,0 +1,110 @@
+//! `TimeWindowedCogroupedStream<K, VOut>`: time-windowed KIP-150 cogroup. Built
+//! by `CogroupedKStream::windowed_by(TimeWindows)`. Terminal `aggregate_explicit`
+//! produces `KTable<Windowed<K>, VOut>` over a shared window store.
+
+use std::any::Any;
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use crate::dsl::builder::InternalStreamsBuilder;
+use crate::dsl::cogrouped::{
+    CogroupInput, CogroupKind, CogroupSpec, CogroupedKStream, StoreRegistrarFn, lower_cogroup,
+};
+use crate::dsl::config::Materialized;
+use crate::dsl::kgrouped::mint_store_name;
+use crate::dsl::ktable::KTable;
+use crate::dsl::names;
+use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Windowed};
+use crate::processor::serde::Serde;
+
+impl<K, VOut> CogroupedKStream<K, VOut>
+where
+    K: Any + Send + Sync + Clone,
+    VOut: Any + Send + Sync + Clone,
+{
+    /// `windowedBy(TimeWindows)` → time-windowed cogroup.
+    #[must_use]
+    pub fn windowed_by(self, windows: TimeWindows) -> TimeWindowedCogroupedStream<K, VOut> {
+        TimeWindowedCogroupedStream {
+            builder: self.builder,
+            inputs: self.inputs,
+            windows,
+            _pd: PhantomData,
+        }
+    }
+}
+
+/// Handle produced by [`CogroupedKStream::windowed_by`]; terminal
+/// time-windowed aggregation consumes it.
+pub struct TimeWindowedCogroupedStream<K, VOut> {
+    builder: Rc<RefCell<InternalStreamsBuilder>>,
+    inputs: Vec<CogroupInput<K, VOut>>,
+    windows: TimeWindows,
+    _pd: PhantomData<fn() -> (K, VOut)>,
+}
+
+impl<K, VOut> TimeWindowedCogroupedStream<K, VOut>
+where
+    K: Any + Send + Sync + Clone,
+    VOut: Any + Send + Sync + Clone,
+{
+    /// Time-windowed terminal aggregation → `KTable<Windowed<K>, VOut>`.
+    pub fn aggregate_explicit<KS, VS, I>(
+        self,
+        init: I,
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<Windowed<K>, VOut, TimeWindowedSerde<KS>, VS>
+    where
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<VOut> + Clone + 'static,
+        I: Fn() -> VOut + Send + Sync + 'static,
+    {
+        let materialized = materialized.into();
+        let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
+        let Materialized {
+            key_serde,
+            value_serde,
+            logging,
+            ..
+        } = materialized;
+        let spec = CogroupSpec::<K, VOut> {
+            kind: CogroupKind::Time(self.windows),
+            init: Arc::new(init),
+            merger: None,
+        };
+        let ks = key_serde.clone();
+        let vs = value_serde.clone();
+        let store_for_reg = store_name.clone();
+        let size = self.windows.size_ms;
+        let grace = self.windows.grace_ms;
+        let registrar: StoreRegistrarFn = Box::new(move |state, procs| {
+            state.topology.add_window_store::<K, VOut, KS, VS>(
+                store_for_reg.clone(),
+                ks.clone(),
+                vs.clone(),
+                size,
+                grace,
+                procs,
+            );
+        });
+        let merge_id = lower_cogroup::<K, VOut, Windowed<K>>(
+            &self.builder,
+            self.inputs,
+            store_name.clone(),
+            spec,
+            logging,
+            registrar,
+        );
+        KTable::new(
+            Rc::clone(&self.builder),
+            merge_id,
+            Some(store_name),
+            None,
+            TimeWindowedSerde::new(key_serde, self.windows.size_ms),
+            value_serde,
+        )
+        .with_window_grace(Some(self.windows.grace_ms))
+    }
+}

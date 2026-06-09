@@ -19,6 +19,7 @@ pub(crate) mod processors;
 pub mod session_windowed_kgrouped;
 pub mod sliding_windowed_kgrouped;
 pub mod suppress;
+pub mod time_windowed_cogrouped;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
 pub use cogrouped::CogroupedKStream;
@@ -30,6 +31,7 @@ pub use ktable::KTable;
 pub use session_windowed_kgrouped::SessionWindowedKGroupedStream;
 pub use sliding_windowed_kgrouped::SlidingWindowedKGroupedStream;
 pub use suppress::{BufferConfig, Suppressed};
+pub use time_windowed_cogrouped::TimeWindowedCogroupedStream;
 pub use windowed_kgrouped::TimeWindowedKGroupedStream;
 pub mod windows;
 pub use windows::{
