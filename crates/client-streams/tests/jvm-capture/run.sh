@@ -238,8 +238,33 @@ case "$MODE" in
     docker network rm "$NET" >/dev/null 2>&1 || true
     ;;
 
+  --emit-final)
+    # Pin the JVM TopologyTestDriver emit-final (KIP-825 EmitStrategy.onWindowClose)
+    # behavioral golden into testdata/emit_final/{time,sliding,session}.json for the
+    # Rust emit-final parity tests. Mirrors --sliding; same jars (incl. streams-test-utils + rocksdb).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/emit_final
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/EmitFinalBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.EmitFinalBehavior /tests/testdata/emit_final
+      '
+    ;;
+
   *)
-    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--emit-final|--verify-broker]" >&2
     exit 2
     ;;
 esac
