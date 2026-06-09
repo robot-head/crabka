@@ -1,4 +1,4 @@
-//! Windowed aggregation processor: emit-on-every-update (no window closing).
+//! Windowed aggregation processors: emit-on-update (default) or emit-on-window-close (KIP-825).
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
@@ -13,9 +13,11 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 /// Aggregate records into a windowed accumulator stored in a `WindowStore`.
 ///
-/// Emits a `Change<VA>` per window that the record falls into (tumbling:
-/// one window; hopping: multiple). This is the **emit-on-update** strategy —
-/// the window is never "closed"; every record update is forwarded immediately.
+/// Behavior depends on the [`EmitStrategy`](crate::dsl::emit::EmitStrategy)
+/// field: in `on_window_update` (default) it emits a `Change<VA>` per window the
+/// record falls into (tumbling: one window; hopping: multiple) immediately; in
+/// `on_window_close` (KIP-825) it suppresses those per-update emits and instead
+/// forwards each window's final result once stream-time passes its close.
 ///
 /// Records with a null key are panicked (aggregations require non-null keys,
 /// enforced by the repartition step preceding this node in the DSL lowering).
@@ -148,8 +150,10 @@ where
 /// leaks into the `KTable`); the "first value" check is the windowed store lookup
 /// returning `None`.
 ///
-/// Emits a `Change<V>` per window that the record falls into (tumbling: one
-/// window; hopping: multiple) — the **emit-on-update** strategy.
+/// Like [`KStreamWindowAggregateProcessor`], the
+/// [`EmitStrategy`](crate::dsl::emit::EmitStrategy) field selects emit-on-update
+/// (default, a `Change<V>` per touched window) or emit-on-window-close (KIP-825,
+/// final result only once a window closes).
 ///
 /// Records with a null key are panicked (aggregations require non-null keys,
 /// enforced by the repartition step preceding this node in the DSL lowering).

@@ -40,15 +40,11 @@ impl EmitStrategy {
 
     /// True for the emit-on-update (default) strategy. Aggregate processors guard
     /// their per-update `ctx.forward` with this.
-    // Consumed by the windowed aggregate processors in a later KIP-825 slice.
-    #[allow(dead_code)]
     pub(crate) fn is_on_update(self) -> bool {
         matches!(self.kind, EmitKind::OnWindowUpdate)
     }
 
     /// True for the emit-on-close strategy.
-    // Consumed by the windowed aggregate processors in a later KIP-825 slice.
-    #[allow(dead_code)]
     pub(crate) fn is_on_close(self) -> bool {
         matches!(self.kind, EmitKind::OnWindowClose)
     }
