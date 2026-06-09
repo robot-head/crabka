@@ -261,6 +261,41 @@ where
     }
 }
 
+// ── VersionedKTableSourceProcessor ──────────────────────────────────────────
+
+/// Materializes incoming records into a `VersionedKeyValueStore` at the record's
+/// timestamp, then forwards a `Change<V>` whose `old` is the value that was valid
+/// at that timestamp *before* this record (KIP-914 table semantics). Out-of-order
+/// records still emit their local change; the store keeps the latest pointer.
+#[allow(dead_code)]
+pub(crate) struct VersionedKTableSourceProcessor<K, V> {
+    pub store_name: String,
+    pub _pd: Marker<(K, V)>,
+}
+
+#[async_trait]
+impl<K, V> Processor<K, V, K, Change<V>> for VersionedKTableSourceProcessor<K, V>
+where
+    K: std::any::Any + Send + Sync + Clone,
+    V: std::any::Any + Send + Clone,
+{
+    async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
+        let key = r
+            .key
+            .expect("versioned KTable source requires a non-null key");
+        let ts = r.timestamp;
+        let old = {
+            let store = ctx
+                .get_versioned_store::<K, V>(&self.store_name)
+                .expect("versioned KTable source store not found");
+            let old = store.get_as_of(&key, ts).await.map(|rec| rec.value);
+            store.put(key.clone(), Some(r.value.clone()), ts).await;
+            old
+        };
+        ctx.forward(Record::new(Some(key), Change::update(old, r.value), ts));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -282,6 +317,19 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "tbl-changelog".into(),
+        )));
+        stores
+    }
+
+    fn make_versioned_stores() -> StoreRegistry {
+        use crate::store::versioned::VersionedBytesStore;
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(VersionedBytesStore::<String, i64>::in_memory(
+            "vtbl".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "vtbl-changelog".into(),
         )));
         stores
     }
@@ -340,6 +388,116 @@ mod tests {
                 .get(&"k".to_string())
                 .await
                 == Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn versioned_ktable_source_out_of_order_changes() {
+        // Feed k: (10@100), (20@200), (15@150 out-of-order).
+        // Expected Change new/old pairs:
+        //   @100: old=None, new=10
+        //   @200: old=10,   new=20
+        //   @150: old=10,   new=15 (get_as_of(150) before put = v@100)
+        // After all three, store latest == 20.
+        let mut stores = make_versioned_stores();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+
+        let mut proc = VersionedKTableSourceProcessor::<String, i64> {
+            store_name: "vtbl".into(),
+            _pd: PhantomData,
+        };
+
+        // Record 1: k=10 @ts=100
+        {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("k".into()), 10i64, 100))
+                .await;
+        }
+        let (_, rec) = buffer.pop_front().unwrap();
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        check!(change.old.is_none(), "first record: no prior value");
+        check!(change.new == Some(10i64));
+
+        // Record 2: k=20 @ts=200
+        {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("k".into()), 20i64, 200))
+                .await;
+        }
+        let (_, rec) = buffer.pop_front().unwrap();
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        check!(change.old == Some(10i64), "record @200: old was v@100=10");
+        check!(change.new == Some(20i64));
+
+        // Record 3: k=15 @ts=150 (out-of-order)
+        {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("k".into()), 15i64, 150))
+                .await;
+        }
+        let (_, rec) = buffer.pop_front().unwrap();
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        check!(
+            change.old == Some(10i64),
+            "record @150: as_of(150) before put = v@100=10"
+        );
+        check!(change.new == Some(15i64));
+
+        // Latest (non-versioned get) must still be 20.
+        check!(
+            stores
+                .get_versioned::<String, i64>("vtbl")
+                .unwrap()
+                .get(&"k".to_string())
+                .await
+                .map(|r| r.value)
+                == Some(20),
+            "store latest must be 20 (the @200 record)"
         );
     }
 
