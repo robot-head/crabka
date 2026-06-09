@@ -2822,3 +2822,23 @@ fn dsl_process_values_unknown_store_panics() {
     b.stream::<String, String>(["in"])
         .process_values(|| FixedFwd, ["missing"]);
 }
+
+#[test]
+fn sliding_window_count_builds() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    // Building must not panic and must yield a wire topology.
+    let _ = b.build_optimized("app").unwrap().to_wire();
+}
