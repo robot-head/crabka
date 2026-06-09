@@ -1,28 +1,29 @@
-//! JSON Schema schema-serde Streams pipeline using the default-serde API.
+//! JSON Schema schema-serde Streams pipeline using the default-serde DSL.
 //! Requires a running broker (`127.0.0.1:9092`) and a Confluent-compatible
 //! registry (`http://127.0.0.1:8081`).
 //!
+//! Reads JSON `Order` records from `orders-json`, doubles each total, and writes
+//! them to `orders-json-doubled`. Mirrors the Avro/Protobuf examples — only the
+//! serde format differs.
+//!
 //! Run: `cargo run -p crabka-client-streams --example json_pipeline`
 
-use std::sync::Arc;
-
-use crabka_client_streams::{
-    DefaultSerde, SchemaPrewarm, SchemaSerde, StreamsMembership, Topology,
-};
+use crabka_client_streams::{DefaultSerde, KafkaStreams, SchemaSerde, StreamsBuilder};
 use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
 use crabka_schema_serde::format::json::JsonSerde;
 use crabka_schema_serde::{RegistryClient, set_default_registry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema)]
 struct Order {
     id: String,
     total: f64,
 }
 
-// JSON values resolved against the process default registry (validation off by
-// default; use `JsonSerde::value(&cache, true)` + add_source_explicit to enable).
+// JSON values resolved against the process default registry. (Payload validation
+// is off by default; build `JsonSerde::value(&cache, true)` and wire it with
+// `add_source_explicit` to enable it.)
 impl DefaultSerde for Order {
     type Serde = SchemaSerde<Order, JsonSerde<Order>>;
 }
@@ -33,23 +34,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         RegistryClient::new("http://127.0.0.1:8081"),
         CacheConfig::default(),
     );
+    // Install the registry BEFORE building: the default serdes read it when the
+    // DSL constructs them during `build`.
     set_default_registry(cache.clone());
 
-    let mut topo = Topology::new();
-    let src = topo.add_source::<String, Order>("src", ["orders-json"]);
-    topo.add_sink("snk", "orders-json-doubled", [&src]);
-    let built = topo.build("orders-json")?;
+    let builder = StreamsBuilder::new();
+    builder
+        .stream::<String, Order>(["orders-json"])
+        .map_values(|o: &Order| Order {
+            id: o.id.clone(),
+            total: o.total * 2.0,
+        })
+        .to("orders-json-doubled");
+    let built = builder.build("orders-json")?;
 
-    let mut membership = StreamsMembership::builder()
+    cache.prewarm().await?;
+
+    let mut streams = KafkaStreams::builder()
         .bootstrap("127.0.0.1:9092")
-        .group_id("orders-json")
-        .topology(Arc::new(built))
-        .maybe_schema_prewarm(Some(cache as Arc<dyn SchemaPrewarm>))
+        .application_id("orders-json")
+        .topology(built)
         .build()
         .await?;
-
-    while let Ok(event) = membership.next_event().await {
-        println!("event: {event:?}");
-    }
+    streams.close().await?;
     Ok(())
 }
