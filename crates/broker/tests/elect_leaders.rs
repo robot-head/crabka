@@ -714,7 +714,8 @@ async fn auto_rebalance_restores_preferred_leader() {
     // fields after building each BrokerConfig. All three brokers boot in
     // `Bootstrap` mode with the same static voter set (KIP-595 Slice 3c);
     // KIP-853 auto-join is Slice 5.
-    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(3).await;
+    let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
+        support::bind_and_hold_ports(3).await;
     let voters: Vec<(u64, std::net::SocketAddr)> = (0u64..3)
         .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
         .collect();
@@ -760,11 +761,22 @@ async fn auto_rebalance_restores_preferred_leader() {
     cfg2.leader_imbalance_per_broker_percentage = 0;
 
     // Start all three statically; they elect among themselves over the wire.
+    let mut client_ls = client_listeners.into_iter();
+    let mut ctrl_ls = controller_listeners.into_iter();
+    let (cl0, ctl0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (cl1, ctl1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (cl2, ctl2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
     let cfg1_clone = cfg1.clone();
     let cfg2_clone = cfg2.clone();
-    let join1 = tokio::spawn(async move { Broker::start(cfg1_clone).await });
-    let join2 = tokio::spawn(async move { Broker::start(cfg2_clone).await });
-    let h0 = Broker::start(cfg0.clone()).await.expect("broker 1 start");
+    let join1 = tokio::spawn(async move {
+        Broker::start_with_listeners(cfg1_clone, Some(ctl1), Some(cl1)).await
+    });
+    let join2 = tokio::spawn(async move {
+        Broker::start_with_listeners(cfg2_clone, Some(ctl2), Some(cl2)).await
+    });
+    let h0 = Broker::start_with_listeners(cfg0.clone(), Some(ctl0), Some(cl0))
+        .await
+        .expect("broker 1 start");
     let h1 = join1.await.expect("spawn join1").expect("broker 2 start");
     let h2 = join2.await.expect("spawn join2").expect("broker 3 start");
 
