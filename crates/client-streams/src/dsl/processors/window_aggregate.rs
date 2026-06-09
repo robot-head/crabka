@@ -25,6 +25,12 @@ pub(crate) struct KStreamWindowAggregateProcessor<K, V, VA, I, A> {
     pub windows: TimeWindows,
     pub init: I,
     pub agg: A,
+    /// Emit on every update (default) or only on window close (KIP-825).
+    pub emit: crate::dsl::emit::EmitStrategy,
+    /// Observed max record timestamp (per task instance) — drives window-close.
+    pub stream_time: i64,
+    /// Highest `window_close_time` already emitted; prevents re-emit.
+    pub last_emitted_close: i64,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -45,8 +51,14 @@ where
     ) {
         let key = r.key.expect("windowed aggregate requires a non-null key");
         let size = self.windows.size_ms;
+        self.stream_time = self.stream_time.max(r.timestamp);
+        let window_close_time = self.stream_time - self.windows.grace_ms;
 
         for ws in self.windows.windows_for(r.timestamp) {
+            // Emit-final drops updates for windows that already closed.
+            if self.emit.is_on_close() && ws + size <= self.last_emitted_close {
+                continue;
+            }
             // Borrow the store, do the async fetch + put, then drop the borrow
             // before calling ctx.forward (which re-borrows ctx mutably).
             let (old, new, new_ts) = {
@@ -63,18 +75,68 @@ where
                 store.put(key.clone(), ws, new.clone(), new_ts).await;
                 (old, new, new_ts)
             };
+            if self.emit.is_on_update() {
+                ctx.forward(Record::new(
+                    Some(Windowed {
+                        key: key.clone(),
+                        window: Window {
+                            start: ws,
+                            end: ws + size,
+                        },
+                    }),
+                    Change::update(old, new),
+                    new_ts,
+                ));
+            }
+        }
+
+        if self.emit.is_on_close() {
+            self.emit_closed_windows(ctx, window_close_time).await;
+        }
+    }
+}
+
+impl<K, V, VA, I, A> KStreamWindowAggregateProcessor<K, V, VA, I, A>
+where
+    K: std::any::Any + Send + Sync + Clone,
+    V: Send + 'static,
+    VA: std::any::Any + Send + Clone,
+    I: Fn() -> VA + Send + 'static,
+    A: Fn(&K, &V, VA) -> VA + Send + 'static,
+{
+    /// Forward each window whose `end <= window_close_time` and `end >
+    /// last_emitted_close` as a final `Change`, ascending by window start, then
+    /// advance the watermark.
+    async fn emit_closed_windows(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
+        window_close_time: i64,
+    ) {
+        let size = self.windows.size_ms;
+        let start_to = window_close_time - size; // end = start + size <= close
+        let start_from = self.last_emitted_close.saturating_sub(size);
+        let mut due = {
+            let store = ctx
+                .get_window_store::<K, VA>(&self.store_name)
+                .expect("window store not found");
+            store.fetch_all_in_range(start_from, start_to).await
+        };
+        due.retain(|(_, ws, _, _)| ws + size > self.last_emitted_close);
+        due.sort_by_key(|(_, ws, _, _)| *ws);
+        for (k, ws, ts, v) in due {
             ctx.forward(Record::new(
                 Some(Windowed {
-                    key: key.clone(),
+                    key: k,
                     window: Window {
                         start: ws,
                         end: ws + size,
                     },
                 }),
-                Change::update(old, new),
-                new_ts,
+                Change::update(None, v),
+                ts,
             ));
         }
+        self.last_emitted_close = window_close_time;
     }
 }
 
@@ -96,6 +158,12 @@ pub(crate) struct KStreamWindowReduceProcessor<K, V, R> {
     pub store_name: String,
     pub windows: TimeWindows,
     pub reducer: R,
+    /// Emit on every update (default) or only on window close (KIP-825).
+    pub emit: crate::dsl::emit::EmitStrategy,
+    /// Observed max record timestamp (per task instance) — drives window-close.
+    pub stream_time: i64,
+    /// Highest `window_close_time` already emitted; prevents re-emit.
+    pub last_emitted_close: i64,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -113,8 +181,14 @@ where
     ) {
         let key = r.key.expect("windowed reduce requires a non-null key");
         let size = self.windows.size_ms;
+        self.stream_time = self.stream_time.max(r.timestamp);
+        let window_close_time = self.stream_time - self.windows.grace_ms;
 
         for ws in self.windows.windows_for(r.timestamp) {
+            // Emit-final drops updates for windows that already closed.
+            if self.emit.is_on_close() && ws + size <= self.last_emitted_close {
+                continue;
+            }
             // Borrow the store, do the async fetch + put, then drop the borrow
             // before calling ctx.forward (which re-borrows ctx mutably).
             let (old, new, new_ts) = {
@@ -133,18 +207,66 @@ where
                 store.put(key.clone(), ws, new.clone(), new_ts).await;
                 (old, new, new_ts)
             };
+            if self.emit.is_on_update() {
+                ctx.forward(Record::new(
+                    Some(Windowed {
+                        key: key.clone(),
+                        window: Window {
+                            start: ws,
+                            end: ws + size,
+                        },
+                    }),
+                    Change::update(old, new),
+                    new_ts,
+                ));
+            }
+        }
+
+        if self.emit.is_on_close() {
+            self.emit_closed_windows(ctx, window_close_time).await;
+        }
+    }
+}
+
+impl<K, V, R> KStreamWindowReduceProcessor<K, V, R>
+where
+    K: std::any::Any + Send + Sync + Clone,
+    V: std::any::Any + Send + Clone,
+    R: Fn(&V, &V) -> V + Send + 'static,
+{
+    /// Forward each window whose `end <= window_close_time` and `end >
+    /// last_emitted_close` as a final `Change`, ascending by window start, then
+    /// advance the watermark.
+    async fn emit_closed_windows(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
+        window_close_time: i64,
+    ) {
+        let size = self.windows.size_ms;
+        let start_to = window_close_time - size; // end = start + size <= close
+        let start_from = self.last_emitted_close.saturating_sub(size);
+        let mut due = {
+            let store = ctx
+                .get_window_store::<K, V>(&self.store_name)
+                .expect("window store not found");
+            store.fetch_all_in_range(start_from, start_to).await
+        };
+        due.retain(|(_, ws, _, _)| ws + size > self.last_emitted_close);
+        due.sort_by_key(|(_, ws, _, _)| *ws);
+        for (k, ws, ts, v) in due {
             ctx.forward(Record::new(
                 Some(Windowed {
-                    key: key.clone(),
+                    key: k,
                     window: Window {
                         start: ws,
                         end: ws + size,
                     },
                 }),
-                Change::update(old, new),
-                new_ts,
+                Change::update(None, v),
+                ts,
             ));
         }
+        self.last_emitted_close = window_close_time;
     }
 }
 
@@ -187,30 +309,37 @@ mod tests {
             windows: TimeWindows::of_size(10),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
-        // record at ts=3 → window [0,10), count 1
-        {
-            let globals = crate::runtime::global::GlobalStateManager::default();
-            let mut scheds = Vec::new();
-            let mut d = Dispatch {
-                buffer: &mut buffer,
-                children: &children,
-                output: &mut output,
-                record_ctx: &rc,
-                stores: &mut stores,
-                globals: &globals,
-                node_idx: 0,
-                schedules: &mut scheds,
-                sched_stream_time: i64::MIN,
-                sched_wall_clock: 0,
-            };
-            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
-            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 3))
-                .await;
+        macro_rules! drive {
+            ($ts:expr) => {{
+                let globals = crate::runtime::global::GlobalStateManager::default();
+                let mut scheds = Vec::new();
+                let mut d = Dispatch {
+                    buffer: &mut buffer,
+                    children: &children,
+                    output: &mut output,
+                    record_ctx: &rc,
+                    stores: &mut stores,
+                    globals: &globals,
+                    node_idx: 0,
+                    schedules: &mut scheds,
+                    sched_stream_time: i64::MIN,
+                    sched_wall_clock: 0,
+                };
+                let mut ctx =
+                    ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+                proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), $ts))
+                    .await;
+            }};
         }
 
+        // record at ts=3 → window [0,10), count 1
+        drive!(3);
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
@@ -219,52 +348,14 @@ mod tests {
         assert_eq!(change.new, Some(1));
 
         // record at ts=7 → same window [0,10), count 2
-        {
-            let globals = crate::runtime::global::GlobalStateManager::default();
-            let mut scheds = Vec::new();
-            let mut d = Dispatch {
-                buffer: &mut buffer,
-                children: &children,
-                output: &mut output,
-                record_ctx: &rc,
-                stores: &mut stores,
-                globals: &globals,
-                node_idx: 0,
-                schedules: &mut scheds,
-                sched_stream_time: i64::MIN,
-                sched_wall_clock: 0,
-            };
-            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
-            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 7))
-                .await;
-        }
-
+        drive!(7);
         let (_, rec2) = buffer.pop_front().unwrap();
         let change2 = rec2.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(change2.old, Some(1));
         assert_eq!(change2.new, Some(2));
 
         // record at ts=12 → window [10,20), count 1
-        {
-            let globals = crate::runtime::global::GlobalStateManager::default();
-            let mut scheds = Vec::new();
-            let mut d = Dispatch {
-                buffer: &mut buffer,
-                children: &children,
-                output: &mut output,
-                record_ctx: &rc,
-                stores: &mut stores,
-                globals: &globals,
-                node_idx: 0,
-                schedules: &mut scheds,
-                sched_stream_time: i64::MIN,
-                sched_wall_clock: 0,
-            };
-            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
-            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 12))
-                .await;
-        }
-
+        drive!(12);
         let (_, rec3) = buffer.pop_front().unwrap();
         assert_eq!(
             rec3.key
@@ -275,5 +366,81 @@ mod tests {
             Window { start: 10, end: 20 }
         );
         assert_eq!(rec3.value.downcast::<Change<i64>>().unwrap().new, Some(1));
+    }
+
+    #[tokio::test]
+    async fn windowed_count_emit_final_emits_only_on_close() {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-w-changelog".into(),
+        )));
+
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+
+        let mut proc = KStreamWindowAggregateProcessor {
+            store_name: "w".into(),
+            windows: TimeWindows::of_size(10),
+            init: || 0i64,
+            agg: |_k: &String, _v: &String, a: i64| a + 1,
+            emit: crate::dsl::emit::EmitStrategy::on_window_close(),
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            _pd: PhantomData::<fn() -> (String, String, i64)>,
+        };
+
+        // helper to drive one record
+        macro_rules! drive {
+            ($ts:expr) => {{
+                let globals = crate::runtime::global::GlobalStateManager::default();
+                let mut scheds = Vec::new();
+                let mut d = Dispatch {
+                    buffer: &mut buffer,
+                    children: &children,
+                    output: &mut output,
+                    record_ctx: &rc,
+                    stores: &mut stores,
+                    globals: &globals,
+                    node_idx: 0,
+                    schedules: &mut scheds,
+                    sched_stream_time: i64::MIN,
+                    sched_wall_clock: 0,
+                };
+                let mut ctx =
+                    ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+                proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), $ts))
+                    .await;
+            }};
+        }
+
+        // ts=3 and ts=7 both in window [0,10) — emit-final does not emit while open.
+        drive!(3);
+        assert!(buffer.is_empty(), "no emit while window [0,10) is open");
+        drive!(7);
+        assert!(
+            buffer.is_empty(),
+            "still no emit while window [0,10) is open"
+        );
+
+        // ts=15 → window [10,20) opens, stream_time=15, window [0,10) closes
+        // (end 10 <= close_time 15). Exactly one final record forwarded.
+        drive!(15);
+
+        assert_eq!(buffer.len(), 1, "exactly one final emit on close");
+        let (_, rec) = buffer.pop_front().unwrap();
+        let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(key.key, "a");
+        assert_eq!(key.window, Window { start: 0, end: 10 });
+        assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
     }
 }

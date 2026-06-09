@@ -1,4 +1,4 @@
-﻿//! `TimeWindowedKGroupedStream<K,V>`: the intermediate handle between
+//! `TimeWindowedKGroupedStream<K,V>`: the intermediate handle between
 //! `KGroupedStream::windowed_by(TimeWindows)` and a terminal **windowed**
 //! aggregation (`count`/`reduce`/`aggregate`).
 //!
@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::config::Materialized;
+use crate::dsl::emit::EmitStrategy;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
 use crate::dsl::ktable::KTable;
@@ -52,6 +53,8 @@ pub struct TimeWindowedKGroupedStream<K, V> {
     repartition_lower: Option<RepartitionLowerFn>,
     /// The window spec driving `windows_for(ts)` + the window-store retention.
     windows: TimeWindows,
+    /// Emit on every update (default) or only on window close (KIP-825).
+    emit: EmitStrategy,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -75,8 +78,16 @@ where
             grouped_name,
             repartition_lower,
             windows,
+            emit: EmitStrategy::on_window_update(),
             _pd: PhantomData,
         }
+    }
+
+    /// Emit on every update (default) or only on window close (KIP-825).
+    #[must_use]
+    pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
+        self.emit = emit;
+        self
     }
 
     /// `count`: count records per (key, window) into a windowed
@@ -274,6 +285,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -308,6 +320,9 @@ where
                         windows,
                         init: init.clone(),
                         agg: agg.clone(),
+                        emit,
+                        stream_time: i64::MIN,
+                        last_emitted_close: i64::MIN,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -366,6 +381,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -400,6 +416,9 @@ where
                         store_name: store_for_proc.clone(),
                         windows,
                         reducer: reducer.clone(),
+                        emit,
+                        stream_time: i64::MIN,
+                        last_emitted_close: i64::MIN,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -459,4 +478,63 @@ where
                 );
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dsl::StreamsBuilder;
+    use crate::dsl::emit::EmitStrategy;
+    use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Window, Windowed};
+    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+    use crate::test_driver::TopologyTestDriver;
+
+    /// `windowedBy(TimeWindows).emit_strategy(on_window_close).count`: emit-final
+    /// (KIP-825) suppresses per-update emits and forwards a single final count for
+    /// each window only once stream-time advances past its close. Records a@1 and
+    /// a@4 accumulate (count 2) in window `[0,10)` silently; the a@12 record opens
+    /// `[10,20)` and closes `[0,10)` (end 10 <= `window_close_time` 12), emitting
+    /// exactly one record: window `[0,10)` with value 2.
+    #[test]
+    fn dsl_windowed_count_emit_final_emits_once_on_close() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by(TimeWindows::of_size(10))
+            .emit_strategy(EmitStrategy::on_window_close())
+            .count("w")
+            .to_stream()
+            .to_explicit(
+                "out",
+                Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            );
+        let built = b.build("app").unwrap();
+        let mut d = TopologyTestDriver::new(&built).unwrap();
+        for ts in [1, 4, 12] {
+            d.pipe_input(
+                "in",
+                Consumed::with(StringSerde, StringSerde),
+                Some("a".to_string()),
+                "x".to_string(),
+                ts,
+            );
+        }
+        let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+        assert_eq!(
+            d.read_output("out", p()),
+            Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                2
+            )),
+            "emit-final forwards window [0,10) with final count 2 on close"
+        );
+        // No per-update emits and the still-open window [10,20) is not emitted.
+        assert_eq!(
+            d.read_output("out", p()),
+            None,
+            "exactly one emit-final record"
+        );
+    }
 }
