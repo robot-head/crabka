@@ -86,7 +86,7 @@ tap. This is what makes the capture schema-agnostic and complete for one broker.
 
 Each unit has one purpose, a defined interface, and is independently testable.
 
-### `tools/kafka-tap/` — new Rust bin crate (workspace member)
+### `crates/kafka-tap/` — new Rust lib+bin crate (workspace member, `publish = false`)
 
 Pure byte-level TCP relay + frame recorder. **No protocol-schema knowledge.**
 
@@ -183,7 +183,7 @@ the existing single entry's contract.
   the artifact.
 - **`capture_corpus.rs`:** `#[ignore]` + Docker-gated; never runs in normal CI;
   invoked on demand to (re)generate the committed corpus.
-- **`tools/kafka-tap` unit tests:** `frame.rs` parses + correlates hand-built
+- **`crates/kafka-tap` unit tests:** `frame.rs` parses + correlates hand-built
   request/response byte fixtures (flexible and non-flexible) with no Docker.
 - **`.github/workflows/recapture-corpus.yml` (`workflow_dispatch`):** boots the
   pinned `apache/kafka:4.3.0`, re-runs capture, and **fails if freshly-captured
@@ -207,7 +207,7 @@ the existing single entry's contract.
 
 The work ships when **all** hold:
 
-1. `tools/kafka-tap` builds, with `frame.rs` unit tests green (framing +
+1. `crates/kafka-tap` builds, with `frame.rs` unit tests green (framing +
    correlation, flexible and non-flexible, request + response).
 2. `capture_corpus.rs` (run once on demand) produces a corpus with exactly one
    entry per `CASES` `(api_key, version, dir)` pair; captured pairs are
