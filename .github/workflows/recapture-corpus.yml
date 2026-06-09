@@ -1,0 +1,30 @@
+name: recapture-corpus
+on:
+  workflow_dispatch:
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build JVM oracle
+        run: (cd tools/oracle && ./gradlew installDist --no-daemon)
+      - name: Pull broker image
+        run: docker pull apache/kafka:4.3.0
+      - name: Capture-and-compare (fails on drift)
+        env:
+          CORPUS_CHECK_ONLY: "1"
+        run: cargo test -p crabka-protocol --test capture_corpus -- --ignored --nocapture
+      - name: Confirm committed corpus still passes the replay gate
+        run: cargo test -p crabka-protocol --test corpus_replay

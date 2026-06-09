@@ -184,11 +184,13 @@ fn write_entry(
 
 #[test]
 #[ignore = "requires docker + apache/kafka:4.3.0"]
+#[allow(clippy::too_many_lines)]
 fn capture_and_generate_corpus() {
     if !docker_available() {
         eprintln!("docker unavailable; skipping");
         return;
     }
+    let check_only = std::env::var("CORPUS_CHECK_ONLY").is_ok();
     docker_run_broker();
     wait_ready();
 
@@ -216,10 +218,13 @@ fn capture_and_generate_corpus() {
     );
 
     // Clear any previously generated corpus so a re-run is deterministic.
-    for e in std::fs::read_dir(corpus_dir()).unwrap() {
-        let p = e.unwrap().path();
-        if matches!(p.extension().and_then(|s| s.to_str()), Some("hex" | "toml")) {
-            let _ = std::fs::remove_file(p);
+    // Skipped in check-only mode, which must be fully read-only.
+    if !check_only {
+        for e in std::fs::read_dir(corpus_dir()).unwrap() {
+            let p = e.unwrap().path();
+            if matches!(p.extension().and_then(|s| s.to_str()), Some("hex" | "toml")) {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 
@@ -238,6 +243,19 @@ fn capture_and_generate_corpus() {
             );
             continue;
         }
+        if check_only {
+            let dirn = if is_request { "request" } else { "response" };
+            let stem = format!("{}_{dirn}_v{version}_001", to_snake(name));
+            let committed = std::fs::read_to_string(corpus_dir().join(format!("{stem}.hex")))
+                .unwrap_or_default();
+            let committed: String = committed.chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(
+                committed == hex_encode(&body),
+                "DRIFT: {name} v{version} {dirn} differs from committed corpus"
+            );
+            covered.insert((api_key, version, is_request));
+            continue;
+        }
         write_entry(
             api_key,
             version,
@@ -251,43 +269,47 @@ fn capture_and_generate_corpus() {
     eprintln!("wrote {} captured entries", covered.len());
 
     // Synthesis pass: fill every uncovered CASES Request/Response pair via oracle.
-    let mut o = oracle::shared();
-    let mut synth = 0usize;
-    for c in CASES {
-        let is_request = match c.kind {
-            Kind::Request => true,
-            Kind::Response => false,
-            Kind::RequestHeader | Kind::ResponseHeader => continue,
-        };
-        if covered.contains(&(c.api_key, c.version, is_request)) {
-            continue;
+    // Skipped in check-only mode so a drift run never needs the JVM oracle and
+    // stays fully read-only.
+    if !check_only {
+        let mut o = oracle::shared();
+        let mut synth = 0usize;
+        for c in CASES {
+            let is_request = match c.kind {
+                Kind::Request => true,
+                Kind::Response => false,
+                Kind::RequestHeader | Kind::ResponseHeader => continue,
+            };
+            if covered.contains(&(c.api_key, c.version, is_request)) {
+                continue;
+            }
+            let jval = default_json_for(c.name, c.version);
+            let body = o.encode(c.api_key, c.version, is_request, &jval);
+            let re = roundtrip(c.name, c.version, &body);
+            assert!(
+                re == body,
+                "synthetic {} v{} does not round-trip",
+                c.name,
+                c.version
+            );
+            write_entry(
+                c.api_key,
+                c.version,
+                is_request,
+                &body,
+                true,
+                &format!(
+                    "{} v{} oracle-synthesized (not realistically client-emitted)",
+                    c.name, c.version
+                ),
+            );
+            synth += 1;
         }
-        let jval = default_json_for(c.name, c.version);
-        let body = o.encode(c.api_key, c.version, is_request, &jval);
-        let re = roundtrip(c.name, c.version, &body);
-        assert!(
-            re == body,
-            "synthetic {} v{} does not round-trip",
-            c.name,
-            c.version
+        eprintln!(
+            "wrote {synth} synthetic entries; total {} pairs",
+            covered.len() + synth
         );
-        write_entry(
-            c.api_key,
-            c.version,
-            is_request,
-            &body,
-            true,
-            &format!(
-                "{} v{} oracle-synthesized (not realistically client-emitted)",
-                c.name, c.version
-            ),
-        );
-        synth += 1;
     }
-    eprintln!(
-        "wrote {synth} synthetic entries; total {} pairs",
-        covered.len() + synth
-    );
 
     docker_rm_f();
 }
