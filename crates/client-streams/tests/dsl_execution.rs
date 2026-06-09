@@ -2910,3 +2910,211 @@ fn sliding_window_count_builds() {
     // Building must not panic and must yield a wire topology.
     let _ = b.build_optimized("app").unwrap().to_wire();
 }
+
+/// Sliding-window (KIP-450) reduce behavioral golden: run the same out-of-order
+/// script as count against the Rust reduce runtime and compare every emission
+/// (key, window, value) to the JVM `TopologyTestDriver` capture in
+/// `testdata/sliding_window/behavior_reduce.json`.
+///
+/// The reduce closure concatenates with `|`, so each window accumulates
+/// "v", "v|v", "v|v|v", … matching the JVM `(a, v) -> a + "|" + v` reducer.
+#[test]
+fn sliding_window_reduce_matches_jvm_behavior() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct Row {
+        key: String,
+        #[serde(rename = "windowStart")]
+        window_start: i64,
+        #[serde(rename = "windowEnd")]
+        window_end: i64,
+        value: String,
+    }
+
+    let inputs: &[(&str, i64)] = &[("a", 0), ("a", 5), ("a", 12), ("a", 3), ("b", 7), ("a", 30)];
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .reduce(|a: &String, v: &String| format!("{a}|{v}"), "w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, ts) in inputs {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some((*k).to_string()),
+            "v".to_string(),
+            *ts,
+        );
+    }
+    let mut got: Vec<Row> = Vec::new();
+    while let Some((Some(wk), v)) = d.read_output(
+        "out",
+        Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+    ) {
+        got.push(Row {
+            key: wk.key,
+            window_start: wk.window.start,
+            window_end: wk.window.end,
+            value: v,
+        });
+    }
+    let golden: Vec<Row> = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/sliding_window/behavior_reduce.json").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        got, golden,
+        "sliding-window reduce output sequence != JVM behavioral golden"
+    );
+}
+
+/// Sliding-window aggregate via the ergonomic non-explicit `.aggregate()` form.
+/// Uses a count-style aggregator (`+1`) to assert the first left-window emission
+/// is correct for two in-order records.
+#[test]
+fn sliding_window_aggregate_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window,
+        Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .aggregate(|| 0i64, |_k: &String, _v: &String, a: i64| a + 1, "w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // t=20: first record, process_normal → left window [10,20] count=1.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        20,
+    );
+    // t=25: second record, process_normal → left window [15,25] seeded by [10,20] → count=2.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        25,
+    );
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    // First emission: left window [10,20] with count=1.
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 10, end: 20 }
+            }),
+            1i64
+        ))
+    );
+}
+
+/// Sliding-window count via the ergonomic non-explicit `.count()` form.
+/// Exercises the `count` → `count_explicit` lowering path distinct from
+/// `count_explicit` called directly.
+#[test]
+fn sliding_window_count_nonexplicit_builds_and_runs() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window,
+        Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .count("w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Single record at t=15, process_normal → left window [5,15] count=1.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        15,
+    );
+    assert_eq!(
+        d.read_output(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde)
+        ),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 5, end: 15 }
+            }),
+            1i64
+        ))
+    );
+}
+
+/// Sliding-window reduce via the ergonomic non-explicit `.reduce()` form.
+/// One record seeds the first value (no prior in window → `value.clone()`),
+/// asserting the single left-window emission.
+#[test]
+fn sliding_window_reduce_nonexplicit() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Produced, SlidingWindows, StringSerde, TimeWindowedSerde, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .reduce(|a: &String, v: &String| format!("{a}|{v}"), "w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Single record at t=15: no prior record in window, seeds with value.clone() → "hello".
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "hello".to_string(),
+        15,
+    );
+    assert_eq!(
+        d.read_output(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde)
+        ),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 5, end: 15 }
+            }),
+            "hello".to_string()
+        ))
+    );
+}

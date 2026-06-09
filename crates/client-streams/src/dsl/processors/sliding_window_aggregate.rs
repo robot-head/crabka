@@ -992,4 +992,130 @@ mod tests {
             "expected left window [15,25]=2, got {out:?}"
         );
     }
+
+    /// Record at `t=3` with `W=10` (so `t < W`): exercises `process_early`.
+    /// The combined window `[0, 10]` is created with count=1.
+    #[tokio::test]
+    async fn early_window_combined_for_t_below_w() {
+        let mut stores = store();
+        let mut p = count_proc();
+        let out = run(&mut p, &mut stores, "a", 3).await;
+        // process_early: combined window [0, W=10] is created/updated.
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, None, Some(1))),
+            "expected combined window [0,10]=1 for early t=3, got {out:?}"
+        );
+        // No left window for early records (ws = t-W = -7 < 0, not created).
+        assert!(
+            !out.iter().any(|(w, _, _)| w.start < 0),
+            "unexpected negative-start window in early path: {out:?}"
+        );
+    }
+
+    // ── Reduce processor unit tests ─────────────────────────────────────────
+
+    /// Helper to build a `StoreRegistry` holding a `WindowBytesStore<String, String>`
+    /// for the reduce processor tests.
+    fn str_store() -> StoreRegistry {
+        let mut s = StoreRegistry::default();
+        s.insert(Box::new(WindowBytesStore::<String, String>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "app-w-changelog".into(),
+        )));
+        s
+    }
+
+    fn reduce_proc()
+    -> KStreamSlidingWindowReduceProcessor<String, String, fn(&String, &String) -> String> {
+        KStreamSlidingWindowReduceProcessor {
+            store_name: "w".into(),
+            windows: SlidingWindows::of_time_difference_with_no_grace(10),
+            reducer: (|a: &String, v: &String| format!("{a}|{v}"))
+                as fn(&String, &String) -> String,
+            stream_time: i64::MIN,
+            _pd: PhantomData,
+        }
+    }
+
+    /// Helper that runs one record through the reduce processor and returns the
+    /// raw output as `Vec<(Window, Option<String>, Option<String>)>`.
+    #[allow(clippy::type_complexity)]
+    async fn run_reduce(
+        proc: &mut KStreamSlidingWindowReduceProcessor<
+            String,
+            String,
+            fn(&String, &String) -> String,
+        >,
+        stores: &mut StoreRegistry,
+        key: &str,
+        value: &str,
+        ts: i64,
+    ) -> Vec<(Window, Option<String>, Option<String>)> {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: ts,
+        };
+        let globals = GlobalStateManager::default();
+        let mut scheds = Vec::new();
+        {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<String>>::new(&mut d);
+            proc.process(&mut ctx, Record::new(Some(key.into()), value.into(), ts))
+                .await;
+        }
+        buffer
+            .into_iter()
+            .map(|(_, rec)| {
+                let k = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+                let c = rec.value.downcast::<Change<String>>().unwrap();
+                (k.window, c.old, c.new)
+            })
+            .collect()
+    }
+
+    /// First record at t=20 seeds the left window `[10,20]` with the value
+    /// itself (no prior record → `value.clone()`).
+    #[tokio::test]
+    async fn reduce_first_record_seeds_left_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
+        assert!(
+            out.contains(&(Window { start: 10, end: 20 }, None, Some("v".into()))),
+            "expected left window [10,20]=\"v\", got {out:?}"
+        );
+    }
+
+    /// Second record at t=25 reduces the left window `[15,25]`. The prior
+    /// record at t=20 falls inside `[15,25]` (since `25-10=15 <= 20`), so the
+    /// seed is the existing `[10,20]` aggregate "v", and the fold yields "v|v".
+    #[tokio::test]
+    async fn reduce_second_record_folds_into_new_left_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let _ = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 25).await;
+        assert!(
+            out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))),
+            "expected left window [15,25]=\"v|v\", got {out:?}"
+        );
+    }
 }
