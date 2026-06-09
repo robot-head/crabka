@@ -10,6 +10,7 @@ use crate::dsl::windows::{SlidingWindows, Window, Windowed};
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
+/// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
 
 /// Aggregate records into sliding windows (KIP-450), emit-on-update.
@@ -57,9 +58,10 @@ where
             return; // too late; window already closed
         }
 
-        // Scan all existing windows that could overlap with `t`.
-        // A window [ws, ws+W] overlaps t iff ws <= t AND ws+W >= t,
-        // i.e. ws in [t-W, t].  We extend scan by one extra to catch right seeds.
+        // Scan windows that could contain `t` or seed its left window. A
+        // predecessor window ending at `t - W` starts at `t - 2W`, so the lower
+        // bound is `max(0, t - 2W)`; the `t + 1` upper bound catches an existing
+        // right window starting at `t + 1`.
         let scan_from = (t - 2 * w).max(0);
         let found: Vec<(i64, i64, VA)> = {
             let store = ctx
@@ -168,6 +170,10 @@ where
         if t < close_time {
             return;
         }
+        // Scan windows that could contain `t` or seed its left window. A
+        // predecessor window ending at `t - W` starts at `t - 2W`, so the lower
+        // bound is `max(0, t - 2W)`; the `t + 1` upper bound catches an existing
+        // right window starting at `t + 1`.
         let scan_from = (t - 2 * w).max(0);
         let found: Vec<(i64, i64, V)> = {
             let store = ctx
@@ -176,6 +182,7 @@ where
             store.fetch_with_ts(&key, scan_from, t + 1).await
         };
         let mut left_exists = false;
+        let mut right_exists = false;
         let mut updates: Vec<(i64, V, i64)> = Vec::new();
         for (ws, stored_ts, agg) in &found {
             let we = ws + w;
@@ -185,15 +192,24 @@ where
                 }
                 let new = (self.reducer)(agg, &r.value);
                 updates.push((*ws, new, (*stored_ts).max(t)));
+            } else if *ws == t + 1 {
+                right_exists = true;
             }
         }
         if !left_exists {
             let ls = (t - w).max(0);
             let seed = found
                 .iter()
-                .find(|(ws, _, _)| ws + w < t)
+                .filter(|(ws, _, _)| ws + w < t)
+                .last()
                 .map_or_else(|| r.value.clone(), |(_, _, v)| (self.reducer)(v, &r.value));
             updates.push((ls, seed, t));
+        }
+        if !right_exists {
+            let has_later = found.iter().any(|(ws, _, _)| *ws > t && *ws <= t + w);
+            if has_later {
+                updates.push((t + 1, r.value.clone(), t));
+            }
         }
         updates.sort_by_key(|(ws, _, _)| *ws);
         for (ws, new, new_ts) in updates {
@@ -324,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn second_record_in_range_updates_windows() {
+    async fn adjacent_record_seeds_new_left_window() {
         let mut stores = store();
         let mut p = count_proc();
         let _ = run(&mut p, &mut stores, "a", 20).await;
