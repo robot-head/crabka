@@ -90,8 +90,10 @@ public final class Capture {
         write(outDir, "process_values", processValuesTopology());
         write(outDir, "fk_join_inner", fkJoinInner());
         write(outDir, "fk_join_left", fkJoinLeft());
+        write(outDir, "sliding_window_count", slidingWindowCount());
+        write(outDir, "sliding_window_aggregate", slidingWindowAggregate());
 
-        System.out.println("Capture complete. Wrote 19 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 21 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -120,6 +122,32 @@ public final class Capture {
             .windowedBy(org.apache.kafka.streams.kstream.TimeWindows.ofSizeWithNoGrace(
                 java.time.Duration.ofSeconds(60)))
             .count()
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** Sliding-window (KIP-450) count: stream -> groupByKey -> windowedBy(SlidingWindows) -> count -> toStream -> to. */
+    static Topology slidingWindowCount() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.SlidingWindows.ofTimeDifferenceWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** Sliding-window aggregate (no count name-burn): groupByKey -> windowedBy(SlidingWindows) -> aggregate -> toStream -> to. */
+    static Topology slidingWindowAggregate() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.SlidingWindows.ofTimeDifferenceWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .aggregate(() -> 0L, (k, v, a) -> a + 1, Materialized.with(Serdes.String(), Serdes.Long()))
             .toStream()
             .to("out");
         return b.build(optimizedProps());

@@ -262,6 +262,17 @@
 //! emit-on-update). The session store keys by `key‖end‖start` (a third typed store
 //! over the pluggable backend); read the output with [`SessionWindowedSerde`].
 //!
+//! [`KGroupedStream::windowed_by_sliding`] produces a
+//! [`SlidingWindowedKGroupedStream`] with `count`/`reduce`/`aggregate`. Sliding
+//! windows are **data-defined** inclusive windows of fixed size
+//! `time_difference_ms`: a record at time `t` falls into every window
+//! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. Unlike
+//! tumbling/hopping windows there is no epoch alignment; the aggregator
+//! discovers affected windows by scanning the window store and emits on update.
+//! Out-of-order records within `time_difference + grace` are folded into the
+//! windows they belong to. The output is a `KTable<Windowed<K>, _>` reusing the
+//! [`TimeWindowedSerde`] output-key layout (`key‖windowStart:8B-BE`).
+//!
 //! [`KTable::suppress`]`(`[`Suppressed`]`::until_window_closes(`[`BufferConfig`]`::unbounded()))`
 //! turns a windowed table's emit-on-update change-stream into **final results**: it
 //! buffers each window's updates and forwards the window's final value exactly once,
@@ -883,8 +894,8 @@ pub mod topology;
 pub use dsl::{
     BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
     KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream, SessionWindowedSerde,
-    SessionWindows, StreamJoined, StreamsBuilder, Suppressed, TimeWindowedKGroupedStream,
-    TimeWindowedSerde, TimeWindows, Window, Windowed,
+    SessionWindows, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined, StreamsBuilder,
+    Suppressed, TimeWindowedKGroupedStream, TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

@@ -2822,3 +2822,91 @@ fn dsl_process_values_unknown_store_panics() {
     b.stream::<String, String>(["in"])
         .process_values(|| FixedFwd, ["missing"]);
 }
+
+/// Sliding-window (KIP-450) behavioral golden: run the same out-of-order script
+/// against the Rust runtime and compare every emission (key, window, value) to the
+/// JVM `TopologyTestDriver` capture in `testdata/sliding_window/behavior.json`.
+///
+/// The input script deliberately includes an out-of-order record (`("a", 3)` after
+/// stream-time has advanced to 12) and a cross-key record (`("b", 7)`) that falls
+/// entirely in closed-window territory for that key — matching the exact JVM
+/// `KStreamSlidingWindowAggregate` behavior.
+#[test]
+fn sliding_window_count_matches_jvm_behavior() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, I64Serde, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    #[derive(serde::Deserialize, PartialEq, Debug)]
+    struct Row {
+        key: String,
+        #[serde(rename = "windowStart")]
+        window_start: i64,
+        #[serde(rename = "windowEnd")]
+        window_end: i64,
+        value: i64,
+    }
+
+    let inputs: &[(&str, i64)] = &[("a", 0), ("a", 5), ("a", 12), ("a", 3), ("b", 7), ("a", 30)];
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .count("w")
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (k, ts) in inputs {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some((*k).to_string()),
+            "v".to_string(),
+            *ts,
+        );
+    }
+    let mut got: Vec<Row> = Vec::new();
+    while let Some((Some(wk), v)) = d.read_output(
+        "out",
+        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+    ) {
+        got.push(Row {
+            key: wk.key,
+            window_start: wk.window.start,
+            window_end: wk.window.end,
+            value: v,
+        });
+    }
+    let golden: Vec<Row> = serde_json::from_str(
+        &std::fs::read_to_string("tests/testdata/sliding_window/behavior.json").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        got, golden,
+        "sliding-window output sequence != JVM behavioral golden"
+    );
+}
+
+#[test]
+fn sliding_window_count_builds() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, StringSerde, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    // Building must not panic and must yield a wire topology.
+    let _ = b.build_optimized("app").unwrap().to_wire();
+}

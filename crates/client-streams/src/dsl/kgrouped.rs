@@ -275,6 +275,29 @@ where
         )
     }
 
+    /// `windowedBy(SlidingWindows)`: switch to a sliding-window (KIP-450)
+    /// aggregation. Moves the grouped lineage into a
+    /// [`crate::dsl::SlidingWindowedKGroupedStream`]. (Distinct method name
+    /// because Rust cannot overload `windowed_by` by the window-spec argument
+    /// type as the JVM does.)
+    #[must_use]
+    pub fn windowed_by_sliding(
+        mut self,
+        windows: crate::dsl::windows::SlidingWindows,
+    ) -> crate::dsl::sliding_windowed_kgrouped::SlidingWindowedKGroupedStream<K, V>
+    where
+        V: Sync,
+    {
+        crate::dsl::sliding_windowed_kgrouped::SlidingWindowedKGroupedStream::new(
+            Rc::clone(&self.builder),
+            self.parent,
+            self.key_changing_upstream,
+            self.grouped_name.take(),
+            self.repartition_lower.take(),
+            windows,
+        )
+    }
+
     /// Shared body for `count`/`aggregate`: mint the store name at the JVM
     /// counter position, then lower the (optional) repartition + aggregate node.
     fn aggregate_inner<KS, VS, VA, I, A>(

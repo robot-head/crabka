@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
-# Capture the 17 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
+# Capture the 21 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
 # (stateless_chain, count, repartition_merge, table_reuse, branch_merge, to_table,
 #  stream_table_join, ktable_ktable_join, windowed_count, stream_stream_join,
 #  stream_stream_outer_join, session_count, suppress_until_window_closes,
 #  suppress_until_window_closes_logged,
-#  global_table_join, process, process_values)
+#  global_table_join, process, process_values, fk_join_inner, fk_join_left,
+#  sliding_window_count, sliding_window_aggregate)
 #
-# Mechanism A (default, no broker): builds the 17 DSL topologies with optimization=all
+# Mechanism A (default, no broker): builds the 21 DSL topologies with optimization=all
 # and runs Kafka's own DSL -> StreamsGroupHeartbeatRequest.Topology conversion via
 # reflection, writing Crabka wire-shape JSON to ../testdata/golden/dsl/.
 #
@@ -15,6 +16,7 @@
 #   ./run.sh                 # capture fixtures via Gradle in Docker (writes the fixtures)
 #   ./run.sh --javac         # capture fixtures via plain javac in Docker (no Gradle)
 #   ./run.sh --verify-broker # mechanism B cross-check: run count vs a real Kafka 4.1 broker
+#   ./run.sh --sliding       # pin sliding-window (KIP-450) behavioral golden (writes testdata/sliding_window)
 #
 # Requires: Docker, network access to Maven Central (and Docker Hub for the broker image).
 set -euo pipefail
@@ -137,6 +139,31 @@ case "$MODE" in
       '
     ;;
 
+  --sliding)
+    # Pin the JVM TopologyTestDriver sliding-window (KIP-450) behavioral golden
+    # into testdata/sliding_window/behavior.json for the Rust KStreamSlidingWindowAggregate
+    # out-of-order fidelity tests. Mirrors --punctuation; same jars (incl. streams-test-utils + rocksdb).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/sliding_window
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/SlidingWindowBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.SlidingWindowBehavior /tests/testdata/sliding_window
+      '
+    ;;
+
   --fkjoin)
     # Pin the JVM FK-join (KIP-213) byte + semantic oracle into
     # testdata/fk_join/behavior.json, for the Rust FK-join codec + processor parity
@@ -212,7 +239,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--verify-broker]" >&2
     exit 2
     ;;
 esac
