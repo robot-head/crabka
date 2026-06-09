@@ -25,6 +25,15 @@ impl<KS, VS> Grouped<KS, VS> {
     }
 }
 
+/// Versioned-store settings for a `Materialized` (KIP-889). `segment_interval_ms`
+/// only affects JVM eviction granularity (non-observable here); accepted for API
+/// parity. `None` segment interval uses the JVM default segment heuristic.
+#[derive(Debug, Clone, Copy)]
+pub struct VersionedConfig {
+    pub history_retention_ms: i64,
+    pub segment_interval_ms: Option<i64>,
+}
+
 /// Store name + serdes + logging flag for a materialized `KTable`.
 #[derive(Debug, Clone)]
 pub struct Materialized<KS, VS> {
@@ -34,6 +43,7 @@ pub struct Materialized<KS, VS> {
     pub(crate) value_serde: VS,
     pub(crate) store_name: Option<String>,
     pub(crate) logging: bool,
+    pub(crate) versioned: Option<VersionedConfig>,
 }
 impl<KS, VS> Materialized<KS, VS> {
     pub fn with(key_serde: KS, value_serde: VS) -> Self {
@@ -42,6 +52,7 @@ impl<KS, VS> Materialized<KS, VS> {
             value_serde,
             store_name: None,
             logging: true,
+            versioned: None,
         }
     }
     #[must_use]
@@ -52,6 +63,17 @@ impl<KS, VS> Materialized<KS, VS> {
     #[must_use]
     pub fn with_logging(mut self, on: bool) -> Self {
         self.logging = on;
+        self
+    }
+    /// Materialize this table into a versioned key-value store (KIP-889) named
+    /// `name`, retaining `history_retention_ms` of version history.
+    #[must_use]
+    pub fn as_versioned(mut self, name: impl Into<String>, history_retention_ms: i64) -> Self {
+        self.store_name = Some(name.into());
+        self.versioned = Some(VersionedConfig {
+            history_retention_ms,
+            segment_interval_ms: None,
+        });
         self
     }
 }
@@ -148,5 +170,13 @@ mod tests {
             .num_partitions(4);
         check!(r.name.as_deref() == Some("rp"));
         check!(r.partitions == Some(4));
+    }
+
+    #[test]
+    fn materialized_as_versioned_sets_config() {
+        let m = Materialized::with(StringSerde, I64Serde).as_versioned("vstore", 600_000);
+        check!(m.store_name.as_deref() == Some("vstore"));
+        let vc = m.versioned.expect("versioned config");
+        check!(vc.history_retention_ms == 600_000);
     }
 }
