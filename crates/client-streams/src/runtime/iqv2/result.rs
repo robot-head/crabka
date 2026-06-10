@@ -106,3 +106,75 @@ impl<R> StateQueryResult<R> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn success_accessors_expose_result_and_position() {
+        let qr: QueryResult<i64> = QueryResult::Success {
+            result: 42,
+            position: Position::default(),
+        };
+        assert!(qr.is_success());
+        assert_eq!(qr.result(), Some(&42));
+        assert_eq!(qr.position(), Some(&Position::default()));
+        assert_eq!(qr.failure_reason(), None);
+        assert_eq!(qr.failure_message(), None);
+        assert_eq!(qr.into_result(), Some(42));
+    }
+
+    #[test]
+    fn failure_accessors_expose_reason_and_message() {
+        let qr: QueryResult<i64> = QueryResult::Failure {
+            reason: FailureReason::NotPresent,
+            message: "store not on this task".to_string(),
+        };
+        assert!(!qr.is_success());
+        assert_eq!(qr.result(), None);
+        assert_eq!(qr.position(), None);
+        assert_eq!(qr.failure_reason(), Some(FailureReason::NotPresent));
+        assert_eq!(qr.failure_message(), Some("store not on this task"));
+        assert_eq!(qr.into_result(), None);
+    }
+
+    #[test]
+    fn state_query_result_multi_partition_has_no_only_or_global() {
+        let mut map: BTreeMap<i32, QueryResult<Option<i64>>> = BTreeMap::new();
+        map.insert(
+            0,
+            QueryResult::Success {
+                result: Some(1),
+                position: Position::default(),
+            },
+        );
+        map.insert(
+            1,
+            QueryResult::Success {
+                result: Some(2),
+                position: Position::default(),
+            },
+        );
+        let sqr = StateQueryResult::new(map);
+        assert_eq!(sqr.partition_results().len(), 2);
+        assert!(sqr.only_partition_result().is_none());
+        assert!(sqr.global_result().is_none());
+    }
+
+    #[test]
+    fn state_query_result_single_partition_has_only() {
+        let mut map: BTreeMap<i32, QueryResult<Option<i64>>> = BTreeMap::new();
+        map.insert(
+            3,
+            QueryResult::Success {
+                result: Some(9),
+                position: Position::default(),
+            },
+        );
+        let sqr = StateQueryResult::new(map);
+        assert_eq!(sqr.partition_results().len(), 1);
+        let only = sqr.only_partition_result().expect("exactly one partition");
+        assert_eq!(only.result(), Some(&Some(9)));
+    }
+}
