@@ -7,6 +7,7 @@ pub(crate) mod cogroup_merge;
 pub(crate) mod fk;
 pub(crate) mod global_join;
 pub(crate) mod join;
+pub(crate) mod join_grace;
 pub(crate) mod ktable_join;
 pub(crate) mod outer_join_store;
 pub(crate) mod session_aggregate;

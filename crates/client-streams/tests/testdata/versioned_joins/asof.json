@@ -1,0 +1,9 @@
+{
+  "scenario": "stream_table_asof",
+  "history_retention_ms": 600000,
+  "out": [
+    { "key": "a", "value": 11, "ts": 150 },
+    { "key": "a", "value": 21, "ts": 250 }
+  ],
+  "describe": "Topologies:\n   Sub-topology: 0\n    Source: KSTREAM-SOURCE-0000000002 (topics: [stream])\n      --> KSTREAM-JOIN-0000000003\n    Processor: KSTREAM-JOIN-0000000003 (stores: [vt])\n      --> KSTREAM-SINK-0000000004\n      <-- KSTREAM-SOURCE-0000000002\n    Source: KSTREAM-SOURCE-0000000000 (topics: [table])\n      --> KTABLE-SOURCE-0000000001\n    Sink: KSTREAM-SINK-0000000004 (topic: out)\n      <-- KSTREAM-JOIN-0000000003\n    Processor: KTABLE-SOURCE-0000000001 (stores: [vt])\n      --> none\n      <-- KSTREAM-SOURCE-0000000000\n\n"
+}

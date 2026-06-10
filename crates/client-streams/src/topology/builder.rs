@@ -879,6 +879,69 @@ impl Topology {
         self
     }
 
+    /// Register a join-grace buffer store (KIP-923) connected to the given
+    /// processor.
+    ///
+    /// The grace buffer ([`JoinGraceBufferStore`]) is a stream-side, time-ordered
+    /// in-memory buffer with its own storage (it does NOT use the pluggable byte
+    /// backend), so the factory ignores the opened backend. Its changelog is a
+    /// COMPACTED KV changelog (`ChangelogKind::Kv` → `cleanup.policy=compact`,
+    /// `message.timestamp.type=CreateTime`, NO explicit `retention.ms`), pinned
+    /// from the JVM 4.1.0 capture. `logging` toggles ONLY the changelog: when
+    /// `true` the changelog topic is emitted and the store logs/restores; when
+    /// `false` the store stays in memory and NO changelog topic appears.
+    ///
+    /// [`JoinGraceBufferStore`]: crate::store::join_grace_buffer::JoinGraceBufferStore
+    pub(crate) fn add_join_grace_store<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        logging: bool,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let name: String = name.into();
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        // Logging toggles ONLY the changelog topic; the runtime store is always
+        // registered so the processor can buffer through it either way. The grace
+        // buffer changelog is a plain compacted KV changelog (ChangelogKind::Kv).
+        if logging {
+            self.reg.add_store(&name, procs, None);
+        }
+        self.store_factories.insert(
+            name.clone(),
+            (
+                None,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          _backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        // logging off → empty changelog (never flushed) + flag off.
+                        let cl = if logging { changelog } else { String::new() };
+                        let mut store =
+                            crate::store::join_grace_buffer::JoinGraceBufferStore::<K, V>::new(
+                                store_name.to_string(),
+                                Box::new(key_serde.clone()),
+                                Box::new(value_serde.clone()),
+                                cl,
+                            );
+                        if !logging {
+                            crate::store::api::StateStore::set_logging(&mut store, false);
+                        }
+                        Box::new(store) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
+        );
+        self
+    }
+
     /// Register a state store **without** a changelog topic.
     ///
     /// The store is available at runtime (for in-memory state), but NO entry is

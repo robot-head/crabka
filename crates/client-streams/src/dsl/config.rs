@@ -123,6 +123,31 @@ impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
     }
 }
 
+/// Stream–table join config (KIP-923). Carries an optional grace period that
+/// buffers stream records so out-of-order records still join the table value
+/// as-of their own timestamp. `grace_ms` requires the joined table to be
+/// versioned and must be `< history_retention_ms` (asserted at build time by the
+/// join DSL). `name` optionally names the grace buffer store.
+#[derive(Debug, Clone, Default)]
+pub struct Joined {
+    pub(crate) grace_ms: Option<i64>,
+    pub(crate) name: Option<String>,
+}
+impl Joined {
+    #[must_use]
+    pub fn with_grace_period(grace_ms: i64) -> Self {
+        Self {
+            grace_ms: Some(grace_ms),
+            name: None,
+        }
+    }
+    #[must_use]
+    pub fn as_named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+}
+
 /// Serdes + optional name/partitions for an explicit `repartition()`.
 #[derive(Debug, Clone)]
 pub struct Repartitioned<KS, VS> {
@@ -170,6 +195,14 @@ mod tests {
             .num_partitions(4);
         check!(r.name.as_deref() == Some("rp"));
         check!(r.partitions == Some(4));
+    }
+
+    #[test]
+    fn joined_carries_grace_and_name() {
+        let j = Joined::with_grace_period(5_000).as_named("jb");
+        check!(j.grace_ms == Some(5_000));
+        check!(j.name.as_deref() == Some("jb"));
+        check!(Joined::default().grace_ms == None);
     }
 
     #[test]
