@@ -401,5 +401,101 @@ mod tests {
                 ..
             }
         ));
+
+        // `with_ascending_timestamps()` is the default; calling it explicitly
+        // (after a descending toggle) must restore ascending.
+        let mv_asc = MultiVersionedKeyQuery::<String, i64>::with_key("k".into())
+            .with_descending_timestamps()
+            .with_ascending_timestamps();
+        assert!(matches!(
+            mv_asc.lower(),
+            Iq2Query::MultiVersionedKey { descending: false, .. }
+        ));
+    }
+
+    #[test]
+    fn range_query_bound_variants_lower_correctly() {
+        let both = RangeQuery::<String, i64>::with_range("a".into(), "b".into());
+        assert_eq!(both.store_kind(), StoreKind::KeyValue);
+        assert!(matches!(
+            both.lower(),
+            Iq2Query::Range {
+                lo: Some(_),
+                hi: Some(_),
+                descending: false,
+            }
+        ));
+
+        let upper = RangeQuery::<String, i64>::with_upper_bound("b".into());
+        assert!(matches!(
+            upper.lower(),
+            Iq2Query::Range {
+                lo: None,
+                hi: Some(_),
+                descending: false,
+            }
+        ));
+
+        let none = RangeQuery::<String, i64>::with_no_bounds().with_ascending_keys();
+        assert!(matches!(
+            none.lower(),
+            Iq2Query::Range {
+                lo: None,
+                hi: None,
+                descending: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn window_key_query_default_and_explicit_bounds() {
+        let dflt = WindowKeyQuery::<String, i64>::with_key("a".into());
+        assert!(matches!(
+            dflt.lower(),
+            Iq2Query::WindowKey {
+                from_ts: i64::MIN,
+                to_ts: i64::MAX,
+                ..
+            }
+        ));
+
+        let bounded = WindowKeyQuery::<String, i64>::with_key("a".into())
+            .from_time(5)
+            .to_time(9);
+        assert!(matches!(
+            bounded.lower(),
+            Iq2Query::WindowKey {
+                from_ts: 5,
+                to_ts: 9,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn window_range_query_key_range_and_all_keys() {
+        let ranged = WindowRangeQuery::<String, i64>::with_key_range("a".into(), "b".into())
+            .from_time(1)
+            .to_time(2);
+        assert_eq!(ranged.store_kind(), StoreKind::Window);
+        assert!(matches!(
+            ranged.lower(),
+            Iq2Query::WindowRange {
+                lo: Some(_),
+                hi: Some(_),
+                from_ts: 1,
+                to_ts: 2,
+            }
+        ));
+
+        let all = WindowRangeQuery::<String, i64>::with_all_keys();
+        assert!(matches!(
+            all.lower(),
+            Iq2Query::WindowRange {
+                lo: None,
+                hi: None,
+                ..
+            }
+        ));
     }
 }

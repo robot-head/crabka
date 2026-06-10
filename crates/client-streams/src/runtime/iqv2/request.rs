@@ -138,4 +138,55 @@ mod tests {
         assert!(!cur.dominates(&pos(&[("in", 0, 11)]))); // behind
         assert!(!cur.dominates(&pos(&[("other", 0, 1)]))); // unknown tp
     }
+
+    #[test]
+    fn position_offset_reads_present_and_absent_tps() {
+        let p = pos(&[("in", 0, 10), ("in", 1, 5)]);
+        assert_eq!(p.offset("in", 0), Some(10));
+        assert_eq!(p.offset("in", 1), Some(5));
+        assert_eq!(p.offset("in", 2), None); // present topic, absent partition
+        assert_eq!(p.offset("other", 0), None); // absent topic
+    }
+
+    #[test]
+    fn builder_defaults_and_store_name() {
+        use crate::runtime::iqv2::query::KeyQuery;
+
+        let q = StateQueryRequest::in_store("s")
+            .with_query(KeyQuery::<String, i64>::with_key("k".into()));
+        assert_eq!(q.store, "s");
+        assert!(matches!(q.partitions, PartitionSel::All));
+        assert!(matches!(q.bound, PositionBound::Unbounded));
+        assert!(!q.require_active);
+    }
+
+    #[test]
+    fn builder_chain_sets_each_field() {
+        use crate::runtime::iqv2::query::KeyQuery;
+
+        let set: BTreeSet<i32> = [0, 2].into_iter().collect();
+        let q = StateQueryRequest::in_store("s")
+            .with_query(KeyQuery::<String, i64>::with_key("k".into()))
+            .with_partitions(set.clone());
+        match &q.partitions {
+            PartitionSel::Set(s) => assert_eq!(s, &set),
+            PartitionSel::All => panic!("expected explicit partition set"),
+        }
+
+        // with_all_partitions resets back to All.
+        let q = q.with_all_partitions();
+        assert!(matches!(q.partitions, PartitionSel::All));
+
+        // with_position_bound stores the bound.
+        let bound_pos = pos(&[("in", 0, 7)]);
+        let q = q.with_position_bound(PositionBound::At(bound_pos.clone()));
+        match &q.bound {
+            PositionBound::At(p) => assert_eq!(p, &bound_pos),
+            PositionBound::Unbounded => panic!("expected At bound"),
+        }
+
+        // require_active flips the flag.
+        let q = q.require_active();
+        assert!(q.require_active);
+    }
 }
