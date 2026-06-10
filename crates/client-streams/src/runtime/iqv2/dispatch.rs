@@ -45,7 +45,10 @@ pub(crate) fn assemble<R: 'static>(outcome: Iq2Outcome) -> StateQueryResult<R> {
     for (partition, position, res) in outcome.per_partition {
         let qr = match res {
             Ok(boxed) => match boxed.downcast::<R>() {
-                Ok(r) => QueryResult::Success { result: *r, position },
+                Ok(r) => QueryResult::Success {
+                    result: *r,
+                    position,
+                },
                 Err(_) => QueryResult::Failure {
                     reason: FailureReason::StoreException,
                     message: "IQv2 result type mismatch".to_string(),
