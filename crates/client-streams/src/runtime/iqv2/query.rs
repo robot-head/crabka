@@ -5,6 +5,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 
 use crate::store::iq::{Iq2Query, StoreKind};
+use crate::store::versioned::VersionedRecord;
 
 mod sealed {
     pub trait Sealed {}
@@ -219,6 +220,87 @@ impl<K: Send + Sync + 'static, V: 'static> Query for WindowRangeQuery<K, V> {
     }
 }
 
+/// Single versioned-key lookup (KIP-960). `as_of = None` ⇒ latest live version.
+/// Result: `Option<VersionedRecord<V>>`.
+pub struct VersionedKeyQuery<K, V> {
+    key: K,
+    as_of: Option<i64>,
+    _v: PhantomData<fn() -> V>,
+}
+impl<K, V> VersionedKeyQuery<K, V> {
+    #[must_use]
+    pub fn with_key(key: K) -> Self {
+        Self { key, as_of: None, _v: PhantomData }
+    }
+    #[must_use]
+    pub fn as_of(mut self, timestamp: i64) -> Self {
+        self.as_of = Some(timestamp);
+        self
+    }
+}
+impl<K: Send + Sync + 'static, V: 'static> sealed::Sealed for VersionedKeyQuery<K, V> {}
+impl<K: Send + Sync + 'static, V: 'static> Query for VersionedKeyQuery<K, V> {
+    type Result = Option<VersionedRecord<V>>;
+    fn store_kind(&self) -> StoreKind {
+        StoreKind::Versioned
+    }
+    fn lower(self) -> Iq2Query {
+        Iq2Query::VersionedKey { key: Box::new(self.key), as_of: self.as_of }
+    }
+}
+
+/// All versions of a key whose validity overlaps `[from_time, to_time]`
+/// (KIP-968). `None` bound = unbounded that side; ascending by `valid_from`
+/// unless `with_descending_timestamps()`. Result: `Vec<VersionedRecord<V>>`.
+pub struct MultiVersionedKeyQuery<K, V> {
+    key: K,
+    from_ts: Option<i64>,
+    to_ts: Option<i64>,
+    descending: bool,
+    _v: PhantomData<fn() -> V>,
+}
+impl<K, V> MultiVersionedKeyQuery<K, V> {
+    #[must_use]
+    pub fn with_key(key: K) -> Self {
+        Self { key, from_ts: None, to_ts: None, descending: false, _v: PhantomData }
+    }
+    #[must_use]
+    pub fn from_time(mut self, t: i64) -> Self {
+        self.from_ts = Some(t);
+        self
+    }
+    #[must_use]
+    pub fn to_time(mut self, t: i64) -> Self {
+        self.to_ts = Some(t);
+        self
+    }
+    #[must_use]
+    pub fn with_ascending_timestamps(mut self) -> Self {
+        self.descending = false;
+        self
+    }
+    #[must_use]
+    pub fn with_descending_timestamps(mut self) -> Self {
+        self.descending = true;
+        self
+    }
+}
+impl<K: Send + Sync + 'static, V: 'static> sealed::Sealed for MultiVersionedKeyQuery<K, V> {}
+impl<K: Send + Sync + 'static, V: 'static> Query for MultiVersionedKeyQuery<K, V> {
+    type Result = Vec<VersionedRecord<V>>;
+    fn store_kind(&self) -> StoreKind {
+        StoreKind::Versioned
+    }
+    fn lower(self) -> Iq2Query {
+        Iq2Query::MultiVersionedKey {
+            key: Box::new(self.key),
+            from_ts: self.from_ts,
+            to_ts: self.to_ts,
+            descending: self.descending,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +342,32 @@ mod tests {
                 hi: None,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn versioned_queries_lower_correctly() {
+        let vk = VersionedKeyQuery::<String, i64>::with_key("k".into()).as_of(250);
+        assert_eq!(vk.store_kind(), StoreKind::Versioned);
+        assert!(matches!(vk.lower(), Iq2Query::VersionedKey { as_of: Some(250), .. }));
+
+        let vk_latest = VersionedKeyQuery::<String, i64>::with_key("k".into());
+        assert!(matches!(vk_latest.lower(), Iq2Query::VersionedKey { as_of: None, .. }));
+
+        let mv = MultiVersionedKeyQuery::<String, i64>::with_key("k".into())
+            .from_time(150)
+            .to_time(250)
+            .with_descending_timestamps();
+        assert_eq!(mv.store_kind(), StoreKind::Versioned);
+        assert!(matches!(
+            mv.lower(),
+            Iq2Query::MultiVersionedKey { from_ts: Some(150), to_ts: Some(250), descending: true, .. }
+        ));
+
+        let mv_all = MultiVersionedKeyQuery::<String, i64>::with_key("k".into());
+        assert!(matches!(
+            mv_all.lower(),
+            Iq2Query::MultiVersionedKey { from_ts: None, to_ts: None, descending: false, .. }
         ));
     }
 }
