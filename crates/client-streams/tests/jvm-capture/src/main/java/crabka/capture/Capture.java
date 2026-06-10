@@ -104,12 +104,13 @@ public final class Capture {
         write(outDir, "fk_join_left", fkJoinLeft());
         write(outDir, "sliding_window_count", slidingWindowCount());
         write(outDir, "sliding_window_aggregate", slidingWindowAggregate());
+        write(outDir, "versioned_table", versionedTable());
         write(outDir, "cogroup", cogroup());
         write(outDir, "cogroup_time", cogroupTime());
         write(outDir, "cogroup_sliding", cogroupSliding());
         write(outDir, "cogroup_session", cogroupSession());
 
-        System.out.println("Capture complete. Wrote 25 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 26 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -841,6 +842,40 @@ public final class Capture {
         }
         sb.append("\"");
         return sb.toString();
+    }
+
+    /**
+     * 22. versioned_table: table("in", Consumed, Materialized.as(persistentVersionedKeyValueStore("vt", 600s)))
+     * .toStream().to("out"). The versioned store's changelog carries
+     * min.compaction.lag.ms = history_retention_ms + 86_400_000 (24h grace).
+     * Built with optimization=all.
+     */
+    static Topology versionedTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * Unoptimized versioned table topology for the behavioral oracle
+     * ({@link VersionedTableBehavior}).
+     */
+    static Topology versionedTableUnoptimized() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build();
     }
 
     private Capture() {

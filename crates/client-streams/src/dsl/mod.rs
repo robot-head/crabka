@@ -26,7 +26,7 @@ pub mod time_windowed_cogrouped;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
 pub use cogrouped::CogroupedKStream;
-pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
+pub use config::{Grouped, Materialized, Repartitioned, StreamJoined, VersionedConfig};
 pub use emit::EmitStrategy;
 pub use global_table::GlobalKTable;
 pub use kgrouped::KGroupedStream;

@@ -20,8 +20,29 @@ pub trait StateStore: Any + Send {
     fn changelog_topic(&self) -> &str;
     /// Drain buffered changelog entries (key bytes, value bytes or None=tombstone).
     fn take_changelog(&mut self) -> Vec<(bytes::Bytes, Option<bytes::Bytes>)>;
+    /// Like `take_changelog`, but each entry also carries an optional explicit
+    /// changelog RECORD timestamp. `None` = use the producer default (send-time).
+    /// Versioned stores override this to emit the version timestamp (KIP-889);
+    /// the default wraps `take_changelog` with `None`.
+    fn take_changelog_ts(&mut self) -> Vec<(bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
+        self.take_changelog()
+            .into_iter()
+            .map(|(k, v)| (k, v, None))
+            .collect()
+    }
     /// Apply a changelog record during restore (updates state, does NOT re-log).
     async fn apply_changelog(&mut self, key: bytes::Bytes, value: Option<bytes::Bytes>);
+    /// Like `apply_changelog`, but carries the changelog record's timestamp.
+    /// Default ignores it and delegates. Versioned stores override to insert the
+    /// version at this timestamp.
+    async fn apply_changelog_ts(
+        &mut self,
+        key: bytes::Bytes,
+        value: Option<bytes::Bytes>,
+        _timestamp: i64,
+    ) {
+        self.apply_changelog(key, value).await;
+    }
     /// Toggle changelog logging (off during restore, on during processing).
     fn set_logging(&mut self, on: bool);
     /// IQ read view, if this store is interactively queryable. Default `None`.

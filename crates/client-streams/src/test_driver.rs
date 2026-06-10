@@ -24,6 +24,11 @@ pub struct TopologyTestDriver {
     /// passed to `Graph::punctuate_wall_clock`. Starts at `0`, mirroring the JVM
     /// `TopologyTestDriver` mock time at construction.
     mock_wall_ms: i64,
+    /// Accumulated changelog records the stores produced, in order:
+    /// `(changelog_topic, key, value, record_ts)`. The driver has no broker, so
+    /// instead of discarding drained changelog it retains it here for byte-exact
+    /// changelog assertions (`drain_changelog`).
+    changelog_captured: Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)>,
 }
 
 impl TopologyTestDriver {
@@ -52,6 +57,7 @@ impl TopologyTestDriver {
             source_topics,
             output: HashMap::new(),
             mock_wall_ms: 0,
+            changelog_captured: Vec::new(),
         })
     }
 
@@ -114,9 +120,10 @@ impl TopologyTestDriver {
 
     /// Drain the graph's output buffer: outputs to a source topic re-enqueue
     /// (repartition loop-back), all others append to `self.output`. Changelog
-    /// buffers are discarded (the test driver has no broker, so restore is a
-    /// no-op with fresh stores). Shared by the record-processing and
-    /// stream-time-punctuation phases of `pipe_bytes`.
+    /// buffers are drained and retained in `changelog_captured` (the test driver
+    /// has no broker, so restore is a no-op with fresh stores, but tests can
+    /// assert the changelog bytes via `drain_changelog`). Shared by the
+    /// record-processing and stream-time-punctuation phases of `pipe_bytes`.
     fn route_outputs(&mut self, queue: &mut VecDeque<PendingRecord>) {
         for out in self.graph.take_output() {
             if self.source_topics.contains(&out.topic) {
@@ -136,12 +143,13 @@ impl TopologyTestDriver {
             }
         }
         // Drain changelog buffers so they don't grow unbounded; the test driver
-        // has no broker, so we discard them (restore is a no-op with fresh stores).
-        // No reuse-source suppression needed — the result is discarded and the
-        // driver never re-produces, so the write-back loop can't occur here.
-        let _ = self
-            .graph
-            .drain_changelogs(&std::collections::HashSet::new());
+        // has no broker, so instead of re-producing them we RETAIN them for
+        // byte-exact changelog assertions (`drain_changelog`). No reuse-source
+        // suppression — the driver never re-produces, so no write-back loop.
+        self.changelog_captured.extend(
+            self.graph
+                .drain_changelogs(&std::collections::HashSet::new()),
+        );
     }
 
     /// Inspect a state store's contents after piping (mirrors the JVM
@@ -163,6 +171,26 @@ impl TopologyTestDriver {
     ) -> Option<V> {
         let s = self.graph.stores.get_kv::<K, V>(store)?;
         pollster::block_on(s.get(key))
+    }
+
+    /// Latest live value of a key in a versioned store (test helper).
+    pub fn store_get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        store_name: &str,
+        key: &K,
+    ) -> Option<V> {
+        let store = self.graph.stores.get_versioned::<K, V>(store_name)?;
+        pollster::block_on(store.get(key)).map(|r| r.value)
+    }
+
+    /// Drain the changelog records the stores have produced so far (test helper):
+    /// `(changelog_topic, key, value, record_ts)` in production order. Lets a test
+    /// assert byte-exact changelog records (e.g. the KIP-889 versioned changelog:
+    /// bare value bytes + version timestamp in the record-timestamp field).
+    pub fn drain_changelog(
+        &mut self,
+    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
+        std::mem::take(&mut self.changelog_captured)
     }
 
     /// Populate a GLOBAL store directly (test-only). In a real app the global

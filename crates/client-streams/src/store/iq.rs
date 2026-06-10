@@ -12,6 +12,7 @@ pub enum StoreKind {
     KeyValue,
     Window,
     Session,
+    Versioned,
 }
 
 /// Byte-level IQ reads. Implemented by the three materialized `*Bytes` stores.
@@ -52,6 +53,19 @@ pub trait IqQueryable: Send + Sync {
     /// All sessions for `key`, store order. Tuple is `(start, end)`.
     async fn iq_session_fetch_key(&self, _key: &[u8]) -> Vec<((i64, i64), Bytes)> {
         Vec::new()
+    }
+
+    /// Latest live version: `(validFrom, validTo=None, valueBytes)`.
+    async fn iq_versioned_get(&self, _key: &[u8]) -> Option<(i64, Option<i64>, Bytes)> {
+        None
+    }
+    /// Version valid at `as_of`: `(validFrom, validTo, valueBytes)`.
+    async fn iq_versioned_get_as_of(
+        &self,
+        _key: &[u8],
+        _as_of: i64,
+    ) -> Option<(i64, Option<i64>, Bytes)> {
+        None
     }
 }
 
@@ -105,6 +119,29 @@ mod tests {
         assert_eq!(q.iq_window_fetch_single(b"k", 500).await, None);
         let r = q.iq_window_fetch(b"k", 0, 1000).await;
         assert_eq!(r.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec![0, 1000]);
+    }
+
+    #[tokio::test]
+    async fn versioned_get_latest_and_as_of() {
+        use crate::store::versioned::{VersionedBytesStore, VersionedKeyValueStore};
+        let mut s = VersionedBytesStore::<String, i64>::in_memory(
+            "v".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "v-changelog".into(),
+        );
+        s.put("k".into(), Some(10), 100).await;
+        s.put("k".into(), Some(20), 200).await;
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+        assert_eq!(q.kind(), StoreKind::Versioned);
+        let (vf, vt, raw) = q.iq_versioned_get(b"k").await.unwrap();
+        assert_eq!((vf, vt), (200, None));
+        assert_eq!(raw, I64Serde.serialize("t", &20));
+        let (vf2, vt2, raw2) = q.iq_versioned_get_as_of(b"k", 150).await.unwrap();
+        assert_eq!((vf2, vt2), (100, Some(200)));
+        assert_eq!(raw2, I64Serde.serialize("t", &10));
+        assert_eq!(q.iq_versioned_get_as_of(b"k", 50).await, None);
     }
 
     #[tokio::test]

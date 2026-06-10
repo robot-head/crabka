@@ -670,6 +670,114 @@ impl Topology {
         self
     }
 
+    /// Register a versioned state store (KIP-889) connected to the given
+    /// processors. The changelog topic carries `compact` + `min.compaction.lag.ms
+    /// = history_retention_ms + 86_400_000`. The version-chain store is
+    /// self-contained in memory; the supplied byte backend is unused.
+    pub fn add_versioned_store<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        history_retention_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        self.add_versioned_store_inner::<K, V, KS, VS>(
+            name,
+            key_serde,
+            value_serde,
+            history_retention_ms,
+            processors,
+            None,
+        )
+    }
+
+    /// Like [`add_versioned_store`] but whose changelog is an existing **source
+    /// topic** (the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a versioned
+    /// `builder.table_explicit(topic, …)` store's changelog at its own source
+    /// `topic`). Mirrors [`add_state_store_with_changelog`].
+    ///
+    /// [`add_versioned_store`]: Topology::add_versioned_store
+    /// [`add_state_store_with_changelog`]: Topology::add_state_store_with_changelog
+    pub fn add_versioned_store_with_changelog<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        history_retention_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_topic: impl Into<String>,
+    ) -> &mut Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        self.add_versioned_store_inner::<K, V, KS, VS>(
+            name,
+            key_serde,
+            value_serde,
+            history_retention_ms,
+            processors,
+            Some(changelog_topic.into()),
+        )
+    }
+
+    fn add_versioned_store_inner<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        history_retention_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_override: Option<String>,
+    ) -> &mut Self
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let name: String = name.into();
+        let min_compaction_lag_ms = history_retention_ms + 86_400_000;
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        self.reg.add_versioned_store(
+            &name,
+            procs,
+            changelog_override.clone(),
+            min_compaction_lag_ms,
+        );
+        self.store_factories.insert(
+            name.clone(),
+            (
+                changelog_override,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          _backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        Box::new(
+                            crate::store::versioned::VersionedBytesStore::<K, V>::new(
+                                store_name.to_string(),
+                                history_retention_ms,
+                                Box::new(key_serde.clone()),
+                                Box::new(value_serde.clone()),
+                                changelog,
+                            ),
+                        ) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
+        );
+        self
+    }
+
     /// Register a KIP-213 FK-join subscription store connected to the given
     /// processors.
     ///
@@ -1624,5 +1732,30 @@ mod tests {
                 .as_ref()
                 == [0, 0, 0, 0, 0, 0, 0, 2]
         );
+    }
+
+    #[test]
+    fn add_versioned_store_registers_wire_spec() {
+        use crate::processor::serde::{I64Serde, StringSerde};
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let proc = t.add_processor("proc", || Upper, [&src]);
+        t.add_versioned_store::<String, i64, _, _>(
+            "vstore",
+            StringSerde,
+            I64Serde,
+            600_000,
+            [proc.name()],
+        );
+        t.add_sink("out", "out-topic", [&proc]);
+        let wire = t.build("app").unwrap().to_wire();
+        let blob = serde_json::to_value(&wire).unwrap().to_string();
+        assert!(blob.contains("vstore"), "changelog topic name not in wire");
+        assert!(
+            blob.contains("min.compaction.lag.ms"),
+            "min.compaction.lag.ms key not in wire"
+        );
+        // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
+        assert!(blob.contains("87000000"), "lag value not in wire");
     }
 }

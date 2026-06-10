@@ -187,6 +187,16 @@ where
         self.dispatch.stores.get_session::<K2, V2>(name)
     }
 
+    /// Access a connected versioned store (KIP-889), typed. `None` if absent or
+    /// the K/V types don't match. Fetch it per-record (do not hold across
+    /// `process` calls).
+    pub fn get_versioned_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::versioned::VersionedKeyValueStore<K2, V2>> {
+        self.dispatch.stores.get_versioned::<K2, V2>(name)
+    }
+
     /// Access a connected suppress store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
     ///
