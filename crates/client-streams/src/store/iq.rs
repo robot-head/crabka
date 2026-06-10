@@ -3,6 +3,8 @@
 //! without knowing `K`/`V` — the typed view owns (de)serialization. All reads
 //! are `&self`; only key/value **bytes** cross this trait.
 
+use std::any::Any;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 
@@ -13,6 +15,51 @@ pub enum StoreKind {
     Window,
     Session,
     Versioned,
+}
+
+/// A typed `IQv2` query lowered to the store boundary. Keys travel as
+/// `Box<dyn Any + Send + Sync>` (the raw `K`); the concrete store downcasts to
+/// its own `K`, serializes with its own key serde, runs the op, and returns the
+/// typed result (`Option<V>`, `Vec<(K,V)>`, …) boxed as `Box<dyn Any + Send>`.
+///
+/// Time bounds are plain `i64`; ordering/bound choices are flags. No serde and
+/// no `K`/`V` appear here — that is the whole point of the byte-level boundary.
+pub enum Iq2Query {
+    /// `KeyQuery` — single key. Result: `Option<V>`.
+    Key { key: Box<dyn Any + Send + Sync> },
+    /// `RangeQuery` — `None` bound = unbounded that side. Result: `Vec<(K,V)>`.
+    Range {
+        lo: Option<Box<dyn Any + Send + Sync>>,
+        hi: Option<Box<dyn Any + Send + Sync>>,
+        descending: bool,
+    },
+    /// `WindowKeyQuery` — one key, window starts in `[from_ts, to_ts]`.
+    /// Result: `Vec<(i64 /*windowStart*/, V)>`, ascending by start.
+    WindowKey {
+        key: Box<dyn Any + Send + Sync>,
+        from_ts: i64,
+        to_ts: i64,
+    },
+    /// `WindowRangeQuery` — key range × window-start range. `None` bound =
+    /// unbounded that side. Result: `Vec<((K, i64 /*windowStart*/), V)>`,
+    /// ascending by (key bytes, windowStart).
+    WindowRange {
+        lo: Option<Box<dyn Any + Send + Sync>>,
+        hi: Option<Box<dyn Any + Send + Sync>>,
+        from_ts: i64,
+        to_ts: i64,
+    },
+}
+
+/// Why a store could not execute an `IQv2` query. The runtime maps these (plus its
+/// own conditions: rebalancing, not-up-to-bound, not-active) into the public
+/// `FailureReason`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Iq2Failure {
+    /// This store kind has no handler for the requested query variant.
+    UnknownQueryType,
+    /// A key `Box<dyn Any>` did not downcast to this store's `K`.
+    KeyTypeMismatch,
 }
 
 /// Byte-level IQ reads. Implemented by the three materialized `*Bytes` stores.
@@ -66,6 +113,13 @@ pub trait IqQueryable: Send + Sync {
         _as_of: i64,
     ) -> Option<(i64, Option<i64>, Bytes)> {
         None
+    }
+
+    /// `IQv2` entry point. The store downcasts keys, (de)serializes with its own
+    /// serdes, runs the op, and returns the typed result boxed. Default: this
+    /// store kind handles no `IQv2` query variant.
+    async fn iq2_execute(&self, _query: &Iq2Query) -> Result<Box<dyn Any + Send>, Iq2Failure> {
+        Err(Iq2Failure::UnknownQueryType)
     }
 }
 
@@ -158,5 +212,25 @@ mod tests {
         let r = q.iq_session_fetch_key(b"k").await;
         let windows: Vec<(i64, i64)> = r.iter().map(|((st, en), _)| (*st, *en)).collect();
         assert!(windows.contains(&(0, 10)) && windows.contains(&(20, 30)));
+    }
+
+    #[tokio::test]
+    async fn iq2_execute_default_is_unknown_query_type() {
+        use super::{Iq2Failure, Iq2Query};
+        // A session store has no `IQv2` handler — default impl must reject.
+        let s = SessionBytesStore::<String, i64>::in_memory(
+            "s".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "s-changelog".into(),
+        );
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+        let query = Iq2Query::Key {
+            key: Box::new("k".to_string()),
+        };
+        assert_eq!(
+            q.iq2_execute(&query).await.err(),
+            Some(Iq2Failure::UnknownQueryType)
+        );
     }
 }

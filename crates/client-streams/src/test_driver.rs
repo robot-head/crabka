@@ -325,6 +325,74 @@ impl TopologyTestDriver {
         Some(vs.deserialize(store, &vb).expect("iq deserialize"))
     }
 
+    /// Run an `IQv2` query against the single test graph (partition 0). `Position`
+    /// is empty (the driver does not track source offsets); use unit tests on
+    /// `Position::dominates` for bound behavior.
+    pub async fn query<Q: crate::runtime::iqv2::Query>(
+        &self,
+        req: crate::runtime::iqv2::StateQuery<Q>,
+    ) -> crate::runtime::iqv2::StateQueryResult<Q::Result> {
+        use std::collections::BTreeMap;
+
+        use crate::runtime::iqv2::request::Position;
+        use crate::runtime::iqv2::result::{FailureReason, QueryResult, StateQueryResult};
+
+        let store_name = req.store.clone();
+        let kind = req.query.store_kind();
+        let Some(store) = self.graph.stores.iq_get(&store_name) else {
+            // The driver has full single-graph knowledge, so an unknown store
+            // name is genuinely `DoesNotExist`. (The distributed runtime cannot
+            // distinguish absent-from-topology vs not-on-this-partition, so
+            // `serve_iq2` returns an empty partition map instead — see §9.)
+            let mut m = BTreeMap::new();
+            m.insert(
+                0,
+                QueryResult::Failure {
+                    reason: FailureReason::DoesNotExist,
+                    message: format!("no state store named {store_name:?}"),
+                },
+            );
+            return StateQueryResult::new(m);
+        };
+        if store.kind() != kind {
+            // Mirror `serve_iq2`: a name that resolves to a different store kind
+            // is reported `NotPresent`, not `DoesNotExist`.
+            let mut m = BTreeMap::new();
+            m.insert(
+                0,
+                QueryResult::Failure {
+                    reason: FailureReason::NotPresent,
+                    message: "wrong store kind".into(),
+                },
+            );
+            return StateQueryResult::new(m);
+        }
+        let lowered = req.query.lower();
+        let qr = match store.iq2_execute(&lowered).await {
+            Ok(boxed) => match boxed.downcast::<Q::Result>() {
+                Ok(r) => QueryResult::Success {
+                    result: *r,
+                    position: Position::default(),
+                },
+                Err(_) => QueryResult::Failure {
+                    reason: FailureReason::StoreException,
+                    message: "IQv2 result type mismatch".into(),
+                },
+            },
+            Err(crate::store::iq::Iq2Failure::UnknownQueryType) => QueryResult::Failure {
+                reason: FailureReason::UnknownQueryType,
+                message: "unknown query type".into(),
+            },
+            Err(crate::store::iq::Iq2Failure::KeyTypeMismatch) => QueryResult::Failure {
+                reason: FailureReason::StoreException,
+                message: "key type mismatch".into(),
+            },
+        };
+        let mut m = BTreeMap::new();
+        m.insert(0, qr);
+        StateQueryResult::new(m)
+    }
+
     /// Interactive-query session read: `((start, end), value)` for every session
     /// of `key`, in store order. Empty if the store is absent or not a session
     /// store.
@@ -561,5 +629,36 @@ mod tests {
                 == Some((Some("a".to_string()), 2))
         );
         check!(d.store_get::<String, i64>("counts", &"a".to_string()) == Some(2));
+    }
+
+    #[tokio::test]
+    async fn iqv2_query_kv_via_driver() {
+        use crate::processor::serde::{Consumed, StringSerde};
+        use crate::runtime::iqv2::{KeyQuery, StateQueryRequest};
+
+        let b = crate::StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .count("counts");
+        let built = b.build("app").unwrap();
+        let mut d = TopologyTestDriver::new(&built).unwrap();
+        for v in ["a", "a", "b"] {
+            d.pipe_input(
+                "in",
+                Consumed::with(StringSerde, StringSerde),
+                Some(v.to_string()),
+                v.to_string(),
+                0,
+            );
+        }
+
+        let res = d
+            .query(
+                StateQueryRequest::in_store("counts")
+                    .with_query(KeyQuery::<String, i64>::with_key("a".into())),
+            )
+            .await;
+        let only = res.only_partition_result().unwrap();
+        assert_eq!(only.result(), Some(&Some(2)));
     }
 }

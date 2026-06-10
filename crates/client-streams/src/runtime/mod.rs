@@ -8,6 +8,7 @@ pub mod io;
 mod io_broker;
 pub(crate) mod iq;
 mod iq_view;
+pub mod iqv2;
 mod task;
 mod thread;
 
