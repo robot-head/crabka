@@ -95,8 +95,59 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
 
 // The store struct holds only `Box<dyn Serde<_>>` + byte buffers (no bare `K`/`V`
 // fields), so it is `Send + Sync` for *any* `K`/`V` — no `Sync` bound needed here.
+// `K: Send + V: Send` are required so `Box<Vec<(K,V)>>` / `Box<Option<V>>` can be
+// returned as `Box<dyn Any + Send>` from `iq2_execute`.
+
+/// Intermediate representation for `iq2_execute`: keys already serialized to bytes,
+/// no reference to `Iq2Query` (which is not `Sync`) held across any await point.
+enum Iq2Prepared {
+    Key(bytes::Bytes),
+    Range {
+        lo_b: Option<bytes::Bytes>,
+        hi_b: Option<bytes::Bytes>,
+        descending: bool,
+    },
+    Unknown,
+}
+
+impl<K: Send + 'static, V: Send + 'static> KeyValueBytesStore<K, V> {
+    /// Synchronously extract and serialize keys from an `Iq2Query`. Called before
+    /// any `.await` so `query` (non-`Sync`) is dropped before the async phase.
+    fn iq2_prepare(
+        &self,
+        query: &crate::store::iq::Iq2Query,
+    ) -> Result<Iq2Prepared, crate::store::iq::Iq2Failure> {
+        use crate::store::iq::{Iq2Failure, Iq2Query};
+        let ser = |b: &dyn Any| -> Result<bytes::Bytes, Iq2Failure> {
+            let k = b.downcast_ref::<K>().ok_or(Iq2Failure::KeyTypeMismatch)?;
+            Ok(self.key_serde.serialize(&self.changelog_topic, k))
+        };
+        match query {
+            Iq2Query::Key { key } => Ok(Iq2Prepared::Key(ser(&**key)?)),
+            Iq2Query::Range { lo, hi, descending } => {
+                let lo_b = match lo {
+                    Some(b) => Some(ser(&**b)?),
+                    None => None,
+                };
+                let hi_b = match hi {
+                    Some(b) => Some(ser(&**b)?),
+                    None => None,
+                };
+                Ok(Iq2Prepared::Range {
+                    lo_b,
+                    hi_b,
+                    descending: *descending,
+                })
+            }
+            _ => Ok(Iq2Prepared::Unknown),
+        }
+    }
+}
+
 #[async_trait::async_trait]
-impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for KeyValueBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
+    for KeyValueBytesStore<K, V>
+{
     fn kind(&self) -> crate::store::iq::StoreKind {
         crate::store::iq::StoreKind::KeyValue
     }
@@ -116,6 +167,60 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for KeyValueBytesStor
     }
     async fn iq_kv_approx_count(&self) -> u64 {
         self.backend.approx_len().await
+    }
+
+    async fn iq2_execute(
+        &self,
+        query: &crate::store::iq::Iq2Query,
+    ) -> Result<Box<dyn Any + Send>, crate::store::iq::Iq2Failure> {
+        use crate::store::iq::Iq2Failure;
+
+        // Serialize all keys synchronously via the helper so `query`
+        // (non-`Sync`) is fully consumed before any `.await`.
+        let prepared = self.iq2_prepare(query)?;
+
+        match prepared {
+            Iq2Prepared::Key(kb) => {
+                let out: Option<V> = self.backend.get(&kb).await.map(|vb| {
+                    self.value_serde
+                        .deserialize(&self.changelog_topic, &vb)
+                        .expect("iqv2 kv value deserialize")
+                });
+                Ok(Box::new(out))
+            }
+            Iq2Prepared::Range {
+                lo_b,
+                hi_b,
+                descending,
+            } => {
+                let mut rows: Vec<(K, V)> = Vec::new();
+                for (kb, vb) in self.backend.scan_all().await {
+                    if let Some(l) = &lo_b {
+                        if kb.as_ref() < l.as_ref() {
+                            continue;
+                        }
+                    }
+                    if let Some(h) = &hi_b {
+                        if kb.as_ref() > h.as_ref() {
+                            continue;
+                        }
+                    }
+                    rows.push((
+                        self.key_serde
+                            .deserialize(&self.changelog_topic, &kb)
+                            .expect("iqv2 kv range key deserialize"),
+                        self.value_serde
+                            .deserialize(&self.changelog_topic, &vb)
+                            .expect("iqv2 kv range value deserialize"),
+                    ));
+                }
+                if descending {
+                    rows.reverse();
+                }
+                Ok(Box::new(rows))
+            }
+            Iq2Prepared::Unknown => Err(Iq2Failure::UnknownQueryType),
+        }
     }
 }
 
@@ -225,6 +330,73 @@ mod tests {
                 (Bytes::from_static(&[1, 5]), Bytes::from_static(b"b")),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn iq2_key_and_range() {
+        use crate::store::iq::{Iq2Query, IqQueryable};
+        let mut s = store();
+        s.put("a".into(), 1).await;
+        s.put("b".into(), 2).await;
+        s.put("c".into(), 3).await;
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+
+        // KeyQuery hit / miss.
+        let got = q
+            .iq2_execute(&Iq2Query::Key {
+                key: Box::new("b".to_string()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(*got.downcast::<Option<i64>>().unwrap(), Some(2));
+        let miss = q
+            .iq2_execute(&Iq2Query::Key {
+                key: Box::new("z".to_string()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(*miss.downcast::<Option<i64>>().unwrap(), None);
+
+        // RangeQuery inclusive [a,b] ascending.
+        let r = q
+            .iq2_execute(&Iq2Query::Range {
+                lo: Some(Box::new("a".to_string())),
+                hi: Some(Box::new("b".to_string())),
+                descending: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *r.downcast::<Vec<(String, i64)>>().unwrap(),
+            vec![("a".to_string(), 1), ("b".to_string(), 2)]
+        );
+
+        // Unbounded both sides, descending → all, reversed.
+        let all_desc = q
+            .iq2_execute(&Iq2Query::Range {
+                lo: None,
+                hi: None,
+                descending: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *all_desc.downcast::<Vec<(String, i64)>>().unwrap(),
+            vec![
+                ("c".to_string(), 3),
+                ("b".to_string(), 2),
+                ("a".to_string(), 1)
+            ]
+        );
+
+        // Wrong key type → KeyTypeMismatch.
+        use crate::store::iq::Iq2Failure;
+        let bad = q
+            .iq2_execute(&Iq2Query::Key {
+                key: Box::new(7_i64),
+            })
+            .await;
+        assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
     }
 
     #[tokio::test]
