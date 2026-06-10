@@ -675,6 +675,11 @@ where
             .expect("join requires a materialized table (a store-backed KTable)")
             .to_string();
         let table_src = table.source_topic().map(str::to_string);
+        // Versioned tables (KIP-889 history retention set) route to the as-of
+        // join processor (KIP-914): the lookup is `get_as_of(key, streamRec.ts)`
+        // instead of latest `get`. The `table` handle is not available inside the
+        // lowering thunk, so capture this flag here.
+        let table_versioned = table.versioned_retention_ms.is_some();
         // The stream-side copartition member is this stream's single source topic
         // (key unchanged → still copartitioned with that topic). `None` if the
         // stream has no single source topic (multi-topic source, prior merge, …).
@@ -697,18 +702,36 @@ where
         let store_for_thunk = table_store.clone();
         g.graph.nodes[join_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            let store_for_proc = store_for_thunk.clone();
-            let lf = left_form.clone();
-            let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
-                join_name.clone(),
-                move || KStreamKTableJoinProcessor {
-                    table_store: store_for_proc.clone(),
-                    joiner: lf.clone(),
-                    emit_on_miss,
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            // Both branches register the SAME node name with the SAME parent and
+            // (below) the SAME store wiring + copartition declaration — only the
+            // processor type differs (latest `get` vs versioned `get_as_of`).
+            let h = if table_versioned {
+                let store_for_proc = store_for_thunk.clone();
+                let lf = left_form.clone();
+                state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_name.clone(),
+                    move || crate::dsl::processors::join::KStreamKTableJoinAsOfProcessor {
+                        table_store: store_for_proc.clone(),
+                        joiner: lf.clone(),
+                        emit_on_miss,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                )
+            } else {
+                let store_for_proc = store_for_thunk.clone();
+                let lf = left_form.clone();
+                state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_name.clone(),
+                    move || KStreamKTableJoinProcessor {
+                        table_store: store_for_proc.clone(),
+                        joiner: lf.clone(),
+                        emit_on_miss,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                )
+            };
             // Union the join into the table store's processor set: this pulls the
             // join (and therefore the stream source feeding it) into the SAME
             // subtopology as the table source that owns the store.
