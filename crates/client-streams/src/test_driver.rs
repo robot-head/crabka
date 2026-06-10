@@ -340,14 +340,28 @@ impl TopologyTestDriver {
         let store_name = req.store.clone();
         let kind = req.query.store_kind();
         let Some(store) = self.graph.stores.iq_get(&store_name) else {
-            return StateQueryResult::new(BTreeMap::new());
-        };
-        if store.kind() != kind {
+            // The driver has full single-graph knowledge, so an unknown store
+            // name is genuinely `DoesNotExist`. (The distributed runtime cannot
+            // distinguish absent-from-topology vs not-on-this-partition, so
+            // `serve_iq2` returns an empty partition map instead — see §9.)
             let mut m = BTreeMap::new();
             m.insert(
                 0,
                 QueryResult::Failure {
                     reason: FailureReason::DoesNotExist,
+                    message: format!("no state store named {store_name:?}"),
+                },
+            );
+            return StateQueryResult::new(m);
+        };
+        if store.kind() != kind {
+            // Mirror `serve_iq2`: a name that resolves to a different store kind
+            // is reported `NotPresent`, not `DoesNotExist`.
+            let mut m = BTreeMap::new();
+            m.insert(
+                0,
+                QueryResult::Failure {
+                    reason: FailureReason::NotPresent,
                     message: "wrong store kind".into(),
                 },
             );

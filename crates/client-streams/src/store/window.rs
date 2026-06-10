@@ -169,7 +169,11 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                 to_ts,
             } => {
                 let kb = ser(&**key)?;
-                let from = *from_ts;
+                // Window starts are non-negative and encoded big-endian *signed*,
+                // so a negative lower bound (e.g. the `i64::MIN` default of an
+                // unbounded `WindowKeyQuery`) would sort above `0x00..` and make
+                // the byte range empty. Clamp the lower start to 0.
+                let from = (*from_ts).max(0);
                 let to = *to_ts;
 
                 let lo = store_key(&kb, from, 0);
@@ -450,6 +454,37 @@ mod tests {
         assert_eq!(
             *wr_b.downcast::<Vec<((String, i64), i64)>>().unwrap(),
             vec![(("b".to_string(), 0), 30)]
+        );
+    }
+
+    // Regression: `WindowKeyQuery::with_key(k)` with no explicit time range
+    // defaults to `from_ts = i64::MIN`. Window starts are encoded big-endian
+    // *signed*, so an unclamped `i64::MIN` lower bound (`0x80..`) sorts ABOVE
+    // every non-negative start (`0x00..`) under memcmp and the byte range comes
+    // back empty — the "all windows for this key" query must still return them.
+    #[tokio::test]
+    async fn iq2_window_key_default_bounds_returns_all_windows() {
+        use crate::store::iq::{Iq2Query, IqQueryable};
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "w-changelog".into(),
+        );
+        s.put("a".into(), 0, 10, 5).await;
+        s.put("a".into(), 1000, 20, 1005).await;
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+        let wk = q
+            .iq2_execute(&Iq2Query::WindowKey {
+                key: Box::new("a".to_string()),
+                from_ts: i64::MIN,
+                to_ts: i64::MAX,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *wk.downcast::<Vec<(i64, i64)>>().unwrap(),
+            vec![(0, 10), (1000, 20)]
         );
     }
 }
