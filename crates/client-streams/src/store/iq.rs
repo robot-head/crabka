@@ -26,17 +26,17 @@ pub enum StoreKind {
 /// no `K`/`V` appear here — that is the whole point of the byte-level boundary.
 pub enum Iq2Query {
     /// `KeyQuery` — single key. Result: `Option<V>`.
-    Key { key: Box<dyn Any + Send> },
+    Key { key: Box<dyn Any + Send + Sync> },
     /// `RangeQuery` — `None` bound = unbounded that side. Result: `Vec<(K,V)>`.
     Range {
-        lo: Option<Box<dyn Any + Send>>,
-        hi: Option<Box<dyn Any + Send>>,
+        lo: Option<Box<dyn Any + Send + Sync>>,
+        hi: Option<Box<dyn Any + Send + Sync>>,
         descending: bool,
     },
     /// `WindowKeyQuery` — one key, window starts in `[from_ts, to_ts]`.
     /// Result: `Vec<(i64 /*windowStart*/, V)>`, ascending by start.
     WindowKey {
-        key: Box<dyn Any + Send>,
+        key: Box<dyn Any + Send + Sync>,
         from_ts: i64,
         to_ts: i64,
     },
@@ -44,8 +44,8 @@ pub enum Iq2Query {
     /// unbounded that side. Result: `Vec<((K, i64 /*windowStart*/), V)>`,
     /// ascending by (key bytes, windowStart).
     WindowRange {
-        lo: Option<Box<dyn Any + Send>>,
-        hi: Option<Box<dyn Any + Send>>,
+        lo: Option<Box<dyn Any + Send + Sync>>,
+        hi: Option<Box<dyn Any + Send + Sync>>,
         from_ts: i64,
         to_ts: i64,
     },
@@ -118,10 +118,7 @@ pub trait IqQueryable: Send + Sync {
     /// IQv2 entry point. The store downcasts keys, (de)serializes with its own
     /// serdes, runs the op, and returns the typed result boxed. Default: this
     /// store kind handles no IQv2 query variant.
-    async fn iq2_execute(
-        &self,
-        _query: &Iq2Query,
-    ) -> Result<Box<dyn Any + Send>, Iq2Failure> {
+    async fn iq2_execute(&self, _query: &Iq2Query) -> Result<Box<dyn Any + Send>, Iq2Failure> {
         Err(Iq2Failure::UnknownQueryType)
     }
 }
@@ -231,6 +228,9 @@ mod tests {
         let query = Iq2Query::Key {
             key: Box::new("k".to_string()),
         };
-        assert_eq!(q.iq2_execute(&query).await.err(), Some(Iq2Failure::UnknownQueryType));
+        assert_eq!(
+            q.iq2_execute(&query).await.err(),
+            Some(Iq2Failure::UnknownQueryType)
+        );
     }
 }

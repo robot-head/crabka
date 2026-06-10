@@ -79,7 +79,7 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
 }
 
 #[async_trait]
-impl<K: 'static, V: 'static> StateStore for WindowBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> StateStore for WindowBytesStore<K, V> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -117,7 +117,7 @@ impl<K: 'static, V: 'static> StateStore for WindowBytesStore<K, V> {
 // `WindowBytesStore` holds only `Box<dyn Serde<_>>` + byte buffers, so it is
 // `Send + Sync` for any `K`/`V` — no `Sync` bound needed on the impl.
 #[async_trait::async_trait]
-impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for WindowBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable for WindowBytesStore<K, V> {
     fn kind(&self) -> crate::store::iq::StoreKind {
         crate::store::iq::StoreKind::Window
     }
@@ -144,6 +144,89 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for WindowBytesStore<
             out.push((window_start_of(&k), bytes::Bytes::copy_from_slice(raw)));
         }
         out
+    }
+
+    async fn iq2_execute(
+        &self,
+        query: &crate::store::iq::Iq2Query,
+    ) -> Result<Box<dyn Any + Send>, crate::store::iq::Iq2Failure> {
+        use crate::store::iq::{Iq2Failure, Iq2Query};
+
+        // Serialize any key boxes to bytes up front (before any `.await`) so
+        // `query` is dropped before the async phase. `dyn Any` deref works for
+        // both `Send` and `Send+Sync` boxes.
+        let ser = |b: &dyn Any| -> Result<bytes::Bytes, Iq2Failure> {
+            let k = b.downcast_ref::<K>().ok_or(Iq2Failure::KeyTypeMismatch)?;
+            Ok(self.key_serde.serialize(&self.changelog_topic, k))
+        };
+
+        match query {
+            Iq2Query::WindowKey { key, from_ts, to_ts } => {
+                let kb = ser(&**key)?;
+                let from = *from_ts;
+                let to = *to_ts;
+
+                let lo = store_key(&kb, from, 0);
+                let hi = store_key(&kb, to.saturating_add(1), 0);
+                let mut out: Vec<(i64, V)> = Vec::new();
+                for (sk, wrapped) in self.backend.range(&lo, &hi).await {
+                    if key_bytes_of(&sk) != kb.as_ref() {
+                        continue;
+                    }
+                    let (_ts, raw) = unwrap_value(&wrapped);
+                    out.push((
+                        window_start_of(&sk),
+                        self.value_serde
+                            .deserialize(&self.changelog_topic, raw)
+                            .expect("iqv2 window value deserialize"),
+                    ));
+                }
+                Ok(Box::new(out))
+            }
+            Iq2Query::WindowRange { lo, hi, from_ts, to_ts } => {
+                let lo_b = match lo {
+                    Some(b) => Some(ser(&**b)?),
+                    None => None,
+                };
+                let hi_b = match hi {
+                    Some(b) => Some(ser(&**b)?),
+                    None => None,
+                };
+                let from = *from_ts;
+                let to = *to_ts;
+
+                let mut out: Vec<((K, i64), V)> = Vec::new();
+                for (sk, wrapped) in self.backend.scan_all().await {
+                    let ws = window_start_of(&sk);
+                    if ws < from || ws > to {
+                        continue;
+                    }
+                    let kbytes = key_bytes_of(&sk);
+                    if let Some(l) = &lo_b {
+                        if kbytes < l.as_ref() {
+                            continue;
+                        }
+                    }
+                    if let Some(h) = &hi_b {
+                        if kbytes > h.as_ref() {
+                            continue;
+                        }
+                    }
+                    let key = self
+                        .key_serde
+                        .deserialize(&self.changelog_topic, kbytes)
+                        .expect("iqv2 window range key deserialize");
+                    let (_ts, raw) = unwrap_value(&wrapped);
+                    let value = self
+                        .value_serde
+                        .deserialize(&self.changelog_topic, raw)
+                        .expect("iqv2 window range value deserialize");
+                    out.push(((key, ws), value));
+                }
+                Ok(Box::new(out))
+            }
+            _ => Err(Iq2Failure::UnknownQueryType),
+        }
     }
 }
 
@@ -302,5 +385,64 @@ mod tests {
         assert_eq!(s.fetch_all_in_range(0, 10).await.len(), 3);
         // Range above everything returns nothing.
         assert!(s.fetch_all_in_range(11, 100).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn iq2_window_key_and_range() {
+        use crate::store::iq::{Iq2Query, IqQueryable};
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "w-changelog".into(),
+        );
+        s.put("a".into(), 0, 10, 5).await;
+        s.put("a".into(), 1000, 20, 1005).await;
+        s.put("b".into(), 0, 30, 6).await;
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+
+        // WindowKeyQuery: key "a", starts in [0,1000], ascending.
+        let wk = q
+            .iq2_execute(&Iq2Query::WindowKey {
+                key: Box::new("a".to_string()),
+                from_ts: 0,
+                to_ts: 1000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *wk.downcast::<Vec<(i64, i64)>>().unwrap(),
+            vec![(0, 10), (1000, 20)]
+        );
+
+        // WindowRangeQuery: all keys, starts in [0,0] → a@0 and b@0, ascending by key.
+        let wr = q
+            .iq2_execute(&Iq2Query::WindowRange {
+                lo: None,
+                hi: None,
+                from_ts: 0,
+                to_ts: 0,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *wr.downcast::<Vec<((String, i64), i64)>>().unwrap(),
+            vec![(("a".to_string(), 0), 10), (("b".to_string(), 0), 30)]
+        );
+
+        // WindowRangeQuery: key range [b, b] only.
+        let wr_b = q
+            .iq2_execute(&Iq2Query::WindowRange {
+                lo: Some(Box::new("b".to_string())),
+                hi: Some(Box::new("b".to_string())),
+                from_ts: 0,
+                to_ts: 2000,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *wr_b.downcast::<Vec<((String, i64), i64)>>().unwrap(),
+            vec![(("b".to_string(), 0), 30)]
+        );
     }
 }
