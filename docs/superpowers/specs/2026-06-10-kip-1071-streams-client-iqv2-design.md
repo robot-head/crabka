@@ -28,9 +28,14 @@ stay and keep working unchanged.
 | `KeyQuery<K,V>` | `Option<V>` | 3a | 796 |
 | `RangeQuery<K,V>` | `Vec<(K,V)>` | 3a | 796/985 |
 | `WindowKeyQuery<K,V>` | `Vec<(i64,V)>` | 3a | 806 |
-| `WindowRangeQuery<K,V>` | `Vec<(Windowed<K>,V)>` | 3a | 806 |
+| `WindowRangeQuery<K,V>` | `Vec<((K,i64),V)>` | 3a | 806 |
 | `VersionedKeyQuery<K,V>` | `Option<VersionedRecord<V>>` | 3b | 960 |
 | `MultiVersionedKeyQuery<K,V>` | `Vec<VersionedRecord<V>>` | 3b | 968 |
+
+> **Window result divergence (pre-existing):** window stores persist only
+> `windowStart`, not window size, so window-query results carry `windowStart`
+> (`i64`) rather than the JVM's full `Windowed<K>` (`start`+`end`) — matching
+> the existing v1 `ReadOnlyWindowStore::fetch`, which is already start-only.
 
 ## 2. Slice split
 
