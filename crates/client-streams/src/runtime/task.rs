@@ -78,6 +78,18 @@ impl StreamTask {
         &self.graph.stores
     }
 
+    /// Snapshot the task's consumed source offsets as an `IQv2` `Position`
+    /// (topic → partition → next-offset). Used to tag query results.
+    #[allow(dead_code)] // consumed by IQv2 dispatch path (later task)
+    pub(crate) fn position(&self) -> crate::runtime::iqv2::request::Position {
+        use std::collections::BTreeMap;
+        let mut m: BTreeMap<String, BTreeMap<i32, i64>> = BTreeMap::new();
+        for ((topic, p), off) in &self.positions {
+            m.entry(topic.clone()).or_default().insert(*p, *off);
+        }
+        crate::runtime::iqv2::request::Position(m)
+    }
+
     /// Call `Processor::init` on every node in the graph.
     pub async fn init(&mut self) -> Result<(), StreamsClientError> {
         self.graph
@@ -1110,5 +1122,37 @@ mod tests {
             task.store_get_i64("counts", &"b".to_string()).await == Some(99),
             "ALO restore (READ_UNCOMMITTED) must see the uncommitted write too"
         );
+    }
+
+    /// Build a minimal task seeded with the given source partitions (all starting
+    /// at offset 0). Uses the stateless `Upper` topology so no stores are needed.
+    async fn make_test_task(sources: Vec<TopicPartition>) -> StreamTask {
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+        StreamTask::new(
+            "0".into(),
+            built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
+            sources,
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
+            ProcessingGuarantee::AtLeastOnce,
+        )
+    }
+
+    #[tokio::test]
+    async fn position_reflects_seeded_source_partitions() {
+        // A task seeded with one source partition starts at offset 0.
+        let task = make_test_task(vec![TopicPartition {
+            topic: "in".into(),
+            partition: 2,
+        }])
+        .await;
+        let pos = task.position();
+        assert_eq!(pos.offset("in", 2), Some(0));
+        assert_eq!(pos.offset("in", 9), None);
     }
 }
