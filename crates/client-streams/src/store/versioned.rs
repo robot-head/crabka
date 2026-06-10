@@ -241,7 +241,9 @@ impl<K: Send + Sync + 'static, V: Send + 'static> VersionedKeyValueStore<K, V>
 
 // Holds only `Box<dyn Serde<_>>` + byte buffers → `Send + Sync` for any K/V.
 #[async_trait]
-impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for VersionedBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
+    for VersionedBytesStore<K, V>
+{
     fn kind(&self) -> crate::store::iq::StoreKind {
         crate::store::iq::StoreKind::Versioned
     }
@@ -261,6 +263,75 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for VersionedBytesSto
         let raw = value.as_ref()?;
         let vt = chain.range((as_of + 1)..).next().map(|(t, _)| *t);
         Some((vf, vt, raw.clone()))
+    }
+
+    async fn iq2_execute(
+        &self,
+        query: &crate::store::iq::Iq2Query,
+    ) -> Result<Box<dyn Any + Send>, crate::store::iq::Iq2Failure> {
+        use crate::store::iq::{Iq2Failure, Iq2Query};
+        let ser = |b: &dyn Any| -> Result<Bytes, Iq2Failure> {
+            let k = b.downcast_ref::<K>().ok_or(Iq2Failure::KeyTypeMismatch)?;
+            Ok(self.key_serde.serialize(&self.changelog_topic, k))
+        };
+        let deser = |raw: &[u8]| -> V {
+            self.value_serde
+                .deserialize(&self.changelog_topic, raw)
+                .expect("iqv2 versioned value deserialize")
+        };
+        match query {
+            Iq2Query::VersionedKey { key, as_of } => {
+                let kb = ser(&**key)?;
+                let out: Option<VersionedRecord<V>> = self.chains.get(&kb).and_then(|chain| {
+                    let (valid_from, value, valid_to) = match as_of {
+                        // Latest live version: last chain entry, valid_to = ∞.
+                        None => {
+                            let (&vf, value) = chain.iter().next_back()?;
+                            (vf, value, None)
+                        }
+                        // Version valid at `t`: greatest validFrom <= t; valid_to
+                        // = the next validFrom after `t` (if any).
+                        Some(t) => {
+                            let (&vf, value) = chain.range(..=*t).next_back()?;
+                            let vt = chain.range((*t + 1)..).next().map(|(x, _)| *x);
+                            (vf, value, vt)
+                        }
+                    };
+                    let raw = value.as_ref()?; // tombstone => None
+                    Some(VersionedRecord { value: deser(raw), valid_from, valid_to })
+                });
+                Ok(Box::new(out))
+            }
+            Iq2Query::MultiVersionedKey { key, from_ts, to_ts, descending } => {
+                let kb = ser(&**key)?;
+                let from = from_ts.unwrap_or(i64::MIN);
+                let to = to_ts.unwrap_or(i64::MAX);
+                let mut out: Vec<VersionedRecord<V>> = Vec::new();
+                if let Some(chain) = self.chains.get(&kb) {
+                    let entries: Vec<(i64, &Option<Bytes>)> =
+                        chain.iter().map(|(t, v)| (*t, v)).collect();
+                    for (i, (valid_from, value)) in entries.iter().enumerate() {
+                        let Some(raw) = value.as_ref() else { continue }; // skip tombstones
+                        let valid_to = entries.get(i + 1).map(|(t, _)| *t);
+                        // Overlap of [valid_from, valid_to) with inclusive [from, to].
+                        let overlaps =
+                            *valid_from <= to && valid_to.is_none_or(|vt| vt > from);
+                        if overlaps {
+                            out.push(VersionedRecord {
+                                value: deser(raw),
+                                valid_from: *valid_from,
+                                valid_to,
+                            });
+                        }
+                    }
+                }
+                if *descending {
+                    out.reverse();
+                }
+                Ok(Box::new(out))
+            }
+            _ => Err(Iq2Failure::UnknownQueryType),
+        }
     }
 }
 
@@ -324,6 +395,89 @@ mod tests {
         let cl = s.take_changelog();
         assert_eq!(cl.len(), 2);
         assert_eq!(s.get_as_of(&"k".into(), 40).await, None);
+    }
+
+    #[tokio::test]
+    async fn iq2_versioned_key_and_multi() {
+        use crate::store::iq::{Iq2Failure, Iq2Query, IqQueryable, StoreKind};
+        let mut s = store(1_000_000);
+        // Three in-order versions of "k": 10@100, 20@200, 30@300.
+        s.put("k".into(), Some(10), 100).await;
+        s.put("k".into(), Some(20), 200).await;
+        s.put("k".into(), Some(30), 300).await;
+        let q: &dyn IqQueryable = s.as_iq().unwrap();
+        assert_eq!(q.kind(), StoreKind::Versioned);
+
+        // VersionedKeyQuery latest.
+        let latest = q
+            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: None })
+            .await
+            .unwrap();
+        assert_eq!(
+            *latest.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
+            Some(VersionedRecord { value: 30, valid_from: 300, valid_to: None })
+        );
+
+        // VersionedKeyQuery as_of(250) → the 20@200 version, superseded at 300.
+        let asof = q
+            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: Some(250) })
+            .await
+            .unwrap();
+        assert_eq!(
+            *asof.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
+            Some(VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) })
+        );
+
+        // as_of(50) predates the oldest version → None.
+        let miss = q
+            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: Some(50) })
+            .await
+            .unwrap();
+        assert_eq!(*miss.downcast::<Option<VersionedRecord<i64>>>().unwrap(), None);
+
+        // MultiVersionedKeyQuery all (unbounded), ascending.
+        let all = q
+            .iq2_execute(&Iq2Query::MultiVersionedKey {
+                key: Box::new("k".to_string()),
+                from_ts: None,
+                to_ts: None,
+                descending: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *all.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
+            vec![
+                VersionedRecord { value: 10, valid_from: 100, valid_to: Some(200) },
+                VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) },
+                VersionedRecord { value: 30, valid_from: 300, valid_to: None },
+            ]
+        );
+
+        // MultiVersionedKeyQuery [150,250] → versions overlapping that range
+        // (10@[100,200) and 20@[200,300); 30@[300,∞) excluded), descending.
+        let win = q
+            .iq2_execute(&Iq2Query::MultiVersionedKey {
+                key: Box::new("k".to_string()),
+                from_ts: Some(150),
+                to_ts: Some(250),
+                descending: true,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *win.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
+            vec![
+                VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) },
+                VersionedRecord { value: 10, valid_from: 100, valid_to: Some(200) },
+            ]
+        );
+
+        // Wrong key type → KeyTypeMismatch.
+        let bad = q
+            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new(7_i64), as_of: None })
+            .await;
+        assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
     }
 
     #[tokio::test]
