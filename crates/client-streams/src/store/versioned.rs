@@ -406,6 +406,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one cohesive test of every iq2_execute branch
     async fn iq2_versioned_key_and_multi() {
         use crate::store::iq::{Iq2Failure, Iq2Query, IqQueryable, StoreKind};
         let mut s = store(1_000_000);
