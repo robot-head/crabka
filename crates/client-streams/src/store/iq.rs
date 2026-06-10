@@ -49,6 +49,23 @@ pub enum Iq2Query {
         from_ts: i64,
         to_ts: i64,
     },
+    /// `VersionedKeyQuery` (KIP-960) — one key; `as_of = None` ⇒ latest live
+    /// version, `Some(t)` ⇒ the version valid at `t`. Result:
+    /// `Option<VersionedRecord<V>>`.
+    VersionedKey {
+        key: Box<dyn Any + Send + Sync>,
+        as_of: Option<i64>,
+    },
+    /// `MultiVersionedKeyQuery` (KIP-968) — one key; every version whose
+    /// validity `[valid_from, valid_to)` overlaps `[from_ts, to_ts]` (`None`
+    /// bound = unbounded that side), ascending by `valid_from` unless
+    /// `descending`. Result: `Vec<VersionedRecord<V>>`.
+    MultiVersionedKey {
+        key: Box<dyn Any + Send + Sync>,
+        from_ts: Option<i64>,
+        to_ts: Option<i64>,
+        descending: bool,
+    },
 }
 
 /// Why a store could not execute an `IQv2` query. The runtime maps these (plus its
@@ -232,5 +249,14 @@ mod tests {
             q.iq2_execute(&query).await.err(),
             Some(Iq2Failure::UnknownQueryType)
         );
+
+        // Versioned variants also hit the default (a session store has no handler).
+        let mv = Iq2Query::MultiVersionedKey {
+            key: Box::new("k".to_string()),
+            from_ts: None,
+            to_ts: None,
+            descending: false,
+        };
+        assert_eq!(q.iq2_execute(&mv).await.err(), Some(Iq2Failure::UnknownQueryType));
     }
 }
