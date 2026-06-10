@@ -899,7 +899,7 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows,
+    BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows, Joined,
     KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
     SessionWindowedKGroupedStream, SessionWindowedSerde, SessionWindows,
     SlidingWindowedCogroupedStream, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined,
