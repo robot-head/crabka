@@ -515,7 +515,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, &VB) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -540,7 +541,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -558,7 +560,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -589,7 +592,8 @@ where
         kind: JoinKind,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         JF: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -608,6 +612,18 @@ where
         let self_node = self.node;
         let other_node = other.node;
 
+        // KIP-914: each side's OWN store name, set only when that side is
+        // versioned. The matching processor reads its own latest `valid_from`
+        // and suppresses out-of-order updates (record ts strictly older).
+        let this_versioned_store = self
+            .versioned_retention_ms
+            .is_some()
+            .then(|| a_store.clone());
+        let other_versioned_store = other
+            .versioned_retention_ms
+            .is_some()
+            .then(|| b_store.clone());
+
         let mut g = self.builder.borrow_mut();
         let join_this = g.new_processor_name(names::KTABLE_JOIN_THIS);
         let join_other = g.new_processor_name(names::KTABLE_JOIN_OTHER);
@@ -622,13 +638,16 @@ where
             vec![self_node],
         );
         let b_store_this = b_store.clone();
+        let a_store_this = a_store.clone();
         let jf_this = jf.clone();
         let join_this_name = join_this.clone();
+        let this_versioned = this_versioned_store.clone();
         g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent =
                 NodeHandle::<K, Change<V>>::from_name(state.handle_name[&self_node].clone());
             let store_for_proc = b_store_this.clone();
             let jf_for_proc = jf_this.clone();
+            let self_versioned = this_versioned.clone();
             let h = state
                 .topology
                 .add_processor::<K, Change<V>, K, Change<VR>, _, _, _>(
@@ -637,6 +656,7 @@ where
                         other_store: store_for_proc.clone(),
                         joiner: jf_for_proc.clone(),
                         kind,
+                        self_versioned_store: self_versioned.clone(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -644,6 +664,13 @@ where
             state
                 .topology
                 .connect_processor_store(h.name(), &b_store_this);
+            // KIP-914: connect this processor to its OWN store so the gate's
+            // `get_versioned_store` lookup resolves (only matters when versioned).
+            if this_versioned.is_some() {
+                state
+                    .topology
+                    .connect_processor_store(h.name(), &a_store_this);
+            }
             state.handle_name.insert(this_id, h.name().to_string());
         }));
 
@@ -656,13 +683,16 @@ where
             vec![other_node],
         );
         let a_store_other = a_store.clone();
+        let b_store_other = b_store.clone();
         let jf_other = jf.clone();
         let join_other_name = join_other.clone();
+        let other_versioned = other_versioned_store.clone();
         g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent =
                 NodeHandle::<K, Change<VB>>::from_name(state.handle_name[&other_node].clone());
             let store_for_proc = a_store_other.clone();
             let jf_for_proc = jf_other.clone();
+            let self_versioned = other_versioned.clone();
             let h = state
                 .topology
                 .add_processor::<K, Change<VB>, K, Change<VR>, _, _, _>(
@@ -671,6 +701,7 @@ where
                         other_store: store_for_proc.clone(),
                         joiner: jf_for_proc.clone(),
                         kind,
+                        self_versioned_store: self_versioned.clone(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -678,6 +709,13 @@ where
             state
                 .topology
                 .connect_processor_store(h.name(), &a_store_other);
+            // KIP-914: connect this processor to its OWN store so the gate's
+            // `get_versioned_store` lookup resolves (only matters when versioned).
+            if other_versioned.is_some() {
+                state
+                    .topology
+                    .connect_processor_store(h.name(), &b_store_other);
+            }
             state.handle_name.insert(other_id, h.name().to_string());
         }));
 

@@ -81,6 +81,10 @@ pub(crate) struct KTableKTableJoinThisProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
     pub kind: JoinKind,
+    /// `Some(store)` when *this* input side is versioned (KIP-914): the join
+    /// suppresses out-of-order changes (record ts older than this store's latest
+    /// `valid_from`). `None` = non-versioned side, never suppresses.
+    pub self_versioned_store: Option<String>,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
@@ -89,7 +93,7 @@ impl<K, VA, VB, VR, F> Processor<K, Change<VA>, K, Change<VR>>
     for KTableKTableJoinThisProcessor<K, VA, VB, VR, F>
 where
     K: std::any::Any + Send + Sync + Clone,
-    VA: Send + 'static,
+    VA: Send + Sync + 'static,
     VB: Send + 'static,
     VR: std::any::Any + Send + Clone,
     F: Fn(Option<&VA>, Option<&VB>) -> VR + Send + 'static,
@@ -100,6 +104,18 @@ where
         r: Record<K, Change<VA>>,
     ) {
         let key = r.key.expect("join key");
+        if let Some(ref vs) = self.self_versioned_store {
+            let out_of_order = match ctx.get_versioned_store::<K, VA>(vs) {
+                Some(s) => s
+                    .get(&key)
+                    .await
+                    .is_some_and(|rec| rec.valid_from > r.timestamp),
+                None => false,
+            };
+            if out_of_order {
+                return; // KIP-914: out-of-order versioned update emits nothing
+            }
+        }
         // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
         // dropping the store borrow before `ctx.forward`.
         let b_cur = match ctx.get_state_store::<K, VB>(&self.other_store) {
@@ -132,6 +148,10 @@ pub(crate) struct KTableKTableJoinOtherProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
     pub kind: JoinKind,
+    /// `Some(store)` when *this* input side is versioned (KIP-914): the join
+    /// suppresses out-of-order changes (record ts older than this store's latest
+    /// `valid_from`). `None` = non-versioned side, never suppresses.
+    pub self_versioned_store: Option<String>,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
@@ -141,7 +161,7 @@ impl<K, VA, VB, VR, F> Processor<K, Change<VB>, K, Change<VR>>
 where
     K: std::any::Any + Send + Sync + Clone,
     VA: Send + 'static,
-    VB: Send + 'static,
+    VB: Send + Sync + 'static,
     VR: std::any::Any + Send + Clone,
     F: Fn(Option<&VA>, Option<&VB>) -> VR + Send + 'static,
 {
@@ -151,6 +171,18 @@ where
         r: Record<K, Change<VB>>,
     ) {
         let key = r.key.expect("join key");
+        if let Some(ref vs) = self.self_versioned_store {
+            let out_of_order = match ctx.get_versioned_store::<K, VB>(vs) {
+                Some(s) => s
+                    .get(&key)
+                    .await
+                    .is_some_and(|rec| rec.valid_from > r.timestamp),
+                None => false,
+            };
+            if out_of_order {
+                return; // KIP-914: out-of-order versioned update emits nothing
+            }
+        }
         // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
         // dropping the store borrow before `ctx.forward`.
         let a_cur = match ctx.get_state_store::<K, VA>(&self.other_store) {
@@ -225,6 +257,7 @@ mod tests {
             other_store: "b".into(),
             joiner: concat_joiner as StrJoiner,
             kind: JoinKind::inner(),
+            self_versioned_store: None,
             _pd: PhantomData,
         }
     }
@@ -362,6 +395,97 @@ mod tests {
         check!(
             buffer.is_empty(),
             "inner join with absent b must not forward"
+        );
+    }
+
+    // ── versioned out-of-order gate (KIP-914) ──────────────────────────────────
+
+    use crate::store::versioned::{VersionedBytesStore, VersionedKeyValueStore};
+
+    /// This-side OWN versioned store "a" key "k" latest `valid_from`=200; other store "b" key "k"="B".
+    async fn make_versioned_this_and_other() -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        let mut a = VersionedBytesStore::<String, String>::in_memory(
+            "a".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "a-cl".into(),
+        );
+        a.put("k".into(), Some("A".into()), 200).await;
+        stores.insert(Box::new(a));
+        let mut b = KeyValueBytesStore::<String, String>::in_memory(
+            "b".into(),
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "b-cl".into(),
+        );
+        b.put("k".to_string(), "B".to_string()).await;
+        stores.insert(Box::new(b));
+        stores
+    }
+
+    async fn run_this(
+        proc: &mut TestJoinProc,
+        stores: &mut StoreRegistry,
+        change: Change<String>,
+        ts: i64,
+    ) -> Option<Change<String>> {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut scheds = Vec::new();
+        let mut dispatch = Dispatch {
+            buffer: &mut buffer,
+            children: &children,
+            output: &mut output,
+            record_ctx: &rc,
+            stores,
+            globals: &globals,
+            node_idx: 0,
+            schedules: &mut scheds,
+            sched_stream_time: i64::MIN,
+            sched_wall_clock: 0,
+        };
+        let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
+        proc.process(&mut ctx, Record::new(Some("k".into()), change, ts))
+            .await;
+        buffer
+            .pop_front()
+            .map(|(_, rec)| *rec.value.downcast::<Change<String>>().unwrap())
+    }
+
+    #[tokio::test]
+    async fn versioned_this_suppresses_out_of_order() {
+        let mut stores = make_versioned_this_and_other().await;
+        let mut proc = TestJoinProc {
+            other_store: "b".into(),
+            joiner: concat_joiner as StrJoiner,
+            kind: JoinKind::inner(),
+            self_versioned_store: Some("a".into()),
+            _pd: PhantomData,
+        };
+        check!(
+            run_this(
+                &mut proc,
+                &mut stores,
+                Change::update(None, "A2".into()),
+                100
+            )
+            .await
+            .is_none()
+        );
+        check!(
+            run_this(
+                &mut proc,
+                &mut stores,
+                Change::update(None, "A3".into()),
+                300
+            )
+            .await
+            .is_some()
         );
     }
 
