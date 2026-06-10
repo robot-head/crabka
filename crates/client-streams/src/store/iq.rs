@@ -257,6 +257,9 @@ mod tests {
             to_ts: None,
             descending: false,
         };
-        assert_eq!(q.iq2_execute(&mv).await.err(), Some(Iq2Failure::UnknownQueryType));
+        assert_eq!(
+            q.iq2_execute(&mv).await.err(),
+            Some(Iq2Failure::UnknownQueryType)
+        );
     }
 }

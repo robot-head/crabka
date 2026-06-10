@@ -298,11 +298,20 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                         }
                     };
                     let raw = value.as_ref()?; // tombstone => None
-                    Some(VersionedRecord { value: deser(raw), valid_from, valid_to })
+                    Some(VersionedRecord {
+                        value: deser(raw),
+                        valid_from,
+                        valid_to,
+                    })
                 });
                 Ok(Box::new(out))
             }
-            Iq2Query::MultiVersionedKey { key, from_ts, to_ts, descending } => {
+            Iq2Query::MultiVersionedKey {
+                key,
+                from_ts,
+                to_ts,
+                descending,
+            } => {
                 let kb = ser(&**key)?;
                 let from = from_ts.unwrap_or(i64::MIN);
                 let to = to_ts.unwrap_or(i64::MAX);
@@ -314,8 +323,7 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                         let Some(raw) = value.as_ref() else { continue }; // skip tombstones
                         let valid_to = entries.get(i + 1).map(|(t, _)| *t);
                         // Overlap of [valid_from, valid_to) with inclusive [from, to].
-                        let overlaps =
-                            *valid_from <= to && valid_to.is_none_or(|vt| vt > from);
+                        let overlaps = *valid_from <= to && valid_to.is_none_or(|vt| vt > from);
                         if overlaps {
                             out.push(VersionedRecord {
                                 value: deser(raw),
@@ -410,30 +418,50 @@ mod tests {
 
         // VersionedKeyQuery latest.
         let latest = q
-            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: None })
+            .iq2_execute(&Iq2Query::VersionedKey {
+                key: Box::new("k".to_string()),
+                as_of: None,
+            })
             .await
             .unwrap();
         assert_eq!(
             *latest.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
-            Some(VersionedRecord { value: 30, valid_from: 300, valid_to: None })
+            Some(VersionedRecord {
+                value: 30,
+                valid_from: 300,
+                valid_to: None
+            })
         );
 
         // VersionedKeyQuery as_of(250) → the 20@200 version, superseded at 300.
         let asof = q
-            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: Some(250) })
+            .iq2_execute(&Iq2Query::VersionedKey {
+                key: Box::new("k".to_string()),
+                as_of: Some(250),
+            })
             .await
             .unwrap();
         assert_eq!(
             *asof.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
-            Some(VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) })
+            Some(VersionedRecord {
+                value: 20,
+                valid_from: 200,
+                valid_to: Some(300)
+            })
         );
 
         // as_of(50) predates the oldest version → None.
         let miss = q
-            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new("k".to_string()), as_of: Some(50) })
+            .iq2_execute(&Iq2Query::VersionedKey {
+                key: Box::new("k".to_string()),
+                as_of: Some(50),
+            })
             .await
             .unwrap();
-        assert_eq!(*miss.downcast::<Option<VersionedRecord<i64>>>().unwrap(), None);
+        assert_eq!(
+            *miss.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
+            None
+        );
 
         // MultiVersionedKeyQuery all (unbounded), ascending.
         let all = q
@@ -448,9 +476,21 @@ mod tests {
         assert_eq!(
             *all.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
             vec![
-                VersionedRecord { value: 10, valid_from: 100, valid_to: Some(200) },
-                VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) },
-                VersionedRecord { value: 30, valid_from: 300, valid_to: None },
+                VersionedRecord {
+                    value: 10,
+                    valid_from: 100,
+                    valid_to: Some(200)
+                },
+                VersionedRecord {
+                    value: 20,
+                    valid_from: 200,
+                    valid_to: Some(300)
+                },
+                VersionedRecord {
+                    value: 30,
+                    valid_from: 300,
+                    valid_to: None
+                },
             ]
         );
 
@@ -468,14 +508,25 @@ mod tests {
         assert_eq!(
             *win.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
             vec![
-                VersionedRecord { value: 20, valid_from: 200, valid_to: Some(300) },
-                VersionedRecord { value: 10, valid_from: 100, valid_to: Some(200) },
+                VersionedRecord {
+                    value: 20,
+                    valid_from: 200,
+                    valid_to: Some(300)
+                },
+                VersionedRecord {
+                    value: 10,
+                    valid_from: 100,
+                    valid_to: Some(200)
+                },
             ]
         );
 
         // Wrong key type → KeyTypeMismatch.
         let bad = q
-            .iq2_execute(&Iq2Query::VersionedKey { key: Box::new(7_i64), as_of: None })
+            .iq2_execute(&Iq2Query::VersionedKey {
+                key: Box::new(7_i64),
+                as_of: None,
+            })
             .await;
         assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
     }

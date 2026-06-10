@@ -230,7 +230,11 @@ pub struct VersionedKeyQuery<K, V> {
 impl<K, V> VersionedKeyQuery<K, V> {
     #[must_use]
     pub fn with_key(key: K) -> Self {
-        Self { key, as_of: None, _v: PhantomData }
+        Self {
+            key,
+            as_of: None,
+            _v: PhantomData,
+        }
     }
     #[must_use]
     pub fn as_of(mut self, timestamp: i64) -> Self {
@@ -245,7 +249,10 @@ impl<K: Send + Sync + 'static, V: 'static> Query for VersionedKeyQuery<K, V> {
         StoreKind::Versioned
     }
     fn lower(self) -> Iq2Query {
-        Iq2Query::VersionedKey { key: Box::new(self.key), as_of: self.as_of }
+        Iq2Query::VersionedKey {
+            key: Box::new(self.key),
+            as_of: self.as_of,
+        }
     }
 }
 
@@ -262,7 +269,13 @@ pub struct MultiVersionedKeyQuery<K, V> {
 impl<K, V> MultiVersionedKeyQuery<K, V> {
     #[must_use]
     pub fn with_key(key: K) -> Self {
-        Self { key, from_ts: None, to_ts: None, descending: false, _v: PhantomData }
+        Self {
+            key,
+            from_ts: None,
+            to_ts: None,
+            descending: false,
+            _v: PhantomData,
+        }
     }
     #[must_use]
     pub fn from_time(mut self, t: i64) -> Self {
@@ -349,10 +362,19 @@ mod tests {
     fn versioned_queries_lower_correctly() {
         let vk = VersionedKeyQuery::<String, i64>::with_key("k".into()).as_of(250);
         assert_eq!(vk.store_kind(), StoreKind::Versioned);
-        assert!(matches!(vk.lower(), Iq2Query::VersionedKey { as_of: Some(250), .. }));
+        assert!(matches!(
+            vk.lower(),
+            Iq2Query::VersionedKey {
+                as_of: Some(250),
+                ..
+            }
+        ));
 
         let vk_latest = VersionedKeyQuery::<String, i64>::with_key("k".into());
-        assert!(matches!(vk_latest.lower(), Iq2Query::VersionedKey { as_of: None, .. }));
+        assert!(matches!(
+            vk_latest.lower(),
+            Iq2Query::VersionedKey { as_of: None, .. }
+        ));
 
         let mv = MultiVersionedKeyQuery::<String, i64>::with_key("k".into())
             .from_time(150)
@@ -361,13 +383,23 @@ mod tests {
         assert_eq!(mv.store_kind(), StoreKind::Versioned);
         assert!(matches!(
             mv.lower(),
-            Iq2Query::MultiVersionedKey { from_ts: Some(150), to_ts: Some(250), descending: true, .. }
+            Iq2Query::MultiVersionedKey {
+                from_ts: Some(150),
+                to_ts: Some(250),
+                descending: true,
+                ..
+            }
         ));
 
         let mv_all = MultiVersionedKeyQuery::<String, i64>::with_key("k".into());
         assert!(matches!(
             mv_all.lower(),
-            Iq2Query::MultiVersionedKey { from_ts: None, to_ts: None, descending: false, .. }
+            Iq2Query::MultiVersionedKey {
+                from_ts: None,
+                to_ts: None,
+                descending: false,
+                ..
+            }
         ));
     }
 }
