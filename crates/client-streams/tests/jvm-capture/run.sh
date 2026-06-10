@@ -247,6 +247,40 @@ case "$MODE" in
       '
     ;;
 
+  --versioned-joins)
+    # Pin the JVM TopologyTestDriver versioned-JOIN (KIP-889/914/923) behavioral
+    # goldens into testdata/versioned_joins/{asof,grace,tabletable}.json for the Rust
+    # versioned stream-table / table-table join parity tests. Mirrors --versioned; same
+    # jars (incl. streams-test-utils + rocksdb). Compiles Capture.java too
+    # (StreamTableGraceBehavior references Capture.wireSubtopologies for the buffer
+    # store's changelog topic config).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/versioned_joins
+        javac -cp "$CP" -d /tmp/build \
+          src/main/java/crabka/capture/Capture.java \
+          src/main/java/crabka/capture/StreamTableAsOfBehavior.java \
+          src/main/java/crabka/capture/StreamTableGraceBehavior.java \
+          src/main/java/crabka/capture/TableTableVersionedBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.StreamTableAsOfBehavior /tests/testdata/versioned_joins
+        java -cp "/tmp/build:$RT" crabka.capture.StreamTableGraceBehavior /tests/testdata/versioned_joins
+        java -cp "/tmp/build:$RT" crabka.capture.TableTableVersionedBehavior /tests/testdata/versioned_joins
+      '
+    ;;
+
   --verify-broker)
     # Mechanism B: stand up a real Kafka 4.1 broker (KRaft, streams groups enabled),
     # run the count topology with group.protocol=streams, dump the live rebalance data.
@@ -318,7 +352,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--cogroup|--emit-final|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--cogroup|--emit-final|--versioned-joins|--verify-broker]" >&2
     exit 2
     ;;
 esac
