@@ -819,6 +819,31 @@ mod tests {
         Arc::new(ScriptedFetcher::new(vec![])) as Arc<dyn RecordFetcher>
     }
 
+    /// Dispatch one `Iq2Request` (built from the supplied reply sender) through
+    /// `serve_iq2` and return the assembled `Iq2Outcome`.
+    async fn serve_iq2_outcome(
+        thread: &mut StreamThread,
+        build: impl FnOnce(
+            tokio::sync::oneshot::Sender<crate::runtime::iqv2::dispatch::Iq2Outcome>,
+        ) -> crate::runtime::iqv2::dispatch::Iq2Request,
+    ) -> crate::runtime::iqv2::dispatch::Iq2Outcome {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        thread.serve_iq2(build(reply)).await;
+        rx.await.unwrap()
+    }
+
+    /// One `(subtopology "0", partition)` task over source topic `in`.
+    fn task_for(partition: i32) -> TaskAssignment {
+        TaskAssignment {
+            subtopology_id: "0".into(),
+            partitions: vec![partition],
+            source_topic_partitions: vec![TopicPartition {
+                topic: "in".into(),
+                partition,
+            }],
+        }
+    }
+
     // ─── tests ────────────────────────────────────────────────────────────────
 
     /// `poll_all` must fire due `WALL_CLOCK_TIME` punctuators between polls, driven
@@ -1118,6 +1143,122 @@ mod tests {
             rx2.await.unwrap(),
             Err(IqError::RebalanceInProgress)
         ));
+    }
+
+    /// `serve_iq2` per-partition gating: an active task over the `counts`
+    /// `KeyValue` store yields a `Success` (empty store → `Ok(Box<None>)`),
+    /// while the partition-set, active-only, and position-bound gates each
+    /// suppress or fail the matching partition.
+    #[tokio::test]
+    async fn serve_iq2_gates_partition_active_and_bound() {
+        use crate::runtime::iqv2::dispatch::Iq2Request;
+        use crate::runtime::iqv2::request::{PartitionSel, Position, PositionBound};
+        use crate::runtime::iqv2::result::FailureReason;
+        use crate::store::iq::{Iq2Query, StoreKind};
+
+        // active(p0) + standby(p1) over the stateful `counts` KeyValue store.
+        // Neither task is fed records, so the store is empty.
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+        let built = stateful_built();
+        let assignment = StreamsAssignment {
+            active: vec![task_for(0)],
+            standby: vec![task_for(1)],
+            warmup: vec![],
+        };
+
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(
+                &assignment,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 2);
+
+        // Build a base KeyQuery request; callers tweak the gate fields.
+        let req = |partitions, bound, require_active, reply| Iq2Request {
+            store: "counts".into(),
+            kind: StoreKind::KeyValue,
+            query: Iq2Query::Key {
+                key: Box::new("k".to_string()),
+            },
+            partitions,
+            bound,
+            require_active,
+            reply,
+        };
+        let find = |out: &crate::runtime::iqv2::dispatch::Iq2Outcome, want: i32| {
+            out.per_partition
+                .iter()
+                .find(|(p, _, _)| *p == want)
+                .map(|(_, _, r)| r.is_ok())
+        };
+
+        // (1) Happy path, all partitions: empty active store → Success(None).
+        let out = serve_iq2_outcome(&mut thread, |reply| {
+            req(PartitionSel::All, PositionBound::Unbounded, false, reply)
+        })
+        .await;
+        let (_, _, r) = out
+            .per_partition
+            .iter()
+            .find(|(p, _, _)| *p == 0)
+            .expect("partition 0 present");
+        let boxed = r.as_ref().expect("partition 0 is a Success");
+        let downcast = boxed.downcast_ref::<Option<i64>>().expect("Option<i64>");
+        assert_eq!(*downcast, None, "empty store yields None");
+
+        // (2) Partition-set gate: a set excluding p0 omits it entirely.
+        let set1 = || PartitionSel::Set([1].into_iter().collect());
+        let out = serve_iq2_outcome(&mut thread, |reply| {
+            req(set1(), PositionBound::Unbounded, false, reply)
+        })
+        .await;
+        assert_eq!(
+            find(&out, 0),
+            None,
+            "p0 excluded from the set must not appear"
+        );
+        assert!(find(&out, 1).is_some(), "p1 (in the set) must appear");
+
+        // (3) Active-only gate against the standby (p1) task → NotActive.
+        let out = serve_iq2_outcome(&mut thread, |reply| {
+            req(set1(), PositionBound::Unbounded, true, reply)
+        })
+        .await;
+        let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 1).unwrap();
+        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotActive));
+
+        // (4) Position-bound gate: a bound ahead of the (empty) p0 position →
+        // NotUpToBound (p0 has never advanced).
+        let ahead = Position(
+            [("in".to_string(), [(0, 100)].into_iter().collect())]
+                .into_iter()
+                .collect(),
+        );
+        let out = serve_iq2_outcome(&mut thread, |reply| {
+            req(
+                PartitionSel::Set([0].into_iter().collect()),
+                PositionBound::At(ahead),
+                false,
+                reply,
+            )
+        })
+        .await;
+        let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 0).unwrap();
+        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotUpToBound));
     }
 
     /// End-to-end of the real runtime global-store path: `StreamThread` builds +

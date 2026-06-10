@@ -7,8 +7,8 @@
 //! `RangeQuery` / `WindowKeyQuery` / `WindowRangeQuery`) and asserts parity.
 
 use crabka_client_streams::{
-    Consumed, KeyQuery, RangeQuery, StateQueryRequest, StreamsBuilder, StringSerde, TimeWindows,
-    TopologyTestDriver, WindowKeyQuery, WindowRangeQuery,
+    Consumed, FailureReason, KeyQuery, RangeQuery, StateQueryRequest, StreamsBuilder, StringSerde,
+    TimeWindows, TopologyTestDriver, WindowKeyQuery, WindowRangeQuery,
 };
 use serde_json::Value;
 
@@ -114,6 +114,52 @@ async fn iqv2_kv_key_and_range_parity() {
         Some(&pairs(&kv["range_lower_b"])),
         "range lower-bound b parity",
     );
+}
+
+/// Driver failure paths: an unknown store name and a wrong-kind query against
+/// an existing `KeyValue` store both surface as per-partition `Failure`s.
+#[tokio::test]
+async fn iqv2_failure_paths() {
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .count("counts");
+    let built = b.build("app").unwrap();
+    let mut d = TopologyTestDriver::new(&built).unwrap();
+    // Seed one record so the store's partition has a live task.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "a".to_string(),
+        0,
+    );
+
+    // Unknown store name → DoesNotExist.
+    let bogus = d
+        .query(
+            StateQueryRequest::in_store("nope")
+                .with_query(KeyQuery::<String, i64>::with_key("a".into())),
+        )
+        .await;
+    let r = bogus
+        .only_partition_result()
+        .expect("single partition result");
+    assert!(!r.is_success());
+    assert_eq!(r.failure_reason(), Some(FailureReason::DoesNotExist));
+
+    // Existing KeyValue store queried with a Window query (wrong kind) → NotPresent.
+    let wrong_kind = d
+        .query(
+            StateQueryRequest::in_store("counts")
+                .with_query(WindowKeyQuery::<String, i64>::with_key("a".into())),
+        )
+        .await;
+    let r = wrong_kind
+        .only_partition_result()
+        .expect("single partition result");
+    assert!(!r.is_success());
+    assert_eq!(r.failure_reason(), Some(FailureReason::NotPresent));
 }
 
 /// `WindowKeyQuery` + `WindowRangeQuery` over a 1000ms tumbling count store.
