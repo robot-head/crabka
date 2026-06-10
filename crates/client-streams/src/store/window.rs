@@ -117,7 +117,9 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for WindowBytesStore<K, V>
 // `WindowBytesStore` holds only `Box<dyn Serde<_>>` + byte buffers, so it is
 // `Send + Sync` for any `K`/`V` — no `Sync` bound needed on the impl.
 #[async_trait::async_trait]
-impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable for WindowBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
+    for WindowBytesStore<K, V>
+{
     fn kind(&self) -> crate::store::iq::StoreKind {
         crate::store::iq::StoreKind::Window
     }
@@ -161,7 +163,11 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable for Win
         };
 
         match query {
-            Iq2Query::WindowKey { key, from_ts, to_ts } => {
+            Iq2Query::WindowKey {
+                key,
+                from_ts,
+                to_ts,
+            } => {
                 let kb = ser(&**key)?;
                 let from = *from_ts;
                 let to = *to_ts;
@@ -183,7 +189,12 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable for Win
                 }
                 Ok(Box::new(out))
             }
-            Iq2Query::WindowRange { lo, hi, from_ts, to_ts } => {
+            Iq2Query::WindowRange {
+                lo,
+                hi,
+                from_ts,
+                to_ts,
+            } => {
                 let lo_b = match lo {
                     Some(b) => Some(ser(&**b)?),
                     None => None,
@@ -202,15 +213,11 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable for Win
                         continue;
                     }
                     let kbytes = key_bytes_of(&sk);
-                    if let Some(l) = &lo_b {
-                        if kbytes < l.as_ref() {
-                            continue;
-                        }
+                    if lo_b.as_ref().is_some_and(|l| kbytes < l.as_ref()) {
+                        continue;
                     }
-                    if let Some(h) = &hi_b {
-                        if kbytes > h.as_ref() {
-                            continue;
-                        }
+                    if hi_b.as_ref().is_some_and(|h| kbytes > h.as_ref()) {
+                        continue;
                     }
                     let key = self
                         .key_serde

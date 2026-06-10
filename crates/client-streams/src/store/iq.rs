@@ -17,10 +17,10 @@ pub enum StoreKind {
     Versioned,
 }
 
-/// A typed IQv2 query lowered to the store boundary. Keys travel as
-/// `Box<dyn Any + Send>` (the raw `K`); the concrete store downcasts to its own
-/// `K`, serializes with its own key serde, runs the op, and returns the typed
-/// result (`Option<V>`, `Vec<(K,V)>`, …) boxed as `Box<dyn Any + Send>`.
+/// A typed `IQv2` query lowered to the store boundary. Keys travel as
+/// `Box<dyn Any + Send + Sync>` (the raw `K`); the concrete store downcasts to
+/// its own `K`, serializes with its own key serde, runs the op, and returns the
+/// typed result (`Option<V>`, `Vec<(K,V)>`, …) boxed as `Box<dyn Any + Send>`.
 ///
 /// Time bounds are plain `i64`; ordering/bound choices are flags. No serde and
 /// no `K`/`V` appear here — that is the whole point of the byte-level boundary.
@@ -51,7 +51,7 @@ pub enum Iq2Query {
     },
 }
 
-/// Why a store could not execute an IQv2 query. The runtime maps these (plus its
+/// Why a store could not execute an `IQv2` query. The runtime maps these (plus its
 /// own conditions: rebalancing, not-up-to-bound, not-active) into the public
 /// `FailureReason`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,9 +115,9 @@ pub trait IqQueryable: Send + Sync {
         None
     }
 
-    /// IQv2 entry point. The store downcasts keys, (de)serializes with its own
+    /// `IQv2` entry point. The store downcasts keys, (de)serializes with its own
     /// serdes, runs the op, and returns the typed result boxed. Default: this
-    /// store kind handles no IQv2 query variant.
+    /// store kind handles no `IQv2` query variant.
     async fn iq2_execute(&self, _query: &Iq2Query) -> Result<Box<dyn Any + Send>, Iq2Failure> {
         Err(Iq2Failure::UnknownQueryType)
     }
@@ -217,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn iq2_execute_default_is_unknown_query_type() {
         use super::{Iq2Failure, Iq2Query};
-        // A session store has no IQv2 handler — default impl must reject.
+        // A session store has no `IQv2` handler — default impl must reject.
         let s = SessionBytesStore::<String, i64>::in_memory(
             "s".into(),
             Box::new(StringSerde),

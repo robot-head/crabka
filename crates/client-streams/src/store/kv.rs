@@ -94,56 +94,9 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
 }
 
 // The store struct holds only `Box<dyn Serde<_>>` + byte buffers (no bare `K`/`V`
-// fields), so it is `Send + Sync` for *any* `K`/`V` — no `Sync` bound needed here.
-// `K: Send + V: Send` are required so `Box<Vec<(K,V)>>` / `Box<Option<V>>` can be
-// returned as `Box<dyn Any + Send>` from `iq2_execute`.
-
-/// Intermediate representation for `iq2_execute`: keys already serialized to bytes,
-/// no reference to `Iq2Query` (which is not `Sync`) held across any await point.
-enum Iq2Prepared {
-    Key(bytes::Bytes),
-    Range {
-        lo_b: Option<bytes::Bytes>,
-        hi_b: Option<bytes::Bytes>,
-        descending: bool,
-    },
-    Unknown,
-}
-
-impl<K: Send + 'static, V: Send + 'static> KeyValueBytesStore<K, V> {
-    /// Synchronously extract and serialize keys from an `Iq2Query`. Called before
-    /// any `.await` so `query` (non-`Sync`) is dropped before the async phase.
-    fn iq2_prepare(
-        &self,
-        query: &crate::store::iq::Iq2Query,
-    ) -> Result<Iq2Prepared, crate::store::iq::Iq2Failure> {
-        use crate::store::iq::{Iq2Failure, Iq2Query};
-        let ser = |b: &dyn Any| -> Result<bytes::Bytes, Iq2Failure> {
-            let k = b.downcast_ref::<K>().ok_or(Iq2Failure::KeyTypeMismatch)?;
-            Ok(self.key_serde.serialize(&self.changelog_topic, k))
-        };
-        match query {
-            Iq2Query::Key { key } => Ok(Iq2Prepared::Key(ser(&**key)?)),
-            Iq2Query::Range { lo, hi, descending } => {
-                let lo_b = match lo {
-                    Some(b) => Some(ser(&**b)?),
-                    None => None,
-                };
-                let hi_b = match hi {
-                    Some(b) => Some(ser(&**b)?),
-                    None => None,
-                };
-                Ok(Iq2Prepared::Range {
-                    lo_b,
-                    hi_b,
-                    descending: *descending,
-                })
-            }
-            _ => Ok(Iq2Prepared::Unknown),
-        }
-    }
-}
-
+// fields), so it is `Send + Sync` for *any* `K`/`V`. `K: Send + V: Send` are
+// required so `Box<Option<V>>` / `Box<Vec<(K,V)>>` can be returned as
+// `Box<dyn Any + Send>` from `iq2_execute`.
 #[async_trait::async_trait]
 impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
     for KeyValueBytesStore<K, V>
@@ -173,14 +126,14 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
         &self,
         query: &crate::store::iq::Iq2Query,
     ) -> Result<Box<dyn Any + Send>, crate::store::iq::Iq2Failure> {
-        use crate::store::iq::Iq2Failure;
-
-        // Serialize all keys synchronously via the helper so `query`
-        // (non-`Sync`) is fully consumed before any `.await`.
-        let prepared = self.iq2_prepare(query)?;
-
-        match prepared {
-            Iq2Prepared::Key(kb) => {
+        use crate::store::iq::{Iq2Failure, Iq2Query};
+        let ser = |b: &Box<dyn Any + Send + Sync>| -> Result<bytes::Bytes, Iq2Failure> {
+            let k = b.downcast_ref::<K>().ok_or(Iq2Failure::KeyTypeMismatch)?;
+            Ok(self.key_serde.serialize(&self.changelog_topic, k))
+        };
+        match query {
+            Iq2Query::Key { key } => {
+                let kb = ser(key)?;
                 let out: Option<V> = self.backend.get(&kb).await.map(|vb| {
                     self.value_serde
                         .deserialize(&self.changelog_topic, &vb)
@@ -188,22 +141,22 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                 });
                 Ok(Box::new(out))
             }
-            Iq2Prepared::Range {
-                lo_b,
-                hi_b,
-                descending,
-            } => {
+            Iq2Query::Range { lo, hi, descending } => {
+                let lo_b = match lo {
+                    Some(b) => Some(ser(b)?),
+                    None => None,
+                };
+                let hi_b = match hi {
+                    Some(b) => Some(ser(b)?),
+                    None => None,
+                };
                 let mut rows: Vec<(K, V)> = Vec::new();
                 for (kb, vb) in self.backend.scan_all().await {
-                    if let Some(l) = &lo_b {
-                        if kb.as_ref() < l.as_ref() {
-                            continue;
-                        }
+                    if lo_b.as_ref().is_some_and(|l| kb.as_ref() < l.as_ref()) {
+                        continue;
                     }
-                    if let Some(h) = &hi_b {
-                        if kb.as_ref() > h.as_ref() {
-                            continue;
-                        }
+                    if hi_b.as_ref().is_some_and(|h| kb.as_ref() > h.as_ref()) {
+                        continue;
                     }
                     rows.push((
                         self.key_serde
@@ -214,12 +167,12 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                             .expect("iqv2 kv range value deserialize"),
                     ));
                 }
-                if descending {
+                if *descending {
                     rows.reverse();
                 }
                 Ok(Box::new(rows))
             }
-            Iq2Prepared::Unknown => Err(Iq2Failure::UnknownQueryType),
+            _ => Err(Iq2Failure::UnknownQueryType),
         }
     }
 }
@@ -334,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn iq2_key_and_range() {
-        use crate::store::iq::{Iq2Query, IqQueryable};
+        use crate::store::iq::{Iq2Failure, Iq2Query, IqQueryable};
         let mut s = store();
         s.put("a".into(), 1).await;
         s.put("b".into(), 2).await;
@@ -390,7 +343,6 @@ mod tests {
         );
 
         // Wrong key type → KeyTypeMismatch.
-        use crate::store::iq::Iq2Failure;
         let bad = q
             .iq2_execute(&Iq2Query::Key {
                 key: Box::new(7_i64),
