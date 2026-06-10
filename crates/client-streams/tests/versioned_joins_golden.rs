@@ -139,6 +139,160 @@ fn asof_stream_table_join_matches_golden() {
     );
 }
 
+/// As-of stream-table LEFT join (KIP-914), no grace.
+///
+/// Routes a left join (`emit_on_miss = true`) to the as-of processor against a
+/// versioned table holding `(a,10)@100`. The joiner is
+/// `|s, t| s + t.copied().unwrap_or(-1)`, so a hit adds the table value and a
+/// miss adds the `-1` sentinel:
+///   - stream `(a,1)@150` → as-of(150) = 10 → hit → emits `1 + 10 = 11`
+///   - stream `(b,1)@150` → no version for `b` → as-of miss → `None` → emits
+///     `1 + (-1) = 0` (the left branch forwards on a miss)
+///
+/// This exercises the `left_join_table` routing into the as-of processor and the
+/// as-of-miss → `None` path with `emit_on_miss = true`.
+#[test]
+fn asof_stream_table_left_join_emits_on_miss() {
+    let b = StreamsBuilder::new();
+    let table = b.table_explicit::<StringSerde, I64Serde>(
+        "table",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    );
+    b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
+        .left_join_table(&table, |s: &i64, t: Option<&i64>| {
+            s + t.copied().unwrap_or(-1)
+        })
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
+    drop(table);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // TABLE version: (a,10)@100. There is no version for key `b`.
+    d.pipe_input(
+        "table",
+        Consumed::with(StringSerde, I64Serde),
+        Some("a".to_string()),
+        10_i64,
+        100,
+    );
+
+    // STREAM (a,1)@150 → hit → 1 + 10 = 11.
+    d.pipe_input(
+        "stream",
+        Consumed::with(StringSerde, I64Serde),
+        Some("a".to_string()),
+        1_i64,
+        150,
+    );
+    // STREAM (b,1)@150 → as-of miss (no `b` version) → joiner gets None → 1 + -1 = 0.
+    d.pipe_input(
+        "stream",
+        Consumed::with(StringSerde, I64Serde),
+        Some("b".to_string()),
+        1_i64,
+        150,
+    );
+
+    let mut got: Vec<(Option<String>, i64)> = Vec::new();
+    while let Some(rec) = d.read_output("out", Produced::with(StringSerde, I64Serde)) {
+        got.push(rec);
+    }
+
+    assert_eq!(
+        got,
+        vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)],
+        "as-of LEFT join: hit forwards 1+10=11; the as-of MISS for `b` must still \
+         forward (emit_on_miss) with the joiner receiving None → 1+(-1)=0"
+    );
+}
+
+/// Grace stream-table LEFT join (KIP-923) with a table miss.
+///
+/// Same grace wiring as [`grace_stream_table_join_matches_golden`], but a left
+/// join (`emit_on_miss = true`) lowered through the *left* branch of
+/// `build_grace_lowering`. The versioned table holds `(a,10)@100`. The joiner is
+/// `|s, t| s + t.copied().unwrap_or(-1)`. Buffered stream records drain in
+/// ascending-ts order once stream-time crosses `bufTs + 60_000`:
+///   - `(a,1)@150` → drained as-of(150) = 10 → hit → `1 + 10 = 11`
+///   - `(b,1)@150` → drained as-of(150) for `b` = MISS → `None` → `1 + (-1) = 0`
+///
+/// A flush record `(x,9)@1_000_000` advances stream-time past the
+/// `150 + 60_000 = 60_150` horizon, draining both buffered records (the flush
+/// record itself stays buffered: its horizon `1_060_000` is never reached).
+///
+/// This is the only test exercising the grace processor's `emit_on_miss = true`
+/// drain path and the left branch of `build_grace_lowering`.
+#[test]
+fn grace_stream_table_left_join_emits_on_miss() {
+    use crabka_client_streams::Joined;
+
+    let b = StreamsBuilder::new();
+    let table = b.table_explicit::<StringSerde, I64Serde>(
+        "table",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    );
+    b.stream_explicit::<StringSerde, I64Serde>(["stream"], Consumed::with(StringSerde, I64Serde))
+        .left_join_table_with(
+            &table,
+            |s: &i64, t: Option<&i64>| s + t.copied().unwrap_or(-1),
+            Joined::with_grace_period(60_000),
+        )
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
+    drop(table);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // TABLE version: (a,10)@100. No version for key `b`.
+    d.pipe_input(
+        "table",
+        Consumed::with(StringSerde, I64Serde),
+        Some("a".to_string()),
+        10_i64,
+        100,
+    );
+
+    // STREAM records buffer (their grace horizon ts+60_000 is far past stream-time).
+    for k in ["a", "b"] {
+        d.pipe_input(
+            "stream",
+            Consumed::with(StringSerde, I64Serde),
+            Some(k.to_string()),
+            1_i64,
+            150,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        None,
+        "buffered records must not emit before the grace horizon is crossed"
+    );
+
+    // FLUSH record @1_000_000 advances stream-time → threshold 940_000, draining
+    // both @150 records. The flush record (key `x`) itself stays buffered.
+    d.pipe_input(
+        "stream",
+        Consumed::with(StringSerde, I64Serde),
+        Some("x".to_string()),
+        9_i64,
+        1_000_000,
+    );
+
+    let mut got: Vec<(Option<String>, i64)> = Vec::new();
+    while let Some(rec) = d.read_output("out", Produced::with(StringSerde, I64Serde)) {
+        got.push(rec);
+    }
+
+    assert_eq!(
+        got,
+        vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)],
+        "grace LEFT join drain: (a,1)@150 hits as-of(150)=10 → 11; (b,1)@150 is an \
+         as-of MISS but the LEFT grace path still emits with None → 1+(-1)=0; the \
+         flush record (x) must NOT emit"
+    );
+}
+
 /// The grace-scenario golden envelope (adds the buffer-store changelog name +
 /// config that the wire assertion pins, on top of the shared `out` sequence).
 #[derive(Debug, Deserialize)]
