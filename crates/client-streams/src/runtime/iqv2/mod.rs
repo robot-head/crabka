@@ -8,6 +8,9 @@ pub mod query;
 pub mod request;
 pub mod result;
 
-pub use query::{KeyQuery, Query, RangeQuery, WindowKeyQuery, WindowRangeQuery};
+pub use query::{
+    KeyQuery, MultiVersionedKeyQuery, Query, RangeQuery, VersionedKeyQuery, WindowKeyQuery,
+    WindowRangeQuery,
+};
 pub use request::{Position, PositionBound, StateQuery, StateQueryRequest};
 pub use result::{FailureReason, QueryResult, StateQueryResult};

@@ -921,8 +921,9 @@ pub use processor::{
 pub use runtime::eos::ProcessingGuarantee;
 pub use runtime::iq::IqError;
 pub use runtime::iqv2::{
-    FailureReason, KeyQuery, Position, PositionBound, Query, QueryResult, RangeQuery, StateQuery,
-    StateQueryRequest, StateQueryResult, WindowKeyQuery, WindowRangeQuery,
+    FailureReason, KeyQuery, MultiVersionedKeyQuery, Position, PositionBound, Query, QueryResult,
+    RangeQuery, StateQuery, StateQueryRequest, StateQueryResult, VersionedKeyQuery, WindowKeyQuery,
+    WindowRangeQuery,
 };
 pub use runtime::{
     KafkaStreams, KafkaStreamsState, ReadOnlyKeyValueStore, ReadOnlySessionStore,
