@@ -13,7 +13,6 @@ use super::result::{FailureReason, QueryResult, StateQueryResult};
 
 /// One `IQv2` query addressed to the supervisor (sent on the dedicated `iq2`
 /// channel; the v1 byte channel is untouched).
-#[allow(dead_code)] // consumed by serve_iq2 / KafkaStreams::query (later task)
 pub(crate) struct Iq2Request {
     pub store: String,
     pub kind: StoreKind,
@@ -28,18 +27,20 @@ pub(crate) struct Iq2Request {
 type PartitionEntry = (i32, Position, Result<Box<dyn Any + Send>, FailureReason>);
 
 /// Raw per-partition outcomes from the supervisor, before downcast to `R`.
-#[allow(dead_code)] // consumed by serve_iq2 / KafkaStreams::query (later task)
 pub(crate) struct Iq2Outcome {
     /// `(partition, position, Ok(boxed R) | Err(failure))` for each responding task.
     pub per_partition: Vec<PartitionEntry>,
-    /// Whether the instance had any tasks (distinguishes rebalancing from absent).
+    /// Whether the instance had any tasks (distinguishes rebalancing from
+    /// absent). Carried for parity with the v1 IQ path; `assemble` does not
+    /// consume it yet (a query against an empty instance simply yields an empty
+    /// per-partition map), so it is wired but unread.
+    #[allow(dead_code)]
     pub had_tasks: bool,
 }
 
 /// Downcast each partition's boxed result into `R` and build the typed
 /// [`StateQueryResult`]. A box that does not downcast to `R` becomes a
 /// `StoreException` failure for that partition.
-#[allow(dead_code)] // exercised by tests; wired by serve_iq2 in a later task
 pub(crate) fn assemble<R: 'static>(outcome: Iq2Outcome) -> StateQueryResult<R> {
     let mut map: BTreeMap<i32, QueryResult<R>> = BTreeMap::new();
     for (partition, position, res) in outcome.per_partition {
