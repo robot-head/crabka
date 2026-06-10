@@ -409,7 +409,10 @@ mod tests {
             .with_ascending_timestamps();
         assert!(matches!(
             mv_asc.lower(),
-            Iq2Query::MultiVersionedKey { descending: false, .. }
+            Iq2Query::MultiVersionedKey {
+                descending: false,
+                ..
+            }
         ));
     }
 
