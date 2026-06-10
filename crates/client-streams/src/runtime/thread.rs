@@ -448,6 +448,74 @@ impl StreamThread {
         let _ = req.reply.send(result);
     }
 
+    /// Serve one `IQv2` query: per-partition (no merge). Filters tasks by the
+    /// requested partition set, applies the active-only and position-bound
+    /// gates, and tags each store's typed result with its partition + position.
+    pub(crate) async fn serve_iq2(&mut self, req: crate::runtime::iqv2::dispatch::Iq2Request) {
+        use crate::runtime::iqv2::dispatch::Iq2Outcome;
+        use crate::runtime::iqv2::request::{PartitionSel, PositionBound};
+        use crate::runtime::iqv2::result::FailureReason;
+        use crate::runtime::task::TaskRole;
+        use crate::store::iq::Iq2Failure;
+
+        let had_tasks = !self.tasks.is_empty();
+        let mut per_partition = Vec::new();
+
+        // Phase 1 (sync): gate every task and collect the runnable store views
+        // before any await. The `tasks.values()` iterator and `&StreamTask` are
+        // not `Send` (the graph holds `Send`-but-not-`Sync` erased nodes), so
+        // the iterator must be fully drained — and dropped — before the first
+        // `iq2_execute().await`. The store view (`&dyn IqQueryable`) and
+        // `Position` *are* `Send`, so they may cross the await in phase 2.
+        let mut runnable: Vec<(
+            i32,
+            crate::runtime::iqv2::request::Position,
+            &dyn crate::store::iq::IqQueryable,
+        )> = Vec::new();
+        for t in self.tasks.values() {
+            let partition = t.partition;
+            if let PartitionSel::Set(set) = &req.partitions
+                && !set.contains(&partition)
+            {
+                continue;
+            }
+            let Some(store) = t.registry().iq_get(&req.store) else {
+                continue;
+            };
+            let pos = t.position();
+            if store.kind() != req.kind {
+                per_partition.push((partition, pos, Err(FailureReason::NotPresent)));
+                continue;
+            }
+            if req.require_active && t.role != TaskRole::Active {
+                per_partition.push((partition, pos, Err(FailureReason::NotActive)));
+                continue;
+            }
+            if let PositionBound::At(bound) = &req.bound
+                && !pos.dominates(bound)
+            {
+                per_partition.push((partition, pos, Err(FailureReason::NotUpToBound)));
+                continue;
+            }
+            runnable.push((partition, pos, store));
+        }
+
+        // Phase 2 (async): execute the collected queries. The iterator above is
+        // dropped, so only `Send` data crosses each await.
+        for (partition, pos, store) in runnable {
+            let outcome = match store.iq2_execute(&req.query).await {
+                Ok(boxed) => Ok(boxed),
+                Err(Iq2Failure::UnknownQueryType) => Err(FailureReason::UnknownQueryType),
+                Err(Iq2Failure::KeyTypeMismatch) => Err(FailureReason::StoreException),
+            };
+            per_partition.push((partition, pos, outcome));
+        }
+        let _ = req.reply.send(Iq2Outcome {
+            per_partition,
+            had_tasks,
+        });
+    }
+
     /// Commit + drop all tasks (on Fenced / shutdown).
     ///
     /// Under EOS, an open transaction is aborted (best-effort) rather than
