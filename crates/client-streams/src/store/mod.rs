@@ -4,6 +4,7 @@ pub mod backend;
 pub(crate) mod byte;
 pub(crate) mod fk_subscription;
 pub mod iq;
+pub(crate) mod join_grace_buffer;
 pub mod join_window;
 pub mod kv;
 pub(crate) mod registry;

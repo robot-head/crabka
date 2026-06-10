@@ -209,6 +209,21 @@ where
         self.dispatch.stores.get_suppress::<K2, V2>(name)
     }
 
+    /// Access a connected join-grace buffer store (KIP-923), typed. `None` if
+    /// absent or the K/V types don't match. Fetch it per-record (do not hold
+    /// across `process` calls).
+    ///
+    /// `pub(crate)`: the grace buffer is a built-in DSL mechanism the stream–table
+    /// join's grace-flush processor reaches via the context, not a user-facing
+    /// store.
+    #[allow(dead_code)] // wired by the join_table_with grace DSL task.
+    pub(crate) fn get_join_grace_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::join_grace_buffer::JoinGraceBufferStore<K2, V2>> {
+        self.dispatch.stores.get_join_grace::<K2, V2>(name)
+    }
+
     /// Access the connected FK subscription store. `None` if absent.
     ///
     /// `pub(crate)`: the subscription store is an internal KIP-213 FK-join

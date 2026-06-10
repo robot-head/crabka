@@ -99,6 +99,18 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::suppress_store::SuppressStore<K, V>)
     }
 
+    /// Typed mutable access: downcast the erased store to the join-grace buffer
+    /// store of the requested types. `None` if absent or the types don't match.
+    pub(crate) fn get_join_grace<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::join_grace_buffer::JoinGraceBufferStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        store
+            .as_any_mut()
+            .downcast_mut::<crate::store::join_grace_buffer::JoinGraceBufferStore<K, V>>()
+    }
+
     /// Mutable access to the FK subscription store. `None` if absent / wrong type.
     pub(crate) fn get_fk_subscription(
         &mut self,
