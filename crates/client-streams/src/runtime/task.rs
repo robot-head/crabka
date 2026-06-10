@@ -80,7 +80,6 @@ impl StreamTask {
 
     /// Snapshot the task's consumed source offsets as an `IQv2` `Position`
     /// (topic → partition → next-offset). Used to tag query results.
-    #[allow(dead_code)] // consumed by IQv2 dispatch path (later task)
     pub(crate) fn position(&self) -> crate::runtime::iqv2::request::Position {
         use std::collections::BTreeMap;
         let mut m: BTreeMap<String, BTreeMap<i32, i64>> = BTreeMap::new();

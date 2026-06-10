@@ -84,7 +84,6 @@ pub struct StateQueryResult<R> {
 
 impl<R> StateQueryResult<R> {
     #[must_use]
-    #[allow(dead_code)] // constructed by the IQv2 dispatch path (later slice)
     pub(crate) fn new(partition_results: BTreeMap<i32, QueryResult<R>>) -> Self {
         Self { partition_results }
     }

@@ -21,7 +21,6 @@ impl Position {
     /// True if `self` meets or exceeds every `(topic, partition)` offset in
     /// `bound`. A bound naming a partition `self` has never advanced fails.
     #[must_use]
-    #[allow(dead_code)] // consumed by the IQv2 dispatch path (later slice)
     pub(crate) fn dominates(&self, bound: &Position) -> bool {
         bound.0.iter().all(|(topic, parts)| {
             parts
@@ -43,7 +42,6 @@ pub enum PositionBound {
 
 /// Which local partitions to query.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)] // `Set` variant is read by the IQv2 dispatch path (later slice)
 pub(crate) enum PartitionSel {
     #[default]
     All,
@@ -52,7 +50,6 @@ pub(crate) enum PartitionSel {
 
 /// A finalized `IQv2` request: built via
 /// `StateQueryRequest::in_store(name).with_query(q)`.
-#[allow(dead_code)] // fields are read by the IQv2 dispatch path (later slice)
 pub struct StateQuery<Q: Query> {
     pub(crate) store: String,
     pub(crate) query: Q,
