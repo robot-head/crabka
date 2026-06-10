@@ -85,6 +85,11 @@ pub(crate) struct KTableKTableJoinThisProcessor<K, VA, VB, VR, F> {
     /// suppresses out-of-order changes (record ts older than this store's latest
     /// `valid_from`). `None` = non-versioned side, never suppresses.
     pub self_versioned_store: Option<String>,
+    /// `true` when the OTHER side's store (`other_store`, holding `VB`) is a
+    /// `VersionedBytesStore` (KIP-914): the latest-value read must go through
+    /// `get_versioned_store` rather than `get_state_store` (which only
+    /// downcasts to a plain `KeyValueBytesStore`).
+    pub other_is_versioned: bool,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
@@ -118,9 +123,19 @@ where
         }
         // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
         // dropping the store borrow before `ctx.forward`.
-        let b_cur = match ctx.get_state_store::<K, VB>(&self.other_store) {
-            Some(s) => s.get(&key).await,
-            None => None,
+        let b_cur = if self.other_is_versioned {
+            // KIP-914: table-table joins read the OTHER side's LATEST value; for a
+            // versioned other store that means `get_versioned_store(..).get` (the
+            // plain-KV downcast in `get_state_store` would return `None`).
+            match ctx.get_versioned_store::<K, VB>(&self.other_store) {
+                Some(s) => s.get(&key).await.map(|rec| rec.value),
+                None => None,
+            }
+        } else {
+            match ctx.get_state_store::<K, VB>(&self.other_store) {
+                Some(s) => s.get(&key).await,
+                None => None,
+            }
         };
         let old = result(
             self.kind,
@@ -152,6 +167,11 @@ pub(crate) struct KTableKTableJoinOtherProcessor<K, VA, VB, VR, F> {
     /// suppresses out-of-order changes (record ts older than this store's latest
     /// `valid_from`). `None` = non-versioned side, never suppresses.
     pub self_versioned_store: Option<String>,
+    /// `true` when the OTHER side's store (`other_store`, holding `VA`) is a
+    /// `VersionedBytesStore` (KIP-914): the latest-value read must go through
+    /// `get_versioned_store` rather than `get_state_store` (which only
+    /// downcasts to a plain `KeyValueBytesStore`).
+    pub other_is_versioned: bool,
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
@@ -185,9 +205,19 @@ where
         }
         // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
         // dropping the store borrow before `ctx.forward`.
-        let a_cur = match ctx.get_state_store::<K, VA>(&self.other_store) {
-            Some(s) => s.get(&key).await,
-            None => None,
+        let a_cur = if self.other_is_versioned {
+            // KIP-914: table-table joins read the OTHER side's LATEST value; for a
+            // versioned other store that means `get_versioned_store(..).get` (the
+            // plain-KV downcast in `get_state_store` would return `None`).
+            match ctx.get_versioned_store::<K, VA>(&self.other_store) {
+                Some(s) => s.get(&key).await.map(|rec| rec.value),
+                None => None,
+            }
+        } else {
+            match ctx.get_state_store::<K, VA>(&self.other_store) {
+                Some(s) => s.get(&key).await,
+                None => None,
+            }
         };
         let old = result(
             self.kind,
@@ -258,6 +288,7 @@ mod tests {
             joiner: concat_joiner as StrJoiner,
             kind: JoinKind::inner(),
             self_versioned_store: None,
+            other_is_versioned: false,
             _pd: PhantomData,
         }
     }
@@ -465,6 +496,7 @@ mod tests {
             joiner: concat_joiner as StrJoiner,
             kind: JoinKind::inner(),
             self_versioned_store: Some("a".into()),
+            other_is_versioned: false,
             _pd: PhantomData,
         };
         check!(
@@ -487,6 +519,43 @@ mod tests {
             .await
             .is_some()
         );
+    }
+
+    /// Both sides versioned: the OTHER store "b" is a `VersionedBytesStore` whose
+    /// latest value is "B". With `other_is_versioned: true` the This-processor must
+    /// read that latest value via `get_versioned_store` and emit a join row.
+    /// (Regression for KIP-914: a plain `get_state_store` downcast returns `None`
+    /// for a versioned store, so the inner join would emit nothing.)
+    #[tokio::test]
+    async fn versioned_other_read_forwards_join() {
+        let mut stores = StoreRegistry::default();
+        let mut b = VersionedBytesStore::<String, String>::in_memory(
+            "b".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "b-cl".into(),
+        );
+        b.put("k".into(), Some("B".into()), 100).await;
+        stores.insert(Box::new(b));
+
+        let mut proc = TestJoinProc {
+            other_store: "b".into(),
+            joiner: concat_joiner as StrJoiner,
+            kind: JoinKind::inner(),
+            self_versioned_store: None,
+            other_is_versioned: true,
+            _pd: PhantomData,
+        };
+
+        let out = run_this(
+            &mut proc,
+            &mut stores,
+            Change::update(None, "A".into()),
+            200,
+        )
+        .await;
+        check!(out == Some(Change::update(None, "AB".into())));
     }
 
     // ── result() rule tests ────────────────────────────────────────────────────

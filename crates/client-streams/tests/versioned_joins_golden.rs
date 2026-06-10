@@ -371,7 +371,6 @@ fn grace_buffer_changelog_matches_golden_wire() {
 /// wrong `[]`): once the join reads the other side via the versioned store when
 /// it is versioned, remove `#[ignore]` and this passes as-is.
 #[test]
-#[ignore = "Task-4 bug: KTable-KTable join reads the OTHER versioned store via get_state_store (plain KV downcast) → None → no join output; needs versioned-aware other-side read"]
 fn table_table_versioned_join_matches_golden() {
     let golden = load_table_table_golden();
 

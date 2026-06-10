@@ -624,6 +624,15 @@ where
             .is_some()
             .then(|| b_store.clone());
 
+        // KIP-914: table-table joins read the OTHER side's LATEST value. Each
+        // processor must know whether ITS other store is versioned so the read
+        // goes through `get_versioned_store` (a plain `get_state_store` downcast
+        // returns `None` for a `VersionedBytesStore`).
+        // - This-processor reads the OTHER (b) table → versioned iff `other` is.
+        // - Other-processor reads the OTHER (a/self) table → versioned iff `self` is.
+        let other_is_versioned_this = other.versioned_retention_ms.is_some();
+        let other_is_versioned_other = self.versioned_retention_ms.is_some();
+
         let mut g = self.builder.borrow_mut();
         let join_this = g.new_processor_name(names::KTABLE_JOIN_THIS);
         let join_other = g.new_processor_name(names::KTABLE_JOIN_OTHER);
@@ -657,6 +666,9 @@ where
                         joiner: jf_for_proc.clone(),
                         kind,
                         self_versioned_store: self_versioned.clone(),
+                        // KIP-914: the This-processor reads the OTHER (b) store; it
+                        // is versioned iff the `other` table is versioned.
+                        other_is_versioned: other_is_versioned_this,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -702,6 +714,9 @@ where
                         joiner: jf_for_proc.clone(),
                         kind,
                         self_versioned_store: self_versioned.clone(),
+                        // KIP-914: the Other-processor reads the OTHER (a/self) store;
+                        // it is versioned iff `self` (the receiver KTable) is versioned.
+                        other_is_versioned: other_is_versioned_other,
                         _pd: PhantomData,
                     },
                     [parent],
