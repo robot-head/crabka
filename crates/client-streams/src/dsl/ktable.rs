@@ -91,6 +91,11 @@ pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde
     /// For windowed tables: the upstream window's grace (suppress closes a window
     /// at `window.end + window_grace_ms`). `None` for non-windowed tables.
     pub(crate) window_grace_ms: Option<i64>,
+    /// `Some(history_retention_ms)` when this table is materialized into a
+    /// versioned store (KIP-889). Drives as-of stream–table join lookups
+    /// (KIP-914) + the table–table out-of-order gate + grace validation.
+    /// Mirrors `window_grace_ms`. `None` for non-versioned / derived tables.
+    pub(crate) versioned_retention_ms: Option<i64>,
     /// Set by serde-carrying producers (aggregations, `builder.table`); read by
     /// `suppress` to register its store with the right serdes. `None` on derived
     /// tables whose value type changed (`map_values`) — `suppress` then panics.
@@ -115,6 +120,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name,
             source_topic,
             window_grace_ms: None,
+            versioned_retention_ms: None,
             suppress_store_factory: None,
             key_serde,
             value_serde,
@@ -129,6 +135,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name: self.store_name,
             source_topic: self.source_topic,
             window_grace_ms: self.window_grace_ms,
+            versioned_retention_ms: self.versioned_retention_ms,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: serde,
             value_serde: self.value_serde,
@@ -143,6 +150,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name: self.store_name,
             source_topic: self.source_topic,
             window_grace_ms: self.window_grace_ms,
+            versioned_retention_ms: self.versioned_retention_ms,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: self.key_serde,
             value_serde: serde,
@@ -191,6 +199,15 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
     #[must_use]
     pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
         self.window_grace_ms = grace_ms;
+        self
+    }
+
+    /// Tag this table with its versioned-store history retention (set by
+    /// `builder.table` when `Materialized::as_versioned` was used). Read by the
+    /// stream–table join (as-of routing) and table–table join (out-of-order gate).
+    #[must_use]
+    pub(crate) fn with_versioned_retention(mut self, retention_ms: Option<i64>) -> Self {
+        self.versioned_retention_ms = retention_ms;
         self
     }
 
@@ -1166,6 +1183,31 @@ fn mint_table_store<KS, VS>(
     match &materialized.store_name {
         Some(name) => name.clone(),
         None => builder.borrow_mut().new_processor_name(prefix),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn versioned_table_handle_carries_retention() {
+        use crate::dsl::builder::StreamsBuilder;
+        use crate::dsl::config::Materialized;
+        use crate::processor::serde::{I64Serde, StringSerde};
+
+        let b = StreamsBuilder::new();
+        let t = b.table_explicit::<StringSerde, I64Serde>(
+            "in",
+            crate::processor::serde::Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        );
+        assert_eq!(t.versioned_retention_ms, Some(600_000));
+
+        let plain = b.table_explicit::<StringSerde, I64Serde>(
+            "in2",
+            crate::processor::serde::Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_store("pt"),
+        );
+        assert_eq!(plain.versioned_retention_ms, None);
     }
 }
 

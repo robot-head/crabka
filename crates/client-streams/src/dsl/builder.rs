@@ -172,6 +172,9 @@ impl StreamsBuilder {
         );
         // Capture versioned config before destructuring moves the serdes.
         let versioned_cfg = materialized.versioned;
+        // Surface the versioned history-retention on the returned KTable handle
+        // (read by KIP-914 join routing), independent of the thunk's move.
+        let versioned_retention = versioned_cfg.map(|v| v.history_retention_ms);
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -285,6 +288,7 @@ impl StreamsBuilder {
             value_serde.clone(),
         )
         .with_suppress_factory(Some(suppress_factory))
+        .with_versioned_retention(versioned_retention)
     }
 
     /// Source a [`GlobalKTable`] from a topic with explicit serdes: a
