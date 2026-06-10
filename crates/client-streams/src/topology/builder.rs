@@ -892,7 +892,6 @@ impl Topology {
     /// `false` the store stays in memory and NO changelog topic appears.
     ///
     /// [`JoinGraceBufferStore`]: crate::store::join_grace_buffer::JoinGraceBufferStore
-    #[allow(dead_code)] // wired by the join_table_with grace DSL task.
     pub(crate) fn add_join_grace_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,

@@ -24,7 +24,6 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// Looks up the stream record's key in the named state store (which holds the
 /// `KTable`'s materialized view). If a match is found — or `emit_on_miss` is
 /// true — invokes `joiner(&stream_value, table_value)` and forwards the result.
-#[allow(dead_code)]
 pub(crate) struct KStreamKTableJoinProcessor<K, V, VT, VO, F> {
     pub table_store: String,
     /// Joiner: `Fn(&V, Option<&VT>) -> VO`.

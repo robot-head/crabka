@@ -216,7 +216,6 @@ where
     /// `pub(crate)`: the grace buffer is a built-in DSL mechanism the stream–table
     /// join's grace-flush processor reaches via the context, not a user-facing
     /// store.
-    #[allow(dead_code)] // wired by the join_table_with grace DSL task.
     pub(crate) fn get_join_grace_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,

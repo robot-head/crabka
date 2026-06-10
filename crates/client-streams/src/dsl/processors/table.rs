@@ -267,7 +267,6 @@ where
 /// timestamp, then forwards a `Change<V>` whose `old` is the value that was valid
 /// at that timestamp *before* this record (KIP-914 table semantics). Out-of-order
 /// records still emit their local change; the store keeps the latest pointer.
-#[allow(dead_code)]
 pub(crate) struct VersionedKTableSourceProcessor<K, V> {
     pub store_name: String,
     pub _pd: Marker<(K, V)>,

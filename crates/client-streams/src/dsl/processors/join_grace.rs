@@ -28,7 +28,6 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// `emit_on_miss = true` is a left join (the joiner receives `None`).
 ///
 /// [`JoinGraceBufferStore`]: crate::store::join_grace_buffer::JoinGraceBufferStore
-#[allow(dead_code)] // wired by the join_table_with grace DSL task.
 pub(crate) struct KStreamKTableJoinGraceProcessor<K, V, VT, VO, F> {
     pub table_store: String,
     pub buffer_store: String,
@@ -52,6 +51,7 @@ where
         let key = r.key.expect("join requires a non-null key");
         self.observed_stream_time = self.observed_stream_time.max(r.timestamp);
         {
+            // buffer is always connected by add_join_grace_store
             let buf = ctx
                 .get_join_grace_store::<K, V>(&self.buffer_store)
                 .expect("join grace buffer store not found");
@@ -59,6 +59,7 @@ where
         }
         let threshold = self.observed_stream_time - self.grace_ms;
         let due = {
+            // buffer is always connected by add_join_grace_store
             let buf = ctx
                 .get_join_grace_store::<K, V>(&self.buffer_store)
                 .expect("join grace buffer store not found");

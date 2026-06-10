@@ -130,7 +130,6 @@ impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
 /// join DSL). `name` optionally names the grace buffer store.
 #[derive(Debug, Clone, Default)]
 pub struct Joined {
-    #[allow(dead_code)] // consumed by the grace-buffer join DSL wiring (later task)
     pub(crate) grace_ms: Option<i64>,
     pub(crate) name: Option<String>,
 }

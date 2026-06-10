@@ -11,12 +11,6 @@
 //! - Changelog KEY  = `(ts, seq)` encoded big-endian (8 bytes ts ‖ 4 bytes seq).
 //! - Changelog VALUE = `(key bytes, value bytes)` length-prefixed, or `None`
 //!   (a tombstone logged when an entry is drained).
-//!
-//! `#![allow(dead_code)]`: the store + its inherent `put`/`drain_due`/`len` and
-//! the changelog codec helpers are reached only from the grace-flush processor
-//! and the `join_table_with` grace DSL wiring (later tasks); until then nothing
-//! outside this module's tests references them.
-#![allow(dead_code)]
 use std::any::Any;
 use std::collections::BTreeMap;
 
@@ -105,6 +99,7 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
     /// The public ctor used by tests + the DSL. The grace buffer has no pluggable
     /// backend, so `in_memory` and `new` are the same body.
     #[must_use]
+    #[allow(dead_code)] // test-only ctor
     pub fn in_memory(
         name: String,
         key_serde: Box<dyn Serde<K>>,
@@ -160,6 +155,7 @@ impl<K: 'static, V: 'static> JoinGraceBufferStore<K, V> {
     }
 
     /// Number of buffered records.
+    #[allow(dead_code)] // test-only accessor
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
