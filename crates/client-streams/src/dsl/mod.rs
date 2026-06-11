@@ -11,6 +11,7 @@ pub mod emit;
 pub mod global_table;
 pub(crate) mod graph;
 pub mod kgrouped;
+pub(crate) mod kgrouped_table;
 pub mod kstream;
 pub mod ktable;
 pub(crate) mod lower;
@@ -30,6 +31,7 @@ pub use config::{Grouped, Joined, Materialized, Repartitioned, StreamJoined, Ver
 pub use emit::EmitStrategy;
 pub use global_table::GlobalKTable;
 pub use kgrouped::KGroupedStream;
+pub use kgrouped_table::KGroupedTable;
 pub use kstream::{BranchedStream, KStream};
 pub use ktable::KTable;
 pub use session_windowed_cogrouped::SessionWindowedCogroupedStream;

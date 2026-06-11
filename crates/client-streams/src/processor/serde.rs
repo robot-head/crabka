@@ -222,6 +222,165 @@ impl<KS, VS> From<(KS, VS)> for Produced<KS, VS> {
     }
 }
 
+/// Write a Kafka signed/zigzag varint (same encoding as `ByteUtils.writeVarint` in the JVM).
+///
+/// The value is zigzag-encoded (`n << 1 ^ n >> 31` for 32-bit equivalent) then
+/// written as a base-128 little-endian varint.  Values ≤ 63 encode to one byte.
+fn write_varint(n: usize, buf: &mut Vec<u8>) {
+    // Zigzag encode: treat as i64 equivalent — all inputs here are non-negative
+    // lengths, so the zigzag is simply n << 1 (sign bit = 0).
+    let mut v = (n as u64) << 1;
+    loop {
+        if v < 0x80 {
+            #[allow(clippy::cast_possible_truncation)]
+            buf.push(v as u8);
+            break;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        buf.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+}
+
+/// Read a Kafka signed/zigzag varint.
+///
+/// Returns `(decoded_value, bytes_consumed)`.
+fn read_varint(bytes: &[u8]) -> Result<(usize, usize), SerdeError> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    let mut consumed = 0;
+    for &b in bytes {
+        consumed += 1;
+        let low7 = u64::from(b & 0x7F);
+        value |= low7 << shift;
+        shift += 7;
+        if b & 0x80 == 0 {
+            // Zigzag decode: (value >>> 1) ^ -(value & 1)
+            let decoded = (value >> 1) ^ ((value & 1).wrapping_neg());
+            let n = usize::try_from(decoded)
+                .map_err(|_| SerdeError(format!("varint value {decoded} out of usize range")))?;
+            return Ok((n, consumed));
+        }
+        if shift >= 64 {
+            return Err(SerdeError("varint overflow".to_string()));
+        }
+    }
+    Err(SerdeError("truncated varint".to_string()))
+}
+
+/// [`Serde`] for `Change<V>` — byte-compatible with the JVM
+/// `ChangedSerializer`/`ChangedDeserializer` used on repartition topics when a
+/// `KGroupedTable` re-keys.
+///
+/// # Wire format
+///
+/// | Case | Layout |
+/// |------|--------|
+/// | new only | `new_bytes ++ [0x01]` |
+/// | old only | `old_bytes ++ [0x00]` |
+/// | both     | `varint(new_len) ++ new_bytes ++ old_bytes ++ [0x02]` |
+///
+/// The `varint` is a Kafka signed/zigzag varint (`ByteUtils.writeVarint` / `readVarint`).
+#[derive(Debug, Clone, Copy)]
+pub struct Changed<S> {
+    inner: S,
+}
+
+impl<S> Changed<S> {
+    /// Wrap an inner serde to produce a `Changed<V>` serde.
+    #[must_use]
+    pub fn new(inner: S) -> Self {
+        Self { inner }
+    }
+}
+
+impl<V, S> Serde<crate::dsl::processors::change::Change<V>> for Changed<S>
+where
+    V: Send + Sync + 'static,
+    S: Serde<V>,
+{
+    fn serialize(&self, topic: &str, value: &crate::dsl::processors::change::Change<V>) -> Bytes {
+        match (&value.new, &value.old) {
+            (Some(new), Some(old)) => {
+                let new_bytes = self.inner.serialize(topic, new);
+                let old_bytes = self.inner.serialize(topic, old);
+                let mut buf = Vec::with_capacity(1 + new_bytes.len() + old_bytes.len() + 1);
+                write_varint(new_bytes.len(), &mut buf);
+                buf.extend_from_slice(&new_bytes);
+                buf.extend_from_slice(&old_bytes);
+                buf.push(0x02);
+                Bytes::from(buf)
+            }
+            (Some(new), None) => {
+                let new_bytes = self.inner.serialize(topic, new);
+                let mut buf = Vec::with_capacity(new_bytes.len() + 1);
+                buf.extend_from_slice(&new_bytes);
+                buf.push(0x01);
+                Bytes::from(buf)
+            }
+            (None, Some(old)) => {
+                let old_bytes = self.inner.serialize(topic, old);
+                let mut buf = Vec::with_capacity(old_bytes.len() + 1);
+                buf.extend_from_slice(&old_bytes);
+                buf.push(0x00);
+                Bytes::from(buf)
+            }
+            // The repartition-map only ever forwards combined, subtract-only, or
+            // add-only changes — never a both-`None` change, and the JVM
+            // `ChangedSerializer` likewise rejects an all-null change. Fail loud
+            // rather than silently emit an unsymmetric encoding.
+            (None, None) => unreachable!("Changed serde never carries a both-None change"),
+        }
+    }
+
+    fn deserialize(
+        &self,
+        topic: &str,
+        bytes: &[u8],
+    ) -> Result<crate::dsl::processors::change::Change<V>, SerdeError> {
+        if bytes.is_empty() {
+            return Err(SerdeError("empty bytes for Change".to_string()));
+        }
+        let flag = bytes[bytes.len() - 1];
+        let payload = &bytes[..bytes.len() - 1];
+        match flag {
+            0x00 => {
+                let old = self.inner.deserialize(topic, payload)?;
+                Ok(crate::dsl::processors::change::Change {
+                    old: Some(old),
+                    new: None,
+                })
+            }
+            0x01 => {
+                let new = self.inner.deserialize(topic, payload)?;
+                Ok(crate::dsl::processors::change::Change {
+                    old: None,
+                    new: Some(new),
+                })
+            }
+            0x02 => {
+                let (new_len, consumed) = read_varint(payload)?;
+                let after_varint = &payload[consumed..];
+                if after_varint.len() < new_len {
+                    return Err(SerdeError(format!(
+                        "not enough bytes for new value: need {new_len}, have {}",
+                        after_varint.len()
+                    )));
+                }
+                let new_bytes = &after_varint[..new_len];
+                let old_bytes = &after_varint[new_len..];
+                let new = self.inner.deserialize(topic, new_bytes)?;
+                let old = self.inner.deserialize(topic, old_bytes)?;
+                Ok(crate::dsl::processors::change::Change {
+                    old: Some(old),
+                    new: Some(new),
+                })
+            }
+            other => Err(SerdeError(format!("unknown Change flag: 0x{other:02x}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +407,67 @@ mod tests {
         let s = BytesSerde;
         let b = s.serialize("t", &bytes::Bytes::from_static(b"xy"));
         check!(s.deserialize("t", &b).unwrap() == bytes::Bytes::from_static(b"xy"));
+    }
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().fold(String::new(), |mut s, x| {
+            use std::fmt::Write as _;
+            write!(s, "{x:02x}").unwrap();
+            s
+        })
+    }
+
+    fn golden() -> serde_json::Value {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/testdata/kgrouped_table/changed_bytes.json"
+        ))
+        .expect("read changed_bytes golden");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn changed_long_matches_jvm_bytes() {
+        let g = golden();
+        let s = Changed::new(I64Serde);
+        let both = crate::dsl::processors::change::Change {
+            old: Some(2i64),
+            new: Some(6i64),
+        };
+        let new_only = crate::dsl::processors::change::Change {
+            old: None,
+            new: Some(5i64),
+        };
+        let old_only = crate::dsl::processors::change::Change {
+            old: Some(4i64),
+            new: None,
+        };
+        check!(hex(&s.serialize("topic", &both)) == g["both"].as_str().unwrap());
+        check!(hex(&s.serialize("topic", &new_only)) == g["new_only"].as_str().unwrap());
+        check!(hex(&s.serialize("topic", &old_only)) == g["old_only"].as_str().unwrap());
+    }
+
+    #[test]
+    fn changed_round_trips() {
+        let s = Changed::new(I64Serde);
+        for c in [
+            crate::dsl::processors::change::Change {
+                old: Some(2i64),
+                new: Some(6i64),
+            },
+            crate::dsl::processors::change::Change {
+                old: None,
+                new: Some(5i64),
+            },
+            crate::dsl::processors::change::Change {
+                old: Some(4i64),
+                new: None,
+            },
+        ] {
+            let bytes = s.serialize("topic", &c);
+            let back: crate::dsl::processors::change::Change<i64> =
+                s.deserialize("topic", &bytes).unwrap();
+            check!(back == c);
+        }
     }
 }

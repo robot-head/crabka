@@ -89,6 +89,22 @@ pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
 /// `KTABLE-SUPPRESS-` + `STATE-STORE-` + index, minted right after the suppress
 /// processor name so the index is consecutive).
 pub(crate) const KTABLE_SUPPRESS_STORE: &str = "KTABLE-SUPPRESS-STATE-STORE-";
+/// JVM `KGroupedTableImpl` repartition-map (select) node prefix. Maps the
+/// upstream `Change<V>` to the grouped `(KR, Change<VR>)` before the
+/// repartition. Not wire-visible.
+#[allow(dead_code)]
+pub(crate) const KTABLE_SELECT: &str = "KTABLE-SELECT-";
+/// JVM `KGroupedTableImpl` aggregate processor node prefix (subtract-then-add).
+/// Not wire-visible.
+#[allow(dead_code)]
+pub(crate) const KTABLE_AGGREGATE: &str = "KTABLE-AGGREGATE-";
+/// Store-name prefix for an unnamed `KGroupedTable::aggregate`/`count` result
+/// store. Used only when `Materialized` carries no explicit name.
+#[allow(dead_code)]
+pub(crate) const KTABLE_AGGREGATE_STORE: &str = "KTABLE-AGGREGATE-STATE-STORE-";
+/// Store-name prefix for an unnamed `KGroupedTable::reduce` result store.
+#[allow(dead_code)]
+pub(crate) const KTABLE_REDUCE_STORE: &str = "KTABLE-REDUCE-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
 
