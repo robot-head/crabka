@@ -345,6 +345,19 @@ git commit -m "feat(client-streams): CachingSessionStore (session-schema-keyed c
 
 ---
 
+## Batch 3 integration design (refined after reading registry/graph/typed-store code)
+
+Reading the code surfaced specifics the original Task 6/7 sketch glossed. Lock these in before implementing:
+
+1. **The caching wrappers are a context-aware layer, not a `ByteKeyValueStore` backend.** They expose `put(key,value,ctx)` / `get` / `range`|`fetch`|`find_sessions` / `flush()->Vec<(Bytes,LruCacheEntry)>` (Batch 2). The typed store (`KeyValueBytesStore<K,V>` etc.) must hold an `Option<CachingKeyValueStore>` and route through it when caching is on.
+2. **Context threading.** `KeyValueStore::put(&mut self,k,v)` carries no context. Add a `StateStore::set_record_context(&mut self, ctx: RecordContext)` hook (default no-op; caching stores stash it). The materializing processor calls `store.set_record_context(ctx.record_context().clone())` (the accessor exists at `processor/api.rs:239`) before each `put`. The cache uses the stashed context for the dirty entry.
+3. **Changelog timing dedups too (Kafka parity).** Kafka's changelog store sits *below* the cache, so a cached store logs a changelog record only at flush/evict (deduped), not per put. The changelog *bytes* are unchanged (spec §2 holds); only the *timing/count* dedups. Implementation: for a cached store, the per-put changelog buffer push moves to the flush-through path (write-through to inner backend → push changelog entry there). Uncached stores keep per-put logging (unchanged).
+4. **Dedup `Change.old`.** At flush, for each dirty key the forwarded `Change.old` = the inner store's value *before* write-through (the last-committed value), `Change.new` = the cached value. So the flush path must read inner BEFORE writing. Adjust the wrapper flush (or the flush-forward listener) to capture `old` pre-write: have it return `(key, old: Option<Bytes>, new_entry)` — OR have the typed flush-forward read inner first, then call the wrapper write-through. Pick the cleaner of the two and pin it with a test.
+5. **Typed flush-forward across the erased graph.** The forward at commit must be a typed `Record<K, Change<VA>>` rooted at the store's owning node. The owning processor knows `K`/`VA`; the graph is erased. Resolution: the materializing processor, at `init`, registers a **typed flush-forward thunk** with the graph keyed by its node, capturing its serdes (or closures that deserialize bytes→`K`/`VA` and build the `Change`). `graph.flush_caches()` reconstructs a `Dispatch` rooted at each such node (copy `Graph::fire_schedule`, `graph.rs:130-165`) and invokes the thunk, which pushes erased `Change` records into `children`.
+6. **EOS ordering.** `flush_caches` runs in `task.commit()` BEFORE the producer commit (and `take_changelog` drain), and in `task.close()`.
+
+This makes Batch 3 larger than two tasks; implement it as: **3a** cache-aware typed KV store (context hook + cache-first + write-back + changelog-at-flush + flush returns old) with its own tests; **3b** node↔store map + flush-forward thunk registration + `graph.flush_caches` rooting; **3c** `TupleForwarder` + wire the 6 materializing processors; **3d** window/session typed-store caching parity; **3e** `task.commit`/`close` flush + EOS-order test. Keep Task 8 (golden) last.
+
 ## Task 6: `TupleForwarder` + node↔store ownership + `graph.flush_caches` + registry wrapping
 
 **Files:**
