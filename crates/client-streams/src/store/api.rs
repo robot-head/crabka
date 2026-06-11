@@ -52,16 +52,20 @@ pub trait StateStore: Any + Send {
     /// Stash the current record's context so a caching store can attach it to the
     /// next write (forwarded with the deduped `Change` on flush). Default no-op.
     fn set_record_context(&mut self, _ctx: crate::processor::record::RecordContext) {}
-    /// Flush this store's record cache (if any): write dirty entries through to
-    /// the underlying store + buffer their changelog records, and return the
-    /// deduped downstream changes as erased `Record<K, Change<V>>` (the graph
-    /// roots + forwards them). Default: no cache → empty.
+    /// Flush this store's record cache (if any): write dirty entries through to the
+    /// underlying store, buffer their changelog records, and push the deduped
+    /// downstream `Record<K, Change<V>>` into `buffer` — one boxed copy PER child in
+    /// `children` (mirroring `ProcessorContext::forward`'s per-child clone). Default:
+    /// no cache → no-op.
     ///
     /// `ErasedRecord` is crate-internal graph plumbing; this method is reachable
     /// on the `pub` trait but never meaningfully callable from outside the crate.
     #[allow(private_interfaces)]
-    async fn flush_cache_changes(&mut self) -> Vec<crate::processor::erased::ErasedRecord> {
-        Vec::new()
+    async fn flush_cache_into(
+        &mut self,
+        _buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
+        _children: &[usize],
+    ) {
     }
     /// Wipe every entry (and any buffered changelog) — used by the EOS rollback
     /// path to reset the store to a clean slate before re-restoring from the

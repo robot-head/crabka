@@ -216,42 +216,51 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
         self.pending_ctx = Some(ctx);
     }
     #[allow(private_interfaces)]
-    async fn flush_cache_changes(&mut self) -> Vec<crate::processor::erased::ErasedRecord> {
+    async fn flush_cache_into(
+        &mut self,
+        buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
+        children: &[usize],
+    ) {
         use crate::dsl::processors::change::Change;
         use crate::processor::erased::ErasedRecord;
         let Backing::Cached(cache) = &self.backing else {
-            return Vec::new();
+            return;
         };
         let drained = cache.flush_with_old().await; // Vec<(kb, old_vb, new_vb, ctx)>
-        let mut out = Vec::with_capacity(drained.len());
         for (kb, old_vb, new_vb, ctx) in drained {
             // Changelog is buffered at flush (the changelog store sits below the
             // cache, so cached puts defer their changelog records until here).
             if self.logging {
                 self.changelog.push((kb.clone(), new_vb.clone()));
             }
-            let k: K = self
-                .key_serde
-                .deserialize(&self.changelog_topic, &kb)
-                .expect("flush_cache_changes key deserialize");
-            let old: Option<V> = old_vb.map(|b| {
-                self.value_serde
-                    .deserialize(&self.changelog_topic, &b)
-                    .expect("flush_cache_changes old value deserialize")
-            });
-            let new: Option<V> = new_vb.map(|b| {
-                self.value_serde
-                    .deserialize(&self.changelog_topic, &b)
-                    .expect("flush_cache_changes new value deserialize")
-            });
-            let change = Change { old, new };
-            out.push(ErasedRecord::new(
-                Some(Box::new(k)),
-                Box::new(change),
-                ctx.timestamp,
-            ));
+            // Re-build the typed key + `Change<V>` PER child from the cloneable
+            // byte buffers (mirrors `pipe`'s per-child re-deserialize and
+            // `forward`'s per-child clone): `Box<dyn Any>` / `Change<V>` for an
+            // unbounded `V` is not cloneable, so each child gets its own fresh
+            // deserialization. `children` is empty → the dirty entry is still
+            // written through + changelog-buffered above, just not forwarded.
+            for &child in children {
+                let k: K = self
+                    .key_serde
+                    .deserialize(&self.changelog_topic, &kb)
+                    .expect("flush_cache_into key deserialize");
+                let old: Option<V> = old_vb.as_ref().map(|b| {
+                    self.value_serde
+                        .deserialize(&self.changelog_topic, b)
+                        .expect("flush_cache_into old value deserialize")
+                });
+                let new: Option<V> = new_vb.as_ref().map(|b| {
+                    self.value_serde
+                        .deserialize(&self.changelog_topic, b)
+                        .expect("flush_cache_into new value deserialize")
+                });
+                let change = Change { old, new };
+                buffer.push_back((
+                    child,
+                    ErasedRecord::new(Some(Box::new(k)), Box::new(change), ctx.timestamp),
+                ));
+            }
         }
-        out
     }
     async fn clear(&mut self) {
         self.backing.clear().await;
@@ -571,8 +580,9 @@ mod tests {
         // Cache-first read sees the latest staged write.
         check!(s.get(&"a".to_string()).await == Some(2));
         // The inner backend has NOT been written yet (write-back deferred to flush).
-        let drained = s.flush_cache_changes().await;
-        check!(drained.len() == 1);
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        check!(buffer.len() == 1);
     }
 
     #[tokio::test]
@@ -584,7 +594,8 @@ mod tests {
         // No changelog buffered while writes only touch the cache.
         check!(s.take_changelog().is_empty());
         // Flushing the cache buffers exactly one deduped changelog record.
-        let _ = s.flush_cache_changes().await;
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
         let cl = s.take_changelog();
         check!(cl.len() == 1);
         check!(cl[0].0 == StringSerde.serialize("s-changelog", &"a".to_string()));
@@ -592,22 +603,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flush_cache_changes_emits_deduped_change() {
+    async fn flush_cache_into_emits_deduped_change() {
         use crate::dsl::processors::change::Change;
         let mut s = cached_store();
         // Seed committed a=1 (flush it through + clear the changelog buffer).
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 1).await;
-        let _ = s.flush_cache_changes().await;
+        let mut seed = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut seed, &[0]).await;
         let _ = s.take_changelog();
 
         // Two staged writes for the same key under context ts=7.
         s.set_record_context(ctx_at(7));
         s.put("a".into(), 2).await;
         s.put("a".into(), 3).await;
-        let out = s.flush_cache_changes().await;
-        check!(out.len() == 1);
-        let rec = &out[0];
+        // Flush into a single fake child index 7.
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[7]).await;
+        check!(buffer.len() == 1);
+        let (child, rec) = &buffer[0];
+        check!(*child == 7);
         // Timestamp comes from the dirty entry's record context.
         check!(rec.timestamp == 7);
         let key = rec.key.as_ref().unwrap().downcast_ref::<String>().unwrap();
@@ -624,14 +639,16 @@ mod tests {
     #[tokio::test]
     async fn plain_store_unchanged() {
         // A non-cached store logs the changelog immediately and reads from the
-        // backend (no flush_cache_changes needed).
+        // backend (no flush_cache_into needed).
         let mut s = store();
         s.put("a".into(), 1).await;
         check!(s.get(&"a".to_string()).await == Some(1));
         let cl = s.take_changelog();
         check!(cl.len() == 1);
         check!(cl[0].1 == Some(I64Serde.serialize("s-changelog", &1)));
-        // No cache → flush_cache_changes is empty.
-        check!(s.flush_cache_changes().await.is_empty());
+        // No cache → flush_cache_into forwards nothing.
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        check!(buffer.is_empty());
     }
 }

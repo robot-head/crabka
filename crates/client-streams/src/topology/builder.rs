@@ -1464,6 +1464,9 @@ impl BuiltTopology {
             stream_time: i64::MIN,
             wall_clock: 0,
             cache_max_bytes,
+            // Build-time population of cache ownership lands in sub-task 3b-ii;
+            // empty here means `flush_caches` is a no-op in production for now.
+            cache_owner: std::collections::HashMap::new(),
         })
     }
 }
