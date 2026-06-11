@@ -145,4 +145,55 @@ mod tests {
         // Remaining: B and D (23 + 23 = 46 <= 50).
         assert_eq!(tc.total_bytes(), 46);
     }
+
+    #[test]
+    fn over_budget_evicts_across_caches() {
+        // Each entry is 23 bytes. Cache "a" holds a single entry; cache "b" holds
+        // three. Budget 30 forces eviction to fully drain "a" and then CROSS into
+        // "b" — proving the cross-cache traversal in maybe_evict, not just a
+        // single-cache drain.
+        let max_bytes = 30;
+        let mut tc = ThreadCache::new(max_bytes);
+
+        let ca = tc.register("a");
+        let cb = tc.register("b");
+
+        ca.lock().unwrap().put(key(b"A"), dirty_entry(b"0")); // a: 23
+        cb.lock().unwrap().put(key(b"B"), dirty_entry(b"1")); // b: 23 -> 46
+        cb.lock().unwrap().put(key(b"C"), dirty_entry(b"2")); // b: 46 -> 69
+        cb.lock().unwrap().put(key(b"D"), dirty_entry(b"3")); // b: 69 -> 92
+
+        assert_eq!(tc.total_bytes(), 92);
+
+        let mut evicted: Vec<(String, Bytes)> = Vec::new();
+        {
+            let mut listener = |name: &str, k: &Bytes, _: &LruCacheEntry| {
+                evicted.push((name.to_string(), k.clone()));
+            };
+            tc.maybe_evict(&mut listener);
+        }
+
+        assert!(
+            tc.total_bytes() <= max_bytes,
+            "total {} should be <= {}",
+            tc.total_bytes(),
+            max_bytes
+        );
+
+        // 92 over budget 30. Sorted name order ["a","b"] always tries "a" first:
+        //   evict a/A -> 69 (a now empty); next round "a" is empty so cross to "b":
+        //   evict b/B -> 46; evict b/C -> 23 (<= 30, stop).
+        // This is exactly the cross-cache path: "a" fully drains, then "b" is hit.
+        assert_eq!(
+            evicted,
+            vec![
+                ("a".to_string(), key(b"A")),
+                ("b".to_string(), key(b"B")),
+                ("b".to_string(), key(b"C")),
+            ]
+        );
+        assert_eq!(ca.lock().unwrap().len(), 0, "cache a fully emptied");
+        // Remaining: only D in cache "b".
+        assert_eq!(tc.total_bytes(), 23);
+    }
 }

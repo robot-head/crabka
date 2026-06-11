@@ -83,17 +83,31 @@ impl NamedCache {
             // Update: adjust size, replace entry, refresh dirty tracking, promote.
             self.size_bytes -= node.entry.value_size();
             self.size_bytes += new_value_size;
-            let old_seq = node.dirty_seq.take();
+            let old_seq = node.dirty_seq;
             node.entry = entry;
-            if let Some(seq) = old_seq {
-                self.dirty.remove(&seq);
-            }
-            if dirty {
-                let seq = self.alloc_dirty_seq();
-                self.dirty.insert(seq, key.clone());
-                if let Some(node) = self.map.get_mut(&key) {
-                    node.dirty_seq = Some(seq);
+            // LinkedHashSet parity: a key that is already dirty KEEPS its original
+            // dirty position. Only (re)allocate a sequence when transitioning a
+            // clean/absent entry to dirty, and only drop the tracking entry when
+            // transitioning dirty -> clean.
+            match (old_seq, dirty) {
+                // Newly dirtied (was clean): allocate a fresh sequence at the end.
+                (None, true) => {
+                    let seq = self.alloc_dirty_seq();
+                    self.dirty.insert(seq, key.clone());
+                    if let Some(node) = self.map.get_mut(&key) {
+                        node.dirty_seq = Some(seq);
+                    }
                 }
+                // Was dirty, now clean: drop it from the dirty set.
+                (Some(seq), false) => {
+                    self.dirty.remove(&seq);
+                    if let Some(node) = self.map.get_mut(&key) {
+                        node.dirty_seq = None;
+                    }
+                }
+                // No dirty-state transition: already dirty stays dirty (preserve
+                // its existing position), or already clean stays clean.
+                (Some(_), true) | (None, false) => {}
             }
             self.unlink(&key);
             self.link_at_tail(key);
@@ -335,6 +349,33 @@ mod tests {
         assert_eq!(count, 1, "listener called once for dirty head");
         assert_eq!(seen_key, Some(key(b"A")));
         assert!(c.get(&key(b"A")).is_none());
+    }
+
+    #[test]
+    fn redirty_preserves_insertion_order() {
+        // Kafka's dirtyKeys is a LinkedHashSet: re-adding an already-present key
+        // keeps its original position. put A (dirty), put B (dirty), put A again
+        // (still dirty, value changed) -> flush order must be [A, B], not [B, A].
+        let mut c = NamedCache::new("s".to_string());
+        c.put(key(b"A"), dirty_entry(b"1"));
+        c.put(key(b"B"), dirty_entry(b"2"));
+        c.put(key(b"A"), dirty_entry(b"9"));
+
+        let mut seen: Vec<Bytes> = Vec::new();
+        {
+            let mut listener = |k: &Bytes, _: &LruCacheEntry| seen.push(k.clone());
+            c.flush(&mut listener);
+        }
+        assert_eq!(
+            seen,
+            vec![key(b"A"), key(b"B")],
+            "A keeps its original dirty position on re-dirty"
+        );
+        // The updated value is the one flushed.
+        assert_eq!(
+            c.get(&key(b"A")).unwrap().value,
+            Some(Bytes::from_static(b"9"))
+        );
     }
 
     #[test]
