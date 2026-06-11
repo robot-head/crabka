@@ -11,9 +11,12 @@ import org.apache.kafka.streams.kstream.BranchedKStream;
 import org.apache.kafka.streams.kstream.Branched;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.GlobalKTable;
+import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KGroupedStream;
+import org.apache.kafka.streams.kstream.KGroupedTable;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
+import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.SessionWindows;
@@ -109,8 +112,9 @@ public final class Capture {
         write(outDir, "cogroup_time", cogroupTime());
         write(outDir, "cogroup_sliding", cogroupSliding());
         write(outDir, "cogroup_session", cogroupSession());
+        write(outDir, "kgrouped_table", kgroupedTable());
 
-        System.out.println("Capture complete. Wrote 26 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 27 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -233,6 +237,35 @@ public final class Capture {
                     .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
         t.toStream().to("out", Produced.with(
             WindowedSerdes.sessionWindowedSerdeFrom(String.class), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * kgrouped_table: table("in") -> filter(v > 0) -> groupBy(even/odd) ->
+     * count + reduce(add,sub) + aggregate(add,sub) -> three sinks.
+     * Exercises KTable.groupBy repartition + three KGroupedTable aggregations.
+     */
+    static Topology kgroupedTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        KTable<String, Long> src = b.table("in",
+            Consumed.with(Serdes.String(), Serdes.Long()),
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("src-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        KTable<String, Long> pos = src.filter((k, v) -> v > 0);
+        KGroupedTable<String, Long> grouped = pos.groupBy(
+            (k, v) -> KeyValue.pair(v % 2 == 0 ? "even" : "odd", v),
+            Grouped.with(Serdes.String(), Serdes.Long()));
+        grouped.count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("count-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("count-out", Produced.with(Serdes.String(), Serdes.Long()));
+        grouped.reduce((a, v) -> a + v, (a, v) -> a - v,
+                Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("reduce-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("reduce-out", Produced.with(Serdes.String(), Serdes.Long()));
+        grouped.aggregate(() -> 0L, (k, v, a) -> a + v, (k, v, a) -> a - v,
+                Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("agg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("agg-out", Produced.with(Serdes.String(), Serdes.Long()));
         return b.build(optimizedProps());
     }
 

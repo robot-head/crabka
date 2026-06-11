@@ -21,7 +21,7 @@
       ],
       "copartition_groups": [
         {
-          "source_topics": [0, 1],
+          "source_topics": [1, 0],
           "source_topic_regex": [],
           "repartition_source_topics": []
         }

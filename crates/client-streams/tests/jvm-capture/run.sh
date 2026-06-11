@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
 #
-# Capture the 21 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
+# Capture the 27 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
 # (stateless_chain, count, repartition_merge, table_reuse, branch_merge, to_table,
 #  stream_table_join, ktable_ktable_join, windowed_count, stream_stream_join,
 #  stream_stream_outer_join, session_count, suppress_until_window_closes,
 #  suppress_until_window_closes_logged,
 #  global_table_join, process, process_values, fk_join_inner, fk_join_left,
-#  sliding_window_count, sliding_window_aggregate)
+#  sliding_window_count, sliding_window_aggregate, versioned_table,
+#  cogroup, cogroup_time, cogroup_sliding, cogroup_session, kgrouped_table)
 #
-# Mechanism A (default, no broker): builds the 21 DSL topologies with optimization=all
+# Mechanism A (default, no broker): builds the 27 DSL topologies with optimization=all
 # and runs Kafka's own DSL -> StreamsGroupHeartbeatRequest.Topology conversion via
 # reflection, writing Crabka wire-shape JSON to ../testdata/golden/dsl/.
 #
 # Usage:
-#   ./run.sh                 # capture fixtures via Gradle in Docker (writes the fixtures)
-#   ./run.sh --javac         # capture fixtures via plain javac in Docker (no Gradle)
-#   ./run.sh --verify-broker # mechanism B cross-check: run count vs a real Kafka 4.1 broker
-#   ./run.sh --sliding       # pin sliding-window (KIP-450) behavioral golden (writes testdata/sliding_window)
+#   ./run.sh                   # capture fixtures via Gradle in Docker (writes the fixtures)
+#   ./run.sh --javac           # capture fixtures via plain javac in Docker (no Gradle)
+#   ./run.sh --verify-broker   # mechanism B cross-check: run count vs a real Kafka 4.1 broker
+#   ./run.sh --sliding         # pin sliding-window (KIP-450) behavioral golden (writes testdata/sliding_window)
+#   ./run.sh --kgrouped-table  # pin KTable.groupBy / KGroupedTable behavioral + ChangedSerializer goldens
 #
 # Requires: Docker, network access to Maven Central (and Docker Hub for the broker image).
 set -euo pipefail
@@ -351,8 +353,38 @@ case "$MODE" in
       '
     ;;
 
+  --kgrouped-table)
+    # Pin the JVM TopologyTestDriver KTable.groupBy / KGroupedTable behavioral golden
+    # (count + reduce + aggregate) and ChangedSerializer wire bytes into
+    # testdata/kgrouped_table/{behavior.json,changed_bytes.json} for the Rust
+    # KGroupedTable implementation parity tests. Also regenerates the topology golden
+    # testdata/golden/dsl/kgrouped_table.topology.json via Capture.java (mechanism A).
+    # Mirrors --cogroup; same jars (incl. streams-test-utils + rocksdb).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/kgrouped_table /tests/testdata/golden/dsl
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/KGroupedTableBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.KGroupedTableBehavior /tests/testdata/kgrouped_table
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/Capture.java
+        java -cp "/tmp/build:$RT" crabka.capture.Capture /tests/testdata/golden/dsl
+      '
+    ;;
+
   *)
-    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--cogroup|--emit-final|--versioned-joins|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--sliding|--cogroup|--emit-final|--versioned-joins|--kgrouped-table|--verify-broker]" >&2
     exit 2
     ;;
 esac
