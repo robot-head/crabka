@@ -622,7 +622,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -669,7 +669,7 @@ mod tests {
         let mut task_a = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -721,7 +721,7 @@ mod tests {
         let mut task_b = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -825,7 +825,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stream_time_punct_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -877,7 +877,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -939,7 +939,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -982,7 +982,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1075,7 +1075,7 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1131,7 +1131,7 @@ mod tests {
         StreamTask::new(
             "0".into(),
             built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
                 .await
                 .unwrap(),
             sources,

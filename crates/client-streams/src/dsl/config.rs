@@ -43,6 +43,7 @@ pub struct Materialized<KS, VS> {
     pub(crate) value_serde: VS,
     pub(crate) store_name: Option<String>,
     pub(crate) logging: bool,
+    pub(crate) caching: bool,
     pub(crate) versioned: Option<VersionedConfig>,
 }
 impl<KS, VS> Materialized<KS, VS> {
@@ -52,6 +53,7 @@ impl<KS, VS> Materialized<KS, VS> {
             value_serde,
             store_name: None,
             logging: true,
+            caching: true,
             versioned: None,
         }
     }
@@ -64,6 +66,17 @@ impl<KS, VS> Materialized<KS, VS> {
     pub fn with_logging(mut self, on: bool) -> Self {
         self.logging = on;
         self
+    }
+    /// Enable/disable the record cache for this store (JVM
+    /// `Materialized.withCachingEnabled/Disabled`). Default enabled.
+    #[must_use]
+    pub fn with_caching(mut self, on: bool) -> Self {
+        self.caching = on;
+        self
+    }
+    #[must_use]
+    pub fn caching_enabled(&self) -> bool {
+        self.caching
     }
     /// Materialize this table into a versioned key-value store (KIP-889) named
     /// `name`, retaining `history_retention_ms` of version history.
@@ -195,6 +208,14 @@ mod tests {
             .num_partitions(4);
         check!(r.name.as_deref() == Some("rp"));
         check!(r.partitions == Some(4));
+    }
+
+    #[test]
+    fn materialized_caching_defaults_on_and_toggles() {
+        let m = Materialized::with(StringSerde, I64Serde);
+        check!(m.caching_enabled()); // default true
+        let m = m.with_caching(false);
+        check!(!m.caching_enabled());
     }
 
     #[test]

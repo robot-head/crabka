@@ -37,7 +37,10 @@ impl TopologyTestDriver {
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
         let backend = crate::store::backend::StoreBackend::InMemory;
-        let mut graph = pollster::block_on(built.instantiate(&backend, "app"))?;
+        // The JVM `TopologyTestDriver` defaults `statestore.cache.max.bytes` to 0
+        // (caching disabled), so stores emit on every update and goldens stay
+        // deterministic. Match that here.
+        let mut graph = pollster::block_on(built.instantiate(&backend, "app", 0))?;
         // The TopologyTestDriver builds the SHARED, fully-replicated global stores
         // into a `GlobalStateManager` and lends it to the graph's dispatch — the
         // same shared manager the real app runtime uses (the global consumer that
@@ -497,6 +500,15 @@ mod tests {
         let flt = t.add_processor("flt", || DropEmpty, [&up]);
         t.add_sink("out", "out", [&flt]);
         t.build("app").unwrap()
+    }
+
+    #[test]
+    fn test_driver_disables_cache() {
+        // The JVM `TopologyTestDriver` default is `statestore.cache.max.bytes = 0`,
+        // so the driver builds its graph with caching disabled (emit-on-update).
+        let built = map_filter();
+        let d = TopologyTestDriver::new(&built).unwrap();
+        check!(d.graph.cache_max_bytes() == 0);
     }
 
     #[test]

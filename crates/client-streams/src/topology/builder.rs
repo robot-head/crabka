@@ -1355,6 +1355,7 @@ impl BuiltTopology {
         &self,
         backend: &crate::store::backend::StoreBackend,
         app_id: &str,
+        cache_max_bytes: i64,
     ) -> Result<Graph, ProcessorError> {
         // 1. Collect the processor/sink nodes in spec order and build a name→idx map.
         //    Sources are NOT in the nodes vec — they become GraphSources.
@@ -1462,6 +1463,7 @@ impl BuiltTopology {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes,
         })
     }
 }
@@ -1625,9 +1627,11 @@ mod tests {
         let up = t.add_processor("up", || Upper, [&src]);
         t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
@@ -1737,9 +1741,11 @@ mod tests {
         sinks.sort();
         check!(sinks == vec!["out".to_string(), "rp".to_string()]);
         // instantiate must succeed and pipe through the first subtopology
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"hi", 0)).unwrap();
         let out1 = g.take_output();
@@ -1778,9 +1784,11 @@ mod tests {
                 .iter()
                 .any(|c| c.name == "app-counts-changelog")
         }));
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();

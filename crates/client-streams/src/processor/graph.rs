@@ -44,9 +44,25 @@ pub(crate) struct Graph {
     /// Last wall-clock value seen; the base a wall-clock schedule stamps its
     /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
     pub wall_clock: i64,
+    /// Total record-cache budget for this graph's stores (JVM
+    /// `statestore.cache.max.bytes`). `0` disables caching (emit-on-update),
+    /// matching the JVM `TopologyTestDriver` default. Threaded from
+    /// [`StreamsApp`](crate::StreamsApp) → [`KafkaStreams`](crate::KafkaStreams) →
+    /// `instantiate`. Read via [`Graph::cache_max_bytes`].
+    // Config-only for now; the record cache that consumes this budget lands in a
+    // later task, so the field/accessor are read only by tests until then.
+    #[allow(dead_code)]
+    pub cache_max_bytes: i64,
 }
 
 impl Graph {
+    /// The record-cache budget threaded into this graph (JVM
+    /// `statestore.cache.max.bytes`); `0` means caching disabled.
+    #[allow(dead_code)] // consumed by the record cache in a later task; tests assert it now
+    pub(crate) fn cache_max_bytes(&self) -> i64 {
+        self.cache_max_bytes
+    }
+
     /// Feed one record arriving on `topic`; runs the graph to completion,
     /// appending sink outputs to `self.output`. Unknown topics are ignored.
     pub async fn pipe(
@@ -395,6 +411,7 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -415,6 +432,7 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -485,6 +503,7 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
@@ -564,6 +583,7 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
         };
 
         // init schedules the punctuator: stream base i64::MIN -> next = MIN + 10.

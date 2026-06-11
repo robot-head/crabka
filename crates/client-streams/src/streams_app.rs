@@ -64,6 +64,7 @@ pub struct StreamsApp {
     cache: Arc<SchemaCache>,
     store_backend: StoreBackend,
     processing_guarantee: ProcessingGuarantee,
+    cache_max_bytes: i64,
 }
 
 #[bon::bon]
@@ -86,6 +87,10 @@ impl StreamsApp {
         cache_config: Option<CacheConfig>,
         #[builder(default)] store_backend: StoreBackend,
         #[builder(default)] processing_guarantee: ProcessingGuarantee,
+        /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
+        /// caching. Defaults to 10 MiB, matching the JVM default.
+        #[builder(default = 10_485_760)]
+        cache_max_bytes: i64,
     ) -> Self {
         let cache = SchemaCache::new(
             RegistryClient::new(schema_registry),
@@ -98,6 +103,7 @@ impl StreamsApp {
             cache,
             store_backend,
             processing_guarantee,
+            cache_max_bytes,
         }
     }
 }
@@ -139,6 +145,7 @@ impl StreamsApp {
             .topology(topology)
             .store_backend(self.store_backend)
             .processing_guarantee(self.processing_guarantee)
+            .cache_max_bytes(self.cache_max_bytes)
             .build()
             .await
     }

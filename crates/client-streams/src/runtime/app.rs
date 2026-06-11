@@ -61,6 +61,10 @@ impl KafkaStreams {
         #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
+        /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
+        /// caching. Threaded onto each task graph at `instantiate`.
+        #[builder(default = 10_485_760)]
+        cache_max_bytes: i64,
     ) -> Result<Self, StreamsClientError> {
         let built = Arc::new(topology);
 
@@ -112,7 +116,12 @@ impl KafkaStreams {
         let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(64);
         let is_eos = processing_guarantee == ProcessingGuarantee::ExactlyOnceV2;
         let handle = tokio::spawn(async move {
-            let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
+            let mut thread = StreamThread::new(
+                fetcher_for_thread,
+                store_backend,
+                application_id,
+                cache_max_bytes,
+            );
             let mut poll = tokio::time::interval(poll_interval);
             let mut commit = tokio::time::interval(commit_interval);
             let tracker = membership.tracker();

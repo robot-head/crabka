@@ -46,6 +46,9 @@ pub(crate) struct StreamThread {
     /// Whether a transaction is currently open (`begin_transaction` called, not yet
     /// committed/aborted). Drives the begin-on-first-poll / commit barrier.
     in_txn: bool,
+    /// Record-cache budget (JVM `statestore.cache.max.bytes`) threaded into each
+    /// task graph at `instantiate`. `0` disables caching.
+    cache_max_bytes: i64,
 }
 
 impl StreamThread {
@@ -53,12 +56,14 @@ impl StreamThread {
         fetcher: Arc<dyn RecordFetcher>,
         backend: crate::store::backend::StoreBackend,
         application_id: String,
+        cache_max_bytes: i64,
     ) -> Self {
         Self {
             tasks: HashMap::new(),
             fetcher,
             backend,
             application_id,
+            cache_max_bytes,
             globals: crate::runtime::global::GlobalStateManager::default(),
             globals_ready: false,
             global_offsets: std::collections::HashMap::new(),
@@ -211,7 +216,7 @@ impl StreamThread {
                 continue;
             }
             let mut graph = topology
-                .instantiate(&self.backend, &self.application_id)
+                .instantiate(&self.backend, &self.application_id, self.cache_max_bytes)
                 .await
                 .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
             // Lend the shared, bootstrapped global manager to this task's graph so a
@@ -871,6 +876,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         )
         .with_clock(clock);
         thread
@@ -925,6 +931,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1014,6 +1021,7 @@ mod tests {
             Arc::clone(&restore_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1091,6 +1099,7 @@ mod tests {
             Arc::clone(&restore_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1127,6 +1136,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         let (reply2, rx2) = tokio::sync::oneshot::channel();
         empty
@@ -1173,6 +1183,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1314,6 +1325,7 @@ mod tests {
             Arc::clone(&boot_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
 
         // The global-table topology emits the stream subtopology as id "1".
@@ -1381,6 +1393,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
 
         // 1. Initial assignment:
@@ -1506,6 +1519,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         // EOS assignment: passes the txn producer and ExactlyOnceV2.
         thread
@@ -1584,6 +1598,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1678,6 +1693,7 @@ mod tests {
             Arc::clone(&replay),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
