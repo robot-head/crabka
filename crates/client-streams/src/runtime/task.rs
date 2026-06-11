@@ -400,7 +400,7 @@ impl StreamTask {
     /// A no-op when no store is cached (`cache_owner` empty, e.g. the
     /// `cache_max_bytes = 0` test-driver path): `flush_caches` forwards nothing,
     /// so the drain produces nothing.
-    async fn flush_caches(&mut self) -> Result<(), StreamsClientError> {
+    pub(crate) async fn flush_caches(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .flush_caches()
             .await

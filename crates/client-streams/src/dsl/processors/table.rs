@@ -139,6 +139,7 @@ where
 pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub f: F,
     pub store_name: String,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, V2)>,
 }
 
@@ -150,6 +151,10 @@ where
     V2: std::any::Any + Send + Clone,
     F: Fn(&V) -> V2 + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>,
@@ -157,10 +162,14 @@ where
     ) {
         let key = r.key.expect("KTable map_values requires a non-null key");
         let mapped = r.value.map(|v| (self.f)(v));
+        // Stash the source record context BEFORE the store borrow so a cached
+        // store attaches it to the deduped change it forwards on flush.
+        let rc = ctx.record_context().clone();
         {
             let store = ctx
                 .get_state_store::<K, V2>(&self.store_name)
                 .expect("KTable map_values store not found");
+            store.set_record_context(rc);
             match &mapped.new {
                 Some(nv) => {
                     store.put(key.clone(), nv.clone()).await;
@@ -170,7 +179,11 @@ where
                 }
             }
         }
-        ctx.forward(Record::new(Some(key), mapped, r.timestamp));
+        // Preserve the exact mapped Change (both sides mapped, including
+        // tombstones): forward it, suppressed when the store is cached (the
+        // cache flush forwards the deduped change instead).
+        self.forwarder
+            .maybe_forward_change(ctx, key, mapped, r.timestamp);
     }
 }
 
@@ -218,6 +231,7 @@ where
 pub(crate) struct KTableFilterProcessor<K, V, P> {
     pub predicate: P,
     pub store_name: String,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -228,6 +242,10 @@ where
     V: std::any::Any + Send + Clone,
     P: Fn(&K, &V) -> bool + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<V>>,
@@ -238,10 +256,14 @@ where
         // A side that doesn't satisfy the predicate is treated as absent.
         let old_p = r.value.old.filter(|v| pred(&key, v));
         let new_p = r.value.new.filter(|v| pred(&key, v));
+        // Stash the source record context BEFORE the store borrow so a cached
+        // store attaches it to the deduped change it forwards on flush.
+        let rc = ctx.record_context().clone();
         {
             let store = ctx
                 .get_state_store::<K, V>(&self.store_name)
                 .expect("KTable filter store not found");
+            store.set_record_context(rc);
             match &new_p {
                 Some(nv) => {
                     store.put(key.clone(), nv.clone()).await;
@@ -252,16 +274,19 @@ where
             }
         }
         // Forward only when something changed on either side; a row that never
-        // matched (old & new both filtered out) produces no change record.
+        // matched (old & new both filtered out) produces no change record. The
+        // forward is suppressed when the store is cached (the cache flush
+        // forwards the deduped change — including tombstones — instead).
         if new_p.is_some() || old_p.is_some() {
-            ctx.forward(Record::new(
-                Some(key),
+            self.forwarder.maybe_forward_change(
+                ctx,
+                key,
                 Change {
                     old: old_p,
                     new: new_p,
                 },
                 r.timestamp,
-            ));
+            );
         }
     }
 }
@@ -585,6 +610,7 @@ mod tests {
         let mut proc = KTableMapValuesProcessor::<String, i64, String, _> {
             f: |v: &i64| v.to_string(),
             store_name: "mv".into(),
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData,
         };
 
@@ -737,6 +763,7 @@ mod tests {
         let mut proc = KTableFilterProcessor::<String, i64, _> {
             predicate: |_k: &String, v: &i64| *v > 10,
             store_name: "tbl".into(),
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData,
         };
 
@@ -915,6 +942,164 @@ mod tests {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         stores
             .get_mut("tbl")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        check!(buffer.len() == 1);
+    }
+
+    // ── KTable.filter cache suppression (Bug B) ──────────────────────────────
+
+    /// Run `init` then two same-key updates through the filter processor (both
+    /// matching the predicate so the store ends with the latest value),
+    /// returning how many records reached the downstream buffer.
+    async fn filter_run_two(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+        let mut proc = KTableFilterProcessor::<String, i64, _> {
+            predicate: |_k: &String, v: &i64| *v > 10,
+            store_name: "tbl".into(),
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData,
+        };
+        // Two matching updates for "k": (None→20) then (20→30).
+        let changes = [Change::update(None, 20i64), Change::update(Some(20i64), 30)];
+        for (i, change) in changes.into_iter().enumerate() {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            if i == 0 {
+                proc.init(&mut ctx).await;
+            }
+            let ts = i64::try_from(i).unwrap();
+            proc.process(&mut ctx, Record::new(Some("k".into()), change, ts))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached filter → forwards each matching update immediately (today's
+    /// behavior, unchanged): two updates → two forwards.
+    #[tokio::test]
+    async fn uncached_filter_forwards_each_record() {
+        let mut stores = source_registry(false);
+        check!(filter_run_two(&mut stores).await == 2);
+    }
+
+    /// Cached filter → the immediate forward is suppressed; the cache buffers the
+    /// dirty entry and flushing emits exactly ONE deduped change.
+    #[tokio::test]
+    async fn cached_filter_suppresses_immediate_forward() {
+        let mut stores = source_registry(true);
+        check!(filter_run_two(&mut stores).await == 0);
+        check!(stores.kv_is_cached("tbl"));
+        let store = stores.get_kv::<String, i64>("tbl").unwrap();
+        check!(store.get(&"k".to_string()).await == Some(30));
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("tbl")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        check!(buffer.len() == 1);
+    }
+
+    // ── KTable.mapValues cache suppression (Bug B) ───────────────────────────
+
+    /// A `mv` String-valued store registry, optionally record-cached.
+    fn mv_registry(cached: bool) -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(KeyValueBytesStore::<String, String>::in_memory(
+            "mv".into(),
+            Box::new(StringSerde),
+            Box::new(StringSerde),
+            "mv-changelog".into(),
+        )));
+        if cached {
+            stores.enable_cache(
+                "mv",
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::store::cache::named::NamedCache::new("mv".into()),
+                )),
+            );
+        }
+        stores
+    }
+
+    /// Run `init` then two same-key updates through the `map_values` processor,
+    /// returning how many records reached the downstream buffer.
+    async fn map_values_run_two(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+        let mut proc = KTableMapValuesProcessor::<String, i64, String, _> {
+            f: |v: &i64| v.to_string(),
+            store_name: "mv".into(),
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData,
+        };
+        let changes = [Change::update(None, 8i64), Change::update(Some(8i64), 9)];
+        for (i, change) in changes.into_iter().enumerate() {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
+            if i == 0 {
+                proc.init(&mut ctx).await;
+            }
+            let ts = i64::try_from(i).unwrap();
+            proc.process(&mut ctx, Record::new(Some("k".into()), change, ts))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached `map_values` → forwards each update immediately (unchanged): two
+    /// updates → two forwards.
+    #[tokio::test]
+    async fn uncached_map_values_forwards_each_record() {
+        let mut stores = mv_registry(false);
+        check!(map_values_run_two(&mut stores).await == 2);
+    }
+
+    /// Cached `map_values` → the immediate forward is suppressed; the cache buffers
+    /// the dirty entry and flushing emits exactly ONE deduped change.
+    #[tokio::test]
+    async fn cached_map_values_suppresses_immediate_forward() {
+        let mut stores = mv_registry(true);
+        check!(map_values_run_two(&mut stores).await == 0);
+        check!(stores.kv_is_cached("mv"));
+        let store = stores.get_kv::<String, String>("mv").unwrap();
+        check!(store.get(&"k".to_string()).await == Some("9".to_string()));
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("mv")
             .unwrap()
             .flush_cache_into(&mut buffer, &[0])
             .await;

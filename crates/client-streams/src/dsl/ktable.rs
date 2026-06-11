@@ -34,6 +34,7 @@ use crate::dsl::processors::table::{
     KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
     KTableToStreamProcessor,
 };
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, Serde, SerdeArc};
 use crate::topology::NodeHandle;
 
@@ -399,6 +400,7 @@ where
                     move || KTableMapValuesProcessor {
                         f: f2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -480,6 +482,7 @@ where
                     move || KTableFilterProcessor {
                         predicate: p2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],

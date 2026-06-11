@@ -36,6 +36,27 @@ impl TupleForwarder {
         }
         ctx.forward(Record::new(Some(key), Change::update(old, new), ts));
     }
+
+    /// Forward an already-computed `Change` (which may be a tombstone, i.e.
+    /// `new == None`) unless the store is cached. Used by processors like
+    /// `KTable.filter` / `KTable.mapValues` whose change can carry a tombstone.
+    /// The store has already buffered the corresponding put/delete, so when
+    /// cached the deduped change is forwarded by the cache flush instead.
+    pub(crate) fn maybe_forward_change<K, VA>(
+        &self,
+        ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>,
+        key: K,
+        change: Change<VA>,
+        ts: i64,
+    ) where
+        K: std::any::Any + Send + Clone,
+        VA: std::any::Any + Send + Clone,
+    {
+        if self.cached {
+            return;
+        }
+        ctx.forward(Record::new(Some(key), change, ts));
+    }
 }
 
 #[cfg(test)]
