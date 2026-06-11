@@ -61,6 +61,14 @@ pub(crate) struct Graph {
     // record-caching sub-tasks; read only by tests until then.
     #[allow(dead_code)]
     pub(crate) cache_owner: std::collections::HashMap<String, usize>,
+    /// The per-task record cache owning every cached store's [`NamedCache`].
+    /// `instantiate` builds it with the graph's `cache_max_bytes` budget and
+    /// registers a named cache per materialized KV store; eviction/flush route
+    /// through it. Empty/zero-budget when caching is disabled.
+    // Eviction wiring (over-budget forwarding) lands in a later record-caching
+    // sub-task; held here so the per-store NamedCaches share one budget.
+    #[allow(dead_code)]
+    pub(crate) cache: crate::store::cache::thread::ThreadCache,
 }
 
 impl Graph {
@@ -461,6 +469,7 @@ mod tests {
             wall_clock: 0,
             cache_max_bytes: 0,
             cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -483,6 +492,7 @@ mod tests {
             wall_clock: 0,
             cache_max_bytes: 0,
             cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -555,6 +565,7 @@ mod tests {
             wall_clock: 0,
             cache_max_bytes: 0,
             cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
@@ -636,6 +647,7 @@ mod tests {
             wall_clock: 0,
             cache_max_bytes: 0,
             cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
 
         // init schedules the punctuator: stream base i64::MIN -> next = MIN + 10.
@@ -725,6 +737,7 @@ mod tests {
             wall_clock: 0,
             cache_max_bytes: 1024,
             cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
         // node 0 owns "store".
         graph.cache_owner.insert("store".into(), 0);

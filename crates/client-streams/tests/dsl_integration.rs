@@ -191,11 +191,18 @@ async fn dsl_count_and_restart_restore() {
     producer.flush().await.unwrap();
 
     // ── 2. Start counting KafkaStreams app (DSL topology) ─────────────────────
+    // cache_max_bytes(0) disables the record cache so the count store emits
+    // per-record (a→1, a→2, b→1) and logs each update to the changelog
+    // immediately. With the default 10 MiB cache, materialized writes are
+    // buffered and only emitted/changelog-logged on a cache flush — and the
+    // flush-on-commit wiring lands in a later record-caching sub-task, so this
+    // emit-on-update test pins caching off until then.
     let app_id = "dsl-count-app";
     let mut streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
+        .cache_max_bytes(0)
         .build()
         .await
         .unwrap();
@@ -244,6 +251,7 @@ async fn dsl_count_and_restart_restore() {
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
+        .cache_max_bytes(0) // see step 2: emit-on-update / immediate changelog
         .build()
         .await
         .unwrap();

@@ -106,6 +106,11 @@ pub struct Topology {
     /// replicate the matching store. Populated by [`Topology::add_global_store`]
     /// alongside `global_store_factories`. Invisible in the wire output.
     global_store_topics: HashMap<String, String>,
+    /// Materialized KV stores whose record cache is eligible (JVM `Materialized`
+    /// caching, default on). Populated by [`Topology::mark_store_caching`] at the
+    /// materialized KTable/aggregate lowering sites; consumed by `instantiate` to
+    /// wrap the store in a [`NamedCache`] when `cache_max_bytes > 0`.
+    caching_stores: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -129,6 +134,7 @@ impl std::fmt::Debug for Topology {
                 ),
             )
             .field("global_store_topics", &self.global_store_topics)
+            .field("caching_stores", &self.caching_stores)
             .finish()
     }
 }
@@ -1075,6 +1081,16 @@ impl Topology {
         self
     }
 
+    /// Mark a materialized store as record-cache eligible (JVM `Materialized`
+    /// caching, default on). Called by the materialized KTable/aggregate lowering
+    /// sites with the `Materialized`'s `caching_enabled()`; `on == false`
+    /// (`with_caching(false)`) leaves the store uncached.
+    pub(crate) fn mark_store_caching(&mut self, name: &str, on: bool) {
+        if on {
+            self.caching_stores.insert(name.to_string());
+        }
+    }
+
     /// Return the connected-processor list for a store (test helper).
     #[cfg(test)]
     pub(crate) fn store_entry_for_test(&self, store: &str) -> Option<Vec<String>> {
@@ -1199,6 +1215,15 @@ impl Topology {
             })
             .collect();
 
+        // Store name → connected processor names (used by `instantiate` to root a
+        // cached store's forwarded changes at its materializing processor's node).
+        let store_processors: HashMap<String, Vec<String>> = self
+            .reg
+            .stores
+            .iter()
+            .map(|e| (e.name.clone(), e.processors.clone()))
+            .collect();
+
         Ok(BuiltTopology {
             wire,
             source_topics,
@@ -1208,6 +1233,8 @@ impl Topology {
             store_factories: self.store_factories,
             global_store_factories: self.global_store_factories,
             global_store_topics: self.global_store_topics,
+            caching_stores: self.caching_stores,
+            store_processors,
         })
     }
 
@@ -1269,6 +1296,14 @@ pub struct BuiltTopology {
     // Consumed by global-store wiring via the accessor.
     #[allow(dead_code)]
     global_store_topics: HashMap<String, String>,
+    /// Materialized KV stores whose record cache is eligible (default-on JVM
+    /// `Materialized` caching, opt-out via `with_caching(false)`). `instantiate`
+    /// wraps each in a [`NamedCache`] when `cache_max_bytes > 0`.
+    caching_stores: std::collections::HashSet<String>,
+    /// Store name → its connected processor names. `instantiate` maps a cached
+    /// store's (single, materializing) processor name to that node's graph index
+    /// to root the store's `cache_owner` entry.
+    store_processors: HashMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -1450,6 +1485,11 @@ impl BuiltTopology {
             store_registry.insert(factory(store_name, changelog, bytes));
         }
 
+        // Build-time record-cache wiring (see `wire_record_caches`): a no-op when
+        // `cache_max_bytes == 0` (TopologyTestDriver) or no store is marked.
+        let (cache, cache_owner) =
+            self.wire_record_caches(&mut store_registry, &name_to_idx, cache_max_bytes);
+
         Ok(Graph {
             nodes,
             children,
@@ -1464,10 +1504,60 @@ impl BuiltTopology {
             stream_time: i64::MIN,
             wall_clock: 0,
             cache_max_bytes,
-            // Build-time population of cache ownership lands in sub-task 3b-ii;
-            // empty here means `flush_caches` is a no-op in production for now.
-            cache_owner: std::collections::HashMap::new(),
+            cache_owner,
+            cache,
         })
+    }
+
+    /// Build-time record-cache wiring: for each materialized KV store marked
+    /// cache-eligible (default-on `Materialized` caching), register a
+    /// [`NamedCache`](crate::store::cache::named::NamedCache) in the per-task
+    /// [`ThreadCache`](crate::store::cache::thread::ThreadCache), wrap the typed
+    /// store's backend (via the erased
+    /// [`enable_cache_erased`](crate::store::api::StateStore::enable_cache_erased)
+    /// hook), and root its forwarded changes at the materializing node.
+    ///
+    /// Returns the populated `ThreadCache` and the `store name → owning node
+    /// index` map for `Graph::flush_caches`. With `cache_max_bytes == 0`
+    /// (`TopologyTestDriver`) or no marked stores, the cache stays empty and the
+    /// owner map is empty, so every store stays uncached (goldens unchanged).
+    fn wire_record_caches(
+        &self,
+        store_registry: &mut crate::store::registry::StoreRegistry,
+        name_to_idx: &HashMap<&str, usize>,
+        cache_max_bytes: i64,
+    ) -> (
+        crate::store::cache::thread::ThreadCache,
+        HashMap<String, usize>,
+    ) {
+        let mut cache = crate::store::cache::thread::ThreadCache::new(
+            usize::try_from(cache_max_bytes.max(0)).unwrap_or(0),
+        );
+        let mut cache_owner: HashMap<String, usize> = HashMap::new();
+        if cache_max_bytes <= 0 {
+            return (cache, cache_owner);
+        }
+        for store_name in &self.caching_stores {
+            // The store's single materializing processor → its graph node index.
+            let owner_idx = self
+                .store_processors
+                .get(store_name)
+                .and_then(|procs| procs.first())
+                .and_then(|proc_name| name_to_idx.get(proc_name.as_str()).copied());
+            let Some(owner_idx) = owner_idx else {
+                // No connected processor in this subtopology (e.g. a store owned
+                // by another partition's graph) — nothing to root here.
+                continue;
+            };
+            let nc = cache.register(store_name);
+            // Only KV stores are cache-aware today; `enable_cache_erased` returns
+            // false for window/session stores, so we skip rooting a `cache_owner`
+            // entry the flush mechanism couldn't drive.
+            if store_registry.enable_cache(store_name, nc) {
+                cache_owner.insert(store_name.clone(), owner_idx);
+            }
+        }
+        (cache, cache_owner)
     }
 }
 
@@ -1806,6 +1896,150 @@ mod tests {
                 .as_ref()
                 == [0, 0, 0, 0, 0, 0, 0, 2]
         );
+    }
+
+    // ── Build-time record-cache wiring (sub-task 3b-ii) ───────────────────────
+    //
+    // A materializing processor that, per record, accumulates a count in its
+    // store and forwards `Change<i64>` (so the store's owning node can feed a
+    // `Change`-consuming sink). Mirrors the DSL aggregate's store-write + emit.
+    struct CountingMaterializer;
+    #[async_trait]
+    impl Processor<String, String, String, crate::dsl::processors::change::Change<i64>>
+        for CountingMaterializer
+    {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, crate::dsl::processors::change::Change<i64>>,
+            r: Record<String, String>,
+        ) {
+            use crate::dsl::processors::change::Change;
+            let (old, new) = {
+                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let old = s.get(&r.value).await;
+                let new = old.unwrap_or(0) + 1;
+                s.put(r.value.clone(), new).await;
+                (old, Some(new))
+            };
+            ctx.forward(Record::new(Some(r.value), Change { old, new }, r.timestamp));
+        }
+    }
+
+    /// Build a `source → CountingMaterializer(materializes "counts") → sink`
+    /// topology, optionally marking the "counts" store cache-eligible.
+    fn counting_topology(caching: bool) -> BuiltTopology {
+        use crate::dsl::processors::change::Change;
+        use crate::processor::serde::I64Serde;
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let c = t.add_processor("c", || CountingMaterializer, [&src]);
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        // The materializing node's `Change<i64>` output feeds the sink (a real
+        // cached flush forwards `Change<i64>` rooted at "c").
+        t.add_sink_explicit::<String, Change<i64>, _, _, _, _>(
+            "out",
+            "out",
+            [&c],
+            crate::processor::serde::Produced::with(StringSerde, ChangeI64Serde),
+        );
+        if caching {
+            t.mark_store_caching("counts", true);
+        }
+        t.build("app").unwrap()
+    }
+
+    // A trivial serde so the `Change<i64>` sink can be wired; it never has to
+    // round-trip in these tests (we assert on the changelog, not the sink bytes).
+    #[derive(Clone)]
+    struct ChangeI64Serde;
+    impl crate::processor::serde::Serde<crate::dsl::processors::change::Change<i64>>
+        for ChangeI64Serde
+    {
+        fn serialize(
+            &self,
+            _topic: &str,
+            v: &crate::dsl::processors::change::Change<i64>,
+        ) -> bytes::Bytes {
+            // Encode just the `new` side (8 bytes BE) so the sink has bytes to emit.
+            bytes::Bytes::copy_from_slice(&v.new.unwrap_or(0).to_be_bytes())
+        }
+        fn deserialize(
+            &self,
+            _topic: &str,
+            _bytes: &[u8],
+        ) -> Result<crate::dsl::processors::change::Change<i64>, crate::processor::serde::SerdeError>
+        {
+            unreachable!("Change<i64> sink is never deserialized in these tests")
+        }
+    }
+
+    #[test]
+    fn instantiate_caches_materialized_store_when_budget_positive() {
+        // cache_max_bytes > 0 + marked store → the store is cached and
+        // cache_owner roots it at the materializing node ("c"), which is graph
+        // node index 0 (sources are not in the nodes vec; "c" is first non-source).
+        let built = counting_topology(true);
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            1024,
+        ))
+        .unwrap();
+        check!(g.cache_owner.get("counts") == Some(&0));
+        check!(g.stores.kv_is_cached::<String, i64>("counts"));
+
+        // Pipe two records for the SAME key, then flush: a cached store dedups the
+        // two staged writes into ONE changelog entry. (Without caching the store
+        // logs each put immediately → two entries; see the no-cache test below.)
+        pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
+        // No changelog buffered yet — cached writes defer logging to flush.
+        check!(
+            g.drain_changelogs(&std::collections::HashSet::new())
+                .is_empty()
+        );
+        pollster::block_on(g.flush_caches()).unwrap();
+        let cl = g.drain_changelogs(&std::collections::HashSet::new());
+        check!(cl.len() == 1); // deduped to the latest count (2)
+        // tuple is (changelog_topic, key, value, ts); value is the BE i64 count.
+        check!(cl[0].2.as_ref().unwrap().as_ref() == [0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn instantiate_does_not_cache_when_budget_zero() {
+        // cache_max_bytes == 0 (TopologyTestDriver default): nothing is wrapped,
+        // cache_owner is empty, and the store logs each put immediately (2 entries
+        // for two same-key writes — no dedup).
+        let built = counting_topology(true);
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
+        .unwrap();
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached::<String, i64>("counts"));
+
+        pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
+        // Uncached: each put logs immediately → two changelog entries (no dedup).
+        let cl = g.drain_changelogs(&std::collections::HashSet::new());
+        check!(cl.len() == 2);
+    }
+
+    #[test]
+    fn instantiate_does_not_cache_when_marking_opted_out() {
+        // with_caching(false) equivalent (store NOT marked) + budget > 0: the store
+        // is NOT in cache_owner and stays uncached.
+        let built = counting_topology(false);
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            1024,
+        ))
+        .unwrap();
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached::<String, i64>("counts"));
     }
 
     #[test]

@@ -295,6 +295,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let spec = CogroupSpec::<K, VOut> {
@@ -323,6 +324,7 @@ where
                         vs.clone(),
                     );
             }
+            state.topology.mark_store_caching(&store_for_reg, caching);
         });
         let suppress = crate::dsl::ktable::kv_suppress_factory::<K, VOut, KS, VS>(
             key_serde.clone(),

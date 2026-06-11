@@ -389,6 +389,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, VA, KS, VS>(
@@ -450,6 +451,7 @@ where
                         value_serde_for_lower.clone(),
                     );
             }
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -482,6 +484,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, V, KS, VS>(
@@ -538,6 +541,7 @@ where
                     value_serde_for_lower.clone(),
                 );
             }
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 

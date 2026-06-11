@@ -18,9 +18,8 @@ use crate::store::cache::named::NamedCache;
 /// uncached stores keep today's behavior exactly.
 enum Backing {
     Plain(Box<dyn ByteKeyValueStore>),
-    // Constructed only via `enable_cache`, which the task-level cache wiring
-    // (a later record-caching sub-task) calls; unused in the lib build for now.
-    #[allow(dead_code)]
+    // Constructed via `enable_cache`, which build-time cache wiring
+    // (`BuiltTopology::instantiate`) calls for materialized KV stores.
     Cached(CachingKeyValueStore),
 }
 
@@ -134,9 +133,6 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
     /// [`CachingKeyValueStore`]). The caller supplies the [`NamedCache`]
     /// registered in the task's `ThreadCache`. Idempotent-ish: re-wrapping an
     /// already-cached store is a no-op.
-    // Called by the task-level cache wiring (a later record-caching sub-task);
-    // for now only the tests in this module exercise it.
-    #[allow(dead_code)]
     pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
         if !matches!(self.backing, Backing::Plain(_)) {
             return; // already cached
@@ -152,6 +148,15 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
             backend,
             self.name.clone(),
         ));
+    }
+
+    /// Whether this store's backend has been wrapped in a record cache via
+    /// [`enable_cache`](Self::enable_cache). Used by build-time wiring tests to
+    /// assert a materialized store actually got cached.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn is_cached(&self) -> bool {
+        matches!(self.backing, Backing::Cached(_))
     }
 
     /// Convenience constructor for tests: an in-memory-backed store.
@@ -214,6 +219,11 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
     }
     fn set_record_context(&mut self, ctx: RecordContext) {
         self.pending_ctx = Some(ctx);
+    }
+    #[allow(private_interfaces)]
+    fn enable_cache_erased(&mut self, cache: Arc<Mutex<NamedCache>>) -> bool {
+        self.enable_cache(cache);
+        true
     }
     #[allow(private_interfaces)]
     async fn flush_cache_into(

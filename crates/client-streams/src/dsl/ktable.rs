@@ -369,6 +369,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -408,6 +409,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -447,6 +449,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -487,6 +490,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);

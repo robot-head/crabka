@@ -133,6 +133,34 @@ impl StoreRegistry {
     pub(crate) fn iq_get(&self, name: &str) -> Option<&dyn crate::store::iq::IqQueryable> {
         self.stores.get(name).and_then(|s| s.as_iq())
     }
+
+    /// Whether the named KV store has its record cache enabled (test helper for
+    /// build-time cache wiring). `false` for an absent store or non-KV store.
+    #[cfg(test)]
+    pub(crate) fn kv_is_cached<K: Send + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> bool {
+        self.stores
+            .get_mut(name)
+            .and_then(|s| s.as_any_mut().downcast_mut::<KeyValueBytesStore<K, V>>())
+            .is_some_and(|s| s.is_cached())
+    }
+
+    /// Enable the record cache on the named store via the erased
+    /// [`StateStore::enable_cache_erased`] hook (no `K`/`V` needed). Returns
+    /// `true` if the store is present AND cache-aware (a KV store); `false` for an
+    /// absent store or a store kind whose caching hasn't landed yet (window/
+    /// session), so the caller can skip rooting a `cache_owner` entry for it.
+    pub(crate) fn enable_cache(
+        &mut self,
+        name: &str,
+        cache: std::sync::Arc<std::sync::Mutex<crate::store::cache::named::NamedCache>>,
+    ) -> bool {
+        self.stores
+            .get_mut(name)
+            .is_some_and(|s| s.enable_cache_erased(cache))
+    }
 }
 
 #[cfg(test)]
