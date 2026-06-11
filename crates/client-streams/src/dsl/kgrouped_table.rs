@@ -16,6 +16,7 @@ use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::table_aggregate::KTableAggregateProcessor;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{Changed, Consumed, DefaultSerde, I64Serde, Produced, Serde};
 use crate::topology::NodeHandle;
 
@@ -325,6 +326,7 @@ where
                         init: init.clone(),
                         adder: adder.clone(),
                         subtractor: subtractor.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],

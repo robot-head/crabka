@@ -1986,7 +1986,7 @@ mod tests {
         ))
         .unwrap();
         check!(g.cache_owner.get("counts") == Some(&0));
-        check!(g.stores.kv_is_cached::<String, i64>("counts"));
+        check!(g.stores.kv_is_cached("counts"));
 
         // Pipe two records for the SAME key, then flush: a cached store dedups the
         // two staged writes into ONE changelog entry. (Without caching the store
@@ -2018,7 +2018,7 @@ mod tests {
         ))
         .unwrap();
         check!(g.cache_owner.is_empty());
-        check!(!g.stores.kv_is_cached::<String, i64>("counts"));
+        check!(!g.stores.kv_is_cached("counts"));
 
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
@@ -2032,14 +2032,14 @@ mod tests {
         // with_caching(false) equivalent (store NOT marked) + budget > 0: the store
         // is NOT in cache_owner and stays uncached.
         let built = counting_topology(false);
-        let mut g = pollster::block_on(built.instantiate(
+        let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
             1024,
         ))
         .unwrap();
         check!(g.cache_owner.is_empty());
-        check!(!g.stores.kv_is_cached::<String, i64>("counts"));
+        check!(!g.stores.kv_is_cached("counts"));
     }
 
     #[test]

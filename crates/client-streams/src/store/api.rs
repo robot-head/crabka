@@ -68,6 +68,15 @@ pub trait StateStore: Any + Send {
     ) -> bool {
         false
     }
+    /// Erased query: whether this store's record cache is enabled (its backend has
+    /// been wrapped via [`enable_cache_erased`](Self::enable_cache_erased)). Lets a
+    /// materializing processor decide — without knowing `K`/`V` — whether to
+    /// suppress its immediate downstream forward (the cache flush forwards the
+    /// deduped `Change`). Default `false` (not cached / not cache-aware). KV stores
+    /// override this.
+    fn is_cached_erased(&self) -> bool {
+        false
+    }
     /// Flush this store's record cache (if any): write dirty entries through to the
     /// underlying store, buffer their changelog records, and push the deduped
     /// downstream `Record<K, Change<V>>` into `buffer` — one boxed copy PER child in

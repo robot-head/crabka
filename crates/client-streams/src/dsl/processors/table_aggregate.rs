@@ -12,6 +12,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
@@ -91,6 +92,7 @@ pub(crate) struct KTableAggregateProcessor<KR, VR, T, I, Add, Sub> {
     pub init: I,
     pub adder: Add,
     pub subtractor: Sub,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(KR, VR, T)>,
 }
 
@@ -105,6 +107,10 @@ where
     Add: Fn(&KR, &VR, T) -> T + Send + 'static,
     Sub: Fn(&KR, &VR, T) -> T + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, KR, Change<T>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, KR, Change<T>>,
@@ -113,10 +119,12 @@ where
         let key = r
             .key
             .expect("KGroupedTable aggregate requires a non-null key");
+        let rc = ctx.record_context().clone();
         let (old, new) = {
             let store = ctx
                 .get_state_store::<KR, T>(&self.store_name)
                 .expect("KGroupedTable aggregate store not found");
+            store.set_record_context(rc);
             let prior = store.get(&key).await;
             let mut agg = prior.clone().unwrap_or_else(|| (self.init)());
             if let Some(ov) = &r.value.old {
@@ -128,11 +136,8 @@ where
             store.put(key.clone(), agg.clone()).await;
             (prior, agg)
         };
-        ctx.forward(Record::new(
-            Some(key),
-            Change::update(old, new),
-            r.timestamp,
-        ));
+        self.forwarder
+            .maybe_forward(ctx, key, old, new, r.timestamp);
     }
 }
 
@@ -247,6 +252,7 @@ mod tests {
             init: || 0i64,
             adder: |_k: &String, v: &i64, a: i64| a + v,
             subtractor: |_k: &String, v: &i64, a: i64| a - v,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData,
         };
 
@@ -364,5 +370,103 @@ mod tests {
                 .await
                 == Some(0)
         );
+    }
+
+    /// An `agg` store registry, optionally record-cached.
+    fn agg_registry(cached: bool) -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
+            "agg".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "agg-changelog".into(),
+        )));
+        if cached {
+            stores.enable_cache(
+                "agg",
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::store::cache::named::NamedCache::new("agg".into()),
+                )),
+            );
+        }
+        stores
+    }
+
+    /// Run `init` then two same-key `process` calls (adds 2 then 6) through the
+    /// table aggregate, returning how many records reached the downstream buffer.
+    async fn agg_run_two(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+        let mut proc = KTableAggregateProcessor::<String, i64, i64, _, _, _> {
+            store_name: "agg".into(),
+            init: || 0i64,
+            adder: |_k: &String, v: &i64, a: i64| a + v,
+            subtractor: |_k: &String, v: &i64, a: i64| a - v,
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData,
+        };
+        for (ts, new) in [(0i64, 2i64), (1i64, 6i64)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            if ts == 0 {
+                proc.init(&mut ctx).await;
+            }
+            proc.process(
+                &mut ctx,
+                Record::new(
+                    Some("even".into()),
+                    Change {
+                        old: None,
+                        new: Some(new),
+                    },
+                    ts,
+                ),
+            )
+            .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached store → the aggregate forwards each record immediately (today's
+    /// behavior, unchanged): two records → two forwards.
+    #[tokio::test]
+    async fn uncached_table_aggregate_forwards_each_record() {
+        let mut stores = agg_registry(false);
+        check!(agg_run_two(&mut stores).await == 2);
+    }
+
+    /// Cached store → the immediate forward is suppressed (the cache flush will
+    /// forward the deduped change): two records → zero immediate forwards, and the
+    /// cached store still holds the dirty entry to flush.
+    #[tokio::test]
+    async fn cached_table_aggregate_suppresses_immediate_forward() {
+        let mut stores = agg_registry(true);
+        check!(agg_run_two(&mut stores).await == 0);
+        check!(stores.kv_is_cached("agg"));
+        // adder adds both contributions (no subtract: old=None each): 0+2+6 = 8.
+        let store = stores.get_kv::<String, i64>("agg").unwrap();
+        check!(store.get(&"even".to_string()).await == Some(8));
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("agg")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        check!(buffer.len() == 1);
     }
 }

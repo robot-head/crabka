@@ -134,17 +134,15 @@ impl StoreRegistry {
         self.stores.get(name).and_then(|s| s.as_iq())
     }
 
-    /// Whether the named KV store has its record cache enabled (test helper for
-    /// build-time cache wiring). `false` for an absent store or non-KV store.
-    #[cfg(test)]
-    pub(crate) fn kv_is_cached<K: Send + 'static, V: Send + 'static>(
-        &mut self,
-        name: &str,
-    ) -> bool {
-        self.stores
-            .get_mut(name)
-            .and_then(|s| s.as_any_mut().downcast_mut::<KeyValueBytesStore<K, V>>())
-            .is_some_and(|s| s.is_cached())
+    /// Whether the named KV store has its record cache enabled, via the erased
+    /// [`StateStore::is_cached_erased`] hook (no `K`/`V` needed). `false` for an
+    /// absent store or a store kind that isn't cache-aware. Used by
+    /// [`ProcessorContext::store_is_cached`] so a materializing processor can
+    /// suppress its immediate forward, and by build-time cache-wiring tests.
+    ///
+    /// [`ProcessorContext::store_is_cached`]: crate::processor::api::ProcessorContext::store_is_cached
+    pub(crate) fn kv_is_cached(&self, name: &str) -> bool {
+        self.stores.get(name).is_some_and(|s| s.is_cached_erased())
     }
 
     /// Enable the record cache on the named store via the erased

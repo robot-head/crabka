@@ -243,6 +243,9 @@ impl StreamsBuilder {
                             proc_name,
                             move || crate::dsl::processors::table::KTableSourceProcessor {
                                 store_name: store_for_proc.clone(),
+                                forwarder:
+                                    crate::dsl::processors::tuple_forwarder::TupleForwarder::default(
+                                    ),
                                 _pd: std::marker::PhantomData,
                             },
                             [&src],

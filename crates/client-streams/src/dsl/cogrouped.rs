@@ -26,6 +26,7 @@ use crate::dsl::names;
 use crate::dsl::processors::aggregate::KStreamAggregateProcessor;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::cogroup_merge::KStreamPassThrough;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, Serde};
 use crate::topology::NodeHandle;
 
@@ -144,6 +145,7 @@ where
                                         let a = agg.clone();
                                         move |k: &K, v: &Vn, acc: VOut| a(k, v, acc)
                                     },
+                                    forwarder: TupleForwarder::default(),
                                     _pd: PhantomData,
                                 },
                                 [parent],

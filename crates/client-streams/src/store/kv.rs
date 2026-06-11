@@ -151,9 +151,9 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
     }
 
     /// Whether this store's backend has been wrapped in a record cache via
-    /// [`enable_cache`](Self::enable_cache). Used by build-time wiring tests to
-    /// assert a materialized store actually got cached.
-    #[cfg(test)]
+    /// [`enable_cache`](Self::enable_cache). Used by the erased
+    /// [`StateStore::is_cached_erased`] hook (so a materializing processor can
+    /// suppress its immediate forward) and by build-time wiring tests.
     #[must_use]
     pub(crate) fn is_cached(&self) -> bool {
         matches!(self.backing, Backing::Cached(_))
@@ -224,6 +224,9 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
     fn enable_cache_erased(&mut self, cache: Arc<Mutex<NamedCache>>) -> bool {
         self.enable_cache(cache);
         true
+    }
+    fn is_cached_erased(&self) -> bool {
+        self.is_cached()
     }
     #[allow(private_interfaces)]
     async fn flush_cache_into(
