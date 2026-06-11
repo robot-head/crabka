@@ -149,21 +149,41 @@ handle (see §4.5):
 - **`CachingSessionStore`** wraps the session byte store. Cache keyed by the
   session key-schema bytes (`store/session_schema.rs`); `findSessions` merges.
 
-### 4.5 Flush listener / forwarding
+### 4.5 Forward-suppression seam (`TupleForwarder`) + typed flush listener
 
-The materializing processor (KTable source, KV/window/session aggregate, reduce,
-table-table, etc.) registers a flush listener on its caching store at build time.
-On a dirty entry flushing:
+Crabka's downstream **forward is processor-driven** (`ctx.forward(Change)` inside
+`process()`), not store-driven as in JVM. So caching must intercept the *forward*,
+not just the byte write. This mirrors JVM's `TimestampedTupleForwarder`: when a
+store is cached, the processor's immediate forward is **suppressed** and the
+cache's flush listener forwards the deduped `Change` later; when uncached, the
+processor forwards immediately (today's behavior).
 
-1. `old = underlying.get(key)`.
-2. `underlying.put(key, entry.value)` (or delete on tombstone).
-3. forward `Change { old, new: entry.value }` with `entry.context` into the
-   **store-owning node's** children.
+- **`TupleForwarder<K, VA>`** (`src/dsl/processors/tuple_forwarder.rs`): holds the
+  store name + a `cached: bool` flag resolved at `init`. Materializing processors
+  replace `ctx.forward(Record::new(k, Change::update(old,new), ts))` with
+  `forwarder.maybe_forward(ctx, k, old, new, ts)` — which forwards iff `!cached`.
+  When `cached`, the value is already in the caching store (the processor still
+  calls `store.put`), and the forward is deferred to the flush listener.
+- **Typed flush listener:** registered per materialized store at build time,
+  holding `Box<dyn Serde<K>>` + `Box<dyn Serde<VA>>`. On a dirty entry flushing it
+  deserializes the key, reads+deserializes `old` from the underlying store, writes
+  `new` through, and pushes an erased `Record<K, Change<VA>>` into the
+  store-owning node's children.
 
-Forwarding outside a `process()` call reuses the **punctuation drive mechanism**:
-`graph.flush_caches()` reconstructs a `Dispatch` rooted at each cache-owning node
-(exactly as `punctuate_stream_time` does for punctuators) and forwards through
-it; the task then drains the resulting sink/changelog output via the existing
+The materializing processors touched: `aggregate.rs` (`KStreamAggregate`,
+`KStreamReduce`), `table.rs` (`KTableSource`), `table_aggregate.rs`
+(`KTableAggregate`), `window_aggregate.rs`, `session_aggregate.rs`,
+`sliding_window_aggregate.rs`. (Joins read stores but do not materialize a cached
+forward source; they are out of the forward-suppression path.)
+
+### 4.5.1 Forwarding mechanism (node rooting)
+
+Forwarding outside a `process()` call reuses the **punctuation drive mechanism**.
+The graph records a node↔store ownership map at build time (which node
+materializes which store). `graph.flush_caches()` reconstructs a `Dispatch`
+rooted at each cache-owning node — exactly as `Graph::fire_schedule` does for
+punctuators — and the typed flush listener pushes erased `Change` records through
+it. The task then drains the resulting sink/changelog output via the existing
 `drain_punctuation_output` path.
 
 ### 4.6 Drive points
@@ -246,6 +266,7 @@ New:
 - `crates/client-streams/src/store/cache/kv.rs`
 - `crates/client-streams/src/store/cache/window.rs`
 - `crates/client-streams/src/store/cache/session.rs`
+- `crates/client-streams/src/dsl/processors/tuple_forwarder.rs`
 - `crates/client-streams/tests/jvm-capture/.../RecordCacheTopology.java`
 - `crates/client-streams/tests/testdata/record_cache/*.json`
 - `crates/client-streams/tests/record_cache_golden.rs`
@@ -254,7 +275,8 @@ Modified:
 - `crates/client-streams/src/store/mod.rs` (module export)
 - `crates/client-streams/src/store/registry.rs` (wrap on materialize when enabled)
 - `crates/client-streams/src/dsl/config.rs` (`Materialized::caching` + `with_caching`)
-- `crates/client-streams/src/processor/graph.rs` (`flush_caches`, `ThreadCache` owner, node-rooted flush dispatch)
+- `crates/client-streams/src/dsl/processors/{aggregate,table,table_aggregate,window_aggregate,session_aggregate,sliding_window_aggregate}.rs` (use `TupleForwarder`)
+- `crates/client-streams/src/processor/graph.rs` (`flush_caches`, `ThreadCache` owner, node↔store map, node-rooted flush dispatch)
 - `crates/client-streams/src/runtime/task.rs` (call `flush_caches` in `commit`/`close`)
 - `crates/client-streams/src/streams_app.rs` + `KafkaStreams` builder (`cache_max_bytes`)
 - `crates/client-streams/src/test_driver.rs` (force `0`; caching-enabled test ctor)
