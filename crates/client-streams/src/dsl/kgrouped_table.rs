@@ -27,8 +27,6 @@ pub(crate) type ChangedRepartitionLowerFn =
 
 /// Build a [`ChangedRepartitionLowerFn`] capturing the grouped key serde and a
 /// `Changed`-wrapped value serde so the repartition round-trip carries `Change<VR>`.
-// Consumed by `KTable::group_by` (Task 6); dead until then.
-#[allow(dead_code)]
 pub(crate) fn repartition_lower_changed<KR, VR, KS, VS>(
     key_serde: KS,
     value_serde: VS,
@@ -86,8 +84,6 @@ where
     KR: Any + Send + Sync + Clone + PartialEq,
     VR: Any + Send + Sync + Clone,
 {
-    // Constructed by `KTable::group_by` (Task 6); dead until then.
-    #[allow(dead_code)]
     pub(crate) fn new(
         builder: Rc<RefCell<InternalStreamsBuilder>>,
         parent: NodeId,
