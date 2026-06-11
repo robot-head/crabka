@@ -204,9 +204,6 @@ impl Graph {
     /// commit/close path before the producer commit. Flushes in ascending owning-
     /// node order and drains after each store, so a downstream cached store sees an
     /// upstream store's forwarded changes before it flushes (chained-KTable order).
-    // Wired into the task commit/close path in a later record-caching sub-task;
-    // exercised only by tests until then.
-    #[allow(dead_code)]
     pub(crate) async fn flush_caches(&mut self) -> Result<(), ProcessorError> {
         let rc = RecordContext {
             topic: String::new(),

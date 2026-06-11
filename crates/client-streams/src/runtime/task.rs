@@ -97,8 +97,19 @@ impl StreamTask {
             .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 
-    /// Call `Processor::close` on every node in the graph.
+    /// Clean close: flush record caches (emitting their buffered deduped changes +
+    /// changelog through the still-live processor chain) BEFORE calling
+    /// `Processor::close` on every node — mirrors the JVM `StreamTask.closeClean`
+    /// (flush state stores → close processors). The flush must precede the processor
+    /// close because forwarding routes through child `process` calls.
+    ///
+    /// Close is infallible, so a flush error is logged and swallowed (the partition
+    /// is being revoked anyway; the thread still commits offsets afterwards). After
+    /// this, the cache is clean, so the subsequent `commit()` flush is a no-op.
     pub async fn close_processors(&mut self) {
+        if let Err(e) = self.flush_caches().await {
+            tracing::warn!(error = %e, "flush_caches failed during task close; continuing");
+        }
         self.graph.close_processors().await;
     }
 
@@ -381,8 +392,29 @@ impl StreamTask {
         self.pending.clear();
     }
 
-    /// At-least-once commit: flush producer THEN commit advanced source offsets.
+    /// Flush every cached materialized store: write dirty entries through to the
+    /// underlying store, buffer their changelog records, and forward the deduped
+    /// `Change`s downstream — then route the resulting sink output + changelog
+    /// entries to the producer (same plumbing the punctuation path uses).
+    ///
+    /// A no-op when no store is cached (`cache_owner` empty, e.g. the
+    /// `cache_max_bytes = 0` test-driver path): `flush_caches` forwards nothing,
+    /// so the drain produces nothing.
+    async fn flush_caches(&mut self) -> Result<(), StreamsClientError> {
+        self.graph
+            .flush_caches()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        self.drain_punctuation_output().await
+    }
+
+    /// At-least-once commit: flush record caches (emitting their deduped changes +
+    /// changelog) → flush producer → commit advanced source offsets. The cache
+    /// flush + its sink/changelog drain happen BEFORE the producer flush/commit so
+    /// the forwarded records are part of the committed batch (under EOS-v2, part of
+    /// the transaction the thread commits after this call).
     pub async fn commit(&mut self) -> Result<(), StreamsClientError> {
+        self.flush_caches().await?;
         self.producer.flush().await?;
         if self.pending.is_empty() {
             return Ok(());
@@ -1153,5 +1185,243 @@ mod tests {
         let pos = task.position();
         assert_eq!(pos.offset("in", 2), Some(0));
         assert_eq!(pos.offset("in", 9), None);
+    }
+
+    // ── record-cache flush on commit (sub-task 3e) ───────────────────────────
+
+    use crate::dsl::processors::change::Change;
+
+    /// A `Change<i64>` serde encoding just the `new` side (8 bytes BE) so the
+    /// downstream sink has bytes to emit. Never deserialized in these tests.
+    #[derive(Clone)]
+    struct ChangeI64Serde;
+    impl crate::processor::serde::Serde<Change<i64>> for ChangeI64Serde {
+        fn serialize(&self, _topic: &str, v: &Change<i64>) -> bytes::Bytes {
+            bytes::Bytes::copy_from_slice(&v.new.unwrap_or(0).to_be_bytes())
+        }
+        fn deserialize(
+            &self,
+            _topic: &str,
+            _bytes: &[u8],
+        ) -> Result<Change<i64>, crate::processor::serde::SerdeError> {
+            unreachable!("Change<i64> sink is never deserialized in these tests")
+        }
+    }
+
+    /// A materializing processor that writes the cached "counts" store on every
+    /// record but forwards NOTHING on `process` — so the ONLY path a `Change`
+    /// reaches the downstream sink is `Graph::flush_caches` (the deduped emit on
+    /// commit). This mirrors a cached `KTable` aggregate whose emit-on-update is
+    /// suppressed: the sink sees one deduped change per flush, not one per record.
+    struct StoreWriterNoForward;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, Change<i64>> for StoreWriterNoForward {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, Change<i64>>,
+            r: Record<String, String>,
+        ) {
+            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+            let n = store.get(&r.value).await.unwrap_or(0) + 1;
+            store.put(r.value.clone(), n).await;
+            // Deliberately no ctx.forward — the change is emitted only at flush.
+        }
+    }
+
+    /// `source "in" → StoreWriterNoForward(materializes cached "counts") → sink "out"`.
+    /// The "counts" store is marked cache-eligible; with `cache_max_bytes > 0` the
+    /// store buffers writes and defers both its changelog AND the downstream
+    /// `Change` emit to `flush_caches`.
+    fn cached_writer_built() -> crate::topology::BuiltTopology {
+        use crate::processor::serde::{I64Serde, Produced};
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let c = t.add_processor("c", || StoreWriterNoForward, [&src]);
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        t.add_sink_explicit::<String, Change<i64>, _, _, _, _>(
+            "out",
+            "out",
+            [&c],
+            Produced::with(StringSerde, ChangeI64Serde),
+        );
+        t.mark_store_caching("counts", true);
+        t.build("app").unwrap()
+    }
+
+    /// An [`OffsetStore`] + [`RecordProducer`] pair that share one ordered event
+    /// log, so a test can assert the relative order of producer sends vs offset
+    /// commits across the two trait objects. `send`/`send_with_timestamp` push a
+    /// `produce:<topic>` event; `commit` pushes `commit-offsets`.
+    #[derive(Clone, Default)]
+    struct OrderLog(std::sync::Arc<StdMutex<Vec<String>>>);
+
+    struct LoggingProducer {
+        log: OrderLog,
+    }
+    #[async_trait::async_trait]
+    impl RecordProducer for LoggingProducer {
+        async fn send(
+            &self,
+            topic: &str,
+            _partition: Option<i32>,
+            _k: Option<bytes::Bytes>,
+            _v: Option<bytes::Bytes>,
+        ) -> Result<(), crate::StreamsClientError> {
+            self.log.0.lock().unwrap().push(format!("produce:{topic}"));
+            Ok(())
+        }
+        async fn flush(&self) -> Result<(), crate::StreamsClientError> {
+            self.log.0.lock().unwrap().push("flush".to_string());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct LoggingStore {
+        log: OrderLog,
+        committed: StdMutex<HashMap<(String, i32), i64>>,
+    }
+    #[async_trait::async_trait]
+    impl OffsetStore for LoggingStore {
+        async fn committed(
+            &self,
+            t: &str,
+            p: i32,
+        ) -> Result<Option<i64>, crate::StreamsClientError> {
+            Ok(self
+                .committed
+                .lock()
+                .unwrap()
+                .get(&(t.to_string(), p))
+                .copied())
+        }
+        async fn earliest(&self, _t: &str, _p: i32) -> Result<i64, crate::StreamsClientError> {
+            Ok(0)
+        }
+        async fn latest(&self, _t: &str, _p: i32) -> Result<i64, crate::StreamsClientError> {
+            Ok(0)
+        }
+        async fn commit(
+            &self,
+            offs: &[(String, i32, i64)],
+        ) -> Result<(), crate::StreamsClientError> {
+            self.log
+                .0
+                .lock()
+                .unwrap()
+                .push("commit-offsets".to_string());
+            let mut m = self.committed.lock().unwrap();
+            for (t, p, o) in offs {
+                m.insert((t.clone(), *p), *o);
+            }
+            Ok(())
+        }
+    }
+
+    /// A cached materialized store must buffer its writes (no sink output / no
+    /// changelog) until commit, then `commit()` must flush the cache — emitting
+    /// exactly ONE deduped sink record + ONE changelog record — BEFORE committing
+    /// source offsets (so under EOS the forwarded records join the committed txn).
+    #[tokio::test]
+    async fn commit_flushes_record_cache_before_offset_commit() {
+        let log = OrderLog::default();
+        let producer = std::sync::Arc::new(LoggingProducer { log: log.clone() });
+        let store = std::sync::Arc::new(LoggingStore {
+            log: log.clone(),
+            committed: StdMutex::new(HashMap::new()),
+        });
+
+        // Two records for the SAME key on consecutive offsets.
+        let fetcher = ScriptedFetcher::new(vec![
+            (
+                ("in".to_string(), 0, 0),
+                FetchBatch {
+                    records: vec![FetchedRec {
+                        offset: 0,
+                        key: None,
+                        value: Some("k".into()),
+                        timestamp: 1,
+                    }],
+                },
+            ),
+            (
+                ("in".to_string(), 0, 1),
+                FetchBatch {
+                    records: vec![FetchedRec {
+                        offset: 1,
+                        key: None,
+                        value: Some("k".into()),
+                        timestamp: 2,
+                    }],
+                },
+            ),
+        ]);
+
+        let mut task = StreamTask::new(
+            "0".into(),
+            cached_writer_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 1024)
+                .await
+                .unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: 0,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
+            ProcessingGuarantee::AtLeastOnce,
+        );
+        task.init().await.unwrap();
+
+        // Pipe both records (two separate process_once polls, no commit yet).
+        task.process_once(&fetcher, None).await.unwrap();
+        task.process_once(&fetcher, None).await.unwrap();
+
+        // BEFORE commit: cached writes are buffered — nothing produced yet.
+        check!(
+            log.0.lock().unwrap().is_empty(),
+            "cached store must defer all sink + changelog output until flush, got {:?}",
+            log.0.lock().unwrap()
+        );
+
+        task.commit().await.unwrap();
+
+        let events = log.0.lock().unwrap().clone();
+        let emitted: Vec<&String> = events
+            .iter()
+            .filter(|e| e.starts_with("produce:"))
+            .collect();
+        // Exactly one deduped sink emit + one changelog emit (two puts → one entry).
+        check!(
+            emitted
+                .iter()
+                .filter(|e| e.as_str() == "produce:out")
+                .count()
+                == 1,
+            "exactly one deduped sink record expected, got {events:?}"
+        );
+        check!(
+            emitted
+                .iter()
+                .filter(|e| e.as_str() == "produce:app-counts-changelog")
+                .count()
+                == 1,
+            "exactly one deduped changelog record expected, got {events:?}"
+        );
+
+        // Ordering: every produce (flushed cache output) precedes the offset commit.
+        let commit_idx = events
+            .iter()
+            .position(|e| e == "commit-offsets")
+            .expect("offsets must be committed");
+        let last_produce_idx = events
+            .iter()
+            .rposition(|e| e.starts_with("produce:"))
+            .expect("cache flush must produce at least one record");
+        check!(
+            last_produce_idx < commit_idx,
+            "cache-flushed sink + changelog output must be produced BEFORE the offset commit, got {events:?}"
+        );
     }
 }
