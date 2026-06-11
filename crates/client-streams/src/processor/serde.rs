@@ -325,7 +325,11 @@ where
                 buf.push(0x00);
                 Bytes::from(buf)
             }
-            (None, None) => Bytes::from_static(b"\x00"),
+            // The repartition-map only ever forwards combined, subtract-only, or
+            // add-only changes — never a both-`None` change, and the JVM
+            // `ChangedSerializer` likewise rejects an all-null change. Fail loud
+            // rather than silently emit an unsymmetric encoding.
+            (None, None) => unreachable!("Changed serde never carries a both-None change"),
         }
     }
 
