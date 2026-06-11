@@ -9,6 +9,15 @@
       "repartition_source_topics": [],
       "state_changelog_topics": [
         {
+          "name": "app-filter-store-changelog",
+          "partitions": 0,
+          "replication_factor": -1,
+          "topic_configs": [
+            { "key": "cleanup.policy", "value": "compact" },
+            { "key": "message.timestamp.type", "value": "CreateTime" }
+          ]
+        },
+        {
           "name": "in",
           "partitions": 0,
           "replication_factor": -1,

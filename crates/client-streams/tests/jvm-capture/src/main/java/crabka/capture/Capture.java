@@ -251,7 +251,9 @@ public final class Capture {
             Consumed.with(Serdes.String(), Serdes.Long()),
             Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("src-store")
                 .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
-        KTable<String, Long> pos = src.filter((k, v) -> v > 0);
+        KTable<String, Long> pos = src.filter((k, v) -> v > 0,
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("filter-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
         KGroupedTable<String, Long> grouped = pos.groupBy(
             (k, v) -> KeyValue.pair(v % 2 == 0 ? "even" : "odd", v),
             Grouped.with(Serdes.String(), Serdes.Long()));
