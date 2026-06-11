@@ -113,8 +113,9 @@ public final class Capture {
         write(outDir, "cogroup_sliding", cogroupSliding());
         write(outDir, "cogroup_session", cogroupSession());
         write(outDir, "kgrouped_table", kgroupedTable());
+        write(outDir, "kgrouped_table_autonamed", kgroupedTableAutoNamed());
 
-        System.out.println("Capture complete. Wrote 27 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 28 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -268,6 +269,28 @@ public final class Capture {
                 Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("agg-store")
                     .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
             .toStream().to("agg-out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * kgrouped_table_autonamed: table("in", "src-store") -> groupBy(even/odd) ->
+     * count() with NO explicit Materialized name. The result store is auto-named
+     * from the JVM's shared name counter (KTABLE-AGGREGATE-STATE-STORE-NNN), so its
+     * repartition/changelog topic names pin the exact counter position of the
+     * groupBy SELECT + aggregate store. Discriminates the KGroupedTable lowering's
+     * mint order (no explicit names to mask it).
+     */
+    static Topology kgroupedTableAutoNamed() {
+        StreamsBuilder b = new StreamsBuilder();
+        KTable<String, Long> src = b.table("in",
+            Consumed.with(Serdes.String(), Serdes.Long()),
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("src-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        src.groupBy(
+                (k, v) -> KeyValue.pair(v % 2 == 0 ? "even" : "odd", v),
+                Grouped.with(Serdes.String(), Serdes.Long()))
+            .count()
+            .toStream().to("out", Produced.with(Serdes.String(), Serdes.Long()));
         return b.build(optimizedProps());
     }
 

@@ -82,6 +82,57 @@ fn kgrouped_table_topology_matches_jvm() {
     );
 }
 
+/// Build the auto-named topology: `table("in","src-store") -> groupBy -> count()`
+/// with NO explicit result-store name, so the store name is minted from the
+/// shared node-name counter. Pins the lowering's mint order against the JVM
+/// (`Capture.java::kgroupedTableAutoNamed`), which explicit-store goldens cannot.
+fn build_autonamed() -> crabka_client_streams::topology::BuiltTopology {
+    use crabka_client_streams::dsl::StreamsBuilder;
+
+    let b = StreamsBuilder::new();
+    let src = b.table_explicit(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_store("src-store"),
+    );
+    src.group_by_explicit(
+        |_k: &String, v: &i64| {
+            (
+                if v % 2 == 0 {
+                    "even".to_string()
+                } else {
+                    "odd".to_string()
+                },
+                *v,
+            )
+        },
+        Grouped::with(StringSerde, I64Serde),
+    )
+    // No `.as_store(...)` → the result store name is auto-minted.
+    .count_explicit(Materialized::with(StringSerde, I64Serde))
+    .to_stream()
+    .to_explicit("out", Produced::with(StringSerde, I64Serde));
+    drop(src);
+    b.build_optimized("app").unwrap()
+}
+
+#[test]
+fn kgrouped_table_autonamed_topology_matches_jvm() {
+    let built = build_autonamed();
+    let actual = serde_json::to_value(built.to_wire()).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            "tests/testdata/golden/dsl/kgrouped_table_autonamed.topology.json",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        actual, expected,
+        "auto-named wire topology != JVM kgrouped_table_autonamed fixture"
+    );
+}
+
 #[derive(serde::Deserialize, PartialEq, Debug)]
 struct Row {
     key: String,

@@ -545,39 +545,42 @@ where
         use crate::dsl::processors::table_aggregate::KTableRepartitionMapProcessor;
 
         let grouped = grouped.into();
-        let mapper_for_select = mapper.clone();
-        let record_select: crate::dsl::kgrouped_table::RecordSelectFn =
-            Box::new(move |g: &mut InternalStreamsBuilder, parent_id| {
-                let select_name = g.new_processor_name(names::KTABLE_SELECT);
-                let id = g.graph.add(
+        let parent_id = self.node;
+
+        // Record the `KTABLE-SELECT` repartition-map node NOW (at `groupBy()` time),
+        // matching the JVM `KGroupedTableImpl`, which mints SELECT before the
+        // terminal aggregation mints its result store. Recording it here rather
+        // than deferring to the terminal op is what keeps an auto-named result
+        // store at the JVM counter index (pinned by the `kgrouped_table_autonamed`
+        // golden).
+        let mut g = self.builder.borrow_mut();
+        let select_name = g.new_processor_name(names::KTABLE_SELECT);
+        let select_id = g.graph.add(
+            select_name.clone(),
+            GraphNodeKind::TableProcessor { store_name: None },
+            vec![parent_id],
+        );
+        let mapper2 = mapper.clone();
+        g.graph.nodes[select_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, KR, Change<VR>, _, _, _>(
                     select_name.clone(),
-                    GraphNodeKind::TableProcessor { store_name: None },
-                    vec![parent_id],
+                    move || KTableRepartitionMapProcessor {
+                        mapper: mapper2.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
                 );
-                let mapper2 = mapper_for_select.clone();
-                g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-                    let parent = NodeHandle::<K, Change<V>>::from_name(
-                        state.handle_name[&parent_id].clone(),
-                    );
-                    let h = state
-                        .topology
-                        .add_processor::<K, Change<V>, KR, Change<VR>, _, _, _>(
-                            select_name.clone(),
-                            move || KTableRepartitionMapProcessor {
-                                mapper: mapper2.clone(),
-                                _pd: PhantomData,
-                            },
-                            [parent],
-                        );
-                    state.handle_name.insert(id, h.name().to_string());
-                }));
-                id
-            });
+            state.handle_name.insert(select_id, h.name().to_string());
+        }));
+        drop(g);
 
         crate::dsl::kgrouped_table::KGroupedTable::new(
             Rc::clone(&self.builder),
-            self.node,
-            record_select,
+            select_id,
             crate::dsl::kgrouped_table::repartition_lower_changed::<KR, VR, GKS, GVS>(
                 grouped.key_serde,
                 grouped.value_serde,

@@ -64,17 +64,14 @@ where
     )
 }
 
-/// Erased thunk: record the SELECT (repartition-map) graph node whose parent is
-/// the upstream `KTable` node, returning the SELECT node id. Captures the source
-/// `K`,`V` types + mapper so `KGroupedTable<KR, VR>` need not name them. Provided
-/// by `KTable::group_by` (Task 6).
-pub(crate) type RecordSelectFn = Box<dyn FnOnce(&mut InternalStreamsBuilder, NodeId) -> NodeId>;
-
 /// Handle produced by `KTable::group_by[_explicit]`.
 pub struct KGroupedTable<KR, VR> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
-    parent: NodeId,
-    record_select: Option<RecordSelectFn>,
+    /// The `KTABLE-SELECT` repartition-map node, already recorded by `group_by`
+    /// at call time (mirroring the JVM, which mints it when `groupBy()` is called
+    /// — *before* the terminal op mints the result store). The terminal op wires
+    /// the repartition off this node.
+    select_node: NodeId,
     repartition_lower: Option<ChangedRepartitionLowerFn>,
     _pd: PhantomData<fn() -> (KR, VR)>,
 }
@@ -86,14 +83,12 @@ where
 {
     pub(crate) fn new(
         builder: Rc<RefCell<InternalStreamsBuilder>>,
-        parent: NodeId,
-        record_select: RecordSelectFn,
+        select_node: NodeId,
         repartition_lower: ChangedRepartitionLowerFn,
     ) -> Self {
         Self {
             builder,
-            parent,
-            record_select: Some(record_select),
+            select_node,
             repartition_lower: Some(repartition_lower),
             _pd: PhantomData,
         }
@@ -263,21 +258,19 @@ where
             key_serde.clone(),
             value_serde.clone(),
         );
-        let record_select = self.record_select.take().expect("record_select consumed");
         let rp_lower = self
             .repartition_lower
             .take()
             .expect("repartition_lower consumed");
-        let parent = self.parent;
+        // The SELECT (repartition-map) node was recorded at `group_by` time so its
+        // name-counter index precedes this terminal op's store (JVM order).
+        let select_id = self.select_node;
         let mut g = self.builder.borrow_mut();
 
-        // 1) SELECT (repartition-map) node fed by the upstream KTable node.
-        let select_id = record_select(&mut g, parent);
-
-        // 2) KTable.groupBy ALWAYS repartitions. Mint filter+sink+source indices
-        //    (the JVM mints a null-key filter before the sink), then a Repartition
-        //    node fed by SELECT.
-        let _filter_name = g.new_processor_name(names::FILTER);
+        // KTable.groupBy ALWAYS repartitions. Mint sink+source for the repartition
+        // (the JVM table-repartition path mints NO null-key filter — the
+        // repartition-map already emits keyed records), then a Repartition node
+        // fed by SELECT.
         let sink_name = g.new_processor_name(names::SINK);
         let source_name = g.new_processor_name(names::SOURCE);
         let topic_store = store_name.clone();
