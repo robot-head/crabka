@@ -37,6 +37,9 @@ use crate::store::cache::named::NamedCache;
 pub(crate) struct CachingKeyValueStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
+    /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
+    /// (which has no in-place reset) under the same identity.
+    name: String,
 }
 
 impl CachingKeyValueStore {
@@ -44,6 +47,20 @@ impl CachingKeyValueStore {
         Self {
             cache,
             inner: AsyncMutex::new(inner),
+            name: String::new(),
+        }
+    }
+
+    /// Like [`new`](Self::new) but records the cache's name for `clear`.
+    pub fn with_name(
+        cache: Arc<Mutex<NamedCache>>,
+        inner: Box<dyn ByteKeyValueStore>,
+        name: String,
+    ) -> Self {
+        Self {
+            cache,
+            inner: AsyncMutex::new(inner),
+            name,
         }
     }
 
@@ -137,6 +154,87 @@ impl CachingKeyValueStore {
             }
         }
         collected
+    }
+
+    /// Write straight through to the inner store, bypassing the cache. Used by
+    /// the restore path (`apply_changelog`), which replays the committed
+    /// changelog into the state below the cache without staging dirty entries.
+    pub async fn put_inner(&self, key: Bytes, value: Bytes) {
+        self.inner.lock().await.put(key, value).await;
+    }
+
+    /// Delete straight through to the inner store, bypassing the cache (restore).
+    pub async fn delete_inner(&self, key: &[u8]) {
+        self.inner.lock().await.delete(key).await;
+    }
+
+    /// Clear both the cache layer and the inner store (EOS rollback reset).
+    pub async fn clear(&self) {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            *cache = NamedCache::new(self.name.clone());
+        }
+        self.inner.lock().await.clear().await;
+    }
+
+    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
+    /// entries win on key collision and a cached tombstone hides the inner value.
+    /// Returns key-sorted `(key, value)`.
+    pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        let mut merged: BTreeMap<Bytes, Bytes> = {
+            let inner = self.inner.lock().await;
+            inner.scan_all().await.into_iter().collect()
+        };
+        let cached = {
+            let cache = self.cache.lock().unwrap();
+            cache.all()
+        };
+        for (k, e) in cached {
+            match e.value {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Flush dirty entries in insertion order, capturing the inner OLD value
+    /// BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
+    /// then write the new value through (`put` / `delete` on a tombstone), and
+    /// return `(key, old, new, context)`. `old`/`new` are `Option<Bytes>`
+    /// (`None` = absent / tombstone). The typed store uses `old` (the
+    /// last-committed value) to build the deduped downstream `Change` and the
+    /// context to stamp the forwarded record.
+    pub async fn flush_with_old(
+        &self,
+    ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
+        // Drain dirty entries under the cache lock, dropping the guard before any
+        // await.
+        let mut dirty: Vec<(Bytes, LruCacheEntry)> = Vec::new();
+        {
+            let mut cache = self.cache.lock().unwrap();
+            let mut listener = |k: &Bytes, e: &LruCacheEntry| dirty.push((k.clone(), e.clone()));
+            cache.flush(&mut listener);
+        }
+        let mut out = Vec::with_capacity(dirty.len());
+        {
+            let mut inner = self.inner.lock().await;
+            for (k, e) in dirty {
+                let old = inner.get(&k).await;
+                match &e.value {
+                    Some(v) => inner.put(k.clone(), v.clone()).await,
+                    None => {
+                        inner.delete(&k).await;
+                    }
+                }
+                out.push((k, old, e.value, e.context));
+            }
+        }
+        out
     }
 }
 

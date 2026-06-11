@@ -1,22 +1,112 @@
 //! `KeyValueBytesStore<K,V>`: the single typed store the registry holds and
 //! downcasts to. Serde + changelog-buffer logic over a pluggable `ByteKeyValueStore`.
 use std::any::Any;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use crate::processor::record::RecordContext;
 use crate::processor::serde::Serde;
 use crate::store::api::{KeyValueStore, StateStore};
 use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
+use crate::store::cache::kv::CachingKeyValueStore;
+use crate::store::cache::named::NamedCache;
+
+/// The store's backing: either a plain boxed byte store or a record-cache
+/// wrapper over it. `Cached` is opted into via [`KeyValueBytesStore::enable_cache`];
+/// uncached stores keep today's behavior exactly.
+enum Backing {
+    Plain(Box<dyn ByteKeyValueStore>),
+    // Constructed only via `enable_cache`, which the task-level cache wiring
+    // (a later record-caching sub-task) calls; unused in the lib build for now.
+    #[allow(dead_code)]
+    Cached(CachingKeyValueStore),
+}
+
+impl Backing {
+    /// Cache-first when `Cached` (read-your-writes); direct otherwise.
+    async fn get(&self, key: &[u8]) -> Option<Bytes> {
+        match self {
+            Backing::Plain(b) => b.get(key).await,
+            Backing::Cached(c) => c.get(key).await,
+        }
+    }
+    async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
+        match self {
+            Backing::Plain(b) => b.range(lo, hi).await,
+            Backing::Cached(c) => c.range(lo, hi).await,
+        }
+    }
+    async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        match self {
+            Backing::Plain(b) => b.scan_all().await,
+            Backing::Cached(c) => c.scan_all().await,
+        }
+    }
+    async fn approx_len(&self) -> u64 {
+        match self {
+            Backing::Plain(b) => b.approx_len().await,
+            // No cheap merged count; the cache+inner overlay is materialized.
+            Backing::Cached(c) => c.scan_all().await.len() as u64,
+        }
+    }
+
+    /// Processing-path write. Plain: direct put. Cached: write-back put carrying
+    /// the record context (changelog deferred to flush).
+    async fn put(&mut self, key: Bytes, value: Bytes, ctx: RecordContext) {
+        match self {
+            Backing::Plain(b) => b.put(key, value).await,
+            Backing::Cached(c) => c.put(key, value, ctx).await,
+        }
+    }
+
+    /// Processing-path delete. Plain: returns the previous value. Cached:
+    /// write-back tombstone; the previous value (for the typed return) is read
+    /// cache-first before staging the tombstone.
+    async fn delete(&mut self, key: Bytes, ctx: RecordContext) -> Option<Bytes> {
+        match self {
+            Backing::Plain(b) => b.delete(&key).await,
+            Backing::Cached(c) => {
+                let prev = c.get(&key).await;
+                c.delete(key, ctx).await;
+                prev
+            }
+        }
+    }
+
+    /// Restore-path write (below the cache; never stages a dirty entry).
+    async fn apply(&mut self, key: Bytes, value: Option<Bytes>) {
+        match (self, value) {
+            (Backing::Plain(b), Some(v)) => b.put(key, v).await,
+            (Backing::Plain(b), None) => {
+                b.delete(&key).await;
+            }
+            (Backing::Cached(c), Some(v)) => c.put_inner(key, v).await,
+            (Backing::Cached(c), None) => c.delete_inner(&key).await,
+        }
+    }
+
+    async fn clear(&mut self) {
+        match self {
+            Backing::Plain(b) => b.clear().await,
+            Backing::Cached(c) => c.clear().await,
+        }
+    }
+}
 
 pub struct KeyValueBytesStore<K, V> {
     name: String,
     changelog_topic: String,
-    backend: Box<dyn ByteKeyValueStore>,
+    backing: Backing,
     key_serde: Box<dyn Serde<K>>,
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
+    /// Set via [`StateStore::set_record_context`]; attached to the next cached
+    /// write so the deduped `Change` can be forwarded with the right context on
+    /// flush. Only meaningful when `backing` is `Cached`.
+    pending_ctx: Option<RecordContext>,
 }
 
 impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
@@ -31,12 +121,37 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
         Self {
             name,
             changelog_topic,
-            backend,
+            backing: Backing::Plain(backend),
             key_serde,
             value_serde,
             changelog: Vec::new(),
             logging: true,
+            pending_ctx: None,
         }
+    }
+
+    /// Wrap this store's backend in a record cache (moves the backend into a
+    /// [`CachingKeyValueStore`]). The caller supplies the [`NamedCache`]
+    /// registered in the task's `ThreadCache`. Idempotent-ish: re-wrapping an
+    /// already-cached store is a no-op.
+    // Called by the task-level cache wiring (a later record-caching sub-task);
+    // for now only the tests in this module exercise it.
+    #[allow(dead_code)]
+    pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
+        if !matches!(self.backing, Backing::Plain(_)) {
+            return; // already cached
+        }
+        // Move the backend out, leaving a throwaway behind, then replace with the
+        // cache wrapper. Safe because we just confirmed `Plain`.
+        let placeholder = Backing::Plain(Box::new(InMemoryBytes::default()));
+        let Backing::Plain(backend) = std::mem::replace(&mut self.backing, placeholder) else {
+            unreachable!("guarded by the matches! above")
+        };
+        self.backing = Backing::Cached(CachingKeyValueStore::with_name(
+            cache,
+            backend,
+            self.name.clone(),
+        ));
     }
 
     /// Convenience constructor for tests: an in-memory-backed store.
@@ -54,6 +169,19 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
             value_serde,
             changelog_topic,
         )
+    }
+
+    /// The context to stamp on the next cached write: the stashed
+    /// [`set_record_context`](StateStore::set_record_context) if present, else a
+    /// default rooted at the changelog topic. Processing always sets context
+    /// first, so the fallback is only hit in tests that put without one.
+    fn write_ctx(&self) -> RecordContext {
+        self.pending_ctx.clone().unwrap_or(RecordContext {
+            topic: self.changelog_topic.clone(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        })
     }
 }
 
@@ -74,12 +202,9 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
         std::mem::take(&mut self.changelog)
     }
     async fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
-        match value {
-            Some(v) => self.backend.put(key, v).await,
-            None => {
-                self.backend.delete(&key).await;
-            }
-        }
+        // Restore writes go BELOW the cache (straight to the inner store) so they
+        // don't stage dirty entries that would be re-logged on the next flush.
+        self.backing.apply(key, value).await;
     }
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
@@ -87,8 +212,49 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
     fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
         Some(self)
     }
+    fn set_record_context(&mut self, ctx: RecordContext) {
+        self.pending_ctx = Some(ctx);
+    }
+    #[allow(private_interfaces)]
+    async fn flush_cache_changes(&mut self) -> Vec<crate::processor::erased::ErasedRecord> {
+        use crate::dsl::processors::change::Change;
+        use crate::processor::erased::ErasedRecord;
+        let Backing::Cached(cache) = &self.backing else {
+            return Vec::new();
+        };
+        let drained = cache.flush_with_old().await; // Vec<(kb, old_vb, new_vb, ctx)>
+        let mut out = Vec::with_capacity(drained.len());
+        for (kb, old_vb, new_vb, ctx) in drained {
+            // Changelog is buffered at flush (the changelog store sits below the
+            // cache, so cached puts defer their changelog records until here).
+            if self.logging {
+                self.changelog.push((kb.clone(), new_vb.clone()));
+            }
+            let k: K = self
+                .key_serde
+                .deserialize(&self.changelog_topic, &kb)
+                .expect("flush_cache_changes key deserialize");
+            let old: Option<V> = old_vb.map(|b| {
+                self.value_serde
+                    .deserialize(&self.changelog_topic, &b)
+                    .expect("flush_cache_changes old value deserialize")
+            });
+            let new: Option<V> = new_vb.map(|b| {
+                self.value_serde
+                    .deserialize(&self.changelog_topic, &b)
+                    .expect("flush_cache_changes new value deserialize")
+            });
+            let change = Change { old, new };
+            out.push(ErasedRecord::new(
+                Some(Box::new(k)),
+                Box::new(change),
+                ctx.timestamp,
+            ));
+        }
+        out
+    }
     async fn clear(&mut self) {
-        self.backend.clear().await;
+        self.backing.clear().await;
         self.changelog.clear();
     }
 }
@@ -105,7 +271,7 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
         crate::store::iq::StoreKind::KeyValue
     }
     async fn iq_kv_get(&self, key: &[u8]) -> Option<bytes::Bytes> {
-        self.backend.get(key).await
+        self.backing.get(key).await
     }
     async fn iq_kv_range(&self, lo: &[u8], hi: &[u8]) -> Vec<(bytes::Bytes, bytes::Bytes)> {
         // JVM `range` is inclusive `[lo, hi]`; the byte backend is half-open
@@ -113,13 +279,13 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
         // so `[lo, hi ++ 0x00)` == inclusive `[lo, hi]`.
         let mut hi_succ = hi.to_vec();
         hi_succ.push(0);
-        self.backend.range(lo, &hi_succ).await
+        self.backing.range(lo, &hi_succ).await
     }
     async fn iq_kv_all(&self) -> Vec<(bytes::Bytes, bytes::Bytes)> {
-        self.backend.scan_all().await
+        self.backing.scan_all().await
     }
     async fn iq_kv_approx_count(&self) -> u64 {
-        self.backend.approx_len().await
+        self.backing.approx_len().await
     }
 
     async fn iq2_execute(
@@ -134,7 +300,7 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
         match query {
             Iq2Query::Key { key } => {
                 let kb = ser(key)?;
-                let out: Option<V> = self.backend.get(&kb).await.map(|vb| {
+                let out: Option<V> = self.backing.get(&kb).await.map(|vb| {
                     self.value_serde
                         .deserialize(&self.changelog_topic, &vb)
                         .expect("iqv2 kv value deserialize")
@@ -151,7 +317,7 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
                     None => None,
                 };
                 let mut rows: Vec<(K, V)> = Vec::new();
-                for (kb, vb) in self.backend.scan_all().await {
+                for (kb, vb) in self.backing.scan_all().await {
                     if lo_b.as_ref().is_some_and(|l| kb.as_ref() < l.as_ref()) {
                         continue;
                     }
@@ -181,7 +347,7 @@ impl<K: Send + 'static, V: Send + 'static> crate::store::iq::IqQueryable
 impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyValueBytesStore<K, V> {
     async fn get(&self, key: &K) -> Option<V> {
         let kb = self.key_serde.serialize(&self.changelog_topic, key);
-        self.backend.get(&kb).await.map(|vb| {
+        self.backing.get(&kb).await.map(|vb| {
             self.value_serde
                 .deserialize(&self.changelog_topic, &vb)
                 .expect("store value deserialize")
@@ -190,19 +356,35 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
     async fn put(&mut self, key: K, value: V) {
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let vb = self.value_serde.serialize(&self.changelog_topic, &value);
-        self.backend.put(kb.clone(), vb.clone()).await;
-        if self.logging {
-            self.changelog.push((kb, Some(vb)));
+        match &self.backing {
+            // Plain: write through + buffer the changelog now (today's behavior).
+            Backing::Plain(_) => {
+                self.backing
+                    .put(kb.clone(), vb.clone(), self.write_ctx())
+                    .await;
+                if self.logging {
+                    self.changelog.push((kb, Some(vb)));
+                }
+            }
+            // Cached: write-back only. The changelog record is deferred to
+            // `flush_cache_changes` (the changelog store sits below the cache).
+            Backing::Cached(_) => {
+                let ctx = self.write_ctx();
+                self.backing.put(kb, vb, ctx).await;
+            }
         }
     }
     async fn delete(&mut self, key: &K) -> Option<V> {
         let kb = self.key_serde.serialize(&self.changelog_topic, key);
-        let prev = self.backend.delete(&kb).await.map(|vb| {
+        let ctx = self.write_ctx();
+        let cached = matches!(self.backing, Backing::Cached(_));
+        let prev = self.backing.delete(kb.clone(), ctx).await.map(|vb| {
             self.value_serde
                 .deserialize(&self.changelog_topic, &vb)
                 .expect("store value deserialize")
         });
-        if self.logging {
+        // Plain logs the tombstone now; cached defers it to flush.
+        if self.logging && !cached {
             self.changelog.push((kb, None));
         }
         prev
@@ -210,7 +392,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
     async fn range(&self, lo: &K, hi: &K) -> Vec<(K, V)> {
         let lo_b = self.key_serde.serialize(&self.changelog_topic, lo);
         let hi_b = self.key_serde.serialize(&self.changelog_topic, hi);
-        self.backend
+        self.backing
             .range(&lo_b, &hi_b)
             .await
             .into_iter()
@@ -241,6 +423,21 @@ mod tests {
             Box::new(I64Serde),
             "s-changelog".into(),
         )
+    }
+
+    fn cached_store() -> KeyValueBytesStore<String, i64> {
+        let mut s = store();
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        s
+    }
+
+    fn ctx_at(ts: i64) -> RecordContext {
+        RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: ts,
+        }
     }
 
     #[tokio::test]
@@ -363,5 +560,78 @@ mod tests {
         check!(s.take_changelog().is_empty());
         s.apply_changelog(b"k".to_vec().into(), None).await;
         check!(s.get(&"k".to_string()).await == None);
+    }
+
+    #[tokio::test]
+    async fn cached_store_reads_your_writes() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 1).await;
+        s.put("a".into(), 2).await;
+        // Cache-first read sees the latest staged write.
+        check!(s.get(&"a".to_string()).await == Some(2));
+        // The inner backend has NOT been written yet (write-back deferred to flush).
+        let drained = s.flush_cache_changes().await;
+        check!(drained.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn cached_store_defers_changelog_until_flush() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 1).await;
+        s.put("a".into(), 2).await;
+        // No changelog buffered while writes only touch the cache.
+        check!(s.take_changelog().is_empty());
+        // Flushing the cache buffers exactly one deduped changelog record.
+        let _ = s.flush_cache_changes().await;
+        let cl = s.take_changelog();
+        check!(cl.len() == 1);
+        check!(cl[0].0 == StringSerde.serialize("s-changelog", &"a".to_string()));
+        check!(cl[0].1 == Some(I64Serde.serialize("s-changelog", &2)));
+    }
+
+    #[tokio::test]
+    async fn flush_cache_changes_emits_deduped_change() {
+        use crate::dsl::processors::change::Change;
+        let mut s = cached_store();
+        // Seed committed a=1 (flush it through + clear the changelog buffer).
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 1).await;
+        let _ = s.flush_cache_changes().await;
+        let _ = s.take_changelog();
+
+        // Two staged writes for the same key under context ts=7.
+        s.set_record_context(ctx_at(7));
+        s.put("a".into(), 2).await;
+        s.put("a".into(), 3).await;
+        let out = s.flush_cache_changes().await;
+        check!(out.len() == 1);
+        let rec = &out[0];
+        // Timestamp comes from the dirty entry's record context.
+        check!(rec.timestamp == 7);
+        let key = rec.key.as_ref().unwrap().downcast_ref::<String>().unwrap();
+        check!(key == "a");
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        // old = last-committed value (1); new = deduped latest (3).
+        check!(change.old == Some(1));
+        check!(change.new == Some(3));
+
+        // Inner store now holds the write-through value.
+        check!(s.get(&"a".to_string()).await == Some(3));
+    }
+
+    #[tokio::test]
+    async fn plain_store_unchanged() {
+        // A non-cached store logs the changelog immediately and reads from the
+        // backend (no flush_cache_changes needed).
+        let mut s = store();
+        s.put("a".into(), 1).await;
+        check!(s.get(&"a".to_string()).await == Some(1));
+        let cl = s.take_changelog();
+        check!(cl.len() == 1);
+        check!(cl[0].1 == Some(I64Serde.serialize("s-changelog", &1)));
+        // No cache → flush_cache_changes is empty.
+        check!(s.flush_cache_changes().await.is_empty());
     }
 }
