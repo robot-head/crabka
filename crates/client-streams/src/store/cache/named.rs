@@ -1,16 +1,24 @@
 //! Per-store record cache: a doubly-linked LRU over `Bytes -> LruCacheEntry`
 //! plus a dirty-key set kept in insertion order. Ports Kafka `NamedCache`.
 //!
+//! The entry map is a `BTreeMap<Bytes, Node>`, mirroring Kafka's backing
+//! `TreeMap`: keys are ordered in memcmp (lexicographic) byte order, which gives
+//! the ordered [`range`](NamedCache::range) / [`all`](NamedCache::all) scans
+//! the caching store wrappers need to merge cache + inner reads — for free,
+//! without a parallel key index.
+//!
 //! The LRU is implemented without `unsafe`: each [`Node`] stores its predecessor
-//! and successor *keys* in a `HashMap`, with `head` (LRU/eviction end) and `tail`
-//! (MRU/most-recently-used end) tracking the list ends. The dirty set is a
-//! `BTreeMap<u64, Bytes>` keyed by a monotonically increasing insertion counter,
-//! so `flush` visits dirty keys in the order they first became dirty.
+//! and successor *keys* in the map, with `head` (LRU/eviction end) and `tail`
+//! (MRU/most-recently-used end) tracking the list ends. LRU recency lives only in
+//! those links, independent of the map's iteration order, so ordered scans do not
+//! perturb recency. The dirty set is a `BTreeMap<u64, Bytes>` keyed by a
+//! monotonically increasing insertion counter, so `flush` visits dirty keys in
+//! the order they first became dirty.
 
 use crate::processor::record::RecordContext;
 use crate::store::cache::entry::LruCacheEntry;
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// Callback invoked per dirty entry on flush/evict.
 pub(crate) type FlushListener<'a> = dyn FnMut(&Bytes, &LruCacheEntry) + 'a;
@@ -26,7 +34,7 @@ struct Node {
 
 pub(crate) struct NamedCache {
     name: String,
-    map: HashMap<Bytes, Node>,
+    map: BTreeMap<Bytes, Node>,
     head: Option<Bytes>,
     tail: Option<Bytes>,
     /// Dirty keys in insertion order (seq -> key).
@@ -39,7 +47,7 @@ impl NamedCache {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            map: HashMap::new(),
+            map: BTreeMap::new(),
             head: None,
             tail: None,
             dirty: BTreeMap::new(),
@@ -59,6 +67,25 @@ impl NamedCache {
     /// Lookup without promotion (read-only borrow).
     pub fn get(&self, key: &Bytes) -> Option<&LruCacheEntry> {
         self.map.get(key).map(|n| &n.entry)
+    }
+
+    /// Entries with key in `[lo, hi)`, in ascending memcmp key order. Clones the
+    /// entries (incl. tombstones, so callers can hide the underlying value). A
+    /// range scan does NOT promote LRU recency (mirrors Kafka's range read).
+    pub fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, LruCacheEntry)> {
+        self.map
+            .range::<[u8], _>((std::ops::Bound::Included(lo), std::ops::Bound::Excluded(hi)))
+            .map(|(k, n)| (k.clone(), n.entry.clone()))
+            .collect()
+    }
+
+    /// Every entry in ascending memcmp key order (unbounded). Clones the entries
+    /// (incl. tombstones). Like [`range`](Self::range), does NOT promote recency.
+    pub fn all(&self) -> Vec<(Bytes, LruCacheEntry)> {
+        self.map
+            .iter()
+            .map(|(k, n)| (k.clone(), n.entry.clone()))
+            .collect()
     }
 
     /// Lookup and promote the key to the MRU (tail) position.
@@ -376,6 +403,46 @@ mod tests {
             c.get(&key(b"A")).unwrap().value,
             Some(Bytes::from_static(b"9"))
         );
+    }
+
+    #[test]
+    fn range_returns_entries_in_key_order() {
+        let mut c = NamedCache::new("s".to_string());
+        // Insert out of key order; range must still come back ascending.
+        c.put(key(b"ccc"), entry(b"3"));
+        c.put(key(b"a"), entry(b"1"));
+        c.put(key(b"bb"), entry(b"2"));
+        // A tombstone inside the range: it must be returned (callers hide it).
+        c.delete(key(b"bb2"), ctx());
+
+        // Range [a, ccc) is half-open: includes a, bb, bb2; EXCLUDES ccc at hi.
+        let r = c.range(b"a", b"ccc");
+        let keys: Vec<Bytes> = r.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            keys,
+            vec![key(b"a"), key(b"bb"), key(b"bb2")],
+            "ascending memcmp order, hi-exclusive"
+        );
+        // The in-range tombstone is present with a None value.
+        let bb2 = r.iter().find(|(k, _)| k == &key(b"bb2")).unwrap();
+        assert_eq!(bb2.1.value, None);
+        assert!(bb2.1.dirty);
+
+        // A range scan must NOT promote recency: LRU head stays the
+        // first-inserted key (ccc), so it is evicted first.
+        let mut noop = |_: &Bytes, _: &LruCacheEntry| {};
+        c.evict(&mut noop);
+        assert!(
+            c.get(&key(b"ccc")).is_none(),
+            "ccc (LRU head) evicted first; range did not touch recency"
+        );
+
+        // all() returns the full set in key order, including the out-of-range ccc.
+        let mut c2 = NamedCache::new("s".to_string());
+        c2.put(key(b"z"), entry(b"9"));
+        c2.put(key(b"a"), entry(b"1"));
+        let all: Vec<Bytes> = c2.all().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(all, vec![key(b"a"), key(b"z")]);
     }
 
     #[test]

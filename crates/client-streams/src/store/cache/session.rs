@@ -29,14 +29,13 @@
 //!
 //! ## Merged `find_sessions`
 //!
-//! `NamedCache` exposes no key iterator, so the store keeps its own `cached_keys`
-//! shadow set (a superset of the composite keys it has staged) to enumerate
-//! candidate cache keys within a session-key range. Each candidate is reconciled
-//! against the live cache via `get`: an entry the shared `ThreadCache` budget
-//! evicted since it was staged probe-misses and is pruned from the shadow,
-//! leaving the inner value to stand. Same approach as `CachingKeyValueStore`.
+//! [`NamedCache::range`] yields the staged entries whose composite key falls in
+//! the session-key range in ascending memcmp order, so the merge enumerates cache
+//! candidates directly off the cache (no shadow key set). Cache entries win on key
+//! collision and a cached tombstone hides the inner value. Same approach as
+//! `CachingKeyValueStore`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -53,12 +52,6 @@ use crate::store::session_schema::{
 pub(crate) struct CachingSessionStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
-    /// Superset of composite session keys this store has staged in the shared
-    /// `cache`. `NamedCache` exposes no key iterator, so `find_sessions`
-    /// enumerates candidate cache keys here and reconciles each against the live
-    /// cache (an entry may have been evicted by the shared `ThreadCache` budget).
-    /// Kept in memcmp order so range scans match the inner store's key ordering.
-    cached_keys: Mutex<BTreeSet<Bytes>>,
 }
 
 impl CachingSessionStore {
@@ -66,7 +59,6 @@ impl CachingSessionStore {
         Self {
             cache,
             inner: AsyncMutex::new(inner),
-            cached_keys: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -76,10 +68,6 @@ impl CachingSessionStore {
     /// store is not touched until [`flush`](Self::flush).
     #[allow(clippy::unused_async)]
     pub async fn put(&self, session_key_bytes: Bytes, value: Bytes, ctx: RecordContext) {
-        self.cached_keys
-            .lock()
-            .unwrap()
-            .insert(session_key_bytes.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.put(
             session_key_bytes,
@@ -90,10 +78,6 @@ impl CachingSessionStore {
     /// Write-back remove: stage a dirty tombstone (`None`) for the session.
     #[allow(clippy::unused_async)]
     pub async fn remove(&self, session_key_bytes: Bytes, ctx: RecordContext) {
-        self.cached_keys
-            .lock()
-            .unwrap()
-            .insert(session_key_bytes.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.delete(session_key_bytes, ctx);
     }
@@ -131,41 +115,27 @@ impl CachingSessionStore {
                 .collect()
         };
 
-        // Candidate cache keys in range, then reconcile each against the live
-        // cache (it may have been evicted by the shared budget). Restrict to keys
-        // whose inner-key bytes equal `key` to skip prefix collisions.
-        let candidates: Vec<Bytes> = {
-            let keys = self.cached_keys.lock().unwrap();
-            keys.range(lo.clone()..hi.clone())
-                .filter(|k| session_key_bytes_of(k) == key)
-                .cloned()
-                .collect()
-        };
-        let mut stale: Vec<Bytes> = Vec::new();
-        {
+        // Overlay the cache entries staged in `[lo, hi)`, collected under the lock
+        // and dropped before any await. Restrict to keys whose inner-key bytes
+        // equal `key` to skip prefix collisions. Cache wins; a tombstone hides the
+        // inner value.
+        let cached = {
             let cache = self.cache.lock().unwrap();
-            for k in candidates {
-                match cache.get(&k) {
-                    // Live value: cache wins over the inner store.
-                    Some(e) => match &e.value {
-                        Some(v) => {
-                            merged.insert(k, v.clone());
-                        }
-                        // Tombstone: hide the inner value.
-                        None => {
-                            merged.remove(&k);
-                        }
-                    },
-                    // Evicted from the shared cache since we staged it: drop from
-                    // the shadow set and let the inner value (already merged) stand.
-                    None => stale.push(k),
-                }
+            cache.range(&lo, &hi)
+        };
+        for (k, e) in cached {
+            if session_key_bytes_of(&k) != key {
+                continue;
             }
-        }
-        if !stale.is_empty() {
-            let mut keys = self.cached_keys.lock().unwrap();
-            for k in stale {
-                keys.remove(&k);
+            match e.value {
+                // Live value: cache wins over the inner store.
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                // Tombstone: hide the inner value.
+                None => {
+                    merged.remove(&k);
+                }
             }
         }
 

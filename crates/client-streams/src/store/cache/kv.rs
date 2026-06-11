@@ -18,14 +18,12 @@
 //!
 //! ## Merged `range`
 //!
-//! `NamedCache` exposes no key iterator, so the caching store keeps its own
-//! `cached_keys` shadow set (a superset of the keys it has staged) to enumerate
-//! candidate cache keys within a range. Each candidate is reconciled against the
-//! live cache via `get`: an entry the shared `ThreadCache` budget evicted since
-//! it was staged probe-misses and is pruned from the shadow, leaving the inner
-//! value to stand.
+//! [`NamedCache::range`] yields the staged entries whose key falls in `[lo, hi)`
+//! in ascending memcmp order, so the merge enumerates cache candidates directly
+//! off the cache (no shadow key set). Cache entries win on key collision and a
+//! cached tombstone hides the inner value.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -39,11 +37,6 @@ use crate::store::cache::named::NamedCache;
 pub(crate) struct CachingKeyValueStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
-    /// Superset of keys this store has staged in the shared `cache`. `NamedCache`
-    /// exposes no key iterator, so `range` enumerates candidate cache keys here
-    /// and reconciles each against the live cache (an entry may have been evicted
-    /// by the shared `ThreadCache` budget). Kept in memcmp order for range scans.
-    cached_keys: Mutex<BTreeSet<Bytes>>,
 }
 
 impl CachingKeyValueStore {
@@ -51,7 +44,6 @@ impl CachingKeyValueStore {
         Self {
             cache,
             inner: AsyncMutex::new(inner),
-            cached_keys: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -80,7 +72,6 @@ impl CachingKeyValueStore {
     /// async end to end) even though a pure cache write needs no `.await`.
     #[allow(clippy::unused_async)]
     pub async fn put(&self, key: Bytes, value: Bytes, ctx: RecordContext) {
-        self.cached_keys.lock().unwrap().insert(key.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.put(key, LruCacheEntry::new(Some(value), true, ctx));
     }
@@ -88,7 +79,6 @@ impl CachingKeyValueStore {
     /// Write-back delete: stage a dirty tombstone (`None`) in the cache.
     #[allow(clippy::unused_async)]
     pub async fn delete(&self, key: Bytes, ctx: RecordContext) {
-        self.cached_keys.lock().unwrap().insert(key.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.delete(key, ctx);
     }
@@ -102,40 +92,23 @@ impl CachingKeyValueStore {
             let inner = self.inner.lock().await;
             inner.range(lo, hi).await.into_iter().collect()
         };
-        // Candidate cache keys in range, then reconcile each against the live
-        // cache (it may have been evicted by the shared budget).
-        let candidates: Vec<Bytes> = {
-            let keys = self.cached_keys.lock().unwrap();
-            keys.range(Bytes::copy_from_slice(lo)..Bytes::copy_from_slice(hi))
-                .cloned()
-                .collect()
-        };
-        let mut stale: Vec<Bytes> = Vec::new();
-        {
+        // Overlay the cache entries staged in `[lo, hi)`, collected under the lock
+        // and dropped before any await. Cache wins; a tombstone hides the inner
+        // value.
+        let cached = {
             let cache = self.cache.lock().unwrap();
-            for k in candidates {
-                match cache.get(&k) {
-                    // Live value: cache wins over the inner store.
-                    Some(e) => match &e.value {
-                        Some(v) => {
-                            merged.insert(k, v.clone());
-                        }
-                        // Tombstone: hide the inner value.
-                        None => {
-                            merged.remove(&k);
-                        }
-                    },
-                    // Evicted from the shared cache since we staged it: drop from
-                    // the shadow set and let the inner value (already in `merged`)
-                    // stand.
-                    None => stale.push(k),
+            cache.range(lo, hi)
+        };
+        for (k, e) in cached {
+            match e.value {
+                // Live value: cache wins over the inner store.
+                Some(v) => {
+                    merged.insert(k, v);
                 }
-            }
-        }
-        if !stale.is_empty() {
-            let mut keys = self.cached_keys.lock().unwrap();
-            for k in stale {
-                keys.remove(&k);
+                // Tombstone: hide the inner value.
+                None => {
+                    merged.remove(&k);
+                }
             }
         }
         merged.into_iter().collect()

@@ -26,14 +26,12 @@
 //! `tokio::sync::Mutex` so its guard may legally span the `async` backend calls.
 //!
 //! ## Ordered iteration
-//! [`NamedCache`] is a pure LRU with only point `get` — it exposes no ordered
-//! range iterator. The wrapper therefore keeps its own ordered `key_index` (a
-//! `BTreeSet` of the windowed store-keys it has written) to drive the range/all
-//! merges. The index is advisory: a key may sit in the index but have been
-//! evicted from the cache, in which case `cache.get` returns `None` and the
-//! window is served from the inner store instead.
+//! [`NamedCache`] is backed by an ordered map, so it exposes
+//! [`range`](NamedCache::range) (bounded `[lo, hi)`) and [`all`](NamedCache::all)
+//! (unbounded) ascending-memcmp scans. The wrapper drives `fetch` off `range`
+//! over the windowed-key bounds and `fetch_all` off `all`, then filters each by
+//! key prefix / window start — no parallel key index.
 
-use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -50,9 +48,6 @@ use crate::store::window_schema::{key_bytes_of, store_key, window_start_of};
 pub(crate) struct CachingWindowStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
-    /// Ordered set of windowed store-keys written through this wrapper, used to
-    /// drive range/all merges over the point-only [`NamedCache`].
-    key_index: Mutex<BTreeSet<Bytes>>,
 }
 
 impl CachingWindowStore {
@@ -60,11 +55,7 @@ impl CachingWindowStore {
         cache: Arc<Mutex<NamedCache>>,
         inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
     ) -> Self {
-        Self {
-            cache,
-            inner,
-            key_index: Mutex::new(BTreeSet::new()),
-        }
+        Self { cache, inner }
     }
 
     /// Write-back a windowed entry into the cache. `key_schema_bytes` is the
@@ -72,10 +63,6 @@ impl CachingWindowStore {
     /// wrapped value (`recordTs ‖ serialized`). The entry is marked dirty so it
     /// is later written through on `flush`.
     pub fn put(&self, key_schema_bytes: Bytes, value: Bytes, ctx: RecordContext) {
-        self.key_index
-            .lock()
-            .unwrap()
-            .insert(key_schema_bytes.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.put(key_schema_bytes, LruCacheEntry::new(Some(value), true, ctx));
     }
@@ -83,10 +70,6 @@ impl CachingWindowStore {
     /// Tombstone a windowed key in the cache (dirty `None`), hiding any inner
     /// value until flush deletes it through.
     pub fn delete(&self, key_schema_bytes: Bytes, ctx: RecordContext) {
-        self.key_index
-            .lock()
-            .unwrap()
-            .insert(key_schema_bytes.clone());
         let mut cache = self.cache.lock().unwrap();
         cache.delete(key_schema_bytes, ctx);
     }
@@ -102,8 +85,16 @@ impl CachingWindowStore {
         let hi = store_key(key, time_to.saturating_add(1), 0);
 
         // Snapshot cache entries whose windowed key falls in [lo, hi) and whose
-        // inner key prefix matches `key` (guard against prefix collisions).
-        let cached = self.snapshot_cache_range(&lo, &hi, Some(key));
+        // inner key prefix matches `key` (guard against prefix collisions). The
+        // range is collected under the lock and the guard dropped before any await.
+        let cached: Vec<(Bytes, LruCacheEntry)> = {
+            let cache = self.cache.lock().unwrap();
+            cache
+                .range(&lo, &hi)
+                .into_iter()
+                .filter(|(k, _)| key_bytes_of(k) == key)
+                .collect()
+        };
 
         let from_inner: Vec<(Bytes, Bytes)> = self
             .inner
@@ -129,8 +120,17 @@ impl CachingWindowStore {
             ws >= time_from && ws <= time_to
         };
 
-        // Snapshot all cache entries whose window start is in range.
-        let cached = self.snapshot_cache_filtered(&in_range);
+        // Snapshot all cache entries whose window start is in range. The full
+        // ordered scan is collected under the lock and the guard dropped before
+        // any await.
+        let cached: Vec<(Bytes, LruCacheEntry)> = {
+            let cache = self.cache.lock().unwrap();
+            cache
+                .all()
+                .into_iter()
+                .filter(|(k, _)| in_range(k))
+                .collect()
+        };
 
         let from_inner: Vec<(Bytes, Bytes)> = self
             .inner
@@ -170,39 +170,6 @@ impl CachingWindowStore {
         }
         drop(inner);
         collected
-    }
-
-    /// Snapshot cache entries whose key is in `[lo, hi)` (memcmp), optionally
-    /// requiring the inner key prefix to equal `key_prefix`. Driven by the
-    /// ordered `key_index`; entries evicted from the cache are skipped.
-    fn snapshot_cache_range(
-        &self,
-        lo: &Bytes,
-        hi: &Bytes,
-        key_prefix: Option<&[u8]>,
-    ) -> Vec<(Bytes, LruCacheEntry)> {
-        let index = self.key_index.lock().unwrap();
-        let cache = self.cache.lock().unwrap();
-        index
-            .range(lo.clone()..hi.clone())
-            .filter(|k| key_prefix.is_none_or(|p| key_bytes_of(k) == p))
-            .filter_map(|k| cache.get(k).map(|e| (k.clone(), e.clone())))
-            .collect()
-    }
-
-    /// Snapshot every live cache entry whose key passes `pred`. Driven by the
-    /// ordered `key_index`; entries evicted from the cache are skipped.
-    fn snapshot_cache_filtered(
-        &self,
-        pred: &impl Fn(&[u8]) -> bool,
-    ) -> Vec<(Bytes, LruCacheEntry)> {
-        let index = self.key_index.lock().unwrap();
-        let cache = self.cache.lock().unwrap();
-        index
-            .iter()
-            .filter(|k| pred(k))
-            .filter_map(|k| cache.get(k).map(|e| (k.clone(), e.clone())))
-            .collect()
     }
 }
 
