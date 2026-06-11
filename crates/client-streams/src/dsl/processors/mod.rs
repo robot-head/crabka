@@ -16,4 +16,5 @@ pub(crate) mod stateless;
 pub(crate) mod stream_join;
 pub(crate) mod suppress;
 pub(crate) mod table;
+pub(crate) mod table_aggregate;
 pub(crate) mod window_aggregate;
