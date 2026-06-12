@@ -26,6 +26,7 @@ use crate::dsl::names;
 use crate::dsl::processors::aggregate::KStreamAggregateProcessor;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::cogroup_merge::KStreamPassThrough;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, Serde};
 use crate::topology::NodeHandle;
 
@@ -144,6 +145,7 @@ where
                                         let a = agg.clone();
                                         move |k: &K, v: &Vn, acc: VOut| a(k, v, acc)
                                     },
+                                    forwarder: TupleForwarder::default(),
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -174,6 +176,7 @@ where
                                     emit: crate::dsl::emit::EmitStrategy::default(),
                                     stream_time: i64::MIN,
                                     last_emitted_close: i64::MIN,
+                                    forwarder: TupleForwarder::default(),
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -204,6 +207,7 @@ where
                                     // Cogroup does not expose emit-final; default to emit-on-update.
                                     emit: crate::dsl::emit::EmitStrategy::default(),
                                     last_emitted_close: i64::MIN,
+                                    forwarder: TupleForwarder::default(),
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -243,6 +247,7 @@ where
                                     grace_ms: w.grace_ms,
                                     stream_time: i64::MIN,
                                     last_emitted_close: i64::MIN,
+                                    forwarder: TupleForwarder::default(),
                                     _pd: PhantomData,
                                 },
                                 [parent],
@@ -295,6 +300,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let spec = CogroupSpec::<K, VOut> {
@@ -323,6 +329,12 @@ where
                         vs.clone(),
                     );
             }
+            // cogroup caching deferred — needs suppression on the cogroup forward
+            // path (the merge passthrough forwards unconditionally, so a cached
+            // store would double-emit: once on the immediate forward, once on the
+            // flush of the deduped change). Uncached = correct emit-on-update.
+            let _ = caching;
+            state.topology.mark_store_caching(&store_for_reg, false);
         });
         let suppress = crate::dsl::ktable::kv_suppress_factory::<K, VOut, KS, VS>(
             key_serde.clone(),
@@ -479,4 +491,44 @@ where
     // Release the RefCell borrow so `KTable::new` can borrow the builder again.
     drop(g);
     merge_id
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+
+    /// Regression: a cogroup result store must NOT be record-cached even with a
+    /// positive cache budget. The cogroup merge passthrough forwards every change
+    /// unconditionally (no `TupleForwarder` suppression), so caching the store
+    /// would double-emit — once on the immediate forward, once on the flush of the
+    /// deduped change. Sub-task 3d-ii leaves cogroup stores uncached; this pins it.
+    #[test]
+    fn cogroup_store_is_not_cached_with_positive_budget() {
+        let b = StreamsBuilder::new();
+        let g1 = b.stream::<String, String>(["in1"]).group_by_key();
+        let g2 = b.stream::<String, String>(["in2"]).group_by_key();
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| {
+            acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
+        })
+        .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+        .aggregate(|| 0i64, "co");
+        let built = b.build("app").unwrap();
+
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            // A generous (default-sized) budget: if the cogroup store were marked
+            // caching, it would land in cache_owner. It must not.
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            !g.cache_owner.contains_key("co"),
+            "cogroup store must stay uncached to avoid the merge double-emit, \
+             cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
 }

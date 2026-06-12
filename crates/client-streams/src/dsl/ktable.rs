@@ -34,6 +34,7 @@ use crate::dsl::processors::table::{
     KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
     KTableToStreamProcessor,
 };
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, Serde, SerdeArc};
 use crate::topology::NodeHandle;
 
@@ -369,6 +370,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -398,6 +400,7 @@ where
                     move || KTableMapValuesProcessor {
                         f: f2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -408,6 +411,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -447,6 +451,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -477,6 +482,7 @@ where
                     move || KTableFilterProcessor {
                         predicate: p2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -487,6 +493,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);

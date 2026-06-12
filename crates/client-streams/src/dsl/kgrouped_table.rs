@@ -16,6 +16,7 @@ use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::table_aggregate::KTableAggregateProcessor;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{Changed, Consumed, DefaultSerde, I64Serde, Produced, Serde};
 use crate::topology::NodeHandle;
 
@@ -252,6 +253,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<KR, T, KS, VS>(
@@ -324,6 +326,7 @@ where
                         init: init.clone(),
                         adder: adder.clone(),
                         subtractor: subtractor.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -344,6 +347,7 @@ where
                         value_serde_lower.clone(),
                     );
             }
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 

@@ -275,6 +275,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         // Factory that lets a downstream `suppress` register a SuppressBytesStore
@@ -327,6 +328,7 @@ where
                         emit,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -336,10 +338,18 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Tumbling/hopping: retention basis == window size.
+                windows.size_ms,
                 windows.size_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update windowed aggregates: emit-final must stay
+            // uncached or the flush would emit the per-update changes emit-final
+            // deliberately suppresses.
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -374,6 +384,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory = windowed_suppress_factory::<K, V, KS, VS>(
@@ -423,6 +434,7 @@ where
                         emit,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -431,10 +443,16 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Tumbling/hopping: retention basis == window size.
+                windows.size_ms,
                 windows.size_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update windowed reduces (see aggregate lower).
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 
@@ -486,11 +504,62 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use crate::dsl::StreamsBuilder;
     use crate::dsl::emit::EmitStrategy;
     use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Window, Windowed};
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
     use crate::test_driver::TopologyTestDriver;
+
+    /// Sub-task 3d-ii: an emit-on-update (default) windowed aggregate store is
+    /// marked caching, so with a positive cache budget it lands in `cache_owner`.
+    #[test]
+    fn emit_on_update_window_store_is_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by(TimeWindows::of_size(10))
+            .count("w");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            g.cache_owner.contains_key("w"),
+            "emit-on-update window store must be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
+
+    /// Sub-task 3d-ii: an emit-FINAL (KIP-825) windowed aggregate store must stay
+    /// UNCACHED even with a positive budget — a cache flush would emit the
+    /// per-update changes emit-final deliberately suppresses. The
+    /// `emit.is_on_update()` guard at the mark site enforces this.
+    #[test]
+    fn emit_final_window_store_is_not_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by(TimeWindows::of_size(10))
+            .emit_strategy(EmitStrategy::on_window_close())
+            .count("w");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            !g.cache_owner.contains_key("w"),
+            "emit-final window store must NOT be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
 
     /// `windowedBy(TimeWindows).emit_strategy(on_window_close).count`: emit-final
     /// (KIP-825) suppresses per-update emits and forwards a single final count for

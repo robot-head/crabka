@@ -240,6 +240,14 @@ where
         self.dispatch.record_ctx
     }
 
+    /// Whether the named KV state store is record-cached (so this processor should
+    /// suppress its immediate forward and let the cache flush forward the deduped
+    /// change). False for absent/non-KV/uncached stores.
+    #[must_use]
+    pub fn store_is_cached(&self, name: &str) -> bool {
+        self.dispatch.stores.kv_is_cached(name)
+    }
+
     /// Schedule a periodic [`Punctuator`]. Callable from `init` or `process`.
     /// `interval` must be positive. Returns a [`Cancellable`] to stop it.
     ///

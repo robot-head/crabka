@@ -245,6 +245,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory =
@@ -295,6 +296,7 @@ where
                         grace_ms: windows.grace_ms,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -307,6 +309,12 @@ where
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update session aggregates: emit-final stays
+            // uncached or the flush would emit the per-update tombstones+updates
+            // emit-final suppresses.
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -338,6 +346,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory =
@@ -384,6 +393,7 @@ where
                         grace_ms: windows.grace_ms,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -396,6 +406,10 @@ where
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update session reduces (see aggregate lower).
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 
@@ -443,11 +457,61 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use crate::dsl::StreamsBuilder;
     use crate::dsl::emit::EmitStrategy;
     use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Window, Windowed};
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
     use crate::test_driver::TopologyTestDriver;
+
+    /// Sub-task 3d-ii: an emit-on-update (default) session aggregate store is
+    /// marked caching, so with a positive cache budget it lands in `cache_owner`.
+    #[test]
+    fn emit_on_update_session_store_is_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+            .count("s");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            g.cache_owner.contains_key("s"),
+            "emit-on-update session store must be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
+
+    /// Sub-task 3d-ii: an emit-FINAL session aggregate store must stay UNCACHED —
+    /// a cache flush would emit the per-update tombstones+updates emit-final
+    /// suppresses. The `emit.is_on_update()` mark guard enforces this.
+    #[test]
+    fn emit_final_session_store_is_not_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by_session(SessionWindows::of_inactivity_gap(60).grace(10))
+            .emit_strategy(EmitStrategy::on_window_close())
+            .count("s");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            !g.cache_owner.contains_key("s"),
+            "emit-final session store must NOT be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
 
     /// `windowedBy(SessionWindows).emit_strategy(on_window_close).count`: emit-final
     /// (KIP-825) suppresses per-update + merge-tombstone emits and forwards a single

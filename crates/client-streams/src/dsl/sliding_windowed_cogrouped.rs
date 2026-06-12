@@ -94,6 +94,9 @@ where
         // (a sliding window spans [t - timeDiff, t + timeDiff] so the effective
         // window size for changelog retention is 2 * timeDifferenceMs).
         let size = self.windows.time_difference_ms * 2;
+        // The true sliding window size for the key end is 1 * timeDiff (the
+        // retention basis above is the 2× span).
+        let window_size = self.windows.time_difference_ms;
         let grace = self.windows.grace_ms;
         let registrar: StoreRegistrarFn = Box::new(move |state, procs| {
             state.topology.add_window_store::<K, VOut, KS, VS>(
@@ -101,6 +104,7 @@ where
                 ks.clone(),
                 vs.clone(),
                 size,
+                window_size,
                 grace,
                 procs,
             );

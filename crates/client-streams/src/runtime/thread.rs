@@ -46,6 +46,9 @@ pub(crate) struct StreamThread {
     /// Whether a transaction is currently open (`begin_transaction` called, not yet
     /// committed/aborted). Drives the begin-on-first-poll / commit barrier.
     in_txn: bool,
+    /// Record-cache budget (JVM `statestore.cache.max.bytes`) threaded into each
+    /// task graph at `instantiate`. `0` disables caching.
+    cache_max_bytes: i64,
 }
 
 impl StreamThread {
@@ -53,12 +56,14 @@ impl StreamThread {
         fetcher: Arc<dyn RecordFetcher>,
         backend: crate::store::backend::StoreBackend,
         application_id: String,
+        cache_max_bytes: i64,
     ) -> Self {
         Self {
             tasks: HashMap::new(),
             fetcher,
             backend,
             application_id,
+            cache_max_bytes,
             globals: crate::runtime::global::GlobalStateManager::default(),
             globals_ready: false,
             global_offsets: std::collections::HashMap::new(),
@@ -211,7 +216,7 @@ impl StreamThread {
                 continue;
             }
             let mut graph = topology
-                .instantiate(&self.backend, &self.application_id)
+                .instantiate(&self.backend, &self.application_id, self.cache_max_bytes)
                 .await
                 .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
             // Lend the shared, bootstrapped global manager to this task's graph so a
@@ -403,6 +408,21 @@ impl StreamThread {
             ProcessingGuarantee::ExactlyOnceV2 => {
                 if !self.in_txn {
                     return Ok(()); // nothing produced since last commit
+                }
+                // Flush each task's record caches BEFORE sending offsets +
+                // committing the transaction, so the deduped `Change`s + their
+                // changelog records are produced into the SAME open transaction
+                // that `eos_send_offsets_and_commit` then commits (mirroring the
+                // ALOS `task.commit()` flush-then-commit ordering). The flush
+                // sends via each task's producer, which under EOS is the thread's
+                // txn producer — so the records join this interval's transaction.
+                // A flush failure aborts + rolls back like any other commit-path
+                // error (so the cycle is retried on the next interval).
+                for task in self.tasks.values_mut() {
+                    if task.flush_caches().await.is_err() {
+                        self.abort_and_rollback().await?;
+                        return Ok(());
+                    }
                 }
                 // Capture the txn-commit sequence so any error (e.g. a failed
                 // `commit_transaction`) aborts the txn and rolls every task back to
@@ -871,6 +891,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         )
         .with_clock(clock);
         thread
@@ -925,6 +946,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1014,6 +1036,7 @@ mod tests {
             Arc::clone(&restore_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1091,6 +1114,7 @@ mod tests {
             Arc::clone(&restore_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1127,6 +1151,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         let (reply2, rx2) = tokio::sync::oneshot::channel();
         empty
@@ -1173,6 +1198,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1314,6 +1340,7 @@ mod tests {
             Arc::clone(&boot_fetcher),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
 
         // The global-table topology emits the stream subtopology as id "1".
@@ -1381,6 +1408,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
 
         // 1. Initial assignment:
@@ -1506,6 +1534,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         // EOS assignment: passes the txn producer and ExactlyOnceV2.
         thread
@@ -1584,6 +1613,7 @@ mod tests {
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1678,6 +1708,7 @@ mod tests {
             Arc::clone(&replay),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
+            0,
         );
         thread
             .apply_assignment(
@@ -1750,5 +1781,207 @@ mod tests {
                 .count()
                 == 2
         );
+    }
+
+    // ─── Bug A: EOS commit flushes record caches into the transaction ─────────
+
+    /// A `Change<i64>` serde so a cached-materialized topology can wire a
+    /// `Change<i64>` sink. Encodes the `new` side (8 bytes BE) so the sink (and,
+    /// crucially, the flush-forwarded deduped change) has bytes to emit.
+    #[derive(Clone)]
+    struct ChangeI64Serde;
+    impl crate::processor::serde::Serde<crate::dsl::processors::change::Change<i64>>
+        for ChangeI64Serde
+    {
+        fn serialize(
+            &self,
+            _topic: &str,
+            v: &crate::dsl::processors::change::Change<i64>,
+        ) -> bytes::Bytes {
+            bytes::Bytes::copy_from_slice(&v.new.unwrap_or(0).to_be_bytes())
+        }
+        fn deserialize(
+            &self,
+            _topic: &str,
+            _bytes: &[u8],
+        ) -> Result<crate::dsl::processors::change::Change<i64>, crate::processor::serde::SerdeError>
+        {
+            unreachable!("Change<i64> sink is never deserialized in this test")
+        }
+    }
+
+    /// A materializing count processor that uses the real `TupleForwarder`
+    /// suppression seam: when its "counts" store is cached it does NOT forward
+    /// immediately (the cache flush forwards the deduped change), mirroring the
+    /// DSL aggregate processors. Used to prove that the EOS commit path flushes
+    /// the cache so the deduped change + changelog reach the transaction.
+    struct SuppressingCounter {
+        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder,
+    }
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, crate::dsl::processors::change::Change<i64>>
+        for SuppressingCounter
+    {
+        async fn init(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, crate::dsl::processors::change::Change<i64>>,
+        ) {
+            self.forwarder = crate::dsl::processors::tuple_forwarder::TupleForwarder::resolve(
+                ctx.store_is_cached("counts"),
+            );
+        }
+
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, crate::dsl::processors::change::Change<i64>>,
+            r: Record<String, String>,
+        ) {
+            let rc = ctx.record_context().clone();
+            let (old, new) = {
+                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                s.set_record_context(rc);
+                let old = s.get(&r.value).await;
+                let new = old.unwrap_or(0) + 1;
+                s.put(r.value.clone(), new).await;
+                (old, new)
+            };
+            self.forwarder
+                .maybe_forward(ctx, r.value, old, new, r.timestamp);
+        }
+    }
+
+    /// `source → SuppressingCounter(materializes "counts", cache-marked) → Change<i64> sink`.
+    fn cached_counting_built() -> crate::topology::BuiltTopology {
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::processors::tuple_forwarder::TupleForwarder;
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let c = t.add_processor(
+            "c",
+            || SuppressingCounter {
+                forwarder: TupleForwarder::default(),
+            },
+            [&src],
+        );
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        t.add_sink_explicit::<String, Change<i64>, _, _, _, _>(
+            "out",
+            "out",
+            [&c],
+            crate::processor::serde::Produced::with(StringSerde, ChangeI64Serde),
+        );
+        t.mark_store_caching("counts", true);
+        t.build("app").unwrap()
+    }
+
+    /// EOS-v2 + a CACHED materialized store: a record buffered in the cache (its
+    /// immediate forward suppressed) must have its deduped `Change` + changelog
+    /// produced INTO the transaction at commit — the `commit_all` EOS branch must
+    /// flush caches before `send_offsets`/`commit`. Regression guard for the bug
+    /// where the EOS commit never flushed caches (dropping cached output).
+    #[tokio::test]
+    async fn eos_commit_flushes_record_caches_into_transaction() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        let mock = Arc::new(MockTransactionalProducer::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = cached_counting_built();
+        // cache_max_bytes > 0 so "counts" is actually wrapped in a cache.
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+            1024,
+        );
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // Two records for the SAME key "a": both buffer in the cache, suppressed.
+        let fetcher = ScriptedFetcher::new(vec![(
+            ("in".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![
+                    FetchedRec {
+                        offset: 0,
+                        key: None,
+                        value: Some("a".into()),
+                        timestamp: -1,
+                    },
+                    FetchedRec {
+                        offset: 1,
+                        key: None,
+                        value: Some("a".into()),
+                        timestamp: -1,
+                    },
+                ],
+            },
+        )]);
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+        thread.poll_all(&fetcher, &tracker).await.unwrap();
+
+        // Suppressed: nothing emitted to the "out" sink during processing yet
+        // (the changelog/sink records are deferred to the cache flush at commit).
+        check!(
+            !mock
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _p, _k, _v)| t == "out"),
+            "cached materialization must suppress the immediate sink forward"
+        );
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // The cache flush at commit produced the deduped change into the txn: the
+        // "out" sink got exactly ONE record (count = 2, the latest) AND the
+        // "counts" changelog got exactly one entry.
+        let sent = mock.sent.lock().unwrap();
+        let out: Vec<_> = sent.iter().filter(|(t, ..)| t == "out").collect();
+        check!(out.len() == 1, "exactly one deduped sink record");
+        check!(
+            out[0].3.as_deref() == Some([0, 0, 0, 0, 0, 0, 0, 2].as_ref()),
+            "deduped sink value is the latest count (2)"
+        );
+        check!(
+            sent.iter().any(|(t, ..)| t.contains("counts")),
+            "cached store changelog must be produced into the transaction"
+        );
+        drop(sent);
+
+        // The flush-produced Send happened BEFORE SendOffsets + Commit, so the
+        // records are part of the committed transaction (not after it).
+        let calls = mock.calls.lock().unwrap();
+        let first_send = calls.iter().position(|s| *s == Step::Send);
+        let send_offsets = calls.iter().position(|s| *s == Step::SendOffsets);
+        let commit = calls.iter().position(|s| *s == Step::Commit);
+        check!(
+            first_send.is_some(),
+            "the flush must produce at least one Send"
+        );
+        check!(
+            first_send < send_offsets,
+            "flush Send must precede SendOffsets"
+        );
+        check!(send_offsets < commit, "SendOffsets must precede Commit");
     }
 }

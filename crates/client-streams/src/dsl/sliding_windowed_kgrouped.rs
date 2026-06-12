@@ -239,6 +239,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory = sliding_suppress_factory::<K, VA, KS, VS>(
@@ -287,6 +288,7 @@ where
                         stream_time: i64::MIN,
                         emit,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -299,10 +301,19 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
+                // the true window size for the key end is 1 * timeDiff.
                 windows.time_difference_ms * 2,
+                windows.time_difference_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update sliding aggregates: emit-final stays
+            // uncached or the flush would emit the per-update changes emit-final
+            // suppresses.
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -334,6 +345,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory = sliding_suppress_factory::<K, V, KS, VS>(
@@ -382,6 +394,7 @@ where
                         stream_time: i64::MIN,
                         emit,
                         last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -391,10 +404,17 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
+                // the true window size for the key end is 1 * timeDiff.
                 windows.time_difference_ms * 2,
+                windows.time_difference_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update sliding reduces (see aggregate lower).
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 

@@ -2,16 +2,82 @@
 //! raw aggregate values. Third typed store beside `KeyValueBytesStore` and
 //! `WindowBytesStore`. Supports the JVM session-merge fetch (`find_sessions`).
 use std::any::Any;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use crate::processor::record::RecordContext;
 use crate::processor::serde::Serde;
 use crate::store::api::StateStore;
 use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
+use crate::store::cache::named::NamedCache;
+use crate::store::cache::session::CachingSessionStore;
 use crate::store::session_schema::{
     session_end_of, session_key, session_key_bytes_of, session_start_of,
 };
+
+/// The session store's backing: either a plain boxed byte store or a record-cache
+/// wrapper over it. `Cached` is opted into via [`SessionBytesStore::enable_cache`];
+/// uncached stores keep today's behavior exactly. Mirrors `kv::Backing`.
+enum Backing {
+    Plain(Box<dyn ByteKeyValueStore>),
+    Cached(CachingSessionStore),
+}
+
+impl Backing {
+    async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
+        match self {
+            Backing::Plain(b) => b.range(lo, hi).await,
+            Backing::Cached(c) => c.range(lo, hi).await,
+        }
+    }
+    async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        match self {
+            Backing::Plain(b) => b.scan_all().await,
+            Backing::Cached(c) => c.scan_all().await,
+        }
+    }
+
+    /// Processing-path write. Plain: direct put. Cached: write-back put carrying
+    /// the record context (changelog deferred to flush).
+    async fn put(&mut self, key: Bytes, value: Bytes, ctx: RecordContext) {
+        match self {
+            Backing::Plain(b) => b.put(key, value).await,
+            Backing::Cached(c) => c.put(key, value, ctx).await,
+        }
+    }
+
+    /// Processing-path remove (tombstone). Plain: direct delete. Cached:
+    /// write-back tombstone carrying the context.
+    async fn remove(&mut self, key: Bytes, ctx: RecordContext) {
+        match self {
+            Backing::Plain(b) => {
+                b.delete(&key).await;
+            }
+            Backing::Cached(c) => c.remove(key, ctx).await,
+        }
+    }
+
+    /// Restore-path write (below the cache; never stages a dirty entry).
+    async fn apply(&mut self, key: Bytes, value: Option<Bytes>) {
+        match (self, value) {
+            (Backing::Plain(b), Some(v)) => b.put(key, v).await,
+            (Backing::Plain(b), None) => {
+                b.delete(&key).await;
+            }
+            (Backing::Cached(c), Some(v)) => c.put_inner(key, v).await,
+            (Backing::Cached(c), None) => c.delete_inner(&key).await,
+        }
+    }
+
+    async fn clear(&mut self) {
+        match self {
+            Backing::Plain(b) => b.clear().await,
+            Backing::Cached(c) => c.clear().await,
+        }
+    }
+}
 
 /// Typed session store keyed by `(K, start, end)`. `find_sessions` returns the
 /// merge candidates for a record: sessions whose `[start, end]` overlaps the
@@ -36,11 +102,15 @@ pub trait SessionStore<K: Send + Sync, V: Send>: StateStore {
 pub struct SessionBytesStore<K, V> {
     name: String,
     changelog_topic: String,
-    backend: Box<dyn ByteKeyValueStore>,
+    backing: Backing,
     key_serde: Box<dyn Serde<K>>,
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
+    /// Set via [`StateStore::set_record_context`]; attached to the next cached
+    /// write so the deduped `Change` can be forwarded with the right context on
+    /// flush. Only meaningful when `backing` is `Cached`.
+    pending_ctx: Option<RecordContext>,
 }
 
 impl<K: 'static, V: 'static> SessionBytesStore<K, V> {
@@ -55,11 +125,12 @@ impl<K: 'static, V: 'static> SessionBytesStore<K, V> {
         Self {
             name,
             changelog_topic,
-            backend,
+            backing: Backing::Plain(backend),
             key_serde,
             value_serde,
             changelog: Vec::new(),
             logging: true,
+            pending_ctx: None,
         }
     }
 
@@ -78,10 +149,46 @@ impl<K: 'static, V: 'static> SessionBytesStore<K, V> {
             changelog_topic,
         )
     }
+
+    /// Wrap this store's backend in a record cache (moves the backend into a
+    /// [`CachingSessionStore`]). The caller supplies the [`NamedCache`] registered
+    /// in the task's `ThreadCache`. Re-wrapping an already-cached store is a no-op.
+    pub(crate) fn enable_cache(&mut self, cache: Arc<Mutex<NamedCache>>) {
+        if !matches!(self.backing, Backing::Plain(_)) {
+            return; // already cached
+        }
+        let placeholder = Backing::Plain(Box::new(InMemoryBytes::default()));
+        let Backing::Plain(backend) = std::mem::replace(&mut self.backing, placeholder) else {
+            unreachable!("guarded by the matches! above")
+        };
+        self.backing = Backing::Cached(CachingSessionStore::with_name(
+            cache,
+            backend,
+            self.name.clone(),
+        ));
+    }
+
+    /// Whether this store's backend has been wrapped in a record cache.
+    #[must_use]
+    pub(crate) fn is_cached(&self) -> bool {
+        matches!(self.backing, Backing::Cached(_))
+    }
+
+    /// The context to stamp on the next cached write: the stashed
+    /// [`set_record_context`](StateStore::set_record_context) if present, else a
+    /// default rooted at the changelog topic.
+    fn write_ctx(&self) -> RecordContext {
+        self.pending_ctx.clone().unwrap_or(RecordContext {
+            topic: self.changelog_topic.clone(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        })
+    }
 }
 
 #[async_trait]
-impl<K: 'static, V: 'static> StateStore for SessionBytesStore<K, V> {
+impl<K: Send + 'static, V: Send + 'static> StateStore for SessionBytesStore<K, V> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -97,12 +204,9 @@ impl<K: 'static, V: 'static> StateStore for SessionBytesStore<K, V> {
         std::mem::take(&mut self.changelog)
     }
     async fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
-        match value {
-            Some(v) => self.backend.put(key, v).await,
-            None => {
-                self.backend.delete(&key).await;
-            }
-        }
+        // Restore writes go BELOW the cache (straight to the inner store) so they
+        // don't stage dirty entries that would be re-logged on the next flush.
+        self.backing.apply(key, value).await;
     }
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
@@ -110,8 +214,74 @@ impl<K: 'static, V: 'static> StateStore for SessionBytesStore<K, V> {
     fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
         Some(self)
     }
+    fn set_record_context(&mut self, ctx: RecordContext) {
+        self.pending_ctx = Some(ctx);
+    }
+    #[allow(private_interfaces)]
+    fn enable_cache_erased(&mut self, cache: Arc<Mutex<NamedCache>>) -> bool {
+        self.enable_cache(cache);
+        true
+    }
+    fn is_cached_erased(&self) -> bool {
+        self.is_cached()
+    }
+    #[allow(private_interfaces)]
+    async fn flush_cache_into(
+        &mut self,
+        buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
+        children: &[usize],
+    ) {
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::windows::{Window, Windowed};
+        use crate::processor::erased::ErasedRecord;
+        let Backing::Cached(cache) = &self.backing else {
+            return;
+        };
+        // Vec<(session_key_bytes, old, new, ctx)>. Session values are the raw
+        // aggregate bytes (no `ValueAndTimestamp` wrap).
+        let drained = cache.flush_with_old().await;
+        for (sk, old_vb, new_vb, ctx) in drained {
+            // Changelog logs the raw session store-key + the new value, exactly as
+            // the uncached `put` path does.
+            if self.logging {
+                self.changelog.push((sk.clone(), new_vb.clone()));
+            }
+            // The session key is self-contained: it carries both start and end.
+            let session_start = session_start_of(&sk);
+            let session_end = session_end_of(&sk);
+            let key_bytes = session_key_bytes_of(&sk);
+            for &child in children {
+                let key: K = self
+                    .key_serde
+                    .deserialize(&self.changelog_topic, key_bytes)
+                    .expect("flush_cache_into session key deserialize");
+                let old: Option<V> = old_vb.as_ref().map(|b| {
+                    self.value_serde
+                        .deserialize(&self.changelog_topic, b)
+                        .expect("flush_cache_into session old value deserialize")
+                });
+                let new: Option<V> = new_vb.as_ref().map(|b| {
+                    self.value_serde
+                        .deserialize(&self.changelog_topic, b)
+                        .expect("flush_cache_into session new value deserialize")
+                });
+                let windowed = Windowed {
+                    key,
+                    window: Window {
+                        start: session_start,
+                        end: session_end,
+                    },
+                };
+                let change = Change { old, new };
+                buffer.push_back((
+                    child,
+                    ErasedRecord::new(Some(Box::new(windowed)), Box::new(change), ctx.timestamp),
+                ));
+            }
+        }
+    }
     async fn clear(&mut self) {
-        self.backend.clear().await;
+        self.backing.clear().await;
         self.changelog.clear();
     }
 }
@@ -127,7 +297,7 @@ impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for SessionBytesStore
         let lo = session_key(key, 0, 0);
         let hi = session_key(key, i64::MAX, i64::MAX);
         let mut out = Vec::new();
-        for (k, raw) in self.backend.range(&lo, &hi).await {
+        for (k, raw) in self.backing.range(&lo, &hi).await {
             if session_key_bytes_of(&k) != key {
                 continue;
             }
@@ -154,7 +324,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
         // Upper bound: past every entry for this key prefix.
         let hi = session_key(&kb, i64::MAX, i64::MAX);
         let mut out = Vec::new();
-        for (k, raw) in self.backend.range(&lo, &hi).await {
+        for (k, raw) in self.backing.range(&lo, &hi).await {
             if session_key_bytes_of(&k) != kb.as_ref() {
                 continue; // guard prefix collisions with a different key
             }
@@ -177,24 +347,40 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SessionStore<K, V> for Session
         let kb = self.key_serde.serialize(&self.changelog_topic, &key);
         let sk = session_key(&kb, start, end);
         let raw = self.value_serde.serialize(&self.changelog_topic, &value);
-        self.backend.put(sk.clone(), raw.clone()).await;
-        if self.logging {
-            self.changelog.push((sk, Some(raw)));
+        match &self.backing {
+            // Plain: write through + buffer the changelog now (today's behavior).
+            Backing::Plain(_) => {
+                self.backing
+                    .put(sk.clone(), raw.clone(), self.write_ctx())
+                    .await;
+                if self.logging {
+                    self.changelog.push((sk, Some(raw)));
+                }
+            }
+            // Cached: write-back only. The changelog record is deferred to
+            // `flush_cache_into` (the changelog store sits below the cache).
+            Backing::Cached(_) => {
+                let ctx = self.write_ctx();
+                self.backing.put(sk, raw, ctx).await;
+            }
         }
     }
 
     async fn remove(&mut self, key: &K, start: i64, end: i64) {
         let kb = self.key_serde.serialize(&self.changelog_topic, key);
         let sk = session_key(&kb, start, end);
-        self.backend.delete(&sk).await;
-        if self.logging {
+        let cached = matches!(self.backing, Backing::Cached(_));
+        let ctx = self.write_ctx();
+        self.backing.remove(sk.clone(), ctx).await;
+        // Plain logs the tombstone now; cached defers it to flush.
+        if self.logging && !cached {
             self.changelog.push((sk, None));
         }
     }
 
     async fn find_closed_sessions(&self, close_time: i64) -> Vec<(K, i64, i64, V)> {
         let mut out = Vec::new();
-        for (k, raw) in self.backend.scan_all().await {
+        for (k, raw) in self.backing.scan_all().await {
             let end = session_end_of(&k);
             if end > close_time {
                 continue;
@@ -305,5 +491,242 @@ mod tests {
             s2.find_sessions(&"k".to_string(), 0, 100).await,
             vec![(50, 60, 2)]
         );
+    }
+
+    // ── Record-cache tests (mirror kv.rs) ───────────────────────────────────
+
+    fn cached_store() -> SessionBytesStore<String, i64> {
+        let mut s = store();
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        s
+    }
+
+    fn ctx_at(ts: i64) -> RecordContext {
+        RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: ts,
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_session_store_reads_your_writes() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        // Two cached puts to the SAME session key [0, 10].
+        s.put("a".into(), 0, 10, 1).await;
+        s.put("a".into(), 0, 10, 2).await;
+        // Cache-first read sees the latest staged write (value 2).
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 2)]
+        );
+        // No changelog buffered while writes only touch the cache.
+        assert!(s.take_changelog().is_empty());
+    }
+
+    #[tokio::test]
+    async fn flush_cache_into_emits_deduped_session_change() {
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::windows::{Window, Windowed};
+        let mut s = cached_store();
+        // Seed a committed value (flush it through + clear the changelog buffer).
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 10, 1).await;
+        let mut seed = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut seed, &[0]).await;
+        let _ = s.take_changelog();
+
+        // Two staged writes for the same session key [0, 10] under context ts=7.
+        s.set_record_context(ctx_at(7));
+        s.put("a".into(), 0, 10, 2).await;
+        s.put("a".into(), 0, 10, 3).await;
+
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[7]).await;
+        assert_eq!(buffer.len(), 1);
+        let (child, rec) = &buffer[0];
+        assert_eq!(*child, 7);
+        assert_eq!(rec.timestamp, 7);
+        // Key downcasts to Windowed<String> carrying the encoded start/end.
+        let key = rec
+            .key
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Windowed<String>>()
+            .unwrap();
+        assert_eq!(key.key, "a");
+        assert_eq!(key.window, Window { start: 0, end: 10 });
+        // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.old, Some(1));
+        assert_eq!(change.new, Some(3));
+
+        // Changelog buffered the RAW session store-key + the latest value.
+        let cl = s.take_changelog();
+        assert_eq!(cl.len(), 1);
+        assert_eq!(
+            cl[0].0,
+            session_key(
+                &StringSerde.serialize("app-s-changelog", &"a".to_string()),
+                0,
+                10
+            )
+        );
+        assert_eq!(cl[0].1, Some(I64Serde.serialize("app-s-changelog", &3)));
+
+        // Inner store now holds the write-through value.
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 3)]
+        );
+    }
+
+    /// Cached `find_closed_sessions` routes through `Backing::Cached::scan_all`,
+    /// overlaying the cache across all keys (read-your-writes before flush).
+    #[tokio::test]
+    async fn cached_find_closed_sessions_overlays_cache() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 5, 1).await;
+        s.put("b".into(), 2, 8, 2).await;
+        s.put("a".into(), 20, 30, 3).await;
+
+        let mut got = s.find_closed_sessions(8).await;
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]
+        );
+        assert!(s.find_closed_sessions(4).await.is_empty());
+        // Reads only touched the cache; no changelog buffered yet.
+        assert!(s.take_changelog().is_empty());
+    }
+
+    /// On a cached store, `remove` stages a write-back tombstone (deferring its
+    /// changelog) that hides the inner session, then flushes the deduped
+    /// tombstone Change + changelog record.
+    #[tokio::test]
+    async fn cached_remove_stages_tombstone_and_flushes() {
+        use crate::dsl::processors::change::Change;
+        let mut s = cached_store();
+        // Seed + flush a committed session [0, 10] = 1.
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 10, 1).await;
+        let mut seed = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut seed, &[0]).await;
+        let _ = s.take_changelog();
+
+        // remove stages a tombstone (cached → no immediate changelog).
+        s.set_record_context(ctx_at(7));
+        s.remove(&"a".to_string(), 0, 10).await;
+        assert!(s.take_changelog().is_empty());
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
+        let change = buffer[0].1.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.old, Some(1)); // committed value
+        assert_eq!(change.new, None); // tombstone
+        let cl = s.take_changelog();
+        assert_eq!(cl.len(), 1);
+        assert!(cl[0].1.is_none()); // changelog tombstone
+    }
+
+    /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
+    /// → empty cache flush), and a `None` deletes through.
+    #[tokio::test]
+    async fn cached_apply_changelog_goes_below_cache() {
+        let mut s = cached_store();
+        let sk = session_key(
+            &StringSerde.serialize("app-s-changelog", &"a".to_string()),
+            0,
+            10,
+        );
+        s.apply_changelog(sk.clone(), Some(I64Serde.serialize("app-s-changelog", &9)))
+            .await;
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 9)]
+        );
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+        assert!(s.take_changelog().is_empty());
+
+        // None apply deletes through.
+        s.apply_changelog(sk, None).await;
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+    }
+
+    /// `clear` on a cached store empties both the cache layer and inner store.
+    #[tokio::test]
+    async fn cached_clear_empties_everything() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 10, 1).await;
+        StateStore::clear(&mut s).await;
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+        assert!(s.find_closed_sessions(i64::MAX).await.is_empty());
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+    }
+
+    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
+    /// no-op.
+    #[tokio::test]
+    async fn enable_cache_is_idempotent() {
+        let mut s = store();
+        assert!(!s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        assert!(s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        assert!(s.is_cached());
+    }
+
+    /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
+    /// `flush`/`close` are no-ops, and `StateStore::clear` wipes the store + its
+    /// buffered changelog.
+    #[tokio::test]
+    async fn plain_store_lifecycle_logging_flush_close_clear() {
+        let mut s = store();
+        s.set_logging(false);
+        s.put("a".into(), 0, 10, 1).await;
+        assert!(
+            s.take_changelog().is_empty(),
+            "logging off suppresses the changelog"
+        );
+        // Read still works; flush/close are no-ops.
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 1)]
+        );
+        s.flush().await;
+        s.close();
+
+        // Re-enable logging and write, then clear wipes state + changelog.
+        s.set_logging(true);
+        s.put("b".into(), 0, 10, 2).await;
+        StateStore::clear(&mut s).await;
+        assert!(s.find_sessions(&"b".to_string(), 0, 100).await.is_empty());
+        assert!(s.take_changelog().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plain_session_store_unchanged() {
+        let mut s = store();
+        s.put("a".into(), 0, 10, 1).await;
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 1)]
+        );
+        let cl = s.take_changelog();
+        assert_eq!(cl.len(), 1);
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
     }
 }

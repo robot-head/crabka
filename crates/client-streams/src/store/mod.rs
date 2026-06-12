@@ -2,6 +2,7 @@
 pub mod api;
 pub mod backend;
 pub(crate) mod byte;
+pub(crate) mod cache;
 pub(crate) mod fk_subscription;
 pub mod iq;
 pub(crate) mod join_grace_buffer;

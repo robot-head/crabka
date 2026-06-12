@@ -34,6 +34,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::dsl::windows::{SlidingWindows, Window, Windowed};
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
@@ -63,6 +64,11 @@ pub(crate) struct KStreamSlidingWindowAggregateProcessor<K, V, VA, I, A> {
     pub emit: crate::dsl::emit::EmitStrategy,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam: when the window store is record-cached the
+    /// per-update forwards are suppressed (the cache flush forwards the deduped
+    /// `Change`). Resolved in `init`. Only the emit-on-update path is wrapped —
+    /// emit-final stores are never cached.
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -76,6 +82,10 @@ where
     I: Fn() -> VA + Send + Sync + 'static,
     A: Fn(&K, &V, VA) -> VA + Send + Sync + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -94,6 +104,17 @@ where
         let record_window_end = t + w;
         if record_window_end < close_time {
             return;
+        }
+
+        // Stash the source record context so a cached store stamps it on the
+        // staged writes (`write_ctx` clones, not takes — so it persists across
+        // every put this record performs).
+        {
+            let rc = ctx.record_context().clone();
+            let store = ctx
+                .get_window_store::<K, VA>(&self.store_name)
+                .expect("window store not found");
+            store.set_record_context(rc);
         }
 
         if t < w {
@@ -191,14 +212,15 @@ where
                     prior
                 };
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window { start: ws, end: we },
-                        }),
+                        },
                         Change::update(old_agg, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 let store = ctx
@@ -223,17 +245,18 @@ where
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: rws,
                                     end: rwe,
                                 },
-                            }),
+                            },
                             Change::update(None, ragg),
                             rts,
-                        ));
+                        );
                     }
                 }
             }
@@ -255,17 +278,18 @@ where
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: pws,
                                     end: pwe,
                                 },
-                            }),
+                            },
                             Change::update(None, new_agg),
                             new_ts,
-                        ));
+                        );
                     }
                 }
             }
@@ -287,17 +311,18 @@ where
                     store.put(key.clone(), cws, new_agg.clone(), new_ts).await;
                 }
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window {
                                 start: cws,
                                 end: cwe,
                             },
-                        }),
+                        },
                         Change::update(old_agg_opt, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             }
         }
@@ -379,14 +404,15 @@ where
                     prior
                 };
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window { start: ws, end: we },
-                        }),
+                        },
                         Change::update(old_agg, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 let store = ctx
@@ -413,17 +439,18 @@ where
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: pws,
                                     end: pwe,
                                 },
-                            }),
+                            },
                             Change::update(None, new_agg),
                             new_ts,
-                        ));
+                        );
                     }
                 }
             }
@@ -448,17 +475,18 @@ where
                     store.put(key.clone(), lws, new_agg.clone(), new_ts).await;
                 }
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window {
                                 start: lws,
                                 end: lwe,
                             },
-                        }),
+                        },
                         Change::update(None, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 // Store but don't emit (expired).
@@ -482,17 +510,18 @@ where
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: rws,
                                     end: rwe,
                                 },
-                            }),
+                            },
                             Change::update(None, ragg),
                             rts,
-                        ));
+                        );
                     }
                 }
             }
@@ -562,6 +591,8 @@ pub(crate) struct KStreamSlidingWindowReduceProcessor<K, V, R> {
     pub emit: crate::dsl::emit::EmitStrategy,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam (see [`KStreamSlidingWindowAggregateProcessor::forwarder`]).
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -573,6 +604,10 @@ where
     V: std::any::Any + Send + Sync + Clone,
     R: Fn(&V, &V) -> V + Send + Sync + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -587,6 +622,16 @@ where
         let record_window_end = t + w;
         if record_window_end < close_time {
             return;
+        }
+
+        // Stash the source record context so a cached store stamps it on the
+        // staged writes (persists across every put this record performs).
+        {
+            let rc = ctx.record_context().clone();
+            let store = ctx
+                .get_window_store::<K, V>(&self.store_name)
+                .expect("window store not found");
+            store.set_record_context(rc);
         }
 
         if t < w {
@@ -673,14 +718,15 @@ where
                     prior
                 };
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window { start: ws, end: we },
-                        }),
+                        },
                         Change::update(old_agg, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 let store = ctx
@@ -705,17 +751,18 @@ where
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: rws,
                                     end: rwe,
                                 },
-                            }),
+                            },
                             Change::update(None, ragg),
                             rts,
-                        ));
+                        );
                     }
                 }
             }
@@ -736,17 +783,18 @@ where
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: pws,
                                     end: pwe,
                                 },
-                            }),
+                            },
                             Change::update(None, new_agg),
                             new_ts,
-                        ));
+                        );
                     }
                 }
             }
@@ -771,17 +819,18 @@ where
                     store.put(key.clone(), cws, new_agg.clone(), new_ts).await;
                 }
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window {
                                 start: cws,
                                 end: cwe,
                             },
-                        }),
+                        },
                         Change::update(old_agg, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             }
         }
@@ -852,14 +901,15 @@ where
                     prior
                 };
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window { start: ws, end: we },
-                        }),
+                        },
                         Change::update(old_agg, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 let store = ctx
@@ -884,17 +934,18 @@ where
                         store.put(key.clone(), pws, new_agg.clone(), new_ts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: pws,
                                     end: pwe,
                                 },
-                            }),
+                            },
                             Change::update(None, new_agg),
                             new_ts,
-                        ));
+                        );
                     }
                 }
             }
@@ -919,17 +970,18 @@ where
                     store.put(key.clone(), lws, new_agg.clone(), new_ts).await;
                 }
                 if self.emit.is_on_update() {
-                    ctx.forward(Record::new(
-                        Some(Windowed {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
                             key: key.clone(),
                             window: Window {
                                 start: lws,
                                 end: lwe,
                             },
-                        }),
+                        },
                         Change::update(None, new_agg),
                         new_ts,
-                    ));
+                    );
                 }
             } else {
                 let store = ctx
@@ -952,17 +1004,18 @@ where
                         store.put(key.clone(), rws, ragg.clone(), rts).await;
                     }
                     if self.emit.is_on_update() {
-                        ctx.forward(Record::new(
-                            Some(Windowed {
+                        self.forwarder.maybe_forward_change(
+                            ctx,
+                            Windowed {
                                 key: key.clone(),
                                 window: Window {
                                     start: rws,
                                     end: rwe,
                                 },
-                            }),
+                            },
                             Change::update(None, ragg),
                             rts,
-                        ));
+                        );
                     }
                 }
             }
@@ -1083,6 +1136,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
         s
     }
@@ -1103,6 +1157,7 @@ mod tests {
             stream_time: i64::MIN,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData,
         }
     }
@@ -1151,6 +1206,30 @@ mod tests {
         assert!(
             !out.iter().any(|(w, _, _)| w.start < 0),
             "unexpected negative-start window in early path: {out:?}"
+        );
+    }
+
+    /// A second EARLY record (`t=6 < W=10`) after a first early record (`t=3`)
+    /// exercises the `process_early` straddle/right-window branches: the combined
+    /// window `[0,10]` folds in the new record (count 1 → 2), and the previous
+    /// record's right window `[t_prev+1, ..]` (`[4,14]`) is created seeded from
+    /// init then aggregated (count 1).
+    #[tokio::test]
+    async fn early_path_second_record_updates_combined_and_prev_right_window() {
+        let mut stores = store();
+        let mut p = count_proc();
+        let _ = run(&mut p, &mut stores, "a", 3).await;
+        let out = run(&mut p, &mut stores, "a", 6).await;
+
+        // Combined window [0,10] now counts both records.
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))),
+            "expected combined [0,10] old=1 new=2, got {out:?}"
+        );
+        // Previous record (t=3) right window [4, 14] created with count=1.
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some(1))),
+            "expected previous-record right window [4,14]=1, got {out:?}"
         );
     }
 
@@ -1268,6 +1347,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(StringSerde),
             "app-w-changelog".into(),
+            10,
         )));
         s
     }
@@ -1282,6 +1362,7 @@ mod tests {
             stream_time: i64::MIN,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData,
         }
     }
@@ -1363,6 +1444,49 @@ mod tests {
         assert!(
             out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))),
             "expected left window [15,25]=\"v|v\", got {out:?}"
+        );
+    }
+
+    /// First reduce record at `t=3` (`t < W=10`) drives the reduce
+    /// `process_early` path: the combined window `[0, W]` is seeded with the
+    /// value itself.
+    #[tokio::test]
+    async fn reduce_early_record_seeds_combined_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))),
+            "expected combined [0,10]=\"v\" for early t=3, got {out:?}"
+        );
+        assert!(
+            !out.iter().any(|(w, _, _)| w.start < 0),
+            "no negative-start window in the early path: {out:?}"
+        );
+    }
+
+    /// A second EARLY reduce record (`t=6`) folds into the combined window
+    /// `[0,10]` (`"v" -> "v|v"`) and creates the previous record's right window
+    /// `[4,14]` seeded from the current value.
+    #[tokio::test]
+    async fn reduce_early_path_second_record_updates_combined_and_prev_right_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let _ = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 6).await;
+
+        assert!(
+            out.contains(&(
+                Window { start: 0, end: 10 },
+                Some("v".into()),
+                Some("v|v".into())
+            )),
+            "expected combined [0,10] old=\"v\" new=\"v|v\", got {out:?}"
+        );
+        // Previous record (t=3) right window [4,14] seeded with the current value.
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))),
+            "expected previous-record right window [4,14]=\"v\", got {out:?}"
         );
     }
 

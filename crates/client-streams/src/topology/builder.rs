@@ -106,6 +106,11 @@ pub struct Topology {
     /// replicate the matching store. Populated by [`Topology::add_global_store`]
     /// alongside `global_store_factories`. Invisible in the wire output.
     global_store_topics: HashMap<String, String>,
+    /// Materialized KV stores whose record cache is eligible (JVM `Materialized`
+    /// caching, default on). Populated by [`Topology::mark_store_caching`] at the
+    /// materialized KTable/aggregate lowering sites; consumed by `instantiate` to
+    /// wrap the store in a [`NamedCache`] when `cache_max_bytes > 0`.
+    caching_stores: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -129,6 +134,7 @@ impl std::fmt::Debug for Topology {
                 ),
             )
             .field("global_store_topics", &self.global_store_topics)
+            .field("caching_stores", &self.caching_stores)
             .finish()
     }
 }
@@ -523,12 +529,25 @@ impl Topology {
     /// `windowstore.changelog.additional.retention.ms` default of 1 day).
     ///
     /// [`add_state_store`]: Topology::add_state_store
+    ///
+    /// `size_ms` is the **retention basis**: it drives the changelog
+    /// `retention.ms = size_ms + grace_ms + 86_400_000`. For tumbling/hopping
+    /// windows it equals the window size; for sliding windows it is the
+    /// retention span (`2 * timeDifferenceMs`), which is wider than the window.
+    ///
+    /// `window_size_ms` is the **true window length** used only by the store's
+    /// cache flush to reconstruct the downstream `Windowed<K>` key's
+    /// `end = start + window_size_ms` (the store-key bytes hold only the start).
+    /// For sliding windows this is `timeDifferenceMs` (1×), NOT the retention
+    /// span.
+    #[allow(clippy::too_many_arguments)] // size_ms (retention basis) + window_size_ms (key-end) are distinct
     pub fn add_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
         size_ms: i64,
+        window_size_ms: i64,
         grace_ms: i64,
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
@@ -557,6 +576,12 @@ impl Topology {
                             Box::new(key_serde.clone()),
                             Box::new(value_serde.clone()),
                             changelog,
+                            // Aggregate window stores need the real window size so the
+                            // cache flush can reconstruct `end = start + window_size_ms`
+                            // for the downstream `Windowed` key (the store-key bytes hold
+                            // only the start). This is distinct from `size_ms`, which is
+                            // the retention basis — they diverge for sliding windows.
+                            window_size_ms,
                         )) as Box<dyn crate::store::api::StateStore>
                     },
                 ),
@@ -1075,6 +1100,16 @@ impl Topology {
         self
     }
 
+    /// Mark a materialized store as record-cache eligible (JVM `Materialized`
+    /// caching, default on). Called by the materialized KTable/aggregate lowering
+    /// sites with the `Materialized`'s `caching_enabled()`; `on == false`
+    /// (`with_caching(false)`) leaves the store uncached.
+    pub(crate) fn mark_store_caching(&mut self, name: &str, on: bool) {
+        if on {
+            self.caching_stores.insert(name.to_string());
+        }
+    }
+
     /// Return the connected-processor list for a store (test helper).
     #[cfg(test)]
     pub(crate) fn store_entry_for_test(&self, store: &str) -> Option<Vec<String>> {
@@ -1199,6 +1234,15 @@ impl Topology {
             })
             .collect();
 
+        // Store name → connected processor names (used by `instantiate` to root a
+        // cached store's forwarded changes at its materializing processor's node).
+        let store_processors: HashMap<String, Vec<String>> = self
+            .reg
+            .stores
+            .iter()
+            .map(|e| (e.name.clone(), e.processors.clone()))
+            .collect();
+
         Ok(BuiltTopology {
             wire,
             source_topics,
@@ -1208,6 +1252,8 @@ impl Topology {
             store_factories: self.store_factories,
             global_store_factories: self.global_store_factories,
             global_store_topics: self.global_store_topics,
+            caching_stores: self.caching_stores,
+            store_processors,
         })
     }
 
@@ -1269,6 +1315,14 @@ pub struct BuiltTopology {
     // Consumed by global-store wiring via the accessor.
     #[allow(dead_code)]
     global_store_topics: HashMap<String, String>,
+    /// Materialized KV stores whose record cache is eligible (default-on JVM
+    /// `Materialized` caching, opt-out via `with_caching(false)`). `instantiate`
+    /// wraps each in a [`NamedCache`] when `cache_max_bytes > 0`.
+    caching_stores: std::collections::HashSet<String>,
+    /// Store name → its connected processor names. `instantiate` maps a cached
+    /// store's (single, materializing) processor name to that node's graph index
+    /// to root the store's `cache_owner` entry.
+    store_processors: HashMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -1355,6 +1409,7 @@ impl BuiltTopology {
         &self,
         backend: &crate::store::backend::StoreBackend,
         app_id: &str,
+        cache_max_bytes: i64,
     ) -> Result<Graph, ProcessorError> {
         // 1. Collect the processor/sink nodes in spec order and build a name→idx map.
         //    Sources are NOT in the nodes vec — they become GraphSources.
@@ -1449,6 +1504,11 @@ impl BuiltTopology {
             store_registry.insert(factory(store_name, changelog, bytes));
         }
 
+        // Build-time record-cache wiring (see `wire_record_caches`): a no-op when
+        // `cache_max_bytes == 0` (TopologyTestDriver) or no store is marked.
+        let (cache, cache_owner) =
+            self.wire_record_caches(&mut store_registry, &name_to_idx, cache_max_bytes);
+
         Ok(Graph {
             nodes,
             children,
@@ -1462,7 +1522,63 @@ impl BuiltTopology {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes,
+            cache_owner,
+            cache,
         })
+    }
+
+    /// Build-time record-cache wiring: for each materialized KV store marked
+    /// cache-eligible (default-on `Materialized` caching), register a
+    /// [`NamedCache`](crate::store::cache::named::NamedCache) in the per-task
+    /// [`ThreadCache`](crate::store::cache::thread::ThreadCache), wrap the typed
+    /// store's backend (via the erased
+    /// [`enable_cache_erased`](crate::store::api::StateStore::enable_cache_erased)
+    /// hook), and root its forwarded changes at the materializing node.
+    ///
+    /// Returns the populated `ThreadCache` and the `store name → owning node
+    /// index` map for `Graph::flush_caches`. With `cache_max_bytes == 0`
+    /// (`TopologyTestDriver`) or no marked stores, the cache stays empty and the
+    /// owner map is empty, so every store stays uncached (goldens unchanged).
+    fn wire_record_caches(
+        &self,
+        store_registry: &mut crate::store::registry::StoreRegistry,
+        name_to_idx: &HashMap<&str, usize>,
+        cache_max_bytes: i64,
+    ) -> (
+        crate::store::cache::thread::ThreadCache,
+        HashMap<String, usize>,
+    ) {
+        let mut cache = crate::store::cache::thread::ThreadCache::new(
+            usize::try_from(cache_max_bytes.max(0)).unwrap_or(0),
+        );
+        let mut cache_owner: HashMap<String, usize> = HashMap::new();
+        if cache_max_bytes <= 0 {
+            return (cache, cache_owner);
+        }
+        for store_name in &self.caching_stores {
+            // The store's single materializing processor → its graph node index.
+            let owner_idx = self
+                .store_processors
+                .get(store_name)
+                .and_then(|procs| procs.first())
+                .and_then(|proc_name| name_to_idx.get(proc_name.as_str()).copied());
+            let Some(owner_idx) = owner_idx else {
+                // No connected processor in this subtopology (e.g. a store owned
+                // by another partition's graph) — nothing to root here.
+                continue;
+            };
+            let nc = cache.register(store_name);
+            // KV, window, and session stores are all cache-aware: each overrides
+            // `enable_cache_erased` to return `true` and drives its own
+            // `flush_cache_into`. A store that declines caching (returns `false`)
+            // is skipped so we don't root a `cache_owner` entry the flush
+            // mechanism couldn't drive.
+            if store_registry.enable_cache(store_name, nc) {
+                cache_owner.insert(store_name.clone(), owner_idx);
+            }
+        }
+        (cache, cache_owner)
     }
 }
 
@@ -1625,9 +1741,11 @@ mod tests {
         let up = t.add_processor("up", || Upper, [&src]);
         t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
@@ -1737,9 +1855,11 @@ mod tests {
         sinks.sort();
         check!(sinks == vec!["out".to_string(), "rp".to_string()]);
         // instantiate must succeed and pipe through the first subtopology
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"hi", 0)).unwrap();
         let out1 = g.take_output();
@@ -1778,9 +1898,11 @@ mod tests {
                 .iter()
                 .any(|c| c.name == "app-counts-changelog")
         }));
-        let mut g = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
@@ -1795,6 +1917,150 @@ mod tests {
                 .as_ref()
                 == [0, 0, 0, 0, 0, 0, 0, 2]
         );
+    }
+
+    // ── Build-time record-cache wiring (sub-task 3b-ii) ───────────────────────
+    //
+    // A materializing processor that, per record, accumulates a count in its
+    // store and forwards `Change<i64>` (so the store's owning node can feed a
+    // `Change`-consuming sink). Mirrors the DSL aggregate's store-write + emit.
+    struct CountingMaterializer;
+    #[async_trait]
+    impl Processor<String, String, String, crate::dsl::processors::change::Change<i64>>
+        for CountingMaterializer
+    {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, crate::dsl::processors::change::Change<i64>>,
+            r: Record<String, String>,
+        ) {
+            use crate::dsl::processors::change::Change;
+            let (old, new) = {
+                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let old = s.get(&r.value).await;
+                let new = old.unwrap_or(0) + 1;
+                s.put(r.value.clone(), new).await;
+                (old, Some(new))
+            };
+            ctx.forward(Record::new(Some(r.value), Change { old, new }, r.timestamp));
+        }
+    }
+
+    /// Build a `source → CountingMaterializer(materializes "counts") → sink`
+    /// topology, optionally marking the "counts" store cache-eligible.
+    fn counting_topology(caching: bool) -> BuiltTopology {
+        use crate::dsl::processors::change::Change;
+        use crate::processor::serde::I64Serde;
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let c = t.add_processor("c", || CountingMaterializer, [&src]);
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        // The materializing node's `Change<i64>` output feeds the sink (a real
+        // cached flush forwards `Change<i64>` rooted at "c").
+        t.add_sink_explicit::<String, Change<i64>, _, _, _, _>(
+            "out",
+            "out",
+            [&c],
+            crate::processor::serde::Produced::with(StringSerde, ChangeI64Serde),
+        );
+        if caching {
+            t.mark_store_caching("counts", true);
+        }
+        t.build("app").unwrap()
+    }
+
+    // A trivial serde so the `Change<i64>` sink can be wired; it never has to
+    // round-trip in these tests (we assert on the changelog, not the sink bytes).
+    #[derive(Clone)]
+    struct ChangeI64Serde;
+    impl crate::processor::serde::Serde<crate::dsl::processors::change::Change<i64>>
+        for ChangeI64Serde
+    {
+        fn serialize(
+            &self,
+            _topic: &str,
+            v: &crate::dsl::processors::change::Change<i64>,
+        ) -> bytes::Bytes {
+            // Encode just the `new` side (8 bytes BE) so the sink has bytes to emit.
+            bytes::Bytes::copy_from_slice(&v.new.unwrap_or(0).to_be_bytes())
+        }
+        fn deserialize(
+            &self,
+            _topic: &str,
+            _bytes: &[u8],
+        ) -> Result<crate::dsl::processors::change::Change<i64>, crate::processor::serde::SerdeError>
+        {
+            unreachable!("Change<i64> sink is never deserialized in these tests")
+        }
+    }
+
+    #[test]
+    fn instantiate_caches_materialized_store_when_budget_positive() {
+        // cache_max_bytes > 0 + marked store → the store is cached and
+        // cache_owner roots it at the materializing node ("c"), which is graph
+        // node index 0 (sources are not in the nodes vec; "c" is first non-source).
+        let built = counting_topology(true);
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            1024,
+        ))
+        .unwrap();
+        check!(g.cache_owner.get("counts") == Some(&0));
+        check!(g.stores.kv_is_cached("counts"));
+
+        // Pipe two records for the SAME key, then flush: a cached store dedups the
+        // two staged writes into ONE changelog entry. (Without caching the store
+        // logs each put immediately → two entries; see the no-cache test below.)
+        pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
+        // No changelog buffered yet — cached writes defer logging to flush.
+        check!(
+            g.drain_changelogs(&std::collections::HashSet::new())
+                .is_empty()
+        );
+        pollster::block_on(g.flush_caches()).unwrap();
+        let cl = g.drain_changelogs(&std::collections::HashSet::new());
+        check!(cl.len() == 1); // deduped to the latest count (2)
+        // tuple is (changelog_topic, key, value, ts); value is the BE i64 count.
+        check!(cl[0].2.as_ref().unwrap().as_ref() == [0, 0, 0, 0, 0, 0, 0, 2]);
+    }
+
+    #[test]
+    fn instantiate_does_not_cache_when_budget_zero() {
+        // cache_max_bytes == 0 (TopologyTestDriver default): nothing is wrapped,
+        // cache_owner is empty, and the store logs each put immediately (2 entries
+        // for two same-key writes — no dedup).
+        let built = counting_topology(true);
+        let mut g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            0,
+        ))
+        .unwrap();
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached("counts"));
+
+        pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
+        // Uncached: each put logs immediately → two changelog entries (no dedup).
+        let cl = g.drain_changelogs(&std::collections::HashSet::new());
+        check!(cl.len() == 2);
+    }
+
+    #[test]
+    fn instantiate_does_not_cache_when_marking_opted_out() {
+        // with_caching(false) equivalent (store NOT marked) + budget > 0: the store
+        // is NOT in cache_owner and stays uncached.
+        let built = counting_topology(false);
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            1024,
+        ))
+        .unwrap();
+        check!(g.cache_owner.is_empty());
+        check!(!g.stores.kv_is_cached("counts"));
     }
 
     #[test]
@@ -1820,5 +2086,66 @@ mod tests {
         );
         // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
         assert!(blob.contains("87000000"), "lag value not in wire");
+    }
+
+    #[tokio::test]
+    async fn add_window_store_uses_window_size_not_retention_for_cached_key_end() {
+        // Regression: a CACHED sliding aggregate registers its window store with a
+        // retention basis of `2 * timeDifferenceMs` but a TRUE window size of
+        // `1 * timeDifferenceMs`. The flushed `Windowed` key end must be
+        // `start + windowSize`, NOT `start + retentionBasis`. Before the fix the
+        // factory fed `size_ms` (the retention basis) to `WindowBytesStore::new`,
+        // so the end was doubled (this asserts `end == 10`, which would be `20`).
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::windows::{Window, Windowed};
+        use crate::processor::record::RecordContext;
+        use crate::processor::serde::I64Serde;
+        use crate::store::api::StateStore;
+        use crate::store::byte::InMemoryBytes;
+        use crate::store::cache::named::NamedCache;
+        use crate::store::window::{WindowBytesStore, WindowStore};
+        use std::sync::{Arc, Mutex};
+
+        const D: i64 = 10;
+        let mut t = Topology::new();
+        // size_ms = 2*D (retention basis), window_size_ms = D (true window size).
+        t.add_window_store::<String, i64, _, _>("sw", StringSerde, I64Serde, D * 2, D, 0, ["p"]);
+
+        // Pull the registered factory and instantiate the store over a fresh backend.
+        let (_changelog, factory) = t.store_factories.get("sw").expect("factory registered");
+        let backend: Box<dyn crate::store::byte::ByteKeyValueStore> =
+            Box::new(InMemoryBytes::default());
+        let mut store: Box<dyn crate::store::api::StateStore> =
+            factory("sw", "sw-changelog".to_string(), backend);
+
+        // Enable the record cache and stage a put for a window starting at 0.
+        let typed = store
+            .as_any_mut()
+            .downcast_mut::<WindowBytesStore<String, i64>>()
+            .expect("window store downcast");
+        typed.enable_cache(Arc::new(Mutex::new(NamedCache::new("sw".into()))));
+        typed.set_record_context(RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 7,
+        });
+        typed.put("a".into(), 0, 1, 7).await;
+
+        let mut buffer = std::collections::VecDeque::new();
+        store.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
+        let (_child, rec) = &buffer[0];
+        let key = rec
+            .key
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Windowed<String>>()
+            .unwrap();
+        assert_eq!(key.key, "a");
+        // end == start + window_size (D), NOT start + retention basis (2*D).
+        assert_eq!(key.window, Window { start: 0, end: D });
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.new, Some(1));
     }
 }

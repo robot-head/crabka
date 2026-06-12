@@ -310,6 +310,53 @@ mod tests {
         }
     }
 
+    /// The suppress store does not override the cache/IQ `StateStore` defaults,
+    /// so it exercises the default trait-method bodies in `store::api`:
+    /// `as_iq` → None, `enable_cache_erased`/`is_cached_erased` → false,
+    /// `flush_cache_into` → no-op, and `take_changelog_ts` wraps `take_changelog`
+    /// with a `None` timestamp.
+    #[tokio::test]
+    async fn uses_statestore_defaults_for_cache_and_iq() {
+        use crate::store::cache::named::NamedCache;
+        use std::sync::{Arc, Mutex};
+        let mut s = store();
+
+        // Not interactively queryable, not cache-aware.
+        assert!(s.as_iq().is_none());
+        assert!(!s.is_cached_erased());
+        let cache = Arc::new(Mutex::new(NamedCache::new("sup".into())));
+        assert!(
+            !s.enable_cache_erased(cache),
+            "suppress store is not cache-aware"
+        );
+        assert!(
+            !s.is_cached_erased(),
+            "still not cached after the no-op enable"
+        );
+
+        // The default flush_cache_into forwards nothing even with a staged entry.
+        s.put("a".into(), 30, Change::update(None, 1), ctx(30))
+            .await;
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty(), "no record cache → no forwarded change");
+
+        // take_changelog_ts wraps each changelog entry with a None timestamp.
+        let cl_ts = s.take_changelog_ts();
+        assert_eq!(cl_ts.len(), 1);
+        assert!(cl_ts[0].2.is_none(), "default timestamp is None");
+        // The wrapped take drained the buffer.
+        assert!(s.take_changelog().is_empty());
+
+        // set_record_context default is a no-op (must not panic).
+        s.set_record_context(crate::processor::record::RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        });
+    }
+
     #[tokio::test]
     async fn put_then_evict_while_in_buffer_time_order() {
         let mut s = store();

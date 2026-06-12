@@ -14,6 +14,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::dsl::windows::{Window, Windowed};
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
@@ -39,6 +40,12 @@ pub(crate) struct KStreamSessionAggregateProcessor<K, V, VA, I, A, M> {
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam: when the session store is record-cached the
+    /// per-update forwards (the merged-away tombstones AND the new-session update)
+    /// are suppressed (the cache flush forwards the deduped `Change`s). Resolved in
+    /// `init`. Only the emit-on-update path is wrapped — emit-final stores are
+    /// never cached.
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -53,6 +60,10 @@ where
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
     M: Fn(&K, VA, VA) -> VA + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -63,6 +74,9 @@ where
         let gap = self.gap_ms;
         self.stream_time = self.stream_time.max(ts);
         let window_close_time = self.stream_time - self.grace_ms;
+        // Stash the source record context so a cached store stamps it on staged
+        // writes (`write_ctx` clones, not takes — persists across removes + put).
+        let rc = ctx.record_context().clone();
 
         // 1. find merge candidates: sessions overlapping [ts-gap, ts+gap].
         let cands: Vec<(i64, i64, VA)> = {
@@ -89,17 +103,20 @@ where
                 let store = ctx
                     .get_session_store::<K, VA>(&self.store_name)
                     .expect("session store not found");
+                store.set_record_context(rc.clone());
                 store.remove(&key, *s, *e).await;
             }
             if self.emit.is_on_update() {
-                ctx.forward(Record::new(
-                    Some(Windowed {
+                // Suppressed when cached (cache flush forwards the deduped change).
+                self.forwarder.maybe_forward_change(
+                    ctx,
+                    Windowed {
                         key: key.clone(),
                         window: Window { start: *s, end: *e },
-                    }),
+                    },
                     Change::tombstone(Some(v.clone())),
                     *e,
-                ));
+                );
             }
         }
 
@@ -108,22 +125,24 @@ where
             let store = ctx
                 .get_session_store::<K, VA>(&self.store_name)
                 .expect("session store not found");
+            store.set_record_context(rc.clone());
             store
                 .put(key.clone(), new_start, new_end, acc.clone())
                 .await;
         }
         if self.emit.is_on_update() {
-            ctx.forward(Record::new(
-                Some(Windowed {
+            self.forwarder.maybe_forward_change(
+                ctx,
+                Windowed {
                     key: key.clone(),
                     window: Window {
                         start: new_start,
                         end: new_end,
                     },
-                }),
+                },
                 Change::update(None, acc),
                 new_end,
-            ));
+            );
         }
 
         if self.emit.is_on_close() {
@@ -190,6 +209,8 @@ pub(crate) struct KStreamSessionReduceProcessor<K, V, R> {
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam (see [`KStreamSessionAggregateProcessor::forwarder`]).
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -200,6 +221,10 @@ where
     V: std::any::Any + Send + Sync + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -210,6 +235,8 @@ where
         let gap = self.gap_ms;
         self.stream_time = self.stream_time.max(ts);
         let window_close_time = self.stream_time - self.grace_ms;
+        // Stash the source record context for cached writes (see aggregate proc).
+        let rc = ctx.record_context().clone();
 
         let cands: Vec<(i64, i64, V)> = {
             let store = ctx
@@ -239,17 +266,19 @@ where
                 let store = ctx
                     .get_session_store::<K, V>(&self.store_name)
                     .expect("session store not found");
+                store.set_record_context(rc.clone());
                 store.remove(&key, *s, *e).await;
             }
             if self.emit.is_on_update() {
-                ctx.forward(Record::new(
-                    Some(Windowed {
+                self.forwarder.maybe_forward_change(
+                    ctx,
+                    Windowed {
                         key: key.clone(),
                         window: Window { start: *s, end: *e },
-                    }),
+                    },
                     Change::tombstone(Some(v.clone())),
                     *e,
-                ));
+                );
             }
         }
 
@@ -257,22 +286,24 @@ where
             let store = ctx
                 .get_session_store::<K, V>(&self.store_name)
                 .expect("session store not found");
+            store.set_record_context(rc.clone());
             store
                 .put(key.clone(), new_start, new_end, acc.clone())
                 .await;
         }
         if self.emit.is_on_update() {
-            ctx.forward(Record::new(
-                Some(Windowed {
+            self.forwarder.maybe_forward_change(
+                ctx,
+                Windowed {
                     key: key.clone(),
                     window: Window {
                         start: new_start,
                         end: new_end,
                     },
-                }),
+                },
                 Change::update(None, acc),
                 new_end,
-            ));
+            );
         }
 
         if self.emit.is_on_close() {
@@ -367,6 +398,7 @@ mod tests {
             grace_ms: 0,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
@@ -453,6 +485,7 @@ mod tests {
             grace_ms: 0,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
         for ts in [0i64, 200] {
@@ -503,6 +536,7 @@ mod tests {
             grace_ms: 0,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
         // ts=0 → [0,0]; ts=100 → [100,100] (not within gap of [0,0]); ts=50 bridges
@@ -611,6 +645,7 @@ mod tests {
             grace_ms: 10,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
@@ -697,6 +732,7 @@ mod tests {
             grace_ms: 0,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String)>,
         };
         // "x"@0 seeds [0,0]="x" (one update). "y"@30 merges → tombstone [0,0] then
@@ -767,6 +803,7 @@ mod tests {
             grace_ms: 10,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String)>,
         };
 
@@ -825,5 +862,129 @@ mod tests {
         assert_eq!(wk.window, Window { start: 0, end: 4 });
         let ch = rec.value.downcast::<Change<String>>().unwrap();
         assert_eq!((ch.old, ch.new), (None, Some("xy".to_string())));
+    }
+
+    // ── Record-cache suppression (sub-task 3d-ii) ─────────────────────────────
+
+    /// An `s` session-store registry, optionally record-cached.
+    fn session_registry(cached: bool) -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(SessionBytesStore::<String, i64>::in_memory(
+            "s".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-s-changelog".into(),
+        )));
+        if cached {
+            stores.enable_cache(
+                "s",
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::store::cache::named::NamedCache::new("s".into()),
+                )),
+            );
+        }
+        stores
+    }
+
+    /// Run `init` then two same-key records that MERGE (within the gap) through
+    /// the session aggregate, returning how many records reached the downstream
+    /// buffer. Record 1 @ ts=0 → session [0,0]; record 2 @ ts=30 (gap 60) merges →
+    /// on-update path forwards a tombstone for [0,0] + an update for [0,30].
+    async fn run_merge(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KStreamSessionAggregateProcessor {
+            store_name: "s".into(),
+            gap_ms: 60,
+            init: || 0i64,
+            agg: |_k: &String, _v: &String, a: i64| a + 1,
+            merger: |_k: &String, a: i64, b: i64| a + b,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            grace_ms: 0,
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData::<fn() -> (String, String, i64)>,
+        };
+        for ts in [0i64, 30] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+            if ts == 0 {
+                proc.init(&mut ctx).await;
+            }
+            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached → each on-update forward fires immediately: record 1 emits one
+    /// update [0,0]; record 2 emits a tombstone [0,0] + an update [0,30] → 3 total.
+    #[tokio::test]
+    async fn uncached_session_aggregate_forwards_each_record() {
+        let mut stores = session_registry(false);
+        assert_eq!(run_merge(&mut stores).await, 3);
+    }
+
+    /// Cached → ALL on-update forwards (the initial update, the merge tombstone,
+    /// and the merged update) are suppressed; the cache flush forwards the deduped
+    /// changes instead. The merged-away session [0,0] flushes as a tombstone and
+    /// the live session [0,30] as an update carrying the final count 2.
+    #[tokio::test]
+    async fn cached_session_aggregate_suppresses_then_flushes_merge() {
+        let mut stores = session_registry(true);
+        assert_eq!(
+            run_merge(&mut stores).await,
+            0,
+            "cached session store must suppress every immediate forward"
+        );
+        // Flush the cache: the staged remove([0,0]) + put([0,30]) emit as two
+        // changes — a tombstone for the merged-away session and an update for the
+        // live one.
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("s")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        // Collect (window, is_tombstone, new) per flushed change.
+        let mut got: Vec<(Window, bool, Option<i64>)> = buffer
+            .into_iter()
+            .map(|(_, rec)| {
+                let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+                let ch = rec.value.downcast::<Change<i64>>().unwrap();
+                (wk.window, ch.is_tombstone(), ch.new)
+            })
+            .collect();
+        got.sort_by_key(|(w, _, _)| (w.start, w.end));
+        // The merged-away [0,0] is a tombstone; the live [0,30] carries count 2.
+        assert!(
+            got.contains(&(Window { start: 0, end: 0 }, true, None)),
+            "flush must emit a tombstone for merged-away session [0,0], got {got:?}"
+        );
+        assert!(
+            got.contains(&(Window { start: 0, end: 30 }, false, Some(2))),
+            "flush must emit the live session [0,30] with count 2, got {got:?}"
+        );
     }
 }

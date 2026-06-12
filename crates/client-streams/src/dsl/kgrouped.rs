@@ -29,6 +29,7 @@ use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::aggregate::{KStreamAggregateProcessor, KStreamReduceProcessor};
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, I64Serde, Serde};
 use crate::topology::NodeHandle;
 
@@ -389,6 +390,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, VA, KS, VS>(
@@ -426,6 +428,7 @@ where
                         store_name: store_for_proc.clone(),
                         init: init.clone(),
                         agg: agg.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -450,6 +453,7 @@ where
                         value_serde_for_lower.clone(),
                     );
             }
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -482,6 +486,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, V, KS, VS>(
@@ -519,6 +524,7 @@ where
                     move || KStreamReduceProcessor {
                         store_name: store_for_proc.clone(),
                         reducer: reducer.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -538,6 +544,7 @@ where
                     value_serde_for_lower.clone(),
                 );
             }
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 

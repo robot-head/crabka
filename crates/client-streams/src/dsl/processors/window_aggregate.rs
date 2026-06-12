@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::dsl::windows::{TimeWindows, Window, Windowed};
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
@@ -33,6 +34,11 @@ pub(crate) struct KStreamWindowAggregateProcessor<K, V, VA, I, A> {
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam: when the window store is record-cached the
+    /// per-update forward is suppressed (the cache flush forwards the deduped
+    /// `Change`). Resolved in `init`. Only used on the emit-on-update path —
+    /// emit-final stores are never cached.
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -46,6 +52,10 @@ where
     I: Fn() -> VA + Send + 'static,
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -55,6 +65,9 @@ where
         let size = self.windows.size_ms;
         self.stream_time = self.stream_time.max(r.timestamp);
         let window_close_time = self.stream_time - self.windows.grace_ms;
+        // Stash the source record context BEFORE the store borrow so a cached
+        // store attaches it to the deduped change it forwards on flush.
+        let rc = ctx.record_context().clone();
 
         for ws in self.windows.windows_for(r.timestamp) {
             // Emit-final drops updates for windows that already closed.
@@ -67,6 +80,7 @@ where
                 let store = ctx
                     .get_window_store::<K, VA>(&self.store_name)
                     .expect("window store not found");
+                store.set_record_context(rc.clone());
                 let prior = store.fetch_single(&key, ws).await;
                 // Extract storedTs before consuming `prior` for `old`.
                 let stored_ts = prior.as_ref().map_or(i64::MIN, |&(ts, _)| ts);
@@ -78,17 +92,20 @@ where
                 (old, new, new_ts)
             };
             if self.emit.is_on_update() {
-                ctx.forward(Record::new(
-                    Some(Windowed {
+                // Suppressed when the store is cached (cache flush forwards the
+                // deduped change); forwarded immediately otherwise.
+                self.forwarder.maybe_forward_change(
+                    ctx,
+                    Windowed {
                         key: key.clone(),
                         window: Window {
                             start: ws,
                             end: ws + size,
                         },
-                    }),
+                    },
                     Change::update(old, new),
                     new_ts,
-                ));
+                );
             }
         }
 
@@ -171,6 +188,8 @@ pub(crate) struct KStreamWindowReduceProcessor<K, V, R> {
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
     pub last_emitted_close: i64,
+    /// Forward-suppression seam (see [`KStreamWindowAggregateProcessor::forwarder`]).
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -181,6 +200,10 @@ where
     V: std::any::Any + Send + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -190,6 +213,8 @@ where
         let size = self.windows.size_ms;
         self.stream_time = self.stream_time.max(r.timestamp);
         let window_close_time = self.stream_time - self.windows.grace_ms;
+        // Stash the source record context for cached writes (see aggregate proc).
+        let rc = ctx.record_context().clone();
 
         for ws in self.windows.windows_for(r.timestamp) {
             // Emit-final drops updates for windows that already closed.
@@ -202,6 +227,7 @@ where
                 let store = ctx
                     .get_window_store::<K, V>(&self.store_name)
                     .expect("window store not found");
+                store.set_record_context(rc.clone());
                 let prior = store.fetch_single(&key, ws).await;
                 let stored_ts = prior.as_ref().map_or(i64::MIN, |&(ts, _)| ts);
                 let old = prior.map(|(_ts, v)| v);
@@ -215,17 +241,18 @@ where
                 (old, new, new_ts)
             };
             if self.emit.is_on_update() {
-                ctx.forward(Record::new(
-                    Some(Windowed {
+                self.forwarder.maybe_forward_change(
+                    ctx,
+                    Windowed {
                         key: key.clone(),
                         window: Window {
                             start: ws,
                             end: ws + size,
                         },
-                    }),
+                    },
                     Change::update(old, new),
                     new_ts,
-                ));
+                );
             }
         }
 
@@ -302,6 +329,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];
@@ -322,6 +350,7 @@ mod tests {
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
@@ -386,6 +415,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];
@@ -406,6 +436,7 @@ mod tests {
             emit: crate::dsl::emit::EmitStrategy::on_window_close(),
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
@@ -462,6 +493,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];
@@ -482,6 +514,7 @@ mod tests {
             emit: crate::dsl::emit::EmitStrategy::on_window_close(),
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, i64)>,
         };
 
@@ -529,5 +562,112 @@ mod tests {
         assert_eq!(key.window, Window { start: 0, end: 10 });
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         assert_eq!((ch.old, ch.new), (None, Some(10)));
+    }
+
+    // ── Record-cache suppression (sub-task 3d-ii) ─────────────────────────────
+
+    /// A `w` window-store registry, optionally record-cached.
+    fn window_registry(cached: bool) -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-w-changelog".into(),
+            10,
+        )));
+        if cached {
+            stores.enable_cache(
+                "w",
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::store::cache::named::NamedCache::new("w".into()),
+                )),
+            );
+        }
+        stores
+    }
+
+    /// Run `init` then two same-window+key records (count) through the windowed
+    /// aggregate, returning how many records reached the downstream buffer.
+    async fn run_two_same_window(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KStreamWindowAggregateProcessor {
+            store_name: "w".into(),
+            windows: TimeWindows::of_size(10),
+            init: || 0i64,
+            agg: |_k: &String, _v: &String, a: i64| a + 1,
+            emit: crate::dsl::emit::EmitStrategy::on_window_update(),
+            stream_time: i64::MIN,
+            last_emitted_close: i64::MIN,
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData::<fn() -> (String, String, i64)>,
+        };
+        // ts=3 and ts=7 both fall into window [0,10) for key "a".
+        for ts in [3i64, 7] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+            if ts == 3 {
+                proc.init(&mut ctx).await;
+            }
+            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached → the windowed aggregate forwards each record immediately: two
+    /// records into the same window → two forwards.
+    #[tokio::test]
+    async fn uncached_windowed_aggregate_forwards_each_record() {
+        let mut stores = window_registry(false);
+        assert_eq!(run_two_same_window(&mut stores).await, 2);
+    }
+
+    /// Cached → the immediate forwards are suppressed; the cache flush forwards
+    /// exactly ONE deduped `Change` keyed by the correct `Windowed<String>` for
+    /// window [0,10) with the final count 2.
+    #[tokio::test]
+    async fn cached_windowed_aggregate_suppresses_then_flushes_one() {
+        let mut stores = window_registry(true);
+        assert_eq!(
+            run_two_same_window(&mut stores).await,
+            0,
+            "cached window store must suppress both immediate forwards"
+        );
+        // Flush the cache: exactly one deduped record, keyed by Windowed [0,10).
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("w")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        assert_eq!(buffer.len(), 1, "flush emits exactly one deduped change");
+        let (_, rec) = buffer.pop_front().unwrap();
+        let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
+        assert_eq!(key.key, "a");
+        assert_eq!(key.window, Window { start: 0, end: 10 });
+        let ch = rec.value.downcast::<Change<i64>>().unwrap();
+        assert_eq!(ch.new, Some(2), "deduped to the latest window count");
     }
 }
