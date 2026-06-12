@@ -191,15 +191,12 @@ mod tests {
 
     /// A fixed-key processor that uppercases the value, preserving the key.
     struct UpperValue;
-    #[async_trait]
-    impl FixedKeyProcessor<String, String, String> for UpperValue {
-        async fn process(
-            &mut self,
-            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
-            r: FixedKeyRecord<String, String>,
-        ) {
-            let v = r.value.clone();
-            ctx.forward(r.with_value(v.to_uppercase()));
+    crate::impl_fixed_key_processor! {
+        impl UpperValue: (String, String) -> String {
+            async fn process(&mut self, ctx, r) {
+                let v = r.value.clone();
+                ctx.forward(r.with_value(v.to_uppercase()));
+            }
         }
     }
 
