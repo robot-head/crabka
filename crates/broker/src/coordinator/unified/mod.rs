@@ -210,6 +210,17 @@ impl GroupCoordinator {
         self.group_types.insert(group_id.into(), GroupType::Classic);
     }
 
+    /// After an in-place classic→streams upgrade (KIP-1071), drop the classic
+    /// seed so a respawn does not re-hydrate the group as classic, and record it
+    /// as streams. Unlike [`Self::mark_streams`] (first-mark-wins via `or_insert`),
+    /// this FORCES the type to `Streams`, overriding any prior `Classic` lock the
+    /// group carried while it was a classic group.
+    pub fn mark_streams_after_upgrade(&self, group_id: &str) {
+        self.seeds.remove(group_id);
+        self.seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Streams);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())
@@ -1104,6 +1115,19 @@ mod tests {
         let b = coord.get_or_create_share("sg");
         assert!(Arc::ptr_eq(&a, &b));
         assert!(coord.find_share("sg").is_some());
+    }
+
+    #[test]
+    fn mark_streams_after_upgrade_forces_streams_over_classic() {
+        let c = make_coord();
+        c.mark_classic("g");
+        assert!(c.group_type("g") == Some(GroupType::Classic));
+        // or_insert mark_streams must NOT override an existing Classic lock:
+        c.mark_streams("g");
+        assert!(c.group_type("g") == Some(GroupType::Classic));
+        // The forced upgrade variant MUST override it:
+        c.mark_streams_after_upgrade("g");
+        assert!(c.group_type("g") == Some(GroupType::Streams));
     }
 
     #[test]
