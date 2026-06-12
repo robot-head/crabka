@@ -34,8 +34,26 @@ pub struct RemoteLogSegmentMetadataSnapshotRecord<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RemoteLogSegmentMetadataSnapshotRecord<'_> {
-    pub fn to_owned (& self) -> crate :: owned :: remote_log_segment_metadata_snapshot_record :: RemoteLogSegmentMetadataSnapshotRecord{
-        crate :: owned :: remote_log_segment_metadata_snapshot_record :: RemoteLogSegmentMetadataSnapshotRecord { segment_id : (self . segment_id) , start_offset : (self . start_offset) , end_offset : (self . end_offset) , broker_id : (self . broker_id) , max_timestamp_ms : (self . max_timestamp_ms) , event_timestamp_ms : (self . event_timestamp_ms) , segment_leader_epochs : (self . segment_leader_epochs) . iter () . map (SegmentLeaderEpochEntry::to_owned) . collect () , segment_size_in_bytes : (self . segment_size_in_bytes) , custom_metadata : (self . custom_metadata) . map (Bytes :: copy_from_slice) , remote_log_segment_state : (self . remote_log_segment_state) , txn_index_empty : (self . txn_index_empty) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord{
+        crate::owned::remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord {
+            segment_id: (self.segment_id),
+            start_offset: (self.start_offset),
+            end_offset: (self.end_offset),
+            broker_id: (self.broker_id),
+            max_timestamp_ms: (self.max_timestamp_ms),
+            event_timestamp_ms: (self.event_timestamp_ms),
+            segment_leader_epochs: (self.segment_leader_epochs)
+                .iter()
+                .map(SegmentLeaderEpochEntry::to_owned)
+                .collect(),
+            segment_size_in_bytes: (self.segment_size_in_bytes),
+            custom_metadata: (self.custom_metadata).map(Bytes::copy_from_slice),
+            remote_log_segment_state: (self.remote_log_segment_state),
+            txn_index_empty: (self.txn_index_empty),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for RemoteLogSegmentMetadataSnapshotRecord<'_> {

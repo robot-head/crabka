@@ -156,7 +156,12 @@ impl<'de> DecodeBorrow<'de> for BeginQuorumEpochResponse<'de> {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v . push (crate :: owned :: begin_quorum_epoch_response :: NodeEndpoint :: decode (b , version) ?) ;
+                                v.push(
+                                            crate::owned::begin_quorum_epoch_response::NodeEndpoint::decode(
+                                                b,
+                                                version,
+                                            )?,
+                                        );
                             }
                             v
                         }

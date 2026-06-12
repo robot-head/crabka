@@ -298,7 +298,12 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: status :: Status :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::status::Status::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -313,7 +318,12 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -328,7 +338,12 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -343,7 +358,12 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -529,7 +549,12 @@ impl Decode<'_> for EndpointToPartitions {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -539,7 +564,12 @@ impl Decode<'_> for EndpointToPartitions {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -562,16 +592,20 @@ impl EndpointToPartitions {
                 );
         }
         if version >= 0 {
-            m . active_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
+            m.active_partitions = vec![
+                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
+            ];
         }
         if version >= 0 {
-            m . standby_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
+            m.standby_partitions = vec![
+                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
+            ];
         }
         m
     }
 }
-#[doc = " Default JSON payload matching `Self::default()` for JVM oracle differential testing."]
-#[doc = " Only includes fields valid for the given version."]
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {

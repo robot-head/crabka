@@ -723,7 +723,12 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_describe_response::topic_info::TopicInfo::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -733,7 +738,12 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_describe_response::topic_info::TopicInfo::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -1088,7 +1098,12 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some (super :: common :: streams_group_describe_response :: endpoint :: Endpoint :: decode_borrow (buf , version) ?)
+                Some(
+                    super::common::streams_group_describe_response::endpoint::Endpoint::decode_borrow(
+                        buf,
+                        version,
+                    )?,
+                )
             };
         }
         if version >= 0 {
@@ -1096,7 +1111,12 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_describe_response :: key_value :: KeyValue :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_describe_response::key_value::KeyValue::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -1106,7 +1126,12 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_describe_response::task_offset::TaskOffset::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -1116,16 +1141,27 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_describe_response::task_offset::TaskOffset::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
         }
         if version >= 0 {
-            out . assignment = super :: common :: streams_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
+            out.assignment = super::common::streams_group_describe_response::assignment::Assignment::decode_borrow(
+                buf,
+                version,
+            )?;
         }
         if version >= 0 {
-            out . target_assignment = super :: common :: streams_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
+            out.target_assignment = super::common::streams_group_describe_response::assignment::Assignment::decode_borrow(
+                buf,
+                version,
+            )?;
         }
         if version >= 0 {
             out.is_classic = get_bool(buf)?;

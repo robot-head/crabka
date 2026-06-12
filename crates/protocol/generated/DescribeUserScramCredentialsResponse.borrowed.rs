@@ -32,7 +32,13 @@ impl DescribeUserScramCredentialsResponse<'_> {
         &self,
     ) -> crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse
     {
-        crate :: owned :: describe_user_scram_credentials_response :: DescribeUserScramCredentialsResponse { throttle_time_ms : (self . throttle_time_ms) , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , results : (self . results) . iter () . map (DescribeUserScramCredentialsResult::to_owned) . collect () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            throttle_time_ms: (self.throttle_time_ms),
+            error_code: (self.error_code),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            results: (self.results).iter().map(DescribeUserScramCredentialsResult::to_owned).collect(),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for DescribeUserScramCredentialsResponse<'_> {

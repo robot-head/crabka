@@ -21,6 +21,11 @@ thiserror = { workspace = true }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "parsing", "printing"] }
+# Pretty-prints the syn AST. Unlike rustfmt — which gives up on lines it cannot
+# fit in `max_width` (e.g. the long fully-qualified paths in `to_owned`) and
+# leaves the raw `quote!` ` :: ` spacing verbatim — prettyplease always renders
+# canonical, correctly-spaced source. See src/fmt.rs.
+prettyplease = "0.2"
 
 [lib]
 name = "crabka_protocol_codegen"

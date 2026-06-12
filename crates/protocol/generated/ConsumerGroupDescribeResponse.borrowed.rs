@@ -666,10 +666,16 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
             };
         }
         if version >= 0 {
-            out . assignment = super :: common :: consumer_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
+            out.assignment = super::common::consumer_group_describe_response::assignment::Assignment::decode_borrow(
+                buf,
+                version,
+            )?;
         }
         if version >= 0 {
-            out . target_assignment = super :: common :: consumer_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
+            out.target_assignment = super::common::consumer_group_describe_response::assignment::Assignment::decode_borrow(
+                buf,
+                version,
+            )?;
         }
         if version >= 1 {
             out.member_type = get_i8(buf)?;

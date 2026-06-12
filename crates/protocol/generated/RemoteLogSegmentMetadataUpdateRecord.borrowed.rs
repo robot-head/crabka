@@ -32,7 +32,14 @@ impl RemoteLogSegmentMetadataUpdateRecord<'_> {
         &self,
     ) -> crate::owned::remote_log_segment_metadata_update_record::RemoteLogSegmentMetadataUpdateRecord
     {
-        crate :: owned :: remote_log_segment_metadata_update_record :: RemoteLogSegmentMetadataUpdateRecord { remote_log_segment_id : (self . remote_log_segment_id) . to_owned () , broker_id : (self . broker_id) , event_timestamp_ms : (self . event_timestamp_ms) , custom_metadata : (self . custom_metadata) . map (Bytes :: copy_from_slice) , remote_log_segment_state : (self . remote_log_segment_state) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate::owned::remote_log_segment_metadata_update_record::RemoteLogSegmentMetadataUpdateRecord {
+            remote_log_segment_id: (self.remote_log_segment_id).to_owned(),
+            broker_id: (self.broker_id),
+            event_timestamp_ms: (self.event_timestamp_ms),
+            custom_metadata: (self.custom_metadata).map(Bytes::copy_from_slice),
+            remote_log_segment_state: (self.remote_log_segment_state),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for RemoteLogSegmentMetadataUpdateRecord<'_> {

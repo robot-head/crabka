@@ -333,7 +333,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatResponse<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: status :: Status :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::status::Status::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -348,7 +353,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatResponse<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -363,7 +373,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatResponse<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -378,7 +393,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatResponse<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -580,7 +600,12 @@ impl<'de> DecodeBorrow<'de> for EndpointToPartitions<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -590,7 +615,12 @@ impl<'de> DecodeBorrow<'de> for EndpointToPartitions<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -613,10 +643,14 @@ impl EndpointToPartitions<'_> {
                 );
         }
         if version >= 0 {
-            m . active_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
+            m.active_partitions = vec![
+                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
+            ];
         }
         if version >= 0 {
-            m . standby_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
+            m.standby_partitions = vec![
+                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
+            ];
         }
         m
     }

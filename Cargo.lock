@@ -1782,6 +1782,7 @@ name = "crabka-protocol-codegen"
 version = "0.3.4"
 dependencies = [
  "assert2",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "serde",

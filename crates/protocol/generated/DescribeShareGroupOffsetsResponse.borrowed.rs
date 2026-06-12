@@ -145,7 +145,13 @@ impl DescribeShareGroupOffsetsResponseGroup<'_> {
         &self,
     ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseGroup
     {
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseGroup { group_id : (self . group_id) . to_string () , topics : (self . topics) . iter () . map (DescribeShareGroupOffsetsResponseTopic::to_owned) . collect () , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseGroup {
+            group_id: (self.group_id).to_string(),
+            topics: (self.topics).iter().map(DescribeShareGroupOffsetsResponseTopic::to_owned).collect(),
+            error_code: (self.error_code),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for DescribeShareGroupOffsetsResponseGroup<'_> {
@@ -288,7 +294,12 @@ impl DescribeShareGroupOffsetsResponseTopic<'_> {
         &self,
     ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseTopic
     {
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseTopic { topic_name : (self . topic_name) . to_string () , topic_id : (self . topic_id) , partitions : (self . partitions) . iter () . map (DescribeShareGroupOffsetsResponsePartition::to_owned) . collect () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseTopic {
+            topic_name: (self.topic_name).to_string(),
+            topic_id: (self.topic_id),
+            partitions: (self.partitions).iter().map(DescribeShareGroupOffsetsResponsePartition::to_owned).collect(),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for DescribeShareGroupOffsetsResponseTopic<'_> {
@@ -424,8 +435,18 @@ impl Default for DescribeShareGroupOffsetsResponsePartition<'_> {
     }
 }
 impl DescribeShareGroupOffsetsResponsePartition<'_> {
-    pub fn to_owned (& self) -> crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponsePartition{
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponsePartition { partition_index : (self . partition_index) , start_offset : (self . start_offset) , leader_epoch : (self . leader_epoch) , lag : (self . lag) , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponsePartition{
+        crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponsePartition {
+            partition_index: (self.partition_index),
+            start_offset: (self.start_offset),
+            leader_epoch: (self.leader_epoch),
+            lag: (self.lag),
+            error_code: (self.error_code),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for DescribeShareGroupOffsetsResponsePartition<'_> {
