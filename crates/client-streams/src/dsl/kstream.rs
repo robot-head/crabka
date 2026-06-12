@@ -1888,6 +1888,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let mut g = self.builder.borrow_mut();
@@ -1935,6 +1936,10 @@ where
                         value_serde_for_lower.clone(),
                     );
             }
+            // Mark the store cached per `Materialized::with_caching` (default true);
+            // the to_table processor's TupleForwarder suppresses immediate forwards
+            // when cached and the cache flush forwards the deduped change.
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -2152,5 +2157,63 @@ mod tests {
             |a: &i64, c: &i64| a + c,
             Joined::with_grace_period(1000),
         );
+    }
+}
+
+#[cfg(test)]
+mod to_table_caching_tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+    use crate::store::backend::StoreBackend;
+    use crate::{I64Serde, Materialized, Produced, StringSerde};
+
+    /// Caching ON: the `to_table` store is marked cached (`cache_owner` rooted),
+    /// two same-key updates are suppressed until flush, and the flush emits a
+    /// single deduped record carrying the latest value.
+    #[test]
+    fn to_table_caches_marks_and_dedups_emit() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, i64>(["in"])
+            .to_table_explicit(Materialized::with(StringSerde, I64Serde).as_store("t"))
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let mut g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(g.cache_owner.contains_key("t"));
+        pollster::block_on(g.init_processors()).unwrap();
+
+        // Two same-key updates: 7 @0 then 9 @1.
+        pollster::block_on(g.pipe("in", Some(b"k"), &7i64.to_be_bytes(), 0)).unwrap();
+        pollster::block_on(g.pipe("in", Some(b"k"), &9i64.to_be_bytes(), 1)).unwrap();
+        // Suppressed: nothing forwarded downstream until the cache flushes.
+        check!(g.take_output().is_empty());
+
+        pollster::block_on(g.flush_caches()).unwrap();
+        let out = g.take_output();
+        check!(out.len() == 1);
+        check!(out[0].topic == "out");
+        // to_stream forwards the deduped `new` value = 9 (BE i64).
+        check!(out[0].value.as_ref().unwrap().as_ref() == 9i64.to_be_bytes());
+    }
+
+    /// `with_caching(false)`: the store is NOT cached even with a positive
+    /// budget (mark opted out → absent from `cache_owner`).
+    #[test]
+    fn to_table_uncached_when_caching_off() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, i64>(["in"])
+            .to_table_explicit(
+                Materialized::with(StringSerde, I64Serde)
+                    .as_store("t")
+                    .with_caching(false),
+            )
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(!g.cache_owner.contains_key("t"));
     }
 }
