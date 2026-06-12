@@ -30,6 +30,7 @@ use crate::dsl::processors::outer_join_store::TimeTracker;
 use crate::dsl::processors::stateless;
 use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
 use crate::dsl::processors::table::KStreamToTableProcessor;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::dsl::windows::JoinWindows;
 use crate::processor::serde::{BytesSerde, DefaultSerde, Produced, Serde, SerdeAssociate};
 use crate::topology::NodeHandle;
@@ -1910,6 +1911,7 @@ where
                 name.clone(),
                 move || KStreamToTableProcessor {
                     store_name: store_for_proc.clone(),
+                    forwarder: TupleForwarder::default(),
                     _pd: PhantomData,
                 },
                 [parent],
