@@ -119,9 +119,24 @@ the consumer `unified/migration.rs` location) performs the flip atomically:
    append the streams actor uses, so the flip and the first streams records are
    durable.
 
-The classic group object is removed from the classic/unified registry as part of
-the flip (its committed offsets now belong to the streams group, which shares the
-same `group_id` and the same `__consumer_offsets` partition).
+**The classic group actor is KEPT alive in the `groups` registry** (it is the
+offset home — see below), not dropped. Detection requires the classic group to
+carry a `Classic` type lock; `JoinGroup` now calls `mark_classic` (first-mark-
+wins, so a consumer group's prior lock is never overridden) so a drained classic
+group is `group_type == Some(Classic)` when the streams heartbeat arrives.
+
+### 4.2.1 Why the classic actor stays (offset home)
+
+Committed offsets are NOT stored in the streams actor. Both `OffsetCommit`
+(`handlers/offset_commit.rs`) and `OffsetFetch` (`handlers/offset_fetch.rs`) route
+via `coordinator.find(group_id)` to the **unified `groups` registry** `Group`
+container — for groups of any protocol, including streams. A streams group
+therefore legitimately has BOTH a streams actor (membership/assignment) and a
+`groups` entry (offsets). On conversion we keep the existing classic actor as that
+offsets-holding `groups` entry; dropping it would lose the in-memory committed
+offsets (until a replay reconstructed them). Its membership is empty (drained), so
+it no longer serves rebalances — the type lock is `Streams` and the streams actor
+owns the protocol.
 
 ### 4.3 Persistence summary
 
@@ -154,6 +169,12 @@ until confirmed**. The implementation plan's first step is this empirical probe.
 - **Modify:** `crates/broker/src/coordinator/unified/mod.rs` — add
   `mark_streams_after_upgrade(group_id)` (forced override + seed cleanup),
   alongside the existing `mark_classic_after_downgrade`.
+- **Modify:** `crates/broker/src/handlers/join_group.rs` — call
+  `mark_classic(group_id)` (first-mark-wins) so a classic group carries a
+  `Classic` type lock the conversion can detect. (`group_types` was previously
+  unset for classic groups — the per-group kind lived only in the actor's
+  `GroupKindTag`; `mark_next_gen` has no callers, so this is additive and does not
+  affect the classic/consumer migration path.)
 - **Modify:** streams coordinator entry (`streams/mod.rs` / `actor.rs`) only as
   needed to instantiate a streams group seeded from an existing `group_id` with
   pre-existing committed offsets.
