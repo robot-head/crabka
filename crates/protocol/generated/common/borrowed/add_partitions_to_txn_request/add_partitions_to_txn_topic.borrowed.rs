@@ -14,8 +14,14 @@ pub struct AddPartitionsToTxnTopic<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AddPartitionsToTxnTopic<'_> {
-    pub fn to_owned (& self) -> crate :: owned :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic{
-        crate :: owned :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic { name : (self . name) . to_string () , partitions : (self . partitions) . clone () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic{
+        crate::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic {
+            name: (self.name).to_string(),
+            partitions: (self.partitions).clone(),
+            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
+        }
     }
 }
 impl Encode for AddPartitionsToTxnTopic<'_> {

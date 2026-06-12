@@ -459,7 +459,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -474,7 +479,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -489,7 +499,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -507,7 +522,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some (super :: common :: streams_group_heartbeat_request :: endpoint :: Endpoint :: decode_borrow (buf , version) ?)
+                Some(
+                    super::common::streams_group_heartbeat_request::endpoint::Endpoint::decode_borrow(
+                        buf,
+                        version,
+                    )?,
+                )
             };
         }
         if version >= 0 {
@@ -518,7 +538,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: key_value :: KeyValue :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::key_value::KeyValue::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -533,7 +558,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -548,7 +578,12 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode_borrow(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -1046,7 +1081,12 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -1070,7 +1110,12 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };

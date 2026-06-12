@@ -461,7 +461,12 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: describe_quorum_response :: replica_state :: ReplicaState :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::describe_quorum_response::replica_state::ReplicaState::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -471,7 +476,12 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: describe_quorum_response :: replica_state :: ReplicaState :: decode_borrow (buf , version) ?) ;
+                    v.push(
+                        super::common::describe_quorum_response::replica_state::ReplicaState::decode_borrow(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };

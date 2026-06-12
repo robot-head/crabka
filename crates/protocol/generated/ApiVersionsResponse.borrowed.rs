@@ -257,7 +257,12 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsResponse {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v . push (crate :: owned :: api_versions_response :: SupportedFeatureKey :: decode (b , version) ?) ;
+                                v.push(
+                                            crate::owned::api_versions_response::SupportedFeatureKey::decode(
+                                                b,
+                                                version,
+                                            )?,
+                                        );
                             }
                             v
                         }
@@ -278,7 +283,12 @@ impl<'de> DecodeBorrow<'de> for ApiVersionsResponse {
                             let n = crate::primitives::array::get_array_len(b, flex)?;
                             let mut v = Vec::with_capacity(n);
                             for _ in 0..n {
-                                v . push (crate :: owned :: api_versions_response :: FinalizedFeatureKey :: decode (b , version) ?) ;
+                                v.push(
+                                            crate::owned::api_versions_response::FinalizedFeatureKey::decode(
+                                                b,
+                                                version,
+                                            )?,
+                                        );
                             }
                             v
                         }

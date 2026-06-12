@@ -418,7 +418,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -433,7 +438,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -448,7 +458,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_ids::TaskIds::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -481,7 +496,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: key_value :: KeyValue :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::key_value::KeyValue::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -496,7 +516,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -511,7 +536,12 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
+                            v.push(
+                                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::decode(
+                                    buf,
+                                    version,
+                                )?,
+                            );
                         }
                         Some(v)
                     }
@@ -961,7 +991,12 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -985,7 +1020,12 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
+                    v.push(
+                        super::common::streams_group_heartbeat_request::topic_info::TopicInfo::decode(
+                            buf,
+                            version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -1184,8 +1224,8 @@ impl CopartitionGroup {
         m
     }
 }
-#[doc = " Default JSON payload matching `Self::default()` for JVM oracle differential testing."]
-#[doc = " Only includes fields valid for the given version."]
+/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
+/// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {

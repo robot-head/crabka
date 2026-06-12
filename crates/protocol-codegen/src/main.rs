@@ -328,12 +328,12 @@ fn run(
     // belong only in the root generated/ output.
     if namespace.is_none() {
         let api_key_src = emit::api_key_enum_quote::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("api_key.rs"), &api_key_src)?;
+        write_rs(out.join("api_key.rs"), &api_key_src)?;
         count += 1;
 
         // Emit the differential dispatch table for the parameterised sweep test.
         let diff_table = emit::differential_table::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("differential_table.rs"), diff_table)?;
+        write_rs(out.join("differential_table.rs"), &diff_table)?;
         count += 1;
     }
 

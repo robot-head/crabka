@@ -584,7 +584,10 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
             };
         }
         if version >= 0 {
-            out . assignment = super :: common :: share_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
+            out.assignment = super::common::share_group_describe_response::assignment::Assignment::decode_borrow(
+                buf,
+                version,
+            )?;
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

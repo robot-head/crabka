@@ -544,7 +544,12 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
                     None => None,
                     Some(__rb_slice) => {
                         let mut __rb_cur = __rb_slice;
-                        Some (< crate :: records :: RecordsPayloadBorrowed as crate :: DecodeBorrow >:: decode_borrow (& mut __rb_cur , version) ?)
+                        Some(
+                            <crate::records::RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(
+                                &mut __rb_cur,
+                                version,
+                            )?,
+                        )
                     }
                 }
             };
