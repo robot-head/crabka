@@ -12,7 +12,6 @@ use crate::coordinator::unified::actor::PendingRecords;
 
 /// Result of inspecting a `group_id` for classic→streams conversion.
 #[derive(Debug, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by try_convert_classic_to_streams; caller wired in Task 4
 pub(crate) enum ConvertOutcome {
     /// Not a classic group (fresh streams group or already streams) — serve normally.
     NotClassic,
@@ -25,7 +24,6 @@ pub(crate) enum ConvertOutcome {
 /// Build the single-record batch that tombstones the classic k2 `GroupMetadata`
 /// for `group_id`. Reuses the consumer-migration `PendingRecords` encoder so the
 /// tombstone key bytes are identical to the upgrade flip's.
-#[allow(dead_code)] // called by try_convert_classic_to_streams; caller wired in Task 4
 pub(crate) fn classic_group_metadata_tombstone_batch(group_id: &str, now_ms: i64) -> RecordBatch {
     PendingRecords {
         classic_group_metadata_tombstone: true,

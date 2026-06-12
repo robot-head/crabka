@@ -418,12 +418,12 @@ impl GroupCoordinator {
 
     /// KIP-1071 cold upgrade: if `group_id` is a drained classic group, convert
     /// it to a streams group in place (tombstone the classic k2 `GroupMetadata`,
-    /// force the type lock to `Streams`, drop the classic actor). Committed
-    /// offsets survive untouched. Returns `NotClassic` for non-classic groups
-    /// (caller serves normally), `Converted` after a successful flip, or
-    /// `RejectLiveMembers` when live classic members remain (online streams
-    /// migration is unsupported in Kafka).
-    #[allow(dead_code)] // called from StreamsGroupHeartbeat handler; wired in Task 4
+    /// force the type lock to `Streams`). Committed offsets survive untouched —
+    /// the classic actor remains in the `groups` map so that `OffsetFetch`
+    /// requests can still read back the committed offset state. Returns
+    /// `NotClassic` for non-classic groups (caller serves normally), `Converted`
+    /// after a successful flip, or `RejectLiveMembers` when live classic members
+    /// remain (online streams migration is unsupported in Kafka).
     pub(crate) async fn try_convert_classic_to_streams(
         self: &Arc<Self>,
         group_id: &str,
@@ -450,11 +450,14 @@ impl GroupCoordinator {
             }
         }
 
-        // Drained classic group → convert. Tombstone k2, flip the lock, drop the actor.
+        // Drained classic group → convert. Tombstone the k2 GroupMetadata so
+        // log-replay does not resurrect this group as classic after a restart.
+        // Flip the type lock to Streams; the classic actor (if any) stays in
+        // `self.groups` so its committed_offsets remain accessible to
+        // `OffsetFetch` without a full replay cycle.
         let batch = classic_group_metadata_tombstone_batch(group_id, now_ms);
         self.offsets_log.append(batch).await?;
         self.mark_streams_after_upgrade(group_id);
-        self.groups.remove(group_id);
         Ok(ConvertOutcome::Converted)
     }
 

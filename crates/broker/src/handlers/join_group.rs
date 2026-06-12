@@ -56,6 +56,12 @@ pub(crate) async fn handle(
     // consumer actor already owns the id, the actor's `ClassicJoin` arm replies
     // `INCONSISTENT_GROUP_PROTOCOL` — that is where the per-group kind lock now
     // lives.
+    //
+    // Mark the group as Classic so that a later StreamsGroupHeartbeat for the
+    // same id can detect it as a classic group and either convert or reject it
+    // (KIP-1071 cold upgrade). First-mark-wins: a prior `mark_next_gen` (or any
+    // other type lock) from a consumer-protocol group is not overridden.
+    broker.group_coordinator.mark_classic(&req.group_id);
     let handle = broker
         .group_coordinator
         .get_or_create_group(&req.group_id, GroupKindTag::Classic);
