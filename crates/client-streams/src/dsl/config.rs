@@ -25,6 +25,15 @@ impl<KS, VS> Grouped<KS, VS> {
     }
 }
 
+/// Versioned-store settings for a `Materialized` (KIP-889). `segment_interval_ms`
+/// only affects JVM eviction granularity (non-observable here); accepted for API
+/// parity. `None` segment interval uses the JVM default segment heuristic.
+#[derive(Debug, Clone, Copy)]
+pub struct VersionedConfig {
+    pub history_retention_ms: i64,
+    pub segment_interval_ms: Option<i64>,
+}
+
 /// Store name + serdes + logging flag for a materialized `KTable`.
 #[derive(Debug, Clone)]
 pub struct Materialized<KS, VS> {
@@ -34,6 +43,8 @@ pub struct Materialized<KS, VS> {
     pub(crate) value_serde: VS,
     pub(crate) store_name: Option<String>,
     pub(crate) logging: bool,
+    pub(crate) caching: bool,
+    pub(crate) versioned: Option<VersionedConfig>,
 }
 impl<KS, VS> Materialized<KS, VS> {
     pub fn with(key_serde: KS, value_serde: VS) -> Self {
@@ -42,6 +53,8 @@ impl<KS, VS> Materialized<KS, VS> {
             value_serde,
             store_name: None,
             logging: true,
+            caching: true,
+            versioned: None,
         }
     }
     #[must_use]
@@ -52,6 +65,28 @@ impl<KS, VS> Materialized<KS, VS> {
     #[must_use]
     pub fn with_logging(mut self, on: bool) -> Self {
         self.logging = on;
+        self
+    }
+    /// Enable/disable the record cache for this store (JVM
+    /// `Materialized.withCachingEnabled/Disabled`). Default enabled.
+    #[must_use]
+    pub fn with_caching(mut self, on: bool) -> Self {
+        self.caching = on;
+        self
+    }
+    #[must_use]
+    pub fn caching_enabled(&self) -> bool {
+        self.caching
+    }
+    /// Materialize this table into a versioned key-value store (KIP-889) named
+    /// `name`, retaining `history_retention_ms` of version history.
+    #[must_use]
+    pub fn as_versioned(mut self, name: impl Into<String>, history_retention_ms: i64) -> Self {
+        self.store_name = Some(name.into());
+        self.versioned = Some(VersionedConfig {
+            history_retention_ms,
+            segment_interval_ms: None,
+        });
         self
     }
 }
@@ -98,6 +133,31 @@ impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
             value1_serde,
             value2_serde,
         }
+    }
+}
+
+/// Stream–table join config (KIP-923). Carries an optional grace period that
+/// buffers stream records so out-of-order records still join the table value
+/// as-of their own timestamp. `grace_ms` requires the joined table to be
+/// versioned and must be `< history_retention_ms` (asserted at build time by the
+/// join DSL). `name` optionally names the grace buffer store.
+#[derive(Debug, Clone, Default)]
+pub struct Joined {
+    pub(crate) grace_ms: Option<i64>,
+    pub(crate) name: Option<String>,
+}
+impl Joined {
+    #[must_use]
+    pub fn with_grace_period(grace_ms: i64) -> Self {
+        Self {
+            grace_ms: Some(grace_ms),
+            name: None,
+        }
+    }
+    #[must_use]
+    pub fn as_named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -148,5 +208,29 @@ mod tests {
             .num_partitions(4);
         check!(r.name.as_deref() == Some("rp"));
         check!(r.partitions == Some(4));
+    }
+
+    #[test]
+    fn materialized_caching_defaults_on_and_toggles() {
+        let m = Materialized::with(StringSerde, I64Serde);
+        check!(m.caching_enabled()); // default true
+        let m = m.with_caching(false);
+        check!(!m.caching_enabled());
+    }
+
+    #[test]
+    fn joined_carries_grace_and_name() {
+        let j = Joined::with_grace_period(5_000).as_named("jb");
+        check!(j.grace_ms == Some(5_000));
+        check!(j.name.as_deref() == Some("jb"));
+        check!(Joined::default().grace_ms == None);
+    }
+
+    #[test]
+    fn materialized_as_versioned_sets_config() {
+        let m = Materialized::with(StringSerde, I64Serde).as_versioned("vstore", 600_000);
+        check!(m.store_name.as_deref() == Some("vstore"));
+        let vc = m.versioned.expect("versioned config");
+        check!(vc.history_retention_ms == 600_000);
     }
 }

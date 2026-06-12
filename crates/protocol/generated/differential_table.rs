@@ -3,7 +3,6 @@
 use bytes::BytesMut;
 #[allow(unused_imports)]
 use crabka_protocol::Encode;
-
 #[derive(Debug, Clone, Copy)]
 pub struct Case {
     pub name: &'static str,
@@ -11,7 +10,6 @@ pub struct Case {
     pub version: i16,
     pub kind: Kind,
 }
-
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
     Request,
@@ -19,7 +17,6 @@ pub enum Kind {
     RequestHeader,
     ResponseHeader,
 }
-
 pub const CASES: &[Case] = &[
     Case {
         name: "AddOffsetsToTxnRequest",
@@ -3670,7 +3667,6 @@ pub const CASES: &[Case] = &[
         kind: Kind::Response,
     },
 ];
-
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
@@ -4824,7 +4820,6 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
         _ => panic!("unknown message in encode_default: {name}"),
     }
 }
-
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
@@ -5306,7 +5301,6 @@ pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
         _ => panic!("unknown message in default_json_for: {name}"),
     }
 }
-
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
@@ -5326,7 +5320,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AddOffsetsToTxnResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5334,7 +5332,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AddPartitionsToTxnRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5342,7 +5344,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AddPartitionsToTxnResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5373,7 +5379,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AllocateProducerIdsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::allocate_producer_ids_request::AllocateProducerIdsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::allocate_producer_ids_request::AllocateProducerIdsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5381,7 +5391,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AllocateProducerIdsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::allocate_producer_ids_response::AllocateProducerIdsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::allocate_producer_ids_response::AllocateProducerIdsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5389,7 +5403,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterClientQuotasRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_client_quotas_request::AlterClientQuotasRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_client_quotas_request::AlterClientQuotasRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5397,7 +5415,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterClientQuotasResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5427,7 +5449,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterPartitionReassignmentsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5435,7 +5461,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterPartitionReassignmentsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_partition_reassignments_response::AlterPartitionReassignmentsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5467,7 +5497,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterReplicaLogDirsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5475,7 +5509,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterReplicaLogDirsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5483,7 +5521,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterShareGroupOffsetsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5491,7 +5533,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterShareGroupOffsetsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5499,7 +5545,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterUserScramCredentialsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5507,7 +5557,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AlterUserScramCredentialsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5537,7 +5591,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AssignReplicasToDirsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5545,7 +5603,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "AssignReplicasToDirsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5553,7 +5615,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "BeginQuorumEpochRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5561,7 +5627,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "BeginQuorumEpochResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5593,7 +5663,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "BrokerRegistrationRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::broker_registration_request::BrokerRegistrationRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::broker_registration_request::BrokerRegistrationRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5601,7 +5675,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "BrokerRegistrationResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::broker_registration_response::BrokerRegistrationResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::broker_registration_response::BrokerRegistrationResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5609,7 +5687,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ConsumerGroupDescribeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5617,7 +5699,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ConsumerGroupDescribeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5625,7 +5711,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ConsumerGroupHeartbeatRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5633,7 +5723,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ConsumerGroupHeartbeatResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5641,7 +5735,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ControllerRegistrationRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::controller_registration_request::ControllerRegistrationRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::controller_registration_request::ControllerRegistrationRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5649,7 +5747,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ControllerRegistrationResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::controller_registration_response::ControllerRegistrationResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::controller_registration_response::ControllerRegistrationResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5679,7 +5781,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "CreateDelegationTokenRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5687,7 +5793,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "CreateDelegationTokenResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5707,7 +5817,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "CreatePartitionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_partitions_response::CreatePartitionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_partitions_response::CreatePartitionsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5804,7 +5918,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DeleteShareGroupOffsetsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5812,7 +5930,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DeleteShareGroupOffsetsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_share_group_offsets_response::DeleteShareGroupOffsetsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5820,7 +5942,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DeleteShareGroupStateRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_share_group_state_request::DeleteShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_share_group_state_request::DeleteShareGroupStateRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5828,7 +5954,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DeleteShareGroupStateResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_share_group_state_response::DeleteShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_share_group_state_response::DeleteShareGroupStateResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5880,7 +6010,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeClientQuotasRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_client_quotas_request::DescribeClientQuotasRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_client_quotas_request::DescribeClientQuotasRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5888,7 +6022,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeClientQuotasResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_client_quotas_response::DescribeClientQuotasResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_client_quotas_response::DescribeClientQuotasResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5944,7 +6082,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeDelegationTokenRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5952,7 +6094,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeDelegationTokenResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_delegation_token_response::DescribeDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_delegation_token_response::DescribeDelegationTokenResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5996,7 +6142,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeLogDirsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_log_dirs_response::DescribeLogDirsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_log_dirs_response::DescribeLogDirsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6004,7 +6154,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeProducersRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_producers_request::DescribeProducersRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_producers_request::DescribeProducersRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6012,7 +6166,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeProducersResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_producers_response::DescribeProducersResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_producers_response::DescribeProducersResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6044,7 +6202,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeShareGroupOffsetsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6052,7 +6214,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeShareGroupOffsetsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6060,7 +6226,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeTopicPartitionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6068,7 +6238,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeTopicPartitionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_topic_partitions_response::DescribeTopicPartitionsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6076,7 +6250,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeTransactionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6084,7 +6262,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeTransactionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_transactions_response::DescribeTransactionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_transactions_response::DescribeTransactionsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6092,7 +6274,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeUserScramCredentialsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6100,7 +6286,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "DescribeUserScramCredentialsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6196,7 +6386,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ExpireDelegationTokenRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6204,7 +6398,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ExpireDelegationTokenResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6279,7 +6477,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "GetTelemetrySubscriptionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6287,7 +6489,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "GetTelemetrySubscriptionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6317,7 +6523,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "IncrementalAlterConfigsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6325,7 +6535,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "IncrementalAlterConfigsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6357,7 +6571,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "InitializeShareGroupStateRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6365,7 +6583,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "InitializeShareGroupStateResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::initialize_share_group_state_response::InitializeShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::initialize_share_group_state_response::InitializeShareGroupStateResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6417,7 +6639,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ListConfigResourcesRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6425,7 +6651,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ListConfigResourcesResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_config_resources_response::ListConfigResourcesResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_config_resources_response::ListConfigResourcesResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6477,7 +6707,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ListPartitionReassignmentsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6485,7 +6719,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ListPartitionReassignmentsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6505,7 +6743,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ListTransactionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_transactions_response::ListTransactionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_transactions_response::ListTransactionsResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6601,7 +6843,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "OffsetForLeaderEpochRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6609,7 +6855,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "OffsetForLeaderEpochResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6661,7 +6911,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ReadShareGroupStateRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::read_share_group_state_request::ReadShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::read_share_group_state_request::ReadShareGroupStateRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6669,7 +6923,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ReadShareGroupStateResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::read_share_group_state_response::ReadShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::read_share_group_state_response::ReadShareGroupStateResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6677,7 +6935,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ReadShareGroupStateSummaryRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::read_share_group_state_summary_request::ReadShareGroupStateSummaryRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::read_share_group_state_summary_request::ReadShareGroupStateSummaryRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6685,7 +6947,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ReadShareGroupStateSummaryResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6705,7 +6971,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "RemoveRaftVoterResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::remove_raft_voter_response::RemoveRaftVoterResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::remove_raft_voter_response::RemoveRaftVoterResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6713,7 +6983,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "RenewDelegationTokenRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6721,7 +6995,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "RenewDelegationTokenResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6761,7 +7039,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "SaslAuthenticateResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6804,7 +7086,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ShareAcknowledgeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6834,7 +7120,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ShareGroupDescribeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6842,7 +7132,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ShareGroupDescribeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_group_describe_response::ShareGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_group_describe_response::ShareGroupDescribeResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6850,7 +7144,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ShareGroupHeartbeatRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6858,7 +7156,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "ShareGroupHeartbeatResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_group_heartbeat_response::ShareGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_group_heartbeat_response::ShareGroupHeartbeatResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6866,7 +7168,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "StreamsGroupDescribeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::streams_group_describe_request::StreamsGroupDescribeRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::streams_group_describe_request::StreamsGroupDescribeRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6874,7 +7180,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "StreamsGroupDescribeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::streams_group_describe_response::StreamsGroupDescribeResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::streams_group_describe_response::StreamsGroupDescribeResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6882,7 +7192,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "StreamsGroupHeartbeatRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6890,7 +7204,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "StreamsGroupHeartbeatResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6932,7 +7250,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "TxnOffsetCommitResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6952,7 +7274,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "UnregisterBrokerResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::unregister_broker_response::UnregisterBrokerResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::unregister_broker_response::UnregisterBrokerResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6996,7 +7322,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "UpdateRaftVoterResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::update_raft_voter_response::UpdateRaftVoterResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::update_raft_voter_response::UpdateRaftVoterResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -7023,7 +7353,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "WriteShareGroupStateRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::write_share_group_state_request::WriteShareGroupStateRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::write_share_group_state_request::WriteShareGroupStateRequest::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -7031,7 +7365,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "WriteShareGroupStateResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -7051,7 +7389,11 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         }
         "WriteTxnMarkersResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse::decode(
+                    &mut cur,
+                    version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -7060,7 +7402,6 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
         _ => panic!("unknown message in roundtrip: {name}"),
     }
 }
-
 #[must_use]
 #[allow(clippy::absurd_extreme_comparisons)]
 #[allow(clippy::match_same_arms)]
@@ -7694,7 +8035,6 @@ pub fn request_header_version(name: &str, version: i16) -> i16 {
         _ => panic!("unknown request in request_header_version: {name}"),
     }
 }
-
 #[must_use]
 #[allow(clippy::absurd_extreme_comparisons)]
 #[allow(clippy::match_same_arms)]
@@ -7793,7 +8133,6 @@ pub fn response_header_version(name: &str, version: i16) -> i16 {
         _ => panic!("unknown response in response_header_version: {name}"),
     }
 }
-
 /// Decode and discard the request/response header from a full frame body,
 /// returning the remaining message bytes.
 #[must_use]

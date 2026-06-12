@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::config::Materialized;
+use crate::dsl::emit::EmitStrategy;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
 use crate::dsl::ktable::KTable;
@@ -35,6 +36,7 @@ pub struct SessionWindowedKGroupedStream<K, V> {
     grouped_name: Option<String>,
     repartition_lower: Option<RepartitionLowerFn>,
     windows: SessionWindows,
+    emit: EmitStrategy,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -58,8 +60,22 @@ where
             grouped_name,
             repartition_lower,
             windows,
+            emit: EmitStrategy::default(),
             _pd: PhantomData,
         }
+    }
+
+    /// Emit on every update (default) or only on window close (KIP-825).
+    ///
+    /// For `on_window_close`, configure the session grace `>=` the inactivity
+    /// gap. With `grace < gap` a late, in-gap record can re-open and re-merge a
+    /// session that already emitted its final result, producing a duplicate
+    /// final — the processor does not yet drop such late records (exact
+    /// late-record semantics are pinned by the JVM golden).
+    #[must_use]
+    pub fn emit_strategy(mut self, emit: EmitStrategy) -> Self {
+        self.emit = emit;
+        self
     }
 
     /// `count`: count records per session → `KTable<Windowed<K>, i64>`.
@@ -229,6 +245,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory =
@@ -237,6 +254,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -274,6 +292,11 @@ where
                         init: init.clone(),
                         agg: agg.clone(),
                         merger: merger.clone(),
+                        emit,
+                        grace_ms: windows.grace_ms,
+                        stream_time: i64::MIN,
+                        last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -286,6 +309,12 @@ where
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update session aggregates: emit-final stays
+            // uncached or the flush would emit the per-update tombstones+updates
+            // emit-final suppresses.
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -317,6 +346,7 @@ where
         let Materialized {
             key_serde,
             value_serde,
+            caching,
             ..
         } = materialized;
         let suppress_factory =
@@ -325,6 +355,7 @@ where
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
         let windows = self.windows;
+        let emit = self.emit;
         let mut g = self.builder.borrow_mut();
         let agg_parent = KGroupedStream::<K, V>::record_repartition(
             &mut g,
@@ -358,6 +389,11 @@ where
                         store_name: store_for_proc.clone(),
                         gap_ms: windows.gap_ms,
                         reducer: reducer.clone(),
+                        emit,
+                        grace_ms: windows.grace_ms,
+                        stream_time: i64::MIN,
+                        last_emitted_close: i64::MIN,
+                        forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -370,6 +406,10 @@ where
                 windows.grace_ms,
                 [h.name().to_string()],
             );
+            // Cache only emit-on-update session reduces (see aggregate lower).
+            state
+                .topology
+                .mark_store_caching(&store_for_thunk, caching && emit.is_on_update());
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 
@@ -413,4 +453,116 @@ where
                 );
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+    use crate::dsl::emit::EmitStrategy;
+    use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Window, Windowed};
+    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+    use crate::test_driver::TopologyTestDriver;
+
+    /// Sub-task 3d-ii: an emit-on-update (default) session aggregate store is
+    /// marked caching, so with a positive cache budget it lands in `cache_owner`.
+    #[test]
+    fn emit_on_update_session_store_is_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+            .count("s");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            g.cache_owner.contains_key("s"),
+            "emit-on-update session store must be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
+
+    /// Sub-task 3d-ii: an emit-FINAL session aggregate store must stay UNCACHED —
+    /// a cache flush would emit the per-update tombstones+updates emit-final
+    /// suppresses. The `emit.is_on_update()` mark guard enforces this.
+    #[test]
+    fn emit_final_session_store_is_not_cached() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by_session(SessionWindows::of_inactivity_gap(60).grace(10))
+            .emit_strategy(EmitStrategy::on_window_close())
+            .count("s");
+        let built = b.build("app").unwrap();
+        let g = pollster::block_on(built.instantiate(
+            &crate::store::backend::StoreBackend::InMemory,
+            "app",
+            10_485_760,
+        ))
+        .unwrap();
+        check!(
+            !g.cache_owner.contains_key("s"),
+            "emit-final session store must NOT be cached, cache_owner = {:?}",
+            g.cache_owner
+        );
+    }
+
+    /// `windowedBy(SessionWindows).emit_strategy(on_window_close).count`: emit-final
+    /// (KIP-825) suppresses per-update + merge-tombstone emits and forwards a single
+    /// final count for each session only once stream-time advances past its close.
+    /// Records a@1 and a@4 (within gap 60) form session `[1,4]` (count 2) silently;
+    /// the a@1000 record opens session `[1000,1000]` and closes `[1,4]` (end 4 <=
+    /// `window_close_time` = 1000 - grace 10 = 990), emitting exactly one record:
+    /// session `[1,4]` with value 2. A grace of 10 keeps the data-defined session
+    /// open at its own (inclusive) end until stream-time jumps ahead.
+    #[test]
+    fn dsl_session_count_emit_final_emits_once_on_close() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, String>(["in"])
+            .group_by_key()
+            .windowed_by_session(SessionWindows::of_inactivity_gap(60).grace(10))
+            .emit_strategy(EmitStrategy::on_window_close())
+            .count("s")
+            .to_stream()
+            .to_explicit(
+                "out",
+                Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+            );
+        let built = b.build("app").unwrap();
+        let mut d = TopologyTestDriver::new(&built).unwrap();
+        for ts in [1, 4, 1000] {
+            d.pipe_input(
+                "in",
+                Consumed::with(StringSerde, StringSerde),
+                Some("a".to_string()),
+                "x".to_string(),
+                ts,
+            );
+        }
+        let p = || Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
+        assert_eq!(
+            d.read_output("out", p()),
+            Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 1, end: 4 }
+                }),
+                2
+            )),
+            "emit-final forwards session [1,4] with final count 2 on close"
+        );
+        // No per-update / merge-tombstone emits and the still-open session
+        // [1000,1000] is not emitted.
+        assert_eq!(
+            d.read_output("out", p()),
+            None,
+            "exactly one emit-final record"
+        );
+    }
 }

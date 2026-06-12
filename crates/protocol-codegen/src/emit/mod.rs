@@ -1,4 +1,3 @@
-pub mod api_key_enum;
 pub mod api_key_enum_quote;
 pub mod borrowed;
 pub mod borrowed_quote;
@@ -58,9 +57,9 @@ mod tests {
         assert!(!active.is_empty(), "no active specs in {dir:?}");
 
         for s in &active {
-            let owned = owned::emit(s, sha).unwrap();
+            let owned = owned_quote::emit(s, sha).unwrap();
             assert!(owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct"));
-            let borrowed = borrowed::emit(s, sha, namespace).unwrap();
+            let borrowed = borrowed_quote::emit(s, sha, namespace).unwrap();
             assert!(!borrowed.primary.is_empty());
             for (_, body) in owned.commons.iter().chain(borrowed.commons.iter()) {
                 assert!(!body.is_empty());
@@ -82,7 +81,7 @@ mod tests {
         }
 
         if namespace.is_none() {
-            assert!(api_key_enum::emit(&specs, sha).contains("ApiKey"));
+            assert!(api_key_enum_quote::emit(&specs, sha).contains("ApiKey"));
             assert!(!differential_table::emit(&specs, sha).is_empty());
         }
         assert!(common::banner(sha).contains(sha));

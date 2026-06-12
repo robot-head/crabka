@@ -579,6 +579,20 @@ impl BrokerHandle {
             .get_or_create_classic(group_id);
     }
 
+    /// Test-only: return the locked `GroupType` for `group_id`, if any.
+    /// Integration tests use this to assert a group has been flagged as
+    /// Classic (after `JoinGroup`) or converted to Streams (after a
+    /// `StreamsGroupHeartbeat` on a drained classic group).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn group_type_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::GroupType> {
+        self._broker.group_coordinator.group_type(group_id)
+    }
+
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
     /// and metadata records). Exposed so integration tests can build
     /// `IncrementalAlterConfigs` broker-resource requests targeting this

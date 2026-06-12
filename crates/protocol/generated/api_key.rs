@@ -194,7 +194,6 @@ pub enum ApiKey {
     /// `GetReplicaLogInfoRequest` (versions 0–0).
     GetReplicaLogInfo = 93,
 }
-
 impl ApiKey {
     /// All known API keys, in ascending numeric order.
     pub const ALL: &'static [ApiKey] = &[
@@ -289,7 +288,6 @@ impl ApiKey {
         ApiKey::DeleteShareGroupOffsets,
         ApiKey::GetReplicaLogInfo,
     ];
-
     /// Resolve from numeric key; returns `None` for unknown keys.
     pub fn from_i16(k: i16) -> Option<ApiKey> {
         match k {

@@ -34,6 +34,7 @@ use crate::dsl::processors::table::{
     KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
     KTableToStreamProcessor,
 };
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::serde::{DefaultSerde, Serde, SerdeArc};
 use crate::topology::NodeHandle;
 
@@ -91,6 +92,11 @@ pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde
     /// For windowed tables: the upstream window's grace (suppress closes a window
     /// at `window.end + window_grace_ms`). `None` for non-windowed tables.
     pub(crate) window_grace_ms: Option<i64>,
+    /// `Some(history_retention_ms)` when this table is materialized into a
+    /// versioned store (KIP-889). Drives as-of stream–table join lookups
+    /// (KIP-914) + the table–table out-of-order gate + grace validation.
+    /// Mirrors `window_grace_ms`. `None` for non-versioned / derived tables.
+    pub(crate) versioned_retention_ms: Option<i64>,
     /// Set by serde-carrying producers (aggregations, `builder.table`); read by
     /// `suppress` to register its store with the right serdes. `None` on derived
     /// tables whose value type changed (`map_values`) — `suppress` then panics.
@@ -115,6 +121,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name,
             source_topic,
             window_grace_ms: None,
+            versioned_retention_ms: None,
             suppress_store_factory: None,
             key_serde,
             value_serde,
@@ -129,6 +136,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name: self.store_name,
             source_topic: self.source_topic,
             window_grace_ms: self.window_grace_ms,
+            versioned_retention_ms: self.versioned_retention_ms,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: serde,
             value_serde: self.value_serde,
@@ -143,6 +151,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             store_name: self.store_name,
             source_topic: self.source_topic,
             window_grace_ms: self.window_grace_ms,
+            versioned_retention_ms: self.versioned_retention_ms,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: self.key_serde,
             value_serde: serde,
@@ -191,6 +200,15 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
     #[must_use]
     pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
         self.window_grace_ms = grace_ms;
+        self
+    }
+
+    /// Tag this table with its versioned-store history retention (set by
+    /// `builder.table` when `Materialized::as_versioned` was used). Read by the
+    /// stream–table join (as-of routing) and table–table join (out-of-order gate).
+    #[must_use]
+    pub(crate) fn with_versioned_retention(mut self, retention_ms: Option<i64>) -> Self {
+        self.versioned_retention_ms = retention_ms;
         self
     }
 
@@ -352,6 +370,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -381,6 +400,7 @@ where
                     move || KTableMapValuesProcessor {
                         f: f2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -391,6 +411,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -430,6 +451,7 @@ where
         let value_serde = materialized.value_serde.clone();
         let key_serde_for_ktable = key_serde.clone();
         let value_serde_for_ktable = value_serde.clone();
+        let caching = materialized.caching_enabled();
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -460,6 +482,7 @@ where
                     move || KTableFilterProcessor {
                         predicate: p2.clone(),
                         store_name: store_for_proc.clone(),
+                        forwarder: TupleForwarder::default(),
                         _pd: PhantomData,
                     },
                     [parent],
@@ -470,6 +493,7 @@ where
                 value_serde.clone(),
                 [h.name().to_string()],
             );
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -485,6 +509,92 @@ where
         .with_suppress_factory(suppress_factory)
     }
 
+    /// `groupBy`: re-group the table by a new `(KR, VR)` derived from each entry,
+    /// then aggregate with `count`/`reduce`/`aggregate`. Always repartitions (the
+    /// JVM `KTable.groupBy` inserts a repartition-map + sink + source).
+    pub fn group_by<KR, VR, M>(
+        &self,
+        mapper: M,
+    ) -> crate::dsl::kgrouped_table::KGroupedTable<KR, VR>
+    where
+        KR: DefaultSerde + Any + Send + Sync + Clone + PartialEq,
+        VR: DefaultSerde + Any + Send + Sync + Clone,
+        <KR as DefaultSerde>::Serde: Serde<KR> + Clone,
+        <VR as DefaultSerde>::Serde: Serde<VR> + Clone,
+        M: Fn(&K, &V) -> (KR, VR) + Clone + Send + Sync + 'static,
+        K: Any + Send + Sync + Clone,
+        V: Any + Send + Clone,
+    {
+        self.group_by_explicit(
+            mapper,
+            crate::dsl::config::Grouped::with(
+                <KR as DefaultSerde>::Serde::default(),
+                <VR as DefaultSerde>::Serde::default(),
+            ),
+        )
+    }
+
+    /// `groupBy` with explicit repartition serdes.
+    pub fn group_by_explicit<KR, VR, GKS, GVS, M>(
+        &self,
+        mapper: M,
+        grouped: impl Into<crate::dsl::config::Grouped<GKS, GVS>>,
+    ) -> crate::dsl::kgrouped_table::KGroupedTable<KR, VR>
+    where
+        KR: Any + Send + Sync + Clone + PartialEq,
+        VR: Any + Send + Sync + Clone,
+        GKS: Serde<KR> + Clone + 'static,
+        GVS: Serde<VR> + Clone + 'static,
+        M: Fn(&K, &V) -> (KR, VR) + Clone + Send + Sync + 'static,
+        K: Any + Send + Sync + Clone,
+        V: Any + Send + Clone,
+    {
+        use crate::dsl::processors::table_aggregate::KTableRepartitionMapProcessor;
+
+        let grouped = grouped.into();
+        let parent_id = self.node;
+
+        // Record the `KTABLE-SELECT` repartition-map node NOW (at `groupBy()` time),
+        // matching the JVM `KGroupedTableImpl`, which mints SELECT before the
+        // terminal aggregation mints its result store. Recording it here rather
+        // than deferring to the terminal op is what keeps an auto-named result
+        // store at the JVM counter index (pinned by the `kgrouped_table_autonamed`
+        // golden).
+        let mut g = self.builder.borrow_mut();
+        let select_name = g.new_processor_name(names::KTABLE_SELECT);
+        let select_id = g.graph.add(
+            select_name.clone(),
+            GraphNodeKind::TableProcessor { store_name: None },
+            vec![parent_id],
+        );
+        let mapper2 = mapper.clone();
+        g.graph.nodes[select_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, KR, Change<VR>, _, _, _>(
+                    select_name.clone(),
+                    move || KTableRepartitionMapProcessor {
+                        mapper: mapper2.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+            state.handle_name.insert(select_id, h.name().to_string());
+        }));
+        drop(g);
+
+        crate::dsl::kgrouped_table::KGroupedTable::new(
+            Rc::clone(&self.builder),
+            select_id,
+            crate::dsl::kgrouped_table::repartition_lower_changed::<KR, VR, GKS, GVS>(
+                grouped.key_serde,
+                grouped.value_serde,
+            ),
+        )
+    }
+
     /// `join` (inner KTable-KTable join): for each key, the join row exists only
     /// when **both** tables hold a value. On any change to either side, the join
     /// re-reads the other side's current value from its store and forwards a
@@ -498,7 +608,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, &VB) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -523,7 +634,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -541,7 +653,8 @@ where
         joiner: F,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         F: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -572,7 +685,8 @@ where
         kind: JoinKind,
     ) -> KTable<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
-        VB: Any + Send + Clone,
+        V: Sync,
+        VB: Any + Send + Sync + Clone,
         VR: DefaultSerde + Any + Send + Clone,
         JF: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
         KS: Clone,
@@ -591,6 +705,27 @@ where
         let self_node = self.node;
         let other_node = other.node;
 
+        // KIP-914: each side's OWN store name, set only when that side is
+        // versioned. The matching processor reads its own latest `valid_from`
+        // and suppresses out-of-order updates (record ts strictly older).
+        let this_versioned_store = self
+            .versioned_retention_ms
+            .is_some()
+            .then(|| a_store.clone());
+        let other_versioned_store = other
+            .versioned_retention_ms
+            .is_some()
+            .then(|| b_store.clone());
+
+        // KIP-914: table-table joins read the OTHER side's LATEST value. Each
+        // processor must know whether ITS other store is versioned so the read
+        // goes through `get_versioned_store` (a plain `get_state_store` downcast
+        // returns `None` for a `VersionedBytesStore`).
+        // - This-processor reads the OTHER (b) table → versioned iff `other` is.
+        // - Other-processor reads the OTHER (a/self) table → versioned iff `self` is.
+        let other_is_versioned_this = other.versioned_retention_ms.is_some();
+        let other_is_versioned_other = self.versioned_retention_ms.is_some();
+
         let mut g = self.builder.borrow_mut();
         let join_this = g.new_processor_name(names::KTABLE_JOIN_THIS);
         let join_other = g.new_processor_name(names::KTABLE_JOIN_OTHER);
@@ -605,13 +740,16 @@ where
             vec![self_node],
         );
         let b_store_this = b_store.clone();
+        let a_store_this = a_store.clone();
         let jf_this = jf.clone();
         let join_this_name = join_this.clone();
+        let this_versioned = this_versioned_store.clone();
         g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent =
                 NodeHandle::<K, Change<V>>::from_name(state.handle_name[&self_node].clone());
             let store_for_proc = b_store_this.clone();
             let jf_for_proc = jf_this.clone();
+            let self_versioned = this_versioned.clone();
             let h = state
                 .topology
                 .add_processor::<K, Change<V>, K, Change<VR>, _, _, _>(
@@ -620,6 +758,10 @@ where
                         other_store: store_for_proc.clone(),
                         joiner: jf_for_proc.clone(),
                         kind,
+                        self_versioned_store: self_versioned.clone(),
+                        // KIP-914: the This-processor reads the OTHER (b) store; it
+                        // is versioned iff the `other` table is versioned.
+                        other_is_versioned: other_is_versioned_this,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -627,6 +769,13 @@ where
             state
                 .topology
                 .connect_processor_store(h.name(), &b_store_this);
+            // KIP-914: connect this processor to its OWN store so the gate's
+            // `get_versioned_store` lookup resolves (only matters when versioned).
+            if this_versioned.is_some() {
+                state
+                    .topology
+                    .connect_processor_store(h.name(), &a_store_this);
+            }
             state.handle_name.insert(this_id, h.name().to_string());
         }));
 
@@ -639,13 +788,16 @@ where
             vec![other_node],
         );
         let a_store_other = a_store.clone();
+        let b_store_other = b_store.clone();
         let jf_other = jf.clone();
         let join_other_name = join_other.clone();
+        let other_versioned = other_versioned_store.clone();
         g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent =
                 NodeHandle::<K, Change<VB>>::from_name(state.handle_name[&other_node].clone());
             let store_for_proc = a_store_other.clone();
             let jf_for_proc = jf_other.clone();
+            let self_versioned = other_versioned.clone();
             let h = state
                 .topology
                 .add_processor::<K, Change<VB>, K, Change<VR>, _, _, _>(
@@ -654,6 +806,10 @@ where
                         other_store: store_for_proc.clone(),
                         joiner: jf_for_proc.clone(),
                         kind,
+                        self_versioned_store: self_versioned.clone(),
+                        // KIP-914: the Other-processor reads the OTHER (a/self) store;
+                        // it is versioned iff `self` (the receiver KTable) is versioned.
+                        other_is_versioned: other_is_versioned_other,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -661,6 +817,13 @@ where
             state
                 .topology
                 .connect_processor_store(h.name(), &a_store_other);
+            // KIP-914: connect this processor to its OWN store so the gate's
+            // `get_versioned_store` lookup resolves (only matters when versioned).
+            if other_versioned.is_some() {
+                state
+                    .topology
+                    .connect_processor_store(h.name(), &b_store_other);
+            }
             state.handle_name.insert(other_id, h.name().to_string());
         }));
 
@@ -1166,6 +1329,31 @@ fn mint_table_store<KS, VS>(
     match &materialized.store_name {
         Some(name) => name.clone(),
         None => builder.borrow_mut().new_processor_name(prefix),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn versioned_table_handle_carries_retention() {
+        use crate::dsl::builder::StreamsBuilder;
+        use crate::dsl::config::Materialized;
+        use crate::processor::serde::{I64Serde, StringSerde};
+
+        let b = StreamsBuilder::new();
+        let t = b.table_explicit::<StringSerde, I64Serde>(
+            "in",
+            crate::processor::serde::Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        );
+        assert_eq!(t.versioned_retention_ms, Some(600_000));
+
+        let plain = b.table_explicit::<StringSerde, I64Serde>(
+            "in2",
+            crate::processor::serde::Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_store("pt"),
+        );
+        assert_eq!(plain.versioned_retention_ms, None);
     }
 }
 

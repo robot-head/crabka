@@ -20,6 +20,8 @@ use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::io_broker;
 use crate::runtime::iq::IqRequest;
 use crate::runtime::iq_view::ReadOnlyKeyValueStore;
+use crate::runtime::iqv2::dispatch::Iq2Request;
+use crate::runtime::iqv2::{Query, StateQuery, StateQueryResult};
 use crate::runtime::thread::StreamThread;
 use crate::store::iq::StoreKind;
 use crate::topology::BuiltTopology;
@@ -42,11 +44,15 @@ pub struct KafkaStreams {
     /// Channel to the supervisor for interactive queries. Read by the
     /// `KafkaStreams` IQ accessors.
     iq_tx: mpsc::Sender<IqRequest>,
+    /// Channel to the supervisor for `IQv2` queries (separate from the v1 `iq_tx`).
+    iq2_tx: mpsc::Sender<Iq2Request>,
 }
 
 #[bon::bon]
 impl KafkaStreams {
     #[builder(start_fn = builder, finish_fn = build)]
+    #[allow(clippy::too_many_lines)] // one-shot constructor: broker I/O setup,
+    // membership join, and the supervisor select-loop (now two IQ channels).
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
@@ -55,6 +61,10 @@ impl KafkaStreams {
         #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
+        /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
+        /// caching. Threaded onto each task graph at `instantiate`.
+        #[builder(default = 10_485_760)]
+        cache_max_bytes: i64,
     ) -> Result<Self, StreamsClientError> {
         let built = Arc::new(topology);
 
@@ -103,9 +113,15 @@ impl KafkaStreams {
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
         let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
+        let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(64);
         let is_eos = processing_guarantee == ProcessingGuarantee::ExactlyOnceV2;
         let handle = tokio::spawn(async move {
-            let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
+            let mut thread = StreamThread::new(
+                fetcher_for_thread,
+                store_backend,
+                application_id,
+                cache_max_bytes,
+            );
             let mut poll = tokio::time::interval(poll_interval);
             let mut commit = tokio::time::interval(commit_interval);
             let tracker = membership.tracker();
@@ -157,6 +173,9 @@ impl KafkaStreams {
                     Some(req) = iq_rx.recv() => {
                         thread.serve_iq(req).await;
                     }
+                    Some(req) = iq2_rx.recv() => {
+                        thread.serve_iq2(req).await;
+                    }
                 }
             }
         });
@@ -167,6 +186,7 @@ impl KafkaStreams {
             handle: Some(handle),
             state: KafkaStreamsState::Running,
             iq_tx,
+            iq2_tx,
         })
     }
 }
@@ -250,6 +270,35 @@ impl KafkaStreams {
         };
         crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::Session).await?;
         Ok(view)
+    }
+
+    /// Run an `IQv2` query against locally assigned partitions and return one
+    /// `QueryResult` per partition. Serde-free: the store supplies its own
+    /// serdes. If the instance is not running, the result has no partitions.
+    pub async fn query<Q: Query>(&self, req: StateQuery<Q>) -> StateQueryResult<Q::Result> {
+        use crate::runtime::iqv2::dispatch::{Iq2Request, assemble};
+
+        if self.state != KafkaStreamsState::Running {
+            return StateQueryResult::new(std::collections::BTreeMap::new());
+        }
+        let kind = req.query.store_kind();
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let iq2 = Iq2Request {
+            store: req.store,
+            kind,
+            query: req.query.lower(),
+            partitions: req.partitions,
+            bound: req.bound,
+            require_active: req.require_active,
+            reply,
+        };
+        if self.iq2_tx.send(iq2).await.is_err() {
+            return StateQueryResult::new(std::collections::BTreeMap::new());
+        }
+        match rx.await {
+            Ok(outcome) => assemble::<Q::Result>(outcome),
+            Err(_) => StateQueryResult::new(std::collections::BTreeMap::new()),
+        }
     }
 
     /// Stop processing, commit, and leave the group.

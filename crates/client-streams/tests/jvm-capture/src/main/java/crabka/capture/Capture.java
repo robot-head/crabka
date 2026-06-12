@@ -3,6 +3,7 @@ package crabka.capture;
 import org.apache.kafka.clients.consumer.internals.StreamsRebalanceData;
 import org.apache.kafka.common.message.StreamsGroupHeartbeatRequestData;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
@@ -10,15 +11,29 @@ import org.apache.kafka.streams.kstream.BranchedKStream;
 import org.apache.kafka.streams.kstream.Branched;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.GlobalKTable;
+import org.apache.kafka.streams.kstream.Grouped;
+import org.apache.kafka.streams.kstream.KGroupedStream;
+import org.apache.kafka.streams.kstream.KGroupedTable;
 import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.KTable;
+import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.SessionWindows;
+import org.apache.kafka.streams.kstream.SlidingWindows;
+import org.apache.kafka.streams.kstream.TimeWindows;
+import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.kstream.WindowedSerdes;
 import org.apache.kafka.streams.processor.api.ContextualProcessor;
 import org.apache.kafka.streams.processor.api.ContextualFixedKeyProcessor;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.SessionStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
+import org.apache.kafka.streams.state.WindowStore;
+
+import java.time.Duration;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -90,8 +105,17 @@ public final class Capture {
         write(outDir, "process_values", processValuesTopology());
         write(outDir, "fk_join_inner", fkJoinInner());
         write(outDir, "fk_join_left", fkJoinLeft());
+        write(outDir, "sliding_window_count", slidingWindowCount());
+        write(outDir, "sliding_window_aggregate", slidingWindowAggregate());
+        write(outDir, "versioned_table", versionedTable());
+        write(outDir, "cogroup", cogroup());
+        write(outDir, "cogroup_time", cogroupTime());
+        write(outDir, "cogroup_sliding", cogroupSliding());
+        write(outDir, "cogroup_session", cogroupSession());
+        write(outDir, "kgrouped_table", kgroupedTable());
+        write(outDir, "kgrouped_table_autonamed", kgroupedTableAutoNamed());
 
-        System.out.println("Capture complete. Wrote 19 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 28 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -122,6 +146,151 @@ public final class Capture {
             .count()
             .toStream()
             .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** Sliding-window (KIP-450) count: stream -> groupByKey -> windowedBy(SlidingWindows) -> count -> toStream -> to. */
+    static Topology slidingWindowCount() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.SlidingWindows.ofTimeDifferenceWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** Sliding-window aggregate (no count name-burn): groupByKey -> windowedBy(SlidingWindows) -> aggregate -> toStream -> to. */
+    static Topology slidingWindowAggregate() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.SlidingWindows.ofTimeDifferenceWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .aggregate(() -> 0L, (k, v, a) -> a + 1, Materialized.with(Serdes.String(), Serdes.Long()))
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** Non-windowed cogroup: in1 (len) + in2 (constant) → aggregate → toStream → to. */
+    static Topology cogroup() {
+        StreamsBuilder b = new StreamsBuilder();
+        KGroupedStream<String, String> g1 = b.<String, String>stream("in1").groupByKey();
+        KGroupedStream<String, String> g2 = b.<String, String>stream("in2").groupByKey();
+        KTable<String, Long> t = g1
+            .<Long>cogroup((k, v, agg) -> agg + v.length())
+            .cogroup(g2, (k, v, agg) -> agg + 1)
+            .aggregate(() -> 0L,
+                Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("cg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        t.toStream().to("out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /** Time-windowed cogroup. */
+    static Topology cogroupTime() {
+        StreamsBuilder b = new StreamsBuilder();
+        KGroupedStream<String, String> g1 = b.<String, String>stream("in1").groupByKey();
+        KGroupedStream<String, String> g2 = b.<String, String>stream("in2").groupByKey();
+        KTable<Windowed<String>, Long> t = g1
+            .<Long>cogroup((k, v, agg) -> agg + v.length())
+            .cogroup(g2, (k, v, agg) -> agg + 1)
+            .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMillis(100)))
+            .aggregate(() -> 0L,
+                Materialized.<String, Long, WindowStore<Bytes, byte[]>>as("cg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        t.toStream().to("out", Produced.with(
+            WindowedSerdes.timeWindowedSerdeFrom(String.class, 100L), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /** Sliding-windowed cogroup. */
+    static Topology cogroupSliding() {
+        StreamsBuilder b = new StreamsBuilder();
+        KGroupedStream<String, String> g1 = b.<String, String>stream("in1").groupByKey();
+        KGroupedStream<String, String> g2 = b.<String, String>stream("in2").groupByKey();
+        KTable<Windowed<String>, Long> t = g1
+            .<Long>cogroup((k, v, agg) -> agg + v.length())
+            .cogroup(g2, (k, v, agg) -> agg + 1)
+            .windowedBy(SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMillis(100)))
+            .aggregate(() -> 0L,
+                Materialized.<String, Long, WindowStore<Bytes, byte[]>>as("cg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        t.toStream().to("out", Produced.with(
+            WindowedSerdes.timeWindowedSerdeFrom(String.class, 100L), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /** Session-windowed cogroup (note the session merger). */
+    static Topology cogroupSession() {
+        StreamsBuilder b = new StreamsBuilder();
+        KGroupedStream<String, String> g1 = b.<String, String>stream("in1").groupByKey();
+        KGroupedStream<String, String> g2 = b.<String, String>stream("in2").groupByKey();
+        KTable<Windowed<String>, Long> t = g1
+            .<Long>cogroup((k, v, agg) -> agg + v.length())
+            .cogroup(g2, (k, v, agg) -> agg + 1)
+            .windowedBy(SessionWindows.ofInactivityGapWithNoGrace(Duration.ofMillis(100)))
+            .aggregate(() -> 0L, (k, a, bb) -> a + bb,
+                Materialized.<String, Long, SessionStore<Bytes, byte[]>>as("cg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        t.toStream().to("out", Produced.with(
+            WindowedSerdes.sessionWindowedSerdeFrom(String.class), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * kgrouped_table: table("in") -> filter(v > 0) -> groupBy(even/odd) ->
+     * count + reduce(add,sub) + aggregate(add,sub) -> three sinks.
+     * Exercises KTable.groupBy repartition + three KGroupedTable aggregations.
+     */
+    static Topology kgroupedTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        KTable<String, Long> src = b.table("in",
+            Consumed.with(Serdes.String(), Serdes.Long()),
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("src-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        KTable<String, Long> pos = src.filter((k, v) -> v > 0,
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("filter-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        KGroupedTable<String, Long> grouped = pos.groupBy(
+            (k, v) -> KeyValue.pair(v % 2 == 0 ? "even" : "odd", v),
+            Grouped.with(Serdes.String(), Serdes.Long()));
+        grouped.count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("count-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("count-out", Produced.with(Serdes.String(), Serdes.Long()));
+        grouped.reduce((a, v) -> a + v, (a, v) -> a - v,
+                Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("reduce-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("reduce-out", Produced.with(Serdes.String(), Serdes.Long()));
+        grouped.aggregate(() -> 0L, (k, v, a) -> a + v, (k, v, a) -> a - v,
+                Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("agg-store")
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream().to("agg-out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * kgrouped_table_autonamed: table("in", "src-store") -> groupBy(even/odd) ->
+     * count() with NO explicit Materialized name. The result store is auto-named
+     * from the JVM's shared name counter (KTABLE-AGGREGATE-STATE-STORE-NNN), so its
+     * repartition/changelog topic names pin the exact counter position of the
+     * groupBy SELECT + aggregate store. Discriminates the KGroupedTable lowering's
+     * mint order (no explicit names to mask it).
+     */
+    static Topology kgroupedTableAutoNamed() {
+        StreamsBuilder b = new StreamsBuilder();
+        KTable<String, Long> src = b.table("in",
+            Consumed.with(Serdes.String(), Serdes.Long()),
+            Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("src-store")
+                .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()));
+        src.groupBy(
+                (k, v) -> KeyValue.pair(v % 2 == 0 ? "even" : "odd", v),
+                Grouped.with(Serdes.String(), Serdes.Long()))
+            .count()
+            .toStream().to("out", Produced.with(Serdes.String(), Serdes.Long()));
         return b.build(optimizedProps());
     }
 
@@ -731,6 +900,40 @@ public final class Capture {
         }
         sb.append("\"");
         return sb.toString();
+    }
+
+    /**
+     * 22. versioned_table: table("in", Consumed, Materialized.as(persistentVersionedKeyValueStore("vt", 600s)))
+     * .toStream().to("out"). The versioned store's changelog carries
+     * min.compaction.lag.ms = history_retention_ms + 86_400_000 (24h grace).
+     * Built with optimization=all.
+     */
+    static Topology versionedTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * Unoptimized versioned table topology for the behavioral oracle
+     * ({@link VersionedTableBehavior}).
+     */
+    static Topology versionedTableUnoptimized() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in",
+                Consumed.with(Serdes.String(), Serdes.Long()),
+                Materialized.<String, Long>as(
+                        Stores.persistentVersionedKeyValueStore("vt", Duration.ofMillis(600_000)))
+                    .withKeySerde(Serdes.String()).withValueSerde(Serdes.Long()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.Long()));
+        return b.build();
     }
 
     private Capture() {

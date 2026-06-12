@@ -1,5 +1,7 @@
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+use proc_macro2::Ident;
+use quote::{format_ident, quote};
 
 use crabka_protocol_codegen::{emit, fmt, ir, name_conv, validate};
 
@@ -154,19 +156,13 @@ fn write_common_wrapper_tree(
     let src_common = protocol_src.join(flavor.dir()).join("common");
     std::fs::create_dir_all(&src_common)?;
 
-    let mut top_mod = emit::common::banner(schemas_version);
-    writeln!(
-        top_mod,
-        "//! {flavor_doc} common structs, scoped per owning message schema.\n"
-    )
-    .unwrap();
-
+    let mut message_mods: Vec<Ident> = Vec::new();
     for (message_snake, structs) in tree {
-        writeln!(top_mod, "pub mod {message_snake};").unwrap();
+        message_mods.push(format_ident!("{message_snake}"));
         let message_dir = src_common.join(message_snake);
         std::fs::create_dir_all(&message_dir)?;
 
-        let mut message_mod = emit::common::banner(schemas_version);
+        let mut struct_mods: Vec<Ident> = Vec::new();
         for struct_snake in structs {
             write_common_wrapper(
                 message_snake,
@@ -175,12 +171,20 @@ fn write_common_wrapper_tree(
                 schemas_version,
                 &message_dir,
             )?;
-            writeln!(message_mod, "pub mod {struct_snake};").unwrap();
+            struct_mods.push(format_ident!("{struct_snake}"));
             count += 1;
         }
+        let message_mod_tokens = quote!(#(pub mod #struct_mods;)*);
+        let message_mod = format!(
+            "{}{message_mod_tokens}",
+            emit::common::banner(schemas_version)
+        );
         std::fs::write(message_dir.join("mod.rs"), &message_mod)?;
         count += 1;
     }
+    let top_doc = format!(" {flavor_doc} common structs, scoped per owning message schema.");
+    let top_tokens = quote!(#![doc = #top_doc] #(pub mod #message_mods;)*);
+    let top_mod = format!("{}{top_tokens}", emit::common::banner(schemas_version));
     std::fs::write(src_common.join("mod.rs"), &top_mod)?;
     count += 1;
     Ok(count)
@@ -323,13 +327,13 @@ fn run(
     // but NOT inside a namespace dir — those files reference top-level types and
     // belong only in the root generated/ output.
     if namespace.is_none() {
-        let api_key_src = emit::api_key_enum::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("api_key.rs"), &api_key_src)?;
+        let api_key_src = emit::api_key_enum_quote::emit(&specs, &schemas_sha);
+        write_rs(out.join("api_key.rs"), &api_key_src)?;
         count += 1;
 
         // Emit the differential dispatch table for the parameterised sweep test.
         let diff_table = emit::differential_table::emit(&specs, &schemas_sha);
-        std::fs::write(out.join("differential_table.rs"), diff_table)?;
+        write_rs(out.join("differential_table.rs"), &diff_table)?;
         count += 1;
     }
 

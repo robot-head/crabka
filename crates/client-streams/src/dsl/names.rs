@@ -89,6 +89,22 @@ pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
 /// `KTABLE-SUPPRESS-` + `STATE-STORE-` + index, minted right after the suppress
 /// processor name so the index is consecutive).
 pub(crate) const KTABLE_SUPPRESS_STORE: &str = "KTABLE-SUPPRESS-STATE-STORE-";
+/// JVM `KGroupedTableImpl` repartition-map (select) node prefix. Maps the
+/// upstream `Change<V>` to the grouped `(KR, Change<VR>)` before the
+/// repartition. Not wire-visible.
+#[allow(dead_code)]
+pub(crate) const KTABLE_SELECT: &str = "KTABLE-SELECT-";
+/// JVM `KGroupedTableImpl` aggregate processor node prefix (subtract-then-add).
+/// Not wire-visible.
+#[allow(dead_code)]
+pub(crate) const KTABLE_AGGREGATE: &str = "KTABLE-AGGREGATE-";
+/// Store-name prefix for an unnamed `KGroupedTable::aggregate`/`count` result
+/// store. Used only when `Materialized` carries no explicit name.
+#[allow(dead_code)]
+pub(crate) const KTABLE_AGGREGATE_STORE: &str = "KTABLE-AGGREGATE-STATE-STORE-";
+/// Store-name prefix for an unnamed `KGroupedTable::reduce` result store.
+#[allow(dead_code)]
+pub(crate) const KTABLE_REDUCE_STORE: &str = "KTABLE-REDUCE-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
 
@@ -134,3 +150,17 @@ pub(crate) const GLOBAL_PROCESSOR: &str = "KTABLE-SOURCE-";
 pub(crate) const KSTREAM_PROCESSOR: &str = "KSTREAM-PROCESSOR-";
 /// JVM `KStream.processValues` node prefix. Not wire-visible.
 pub(crate) const KSTREAM_PROCESSVALUES: &str = "KSTREAM-PROCESSVALUES-";
+
+// ── KIP-150 cogroup node prefixes ───────────────────────────────────────────
+// Pinned by the `cogroup` golden capture (Kafka Streams 4.1.0). The processor
+// names are NOT wire-visible (the wire carries topics/stores/copartition only),
+// so these drive the internal node-name counter + diagnostics; the JVM constant
+// is `COGROUPKSTREAM-` (NOT `COGROUP-`).
+/// Per-input cogroup aggregate processor prefix (one node per input stream; all
+/// share the cogroup state store).
+#[allow(dead_code)]
+pub(crate) const COGROUP_AGGREGATE: &str = "COGROUPKSTREAM-AGGREGATE-";
+/// Cogroup passthrough merge node prefix (fans the per-input aggregate
+/// processors into the single result `KTable` source).
+#[allow(dead_code)]
+pub(crate) const COGROUP_MERGE: &str = "COGROUPKSTREAM-MERGE-";

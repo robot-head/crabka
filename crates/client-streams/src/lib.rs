@@ -253,6 +253,17 @@
 //! emit-on-update). The session store keys by `key‖end‖start` (a third typed store
 //! over the pluggable backend); read the output with [`SessionWindowedSerde`].
 //!
+//! [`KGroupedStream::windowed_by_sliding`] produces a
+//! [`SlidingWindowedKGroupedStream`] with `count`/`reduce`/`aggregate`. Sliding
+//! windows are **data-defined** inclusive windows of fixed size
+//! `time_difference_ms`: a record at time `t` falls into every window
+//! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. Unlike
+//! tumbling/hopping windows there is no epoch alignment; the aggregator
+//! discovers affected windows by scanning the window store and emits on update.
+//! Out-of-order records within `time_difference + grace` are folded into the
+//! windows they belong to. The output is a `KTable<Windowed<K>, _>` reusing the
+//! [`TimeWindowedSerde`] output-key layout (`key‖windowStart:8B-BE`).
+//!
 //! [`KTable::suppress`]`(`[`Suppressed`]`::until_window_closes(`[`BufferConfig`]`::unbounded()))`
 //! turns a windowed table's emit-on-update change-stream into **final results**: it
 //! buffers each window's updates and forwards the window's final value exactly once,
@@ -859,6 +870,13 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Versioned tables (KIP-889)
+//!
+//! `builder.table(..., Materialized::as_versioned(name, history_retention_ms))`
+//! materializes a table into a versioned key-value store, so out-of-order
+//! records are recorded as historical versions without clobbering the latest,
+//! and point-in-time reads are available via `get_as_of`.
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.4")]
 
 pub mod dsl;
@@ -875,10 +893,12 @@ pub mod topology;
 pub use async_trait::async_trait as __async_trait;
 
 pub use dsl::{
-    BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
-    KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream, SessionWindowedSerde,
-    SessionWindows, StreamJoined, StreamsBuilder, Suppressed, TimeWindowedKGroupedStream,
-    TimeWindowedSerde, TimeWindows, Window, Windowed,
+    BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows, Joined,
+    KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
+    SessionWindowedKGroupedStream, SessionWindowedSerde, SessionWindows,
+    SlidingWindowedCogroupedStream, SlidingWindowedKGroupedStream, SlidingWindows, StreamJoined,
+    StreamsBuilder, Suppressed, TimeWindowedCogroupedStream, TimeWindowedKGroupedStream,
+    TimeWindowedSerde, TimeWindows, VersionedConfig, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{
@@ -894,11 +914,17 @@ pub use processor::{
 };
 pub use runtime::eos::ProcessingGuarantee;
 pub use runtime::iq::IqError;
+pub use runtime::iqv2::{
+    FailureReason, KeyQuery, MultiVersionedKeyQuery, Position, PositionBound, Query, QueryResult,
+    RangeQuery, StateQuery, StateQueryRequest, StateQueryResult, VersionedKeyQuery, WindowKeyQuery,
+    WindowRangeQuery,
+};
 pub use runtime::{
     KafkaStreams, KafkaStreamsState, ReadOnlyKeyValueStore, ReadOnlySessionStore,
     ReadOnlyWindowStore,
 };
 pub use store::iq::StoreKind;
+pub use store::versioned::VersionedRecord;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
 pub use streams_app::StreamsApp;
 pub use test_driver::TopologyTestDriver;

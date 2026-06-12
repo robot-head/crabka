@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 
 use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::{Grouped, Materialized, StreamJoined};
+use crate::dsl::config::{Grouped, Joined, Materialized, StreamJoined};
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::KGroupedStream;
 use crate::dsl::ktable::KTable;
@@ -30,6 +30,7 @@ use crate::dsl::processors::outer_join_store::TimeTracker;
 use crate::dsl::processors::stateless;
 use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
 use crate::dsl::processors::table::KStreamToTableProcessor;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::dsl::windows::JoinWindows;
 use crate::processor::serde::{BytesSerde, DefaultSerde, Produced, Serde, SerdeAssociate};
 use crate::topology::NodeHandle;
@@ -38,6 +39,18 @@ use crate::topology::NodeHandle;
 /// (`join`/`left_join`/`outer_join` all lift their user joiner to this shape).
 /// Each per-side processor wraps it so a match passes the present sides.
 type SharedOuterJoiner<V, V2, VO> = Arc<dyn Fn(Option<&V>, Option<&V2>) -> VO + Send + Sync>;
+
+/// Type-erased KIP-923 grace lowering, built by the `*_with` methods (which hold
+/// the `Serde`/`Sync` bounds the grace buffer store + processor require) and run
+/// once inside [`KStream::join_table_impl`]'s lowering thunk. Given the live
+/// `LowerState`, the stream-side parent `NodeId` (the closure rebuilds the typed
+/// `NodeHandle<K, V>` itself, since `V` is in scope where it is built), the
+/// auto-minted join node name, and the table store name, it registers the grace
+/// processor + its `<join_name>-Buffer` store, connects the join to the buffer,
+/// and returns the join node handle. The impl then performs the shared table-store
+/// connect + copartition declaration (identical to the non-grace path).
+type GraceLowering<K, VO> =
+    Box<dyn FnOnce(&mut LowerState, NodeId, String, String) -> NodeHandle<K, VO> + Send>;
 
 pub struct KStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     #[allow(dead_code)]
@@ -58,7 +71,8 @@ pub struct KStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerd
     /// in those cases the stream no longer corresponds to a single original source
     /// topic. [`join`](Self::join) reads this as the stream-side copartition group
     /// member when the key is unchanged (otherwise it repartitions and uses the
-    /// repartition topic as the member).
+    /// repartition topic as the member). `group_by_key` likewise propagates it so
+    /// a downstream cogroup can register its inputs' copartition group.
     pub(crate) source_topic: Option<String>,
     pub(crate) key_serde: KS,
     pub(crate) value_serde: VS,
@@ -620,7 +634,7 @@ where
         // Wrap the inner joiner to the left form `Fn(&V, Option<&VT>) -> VO`; with
         // `emit_on_miss = false` the closure is only ever called with `Some`.
         let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
-        self.join_table_impl::<VT, VO, _, VTS>(table, lf, false)
+        self.join_table_impl::<VT, VO, _, VTS>(table, lf, false, None)
     }
 
     /// `leftJoin` (left stream-table join): like [`join_table`](Self::join_table)
@@ -639,7 +653,156 @@ where
         VTS: Clone,
         F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true)
+        self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, None)
+    }
+
+    /// `join` with [`Joined`] config (KIP-923 grace path). Identical to
+    /// [`join_table`](Self::join_table) when `joined.grace_ms` is `None`. When a
+    /// grace period is set, the join buffers each stream record into a
+    /// `JoinGraceBufferStore` and drains it as-of its own timestamp once the grace
+    /// horizon passes — so out-of-order stream records join against the table
+    /// version that was current at the record's own timestamp. Grace **requires**
+    /// the table to be versioned ([`Materialized::as_versioned`]); `grace_ms` must
+    /// be strictly less than the table's `history_retention_ms`.
+    ///
+    /// [`Materialized::as_versioned`]: crate::dsl::config::Materialized::as_versioned
+    #[must_use]
+    #[allow(clippy::similar_names)] // `joiner`/`joined` mirror the JVM `join(table, joiner, Joined)`
+    #[allow(clippy::needless_pass_by_value)] // by-value `Joined` mirrors the JVM DSL (cf. `StreamJoined`)
+    pub fn join_table_with<VT, VO, F, VTS>(
+        &self,
+        table: &KTable<K, VT, KS, VTS>,
+        joiner: F,
+        joined: Joined,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
+    where
+        VT: Any + Send + Sync + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+        V: Sync,
+        F: Fn(&V, &VT) -> VO + Clone + Send + Sync + 'static,
+    {
+        let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
+        let grace =
+            self.build_grace_lowering::<VT, VO, _, VTS>(table, lf.clone(), false, joined.grace_ms);
+        self.join_table_impl::<VT, VO, _, VTS>(table, lf, false, grace)
+    }
+
+    /// `leftJoin` with [`Joined`] config (KIP-923 grace path). Like
+    /// [`left_join_table`](Self::left_join_table) but, when `joined.grace_ms` is
+    /// set, wires the grace buffer + as-of drain (see
+    /// [`join_table_with`](Self::join_table_with)). On a table miss at drain time
+    /// the joiner receives `None`.
+    #[must_use]
+    #[allow(clippy::similar_names)] // `joiner`/`joined` mirror the JVM `leftJoin(table, joiner, Joined)`
+    #[allow(clippy::needless_pass_by_value)] // by-value `Joined` mirrors the JVM DSL (cf. `StreamJoined`)
+    pub fn left_join_table_with<VT, VO, F, VTS>(
+        &self,
+        table: &KTable<K, VT, KS, VTS>,
+        joiner: F,
+        joined: Joined,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
+    where
+        VT: Any + Send + Sync + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+        V: Sync,
+        F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
+    {
+        let grace = self.build_grace_lowering::<VT, VO, _, VTS>(
+            table,
+            joiner.clone(),
+            true,
+            joined.grace_ms,
+        );
+        self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, grace)
+    }
+
+    /// Build the [`GraceLowering`] closure for a KIP-923 grace join, or `None` when
+    /// `joined.grace_ms` is unset. This method holds the `Serde`/`Sync` bounds the
+    /// grace buffer store + processor require (which the type-erased
+    /// [`join_table_impl`](Self::join_table_impl) does not), and validates the
+    /// versioned-table + `grace_ms < history_retention_ms` preconditions up front.
+    ///
+    /// The returned closure, run once inside the impl's lowering thunk, rebuilds the
+    /// typed stream parent handle, registers the grace processor + its
+    /// `<join_name>-Buffer` store (changelog `app-<join_name>-Buffer-changelog`,
+    /// derived by the topology layer), connects the join node to the buffer, and
+    /// returns the join node handle.
+    fn build_grace_lowering<VT, VO, LF, VTS>(
+        &self,
+        table: &KTable<K, VT, KS, VTS>,
+        left_form: LF,
+        emit_on_miss: bool,
+        grace_ms: Option<i64>,
+    ) -> Option<GraceLowering<K, VO>>
+    where
+        VT: Any + Send + Sync + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+        V: Sync,
+        LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
+    {
+        let grace_ms = grace_ms?;
+        // KIP-923 grace requires a versioned table (the drain does as-of lookups)
+        // and `grace_ms` strictly below the table's history retention.
+        let retention = table
+            .versioned_retention_ms
+            .expect("grace requires a versioned table");
+        assert!(
+            grace_ms < retention,
+            "grace_ms must be < history_retention_ms"
+        );
+
+        let key_serde = self.key_serde.clone();
+        let value_serde = self.value_serde.clone();
+        Some(Box::new(
+            move |state: &mut LowerState,
+                  parent_id: NodeId,
+                  join_name: String,
+                  table_store: String| {
+                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+                // KIP-923: buffer store named `<join_name>-Buffer`; the join node
+                // connects to BOTH the buffer (here) and the table store (in the
+                // impl). Same KSTREAM-JOIN node as a plain stream-table join.
+                let buffer_name = format!("{join_name}-Buffer");
+                let store_for_proc = table_store.clone();
+                let buffer_for_proc = buffer_name.clone();
+                let lf = left_form.clone();
+                let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_name.clone(),
+                    move || crate::dsl::processors::join_grace::KStreamKTableJoinGraceProcessor {
+                        table_store: store_for_proc.clone(),
+                        buffer_store: buffer_for_proc.clone(),
+                        grace_ms,
+                        joiner: lf.clone(),
+                        emit_on_miss,
+                        observed_stream_time: i64::MIN,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+                // Register the grace buffer store (holds stream (K,V)) and connect
+                // the join node to it.
+                state.topology.add_join_grace_store::<K, V, KS, VS>(
+                    buffer_name.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                    true,
+                    [h.name().to_string()],
+                );
+                state
+                    .topology
+                    .connect_processor_store(h.name(), &buffer_name);
+                h
+            },
+        ))
     }
 
     /// Shared lowering for inner/left stream-table join. `left_form` is the
@@ -657,6 +820,7 @@ where
         table: &KTable<K, VT, KS, VTS>,
         left_form: LF,
         emit_on_miss: bool,
+        grace: Option<GraceLowering<K, VO>>,
     ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Clone,
@@ -674,6 +838,11 @@ where
             .expect("join requires a materialized table (a store-backed KTable)")
             .to_string();
         let table_src = table.source_topic().map(str::to_string);
+        // Versioned tables (KIP-889 history retention set) route to the as-of
+        // join processor (KIP-914): the lookup is `get_as_of(key, streamRec.ts)`
+        // instead of latest `get`. The `table` handle is not available inside the
+        // lowering thunk, so capture this flag here.
+        let table_versioned = table.versioned_retention_ms.is_some();
         // The stream-side copartition member is this stream's single source topic
         // (key unchanged → still copartitioned with that topic). `None` if the
         // stream has no single source topic (multi-topic source, prior merge, …).
@@ -695,19 +864,47 @@ where
         );
         let store_for_thunk = table_store.clone();
         g.graph.nodes[join_id].lower = Some(Box::new(move |state: &mut LowerState| {
-            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            let store_for_proc = store_for_thunk.clone();
-            let lf = left_form.clone();
-            let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
-                join_name.clone(),
-                move || KStreamKTableJoinProcessor {
-                    table_store: store_for_proc.clone(),
-                    joiner: lf.clone(),
-                    emit_on_miss,
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            // Three processor branches, all registering the SAME node name with the
+            // SAME parent + (below) the SAME table-store wiring + copartition group:
+            //   grace (Some)  → grace processor + its own buffer store (built by the
+            //                   boxed `GraceLowering` closure, which holds the
+            //                   stream-serde + `V: Sync` bounds the buffer needs),
+            //   versioned     → as-of `get_as_of` processor,
+            //   plain         → latest `get` processor.
+            let h = if let Some(grace_lower) = grace {
+                // The closure rebuilds the typed parent handle, registers the grace
+                // processor + `<join_name>-Buffer` store, and connects the join to
+                // the buffer. The table-store connect + copartition happen below.
+                grace_lower(state, parent_id, join_name.clone(), store_for_thunk.clone())
+            } else if table_versioned {
+                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+                let store_for_proc = store_for_thunk.clone();
+                let lf = left_form.clone();
+                state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_name.clone(),
+                    move || crate::dsl::processors::join::KStreamKTableJoinAsOfProcessor {
+                        table_store: store_for_proc.clone(),
+                        joiner: lf.clone(),
+                        emit_on_miss,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                )
+            } else {
+                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+                let store_for_proc = store_for_thunk.clone();
+                let lf = left_form.clone();
+                state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_name.clone(),
+                    move || KStreamKTableJoinProcessor {
+                        table_store: store_for_proc.clone(),
+                        joiner: lf.clone(),
+                        emit_on_miss,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                )
+            };
             // Union the join into the table store's processor set: this pulls the
             // join (and therefore the stream source feeding it) into the SAME
             // subtopology as the table source that owns the store.
@@ -1425,6 +1622,11 @@ where
                 grouped.value_serde,
             ),
         )
+        .with_source_topic(if self.key_changing {
+            None
+        } else {
+            self.source_topic.clone()
+        })
     }
 
     /// `groupByKey` using the stream's existing serdes.
@@ -1443,6 +1645,11 @@ where
                 self.value_serde.clone(),
             ),
         )
+        .with_source_topic(if self.key_changing {
+            None
+        } else {
+            self.source_topic.clone()
+        })
     }
 
     /// `groupBy`: re-key via `f`, then group by the new key.
@@ -1681,6 +1888,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let mut g = self.builder.borrow_mut();
@@ -1704,6 +1912,7 @@ where
                 name.clone(),
                 move || KStreamToTableProcessor {
                     store_name: store_for_proc.clone(),
+                    forwarder: TupleForwarder::default(),
                     _pd: PhantomData,
                 },
                 [parent],
@@ -1727,6 +1936,10 @@ where
                         value_serde_for_lower.clone(),
                     );
             }
+            // Mark the store cached per `Materialized::with_caching` (default true);
+            // the to_table processor's TupleForwarder suppresses immediate forwards
+            // when cached and the cache flush forwards the deduped change.
+            state.topology.mark_store_caching(&store_for_thunk, caching);
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -1864,5 +2077,143 @@ mod tests {
             .select_key(|_k: &String, v: &String| v.clone());
         let g = b.internal.borrow();
         check!(g.graph.nodes[1].key_changing_operation);
+    }
+
+    #[test]
+    fn grace_join_builds_and_names_buffer_store() {
+        // A grace join over a versioned table lowers cleanly and emits a buffer
+        // changelog `app-<join_name>-Buffer-changelog`. The join node is the SAME
+        // KSTREAM-JOIN node as a plain stream-table join (no extra processor). The
+        // versioned table here supplies its own store name ("vt"), so only the
+        // table SOURCE(1) + TABLE-SOURCE proc(2) and the stream SOURCE(0) are minted
+        // before the join lands at KSTREAM-JOIN-0000000003 (see `dsl_golden_frame`
+        // grace golden for the byte-exact node/store layout — this pins the name).
+        use crate::dsl::config::{Joined, Materialized};
+        use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+        let b = StreamsBuilder::new();
+        let s = b
+            .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
+        let t = b.table_explicit::<StringSerde, I64Serde>(
+            "t",
+            Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        );
+        s.join_table_with(
+            &t,
+            |a: &i64, c: &i64| a + c,
+            Joined::with_grace_period(60_000),
+        )
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        drop(s);
+        drop(t);
+        let wire = b.build("app").unwrap().to_wire();
+        let changelogs: Vec<&str> = wire
+            .subtopologies
+            .iter()
+            .flat_map(|st| st.state_changelog_topics.iter())
+            .map(|t| t.name.as_str())
+            .collect();
+        check!(
+            changelogs.contains(&"app-KSTREAM-JOIN-0000000003-Buffer-changelog"),
+            "buffer changelog missing; got {changelogs:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grace requires a versioned table")]
+    fn grace_on_unversioned_table_panics() {
+        use crate::dsl::config::{Joined, Materialized};
+        use crate::processor::serde::{Consumed, I64Serde, StringSerde};
+        let b = StreamsBuilder::new();
+        let s = b
+            .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
+        let t = b.table_explicit::<StringSerde, I64Serde>(
+            "t",
+            Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_store("plain"),
+        );
+        let _ = s.join_table_with(
+            &t,
+            |a: &i64, c: &i64| a + c,
+            Joined::with_grace_period(1000),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grace_ms must be < history_retention_ms")]
+    fn grace_geq_retention_panics() {
+        use crate::dsl::config::{Joined, Materialized};
+        use crate::processor::serde::{Consumed, I64Serde, StringSerde};
+        let b = StreamsBuilder::new();
+        let s = b
+            .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
+        let t = b.table_explicit::<StringSerde, I64Serde>(
+            "t",
+            Consumed::with(StringSerde, I64Serde),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 1000),
+        );
+        let _ = s.join_table_with(
+            &t,
+            |a: &i64, c: &i64| a + c,
+            Joined::with_grace_period(1000),
+        );
+    }
+}
+
+#[cfg(test)]
+mod to_table_caching_tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+    use crate::store::backend::StoreBackend;
+    use crate::{I64Serde, Materialized, Produced, StringSerde};
+
+    /// Caching ON: the `to_table` store is marked cached (`cache_owner` rooted),
+    /// two same-key updates are suppressed until flush, and the flush emits a
+    /// single deduped record carrying the latest value.
+    #[test]
+    fn to_table_caches_marks_and_dedups_emit() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, i64>(["in"])
+            .to_table_explicit(Materialized::with(StringSerde, I64Serde).as_store("t"))
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let mut g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(g.cache_owner.contains_key("t"));
+        pollster::block_on(g.init_processors()).unwrap();
+
+        // Two same-key updates: 7 @0 then 9 @1.
+        pollster::block_on(g.pipe("in", Some(b"k"), &7i64.to_be_bytes(), 0)).unwrap();
+        pollster::block_on(g.pipe("in", Some(b"k"), &9i64.to_be_bytes(), 1)).unwrap();
+        // Suppressed: nothing forwarded downstream until the cache flushes.
+        check!(g.take_output().is_empty());
+
+        pollster::block_on(g.flush_caches()).unwrap();
+        let out = g.take_output();
+        check!(out.len() == 1);
+        check!(out[0].topic == "out");
+        // to_stream forwards the deduped `new` value = 9 (BE i64).
+        check!(out[0].value.as_ref().unwrap().as_ref() == 9i64.to_be_bytes());
+    }
+
+    /// `with_caching(false)`: the store is NOT cached even with a positive
+    /// budget (mark opted out → absent from `cache_owner`).
+    #[test]
+    fn to_table_uncached_when_caching_off() {
+        let b = StreamsBuilder::new();
+        b.stream::<String, i64>(["in"])
+            .to_table_explicit(
+                Materialized::with(StringSerde, I64Serde)
+                    .as_store("t")
+                    .with_caching(false),
+            )
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(!g.cache_owner.contains_key("t"));
     }
 }

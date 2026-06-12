@@ -6,12 +6,10 @@ use bytes::{Buf, BufMut};
 pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
-
 #[inline]
 fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTransactionRecord {
     pub unknown_tagged_fields: UnknownTaggedFields,
@@ -62,7 +60,6 @@ impl EndTransactionRecord {
         Self::default()
     }
 }
-
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

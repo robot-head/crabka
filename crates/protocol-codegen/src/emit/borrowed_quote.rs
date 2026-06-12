@@ -24,11 +24,12 @@ use crate::emit::borrowed::{
     owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
     tagged_is_default_cond, to_owned_field_expr, version_cond,
 };
+use crate::emit::common::banner;
 use crate::emit::owned::EmitError;
 use crate::emit::{EmittedMessage, common};
 use crate::ir::{FieldSpec, MessageSpec, MessageType};
 use crate::name_conv;
-use crate::resolve::{self, Resolution};
+use crate::resolve::{self, Resolution, StructKind};
 use crate::type_map;
 
 type ResMap = std::collections::HashMap<String, Resolution>;
@@ -68,8 +69,7 @@ pub fn emit(
     schemas_version: &str,
     namespace: Option<&str>,
 ) -> Result<EmittedMessage, EmitError> {
-    // Reuse the string emitter for common-struct files and resolution checks.
-    let reused = borrowed::emit(spec, schemas_version, namespace)?;
+    // Resolve struct references — also validates that everything resolves.
     let res_map = resolve::resolve_message(spec)?;
     let parent_module = name_conv::module_name(&spec.name);
     let owned_root = match namespace {
@@ -94,10 +94,8 @@ pub fn emit(
     );
     structural.extend(nested_structs(&ctx, &spec.fields, flex_min(spec)));
 
-    let mut imports = String::new();
-    borrowed::emit_imports(&mut imports, spec, &res_map);
-    let mut constants = String::new();
-    borrowed::emit_constants(&mut constants, spec);
+    let imports = borrowed::emit_imports(spec, &res_map).to_string();
+    let constants = borrowed::emit_constants(spec).to_string();
     let banner = common::banner(schemas_version);
 
     let primary = format!("{banner}{imports}{constants}\n{structural}\n");
@@ -108,10 +106,90 @@ pub fn emit(
         ))
     })?;
 
-    Ok(EmittedMessage {
-        primary,
-        commons: reused.commons,
-    })
+    let commons = emit_commons(spec, &res_map, schemas_version, namespace);
+
+    Ok(EmittedMessage { primary, commons })
+}
+
+/// Emit the standalone `.rs` file bodies for the message's `commonStructs`.
+///
+/// `commonStructs` are message-local: each is emitted under a per-message nested
+/// module `common/<message_snake>/<struct_snake>`. The `commons` key is the
+/// relative path stem `<message_snake>/<struct_snake>`; the caller turns that
+/// into the on-disk body path and the wrapper module nesting.
+fn emit_commons(
+    spec: &MessageSpec,
+    res_map: &ResMap,
+    schemas_version: &str,
+    namespace: Option<&str>,
+) -> Vec<(String, String)> {
+    let message_snake = name_conv::module_name(&spec.name);
+    let fm = flex_min(spec);
+    let owned_root = match namespace {
+        None => "crate::owned".to_string(),
+        Some(ns) => format!("crate::{ns}::owned"),
+    };
+    let mut commons: Vec<(String, String)> = Vec::new();
+    for cs in &spec.common_structs {
+        // Build a modified res_map for the common-struct context:
+        // - Common-struct references use sibling paths `super::<struct_snake>::TypeName`
+        //   (the body lands under `src/{flavor}/common/<message_snake>/<struct_snake>.rs`,
+        //   and sibling common structs of the same message share that parent module).
+        // - Nested struct references remain unchanged (bare type name, same file).
+        let common_res_map: ResMap = res_map
+            .iter()
+            .map(|(k, v)| {
+                let new_path = if v.kind == StructKind::Common {
+                    let snake = name_conv::module_name(k);
+                    format!("super::{snake}::{k}")
+                } else {
+                    v.rust_path.clone()
+                };
+                (
+                    k.clone(),
+                    Resolution {
+                        kind: v.kind.clone(),
+                        rust_path: new_path,
+                        needs_lifetime: v.needs_lifetime,
+                    },
+                )
+            })
+            .collect();
+
+        let cs_snake = name_conv::module_name(&cs.name);
+        // Use `common::<message_snake>::<struct_snake>` as the parent_module so
+        // `to_owned()` targets `crate::owned::common::<message_snake>::<struct_snake>::TypeName`.
+        let cs_parent_module = format!("common::{message_snake}::{cs_snake}");
+        let ctx = Ctx {
+            res_map: &common_res_map,
+            parent_module: &cs_parent_module,
+            owned_root: &owned_root,
+        };
+
+        let name = name_conv::type_name(&cs.name);
+        let has_lt = needs_lifetime(&cs.fields, &common_res_map);
+        let mut struct_tokens = struct_block(
+            &ctx,
+            &name,
+            &cs.fields,
+            has_lt,
+            &FlexSource::Nested(fm),
+            None,
+            false,
+            fm < i16::MAX,
+        );
+        struct_tokens.extend(nested_structs(&ctx, &cs.fields, fm));
+
+        let body = format!(
+            "{}{}{}",
+            banner(schemas_version),
+            borrowed::emit_common_imports(&cs.fields, fm),
+            struct_tokens,
+        );
+
+        commons.push((format!("{message_snake}/{cs_snake}"), body));
+    }
+    commons
 }
 
 fn version_err(spec: &MessageSpec) -> TokenStream {

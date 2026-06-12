@@ -1,6 +1,6 @@
 //! Generate the `mod.rs` files for `crates/protocol/src/{owned,borrowed}/`.
 
-use std::fmt::Write;
+use quote::{format_ident, quote};
 
 use crate::emit::common::banner;
 use crate::emit::wrappers::Flavor;
@@ -24,9 +24,8 @@ pub fn emit(
         Flavor::Owned => "Owned (heap-allocated) message types.",
         Flavor::Borrowed => "Borrowed-flavor generated message types.",
     };
-    let mut out = banner(schemas_version);
-    writeln!(out, "//! {flavor_comment}").unwrap();
-    writeln!(out).unwrap();
+    let banner = banner(schemas_version);
+
     // Collect snake-case names, sort, deduplicate.
     let mut entries: Vec<String> = specs
         .iter()
@@ -39,10 +38,22 @@ pub fn emit(
     }
     entries.sort();
     entries.dedup();
-    for snake in &entries {
-        writeln!(out, "pub mod {snake};").unwrap();
-    }
-    out
+
+    let doc = format!(" {flavor_comment}");
+    let mods = entries.iter().map(|s| {
+        let id = format_ident!("{s}");
+        quote!(pub mod #id;)
+    });
+    let tokens = quote! {
+        #![doc = #doc]
+        #(#mods)*
+    };
+
+    // Validate at generation time.
+    let _validate: syn::File =
+        syn::parse2(tokens.clone()).expect("generated mod.rs must be valid Rust");
+
+    format!("{banner}{tokens}")
 }
 
 #[cfg(test)]
@@ -74,6 +85,8 @@ mod tests {
         let refs: Vec<&MessageSpec> = specs.iter().collect();
         let out = emit(&refs, Flavor::Owned, "test-sha", false);
         // Must contain all three, in alphabetical order.
+        // Note: quote! may emit `pub mod api_versions_request ;` (space before `;`),
+        // so we search for the ident without the semicolon.
         let api_pos = out.find("pub mod api_versions_request").unwrap();
         let meta_pos = out.find("pub mod metadata_request").unwrap();
         let prod_pos = out.find("pub mod produce_request").unwrap();
@@ -97,6 +110,8 @@ mod tests {
     fn borrowed_flavor_has_correct_doc_comment() {
         let refs: Vec<&MessageSpec> = vec![];
         let out = emit(&refs, Flavor::Borrowed, "sha123", false);
-        assert!(out.contains("//! Borrowed-flavor generated message types."));
+        // Output now uses `#![doc = "..."]` form instead of `//! ...` comment,
+        // so we check for the doc text itself rather than the `//!` prefix.
+        assert!(out.contains("Borrowed-flavor generated message types."));
     }
 }

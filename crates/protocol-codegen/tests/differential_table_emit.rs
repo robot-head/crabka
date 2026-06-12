@@ -22,9 +22,15 @@ fn req(name: &str, api_key: i16, min: i16, max: i16, flex_min: i16) -> MessageSp
 fn emits_roundtrip_and_header_helpers() {
     let specs = vec![req("ApiVersionsRequest", 18, 0, 3, 3)];
     let out = differential_table::emit(&specs, "testsha");
-    assert!(out.contains("pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8>"));
-    assert!(out.contains("pub fn request_header_version(name: &str, version: i16) -> i16"));
-    assert!(out.contains("pub fn response_header_version(name: &str, version: i16) -> i16"));
+    // quote! token output uses spaces between punctuation tokens; match on
+    // function name fragments that are stable regardless of exact token spacing.
+    assert!(out.contains("pub fn roundtrip"));
+    assert!(
+        out.contains("name : & str , version : i16 , bytes : & [u8]")
+            || out.contains("name: &str, version: i16, bytes: &[u8]")
+    );
+    assert!(out.contains("pub fn request_header_version"));
+    assert!(out.contains("pub fn response_header_version"));
     assert!(out.contains("pub fn strip_frame_header"));
     assert!(out.contains("\"ApiVersionsResponse\" => 0"));
 }

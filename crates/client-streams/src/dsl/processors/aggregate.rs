@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use async_trait::async_trait;
 
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::tuple_forwarder::TupleForwarder;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
@@ -27,6 +28,7 @@ pub(crate) struct KStreamAggregateProcessor<K, V, VA, I, A> {
     pub store_name: String,
     pub init: I,
     pub agg: A,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V, VA)>,
 }
 
@@ -39,6 +41,10 @@ where
     I: Fn() -> VA + Send + 'static,
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>,
@@ -46,8 +52,11 @@ where
     ) {
         // Aggregations require non-null keys (post-repartition).
         let key = r.key.expect("aggregate requires a non-null key");
+        // Stash the source record context BEFORE the store borrow so a cached
+        // store attaches it to the deduped change it forwards on flush.
+        let rc = ctx.record_context().clone();
         // Hold the store borrow only across the store awaits; drop it before
-        // `ctx.forward` (which re-borrows `ctx`). Aggregate math is unchanged:
+        // `maybe_forward` (which re-borrows `ctx`). Aggregate math is unchanged:
         // seed the accumulator with `init` when the store has no prior value.
         // The forwarded `Change.old` is the *actual* prior store value (None on
         // the first record for this key), not the init-seeded accumulator.
@@ -55,17 +64,15 @@ where
             let store = ctx
                 .get_state_store::<K, VA>(&self.store_name)
                 .expect("aggregate state store not found");
+            store.set_record_context(rc);
             let old = store.get(&key).await;
             let seed = old.clone().unwrap_or_else(|| (self.init)());
             let new = (self.agg)(&key, &r.value, seed);
             store.put(key.clone(), new.clone()).await;
             (old, new)
         };
-        ctx.forward(Record::new(
-            Some(key),
-            Change::update(old, new),
-            r.timestamp,
-        ));
+        self.forwarder
+            .maybe_forward(ctx, key, old, new, r.timestamp);
     }
 }
 
@@ -82,6 +89,7 @@ where
 pub(crate) struct KStreamReduceProcessor<K, V, R> {
     pub store_name: String,
     pub reducer: R,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -92,16 +100,22 @@ where
     V: std::any::Any + Send + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("reduce requires a non-null key");
+        let rc = ctx.record_context().clone();
         // Reduce math unchanged: the first value for a key seeds the accumulator;
         // later values fold via the reducer. `old` is the prior store value
         // (None on the first record), forwarded as the `Change.old`. Hold the
-        // store borrow only across the awaits, then drop it before `ctx.forward`.
+        // store borrow only across the awaits, then drop it before forwarding.
         let (old, new) = {
             let store = ctx
                 .get_state_store::<K, V>(&self.store_name)
                 .expect("reduce state store not found");
+            store.set_record_context(rc);
             let old = store.get(&key).await;
             let new = match &old {
                 None => r.value,
@@ -110,11 +124,8 @@ where
             store.put(key.clone(), new.clone()).await;
             (old, new)
         };
-        ctx.forward(Record::new(
-            Some(key),
-            Change::update(old, new),
-            r.timestamp,
-        ));
+        self.forwarder
+            .maybe_forward(ctx, key, old, new, r.timestamp);
     }
 }
 
@@ -159,6 +170,7 @@ mod tests {
             store_name: "counts".into(),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
+            forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
 
@@ -223,5 +235,100 @@ mod tests {
         // Store should now contain count=2 for key "a".
         let store = stores.get_kv::<String, i64>("counts").unwrap();
         check!(store.get(&"a".to_string()).await == Some(2));
+    }
+
+    /// A `counts` store registry, optionally record-cached.
+    fn counts_registry(cached: bool) -> StoreRegistry {
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
+            "counts".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "app-counts-changelog".into(),
+        )));
+        if cached {
+            stores.enable_cache(
+                "counts",
+                std::sync::Arc::new(std::sync::Mutex::new(
+                    crate::store::cache::named::NamedCache::new("counts".into()),
+                )),
+            );
+        }
+        stores
+    }
+
+    /// Run `init` then two same-key `process` calls through the count aggregate,
+    /// returning how many records reached the downstream buffer.
+    async fn run_two(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KStreamAggregateProcessor {
+            store_name: "counts".into(),
+            init: || 0i64,
+            agg: |_k: &String, _v: &String, a: i64| a + 1,
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData::<fn() -> (String, String, i64)>,
+        };
+        for ts in 0..2i64 {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            if ts == 0 {
+                // Resolve the forwarder's cache state from the store on first use.
+                proc.init(&mut ctx).await;
+            }
+            proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached store → the aggregate forwards each record immediately (today's
+    /// behavior, unchanged): two records → two forwards.
+    #[tokio::test]
+    async fn uncached_aggregate_forwards_each_record() {
+        let mut stores = counts_registry(false);
+        check!(run_two(&mut stores).await == 2);
+    }
+
+    /// Cached store → the immediate forward is suppressed (the cache flush will
+    /// forward the deduped change later): two records → zero immediate forwards,
+    /// and the cached store holds the dirty entry until flush.
+    #[tokio::test]
+    async fn cached_aggregate_suppresses_immediate_forward() {
+        let mut stores = counts_registry(true);
+        check!(run_two(&mut stores).await == 0);
+        // The store is cached and read-your-writes shows the staged count=2.
+        check!(stores.kv_is_cached("counts"));
+        let store = stores.get_kv::<String, i64>("counts").unwrap();
+        check!(store.get(&"a".to_string()).await == Some(2));
+        // The dirty entry is still buffered in the cache: flushing emits exactly
+        // one deduped downstream record (proving suppression deferred, not dropped).
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("counts")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        check!(buffer.len() == 1);
     }
 }
