@@ -21,14 +21,12 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/generated/DeleteRecordsRequest.owned.rs"
 ));
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Decode, Encode};
     use assert2::assert;
     use bytes::BytesMut;
-
     fn roundtrip(msg: &DeleteRecordsRequest, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
@@ -40,17 +38,14 @@ mod tests {
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
         assert!(&reencoded[..] == &bytes[..]);
-        // Exercise the JVM-oracle default-JSON builder for this version.
         let _ = default_json(v);
     }
-
     #[test]
     fn default_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
             roundtrip(&DeleteRecordsRequest::default(), v);
         }
     }
-
     #[test]
     fn populated_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
