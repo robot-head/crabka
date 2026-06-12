@@ -9,6 +9,7 @@
 pub mod actor;
 pub mod assignor;
 pub mod config;
+pub(crate) mod migration;
 pub mod persistence;
 pub mod state;
 pub mod topology;

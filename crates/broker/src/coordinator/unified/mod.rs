@@ -416,6 +416,48 @@ impl GroupCoordinator {
         self.streams_groups.get(group_id).map(|e| e.value().clone())
     }
 
+    /// KIP-1071 cold upgrade: if `group_id` is a drained classic group, convert
+    /// it to a streams group in place (tombstone the classic k2 `GroupMetadata`,
+    /// force the type lock to `Streams`, drop the classic actor). Committed
+    /// offsets survive untouched. Returns `NotClassic` for non-classic groups
+    /// (caller serves normally), `Converted` after a successful flip, or
+    /// `RejectLiveMembers` when live classic members remain (online streams
+    /// migration is unsupported in Kafka).
+    #[allow(dead_code)] // called from StreamsGroupHeartbeat handler; wired in Task 4
+    pub(crate) async fn try_convert_classic_to_streams(
+        self: &Arc<Self>,
+        group_id: &str,
+        now_ms: i64,
+    ) -> Result<streams::migration::ConvertOutcome, crate::error::BrokerError> {
+        use streams::migration::{ConvertOutcome, classic_group_metadata_tombstone_batch};
+
+        if self.group_type(group_id) != Some(GroupType::Classic) {
+            return Ok(ConvertOutcome::NotClassic);
+        }
+
+        // Inspect the live classic actor (if any) for remaining members.
+        if let Some(handle) = self.find(group_id) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::ClassicInspect { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+                && !view.members.is_empty()
+            {
+                return Ok(ConvertOutcome::RejectLiveMembers);
+            }
+        }
+
+        // Drained classic group → convert. Tombstone k2, flip the lock, drop the actor.
+        let batch = classic_group_metadata_tombstone_batch(group_id, now_ms);
+        self.offsets_log.append(batch).await?;
+        self.mark_streams_after_upgrade(group_id);
+        self.groups.remove(group_id);
+        Ok(ConvertOutcome::Converted)
+    }
+
     /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
     /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
     /// `group_type="streams"` entries without a per-group `Describe` hop.
