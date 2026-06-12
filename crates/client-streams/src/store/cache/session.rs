@@ -429,6 +429,118 @@ mod tests {
         assert_eq!(found, vec![(0, 10, b(b"a"))]);
     }
 
+    /// `get` is cache-first: a staged value wins, and a miss falls through to the
+    /// inner store.
+    #[tokio::test]
+    async fn get_is_cache_first_then_falls_through() {
+        let mut inner = InMemoryBytes::default();
+        let sk = session_key(b"k", 0, 10);
+        inner.put(sk.clone(), b(b"inner")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+
+        // Cache miss falls through to inner.
+        assert_eq!(store.get(&sk).await, Some(b(b"inner")));
+
+        // Staged value wins over inner.
+        store.put(sk.clone(), b(b"cached"), ctx()).await;
+        assert_eq!(store.get(&sk).await, Some(b(b"cached")));
+
+        // Genuinely-absent key returns None.
+        assert_eq!(store.get(&session_key(b"k", 0, 99)).await, None);
+    }
+
+    /// `range` overlays the cache on the inner store over a raw key range: cache
+    /// wins on collision and a cached tombstone hides the inner value.
+    #[tokio::test]
+    async fn range_merges_cache_over_inner_with_tombstone() {
+        let mut inner = InMemoryBytes::default();
+        let k0 = session_key(b"k", 0, 10);
+        let k1 = session_key(b"k", 0, 20);
+        let k2 = session_key(b"k", 0, 30);
+        inner.put(k0.clone(), b(b"i0")).await;
+        inner.put(k1.clone(), b(b"i1")).await;
+        inner.put(k2.clone(), b(b"i2")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+
+        store.put(k1.clone(), b(b"c1"), ctx()).await; // cache wins over i1
+        store.remove(k2.clone(), ctx()).await; // tombstone hides i2
+
+        let lo = session_key(b"k", 0, 0);
+        let hi = session_key(b"k", i64::MAX, i64::MAX);
+        let r = store.range(&lo, &hi).await;
+        assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1"))]);
+    }
+
+    /// `scan_all` overlays the full cache on the full inner store: cache wins on
+    /// collision, a cache-only entry is added, and a cached tombstone hides the
+    /// inner value.
+    #[tokio::test]
+    async fn scan_all_merges_cache_and_underlying() {
+        let mut inner = InMemoryBytes::default();
+        let k0 = session_key(b"k", 0, 10);
+        let k1 = session_key(b"k", 0, 20);
+        let k3 = session_key(b"k", 0, 40);
+        inner.put(k0.clone(), b(b"i0")).await;
+        inner.put(k1.clone(), b(b"i1")).await;
+        inner.put(k3.clone(), b(b"i3")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+
+        store.put(k1.clone(), b(b"c1"), ctx()).await; // cache wins
+        let k2 = session_key(b"k", 0, 30);
+        store.put(k2.clone(), b(b"c2"), ctx()).await; // cache-only
+        store.remove(k3.clone(), ctx()).await; // tombstone hides inner i3
+
+        let r = store.scan_all().await;
+        assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1")), (k2, b(b"c2"))]);
+    }
+
+    /// `put_inner` / `delete_inner` bypass the cache (no dirty entry staged).
+    #[tokio::test]
+    async fn put_and_delete_inner_bypass_the_cache() {
+        let store = CachingSessionStore::new(cache(), Box::new(InMemoryBytes::default()));
+        let sk = session_key(b"k", 0, 10);
+
+        store.put_inner(sk.clone(), b(b"v")).await;
+        assert_eq!(store.get(&sk).await, Some(b(b"v")));
+        assert!(store.flush().await.is_empty());
+
+        store.delete_inner(&sk).await;
+        assert_eq!(store.get(&sk).await, None);
+        assert!(store.flush().await.is_empty());
+    }
+
+    /// `clear` empties both the cache layer and the inner store.
+    #[tokio::test]
+    async fn clear_empties_cache_and_inner() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(session_key(b"k", 0, 10), b(b"i")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+        store.put(session_key(b"k", 0, 20), b(b"c"), ctx()).await; // staged dirty
+
+        store.clear().await;
+
+        assert!(store.find_sessions(b"k", 0, 1000).await.is_empty());
+        assert!(store.scan_all().await.is_empty());
+        assert!(store.flush().await.is_empty());
+    }
+
+    /// `flush` deletes a staged tombstone through to the inner store.
+    #[tokio::test]
+    async fn flush_deletes_tombstone_through() {
+        let mut inner = InMemoryBytes::default();
+        let sk = session_key(b"k", 0, 10);
+        inner.put(sk.clone(), b(b"old")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+
+        store.remove(sk.clone(), ctx()).await;
+        let flushed = store.flush().await;
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].1.value, None);
+
+        // Inner value deleted through.
+        assert_eq!(store.get(&sk).await, None);
+    }
+
     /// `flush_with_old` captures the inner OLD value before writing the staged new
     /// value through.
     #[tokio::test]

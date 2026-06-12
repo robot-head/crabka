@@ -514,4 +514,106 @@ mod tests {
         // Write-through landed in the inner store.
         assert_eq!(inner_get(&s, &sk).await, Some(wrapped(2, b"new")));
     }
+
+    /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
+    /// wrapped value through (the tombstone arm).
+    #[tokio::test]
+    async fn flush_with_old_tombstone_deletes_through() {
+        let s = store();
+        let key = b"a";
+        let sk = store_key(key, 0, 0);
+        inner_put(&s, sk.clone(), wrapped(1, b"old")).await;
+        s.delete(sk.clone(), ctx());
+
+        let drained = s.flush_with_old().await;
+        assert_eq!(drained.len(), 1);
+        let (k, old, new, _ctx) = &drained[0];
+        assert_eq!(k, &sk);
+        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old"))); // inner OLD captured
+        assert_eq!(new.as_ref(), None); // tombstone
+        assert_eq!(inner_get(&s, &sk).await, None); // deleted through
+    }
+
+    /// `range` overlays the cache on the inner store over a raw windowed-key
+    /// range: cache wins on collision and a cached tombstone hides the inner
+    /// value. Backs the typed store's `fetch`/IQ range reads.
+    #[tokio::test]
+    async fn range_merges_cache_over_inner_with_tombstone() {
+        let s = store();
+        let key = b"a";
+        let k0 = store_key(key, 0, 0);
+        let k1 = store_key(key, 10, 0);
+        let k2 = store_key(key, 20, 0);
+        inner_put(&s, k0.clone(), wrapped(1, b"i0")).await;
+        inner_put(&s, k1.clone(), wrapped(1, b"i1")).await;
+        inner_put(&s, k2.clone(), wrapped(1, b"i2")).await;
+
+        s.put(k1.clone(), wrapped(9, b"c1"), ctx()); // cache wins over i1
+        s.delete(k2.clone(), ctx()); // tombstone hides i2
+
+        let lo = store_key(key, 0, 0);
+        let hi = store_key(key, i64::MAX, 0);
+        let r = s.range(&lo, &hi).await;
+        assert_eq!(r, vec![(k0, wrapped(1, b"i0")), (k1, wrapped(9, b"c1"))]);
+    }
+
+    /// `scan_all` overlays the full cache on the full inner store: cache wins on
+    /// collision, a cache-only entry is added, and a cached tombstone hides the
+    /// inner value.
+    #[tokio::test]
+    async fn scan_all_merges_cache_and_underlying() {
+        let s = store();
+        let key = b"a";
+        let k0 = store_key(key, 0, 0);
+        let k1 = store_key(key, 10, 0);
+        let k3 = store_key(key, 30, 0);
+        inner_put(&s, k0.clone(), wrapped(1, b"i0")).await;
+        inner_put(&s, k1.clone(), wrapped(1, b"i1")).await;
+        inner_put(&s, k3.clone(), wrapped(1, b"i3")).await;
+
+        s.put(k1.clone(), wrapped(9, b"c1"), ctx()); // cache wins
+        let k2 = store_key(key, 20, 0);
+        s.put(k2.clone(), wrapped(9, b"c2"), ctx()); // cache-only
+        s.delete(k3.clone(), ctx()); // tombstone hides inner i3
+
+        let r = s.scan_all().await;
+        assert_eq!(
+            r,
+            vec![
+                (k0, wrapped(1, b"i0")),
+                (k1, wrapped(9, b"c1")),
+                (k2, wrapped(9, b"c2")),
+            ]
+        );
+    }
+
+    /// `put_inner` / `delete_inner` bypass the cache (no dirty entry staged).
+    #[tokio::test]
+    async fn put_and_delete_inner_bypass_the_cache() {
+        let s = store();
+        let sk = store_key(b"a", 0, 0);
+
+        s.put_inner(sk.clone(), wrapped(1, b"v")).await;
+        assert_eq!(s.get(&sk).await, Some(wrapped(1, b"v")));
+        assert!(s.flush().await.is_empty());
+
+        s.delete_inner(&sk).await;
+        assert_eq!(s.get(&sk).await, None);
+        assert!(s.flush().await.is_empty());
+    }
+
+    /// `clear` empties both the cache layer and the inner store.
+    #[tokio::test]
+    async fn clear_empties_cache_and_inner() {
+        let s = store();
+        let k0 = store_key(b"a", 0, 0);
+        inner_put(&s, k0.clone(), wrapped(1, b"i")).await;
+        s.put(store_key(b"a", 10, 0), wrapped(9, b"c"), ctx()); // staged dirty
+
+        s.clear().await;
+
+        assert!(s.scan_all().await.is_empty());
+        assert!(s.flush().await.is_empty());
+        assert_eq!(s.get(&k0).await, None);
+    }
 }

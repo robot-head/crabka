@@ -1209,6 +1209,30 @@ mod tests {
         );
     }
 
+    /// A second EARLY record (`t=6 < W=10`) after a first early record (`t=3`)
+    /// exercises the `process_early` straddle/right-window branches: the combined
+    /// window `[0,10]` folds in the new record (count 1 → 2), and the previous
+    /// record's right window `[t_prev+1, ..]` (`[4,14]`) is created seeded from
+    /// init then aggregated (count 1).
+    #[tokio::test]
+    async fn early_path_second_record_updates_combined_and_prev_right_window() {
+        let mut stores = store();
+        let mut p = count_proc();
+        let _ = run(&mut p, &mut stores, "a", 3).await;
+        let out = run(&mut p, &mut stores, "a", 6).await;
+
+        // Combined window [0,10] now counts both records.
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))),
+            "expected combined [0,10] old=1 new=2, got {out:?}"
+        );
+        // Previous record (t=3) right window [4, 14] created with count=1.
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some(1))),
+            "expected previous-record right window [4,14]=1, got {out:?}"
+        );
+    }
+
     /// Build a count processor in emit-on-close mode with a generous grace so
     /// freshly-created left windows (which end exactly at stream-time) stay open
     /// until a far-future record forces them closed.
@@ -1420,6 +1444,49 @@ mod tests {
         assert!(
             out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))),
             "expected left window [15,25]=\"v|v\", got {out:?}"
+        );
+    }
+
+    /// First reduce record at `t=3` (`t < W=10`) drives the reduce
+    /// `process_early` path: the combined window `[0, W]` is seeded with the
+    /// value itself.
+    #[tokio::test]
+    async fn reduce_early_record_seeds_combined_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))),
+            "expected combined [0,10]=\"v\" for early t=3, got {out:?}"
+        );
+        assert!(
+            !out.iter().any(|(w, _, _)| w.start < 0),
+            "no negative-start window in the early path: {out:?}"
+        );
+    }
+
+    /// A second EARLY reduce record (`t=6`) folds into the combined window
+    /// `[0,10]` (`"v" -> "v|v"`) and creates the previous record's right window
+    /// `[4,14]` seeded from the current value.
+    #[tokio::test]
+    async fn reduce_early_path_second_record_updates_combined_and_prev_right_window() {
+        let mut stores = str_store();
+        let mut p = reduce_proc();
+        let _ = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
+        let out = run_reduce(&mut p, &mut stores, "a", "v", 6).await;
+
+        assert!(
+            out.contains(&(
+                Window { start: 0, end: 10 },
+                Some("v".into()),
+                Some("v|v".into())
+            )),
+            "expected combined [0,10] old=\"v\" new=\"v|v\", got {out:?}"
+        );
+        // Previous record (t=3) right window [4,14] seeded with the current value.
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))),
+            "expected previous-record right window [4,14]=\"v\", got {out:?}"
         );
     }
 

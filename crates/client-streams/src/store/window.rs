@@ -826,6 +826,113 @@ mod tests {
         assert_eq!(change.new, Some(1));
     }
 
+    /// Cached `fetch` / `fetch_with_ts` route through `Backing::Cached::range`
+    /// and serve read-your-writes (the cache overlay) before any flush; cache
+    /// wins over a colliding inner window.
+    #[tokio::test]
+    async fn cached_window_store_fetch_overlays_cache() {
+        let mut s = cached_store(10);
+        s.set_record_context(ctx_at(0));
+        // Stage three windows for "a": starts 0, 10, 20.
+        s.put("a".into(), 0, 1, 5).await;
+        s.put("a".into(), 10, 2, 15).await;
+        s.put("a".into(), 20, 3, 25).await;
+
+        // fetch over [0, 20] returns all three in window order (range overlay).
+        assert_eq!(
+            s.fetch(&"a".to_string(), 0, 20).await,
+            vec![(0, 1), (10, 2), (20, 3)]
+        );
+        // fetch_with_ts surfaces each window's stored record ts.
+        assert_eq!(
+            s.fetch_with_ts(&"a".to_string(), 0, 20).await,
+            vec![(0, 5, 1), (10, 15, 2), (20, 25, 3)]
+        );
+        // Narrowed range excludes window 20.
+        assert_eq!(
+            s.fetch(&"a".to_string(), 0, 10).await,
+            vec![(0, 1), (10, 2)]
+        );
+    }
+
+    /// Cached `fetch_all_in_range` routes through `Backing::Cached::scan_all`,
+    /// overlaying the cache across all keys.
+    #[tokio::test]
+    async fn cached_window_store_fetch_all_overlays_cache() {
+        let mut s = cached_store(10);
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 1, 5).await;
+        s.put("b".into(), 50, 2, 55).await;
+
+        // [0, 10] excludes b@50.
+        assert_eq!(
+            s.fetch_all_in_range(0, 10).await,
+            vec![("a".to_string(), 0, 5, 1)]
+        );
+        // [0, 50] includes both, in windowed-key order (a@0 < b@50).
+        assert_eq!(
+            s.fetch_all_in_range(0, 50).await,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 50, 55, 2),]
+        );
+    }
+
+    /// `apply_changelog` on a cached window store writes BELOW the cache (no
+    /// dirty entry → an empty cache flush) and a `None` deletes through.
+    #[tokio::test]
+    async fn cached_window_store_apply_changelog_goes_below_cache() {
+        let mut s = cached_store(10);
+        let sk = store_key(
+            &StringSerde.serialize("w-changelog", &"a".to_string()),
+            0,
+            0,
+        );
+        let wrapped = wrap_value(7, &I64Serde.serialize("w-changelog", &9));
+        s.apply_changelog(sk.clone(), Some(wrapped)).await;
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((7, 9)));
+        // Restored below the cache: nothing to forward, no changelog buffered.
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+        assert!(s.take_changelog().is_empty());
+
+        // None apply deletes through the inner store.
+        s.apply_changelog(sk, None).await;
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
+    }
+
+    /// `clear` on a cached window store empties the cache layer and the inner
+    /// store and drops the buffered changelog.
+    #[tokio::test]
+    async fn cached_window_store_clear_empties_everything() {
+        let mut s = cached_store(10);
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 1, 5).await;
+        StateStore::clear(&mut s).await;
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
+        assert!(s.fetch_all_in_range(i64::MIN, i64::MAX).await.is_empty());
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+    }
+
+    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
+    /// no-op.
+    #[tokio::test]
+    async fn enable_cache_is_idempotent() {
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "w-changelog".into(),
+            10,
+        );
+        assert!(!s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
+        assert!(s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
+        assert!(s.is_cached());
+    }
+
     #[tokio::test]
     async fn plain_window_store_unchanged() {
         // A non-cached store logs the changelog immediately; flush_cache_into is a
@@ -844,5 +951,48 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         assert!(buffer.is_empty());
+    }
+
+    /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
+    /// `apply_changelog` restores below the store (Some then None deletes),
+    /// `flush`/`close` are no-ops, and `StateStore::clear` wipes state +
+    /// changelog.
+    #[tokio::test]
+    async fn plain_window_store_lifecycle_and_apply_changelog() {
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "w".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "w-changelog".into(),
+            10,
+        );
+        // Logging off → no changelog buffered.
+        s.set_logging(false);
+        s.put("a".into(), 0, 1, 5).await;
+        assert!(s.take_changelog().is_empty());
+
+        // apply_changelog restores below the store without re-logging.
+        let sk = store_key(
+            &StringSerde.serialize("w-changelog", &"b".to_string()),
+            0,
+            0,
+        );
+        s.apply_changelog(
+            sk.clone(),
+            Some(wrap_value(7, &I64Serde.serialize("w-changelog", &9))),
+        )
+        .await;
+        assert_eq!(s.fetch_single(&"b".to_string(), 0).await, Some((7, 9)));
+        assert!(s.take_changelog().is_empty());
+        // None apply deletes through.
+        s.apply_changelog(sk, None).await;
+        assert_eq!(s.fetch_single(&"b".to_string(), 0).await, None);
+
+        // flush/close are no-ops; clear wipes the remaining "a" window + changelog.
+        s.flush().await;
+        s.close();
+        StateStore::clear(&mut s).await;
+        assert_eq!(s.fetch_single(&"a".to_string(), 0).await, None);
+        assert!(s.take_changelog().is_empty());
     }
 }

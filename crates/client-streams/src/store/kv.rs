@@ -649,6 +649,103 @@ mod tests {
         check!(s.get(&"a".to_string()).await == Some(3));
     }
 
+    /// Cached routing for `range` / `scan_all` / `approx_len` / IQ reads serves
+    /// read-your-writes through the cache overlay before any flush.
+    #[tokio::test]
+    async fn cached_store_range_scan_and_count_overlay() {
+        use crate::store::iq::IqQueryable;
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 1).await;
+        s.put("b".into(), 2).await;
+        s.put("c".into(), 3).await;
+
+        // Typed range routes through Backing::Cached::range (cache overlay).
+        let r = s.range(&"a".to_string(), &"c".to_string()).await; // [a, c)
+        check!(r == vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+
+        // IQ all + approx-count route through Backing::Cached::scan_all.
+        check!(s.iq_kv_all().await.len() == 3);
+        check!(s.iq_kv_approx_count().await == 3);
+        // IQ get routes cache-first.
+        check!(s.iq_kv_get(b"b").await == Some(I64Serde.serialize("s-changelog", &2)));
+    }
+
+    /// On a cached store, typed `delete` returns the prior cached value (read
+    /// cache-first before staging the tombstone).
+    #[tokio::test]
+    async fn cached_store_delete_returns_prev_and_stages_tombstone() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 5).await;
+
+        // delete sees the staged value as its return, without touching the
+        // changelog (cached defers it to flush).
+        check!(s.delete(&"a".to_string()).await == Some(5));
+        check!(s.take_changelog().is_empty());
+        check!(s.get(&"a".to_string()).await == None); // tombstone hides it
+
+        // Flushing emits the deduped tombstone Change + changelog record.
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        let cl = s.take_changelog();
+        check!(cl.len() == 1);
+        check!(cl[0].1.is_none());
+    }
+
+    /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
+    /// staged → nothing forwarded on the next cache flush), and a `None` value
+    /// deletes through the inner store.
+    #[tokio::test]
+    async fn cached_store_apply_changelog_goes_below_cache() {
+        let mut s = cached_store();
+        s.apply_changelog(
+            b"k".to_vec().into(),
+            Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 7])),
+        )
+        .await;
+        check!(s.get(&"k".to_string()).await == Some(7));
+        // Restored below the cache: no dirty entry, so the cache flush is empty.
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        check!(buffer.is_empty());
+        check!(s.take_changelog().is_empty());
+
+        // A None apply deletes through the inner store.
+        s.apply_changelog(b"k".to_vec().into(), None).await;
+        check!(s.get(&"k".to_string()).await == None);
+    }
+
+    /// `clear` on a cached store empties both the cache layer and the inner store
+    /// and drops the buffered changelog.
+    #[tokio::test]
+    async fn cached_store_clear_empties_everything() {
+        use crate::store::iq::IqQueryable;
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 1).await;
+        StateStore::clear(&mut s).await;
+        check!(s.get(&"a".to_string()).await == None);
+        check!(s.iq_kv_all().await.is_empty());
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        check!(buffer.is_empty());
+    }
+
+    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
+    /// no-op (the guard returns early).
+    #[tokio::test]
+    async fn enable_cache_is_idempotent() {
+        let mut s = store();
+        check!(!s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        check!(s.is_cached());
+        // Second call hits the early-return guard; still cached, no panic.
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        check!(s.is_cached());
+        check!(s.is_cached_erased());
+    }
+
     #[tokio::test]
     async fn plain_store_unchanged() {
         // A non-cached store logs the changelog immediately and reads from the
@@ -663,5 +760,10 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         check!(buffer.is_empty());
+        // flush / close are no-ops (in-memory durability is the changelog) and
+        // must not disturb the stored value.
+        s.flush().await;
+        s.close();
+        check!(s.get(&"a".to_string()).await == Some(1));
     }
 }

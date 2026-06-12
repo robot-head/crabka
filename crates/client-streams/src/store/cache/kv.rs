@@ -342,4 +342,129 @@ mod tests {
         let r = store.range(b"a", b"c").await;
         assert_eq!(r, vec![(b(b"b"), b(b"2"))]);
     }
+
+    /// A cache miss falls through to the inner store (the `None` arm of `get`).
+    #[tokio::test]
+    async fn get_falls_through_to_inner_on_miss() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(b(b"k"), b(b"inner")).await;
+        let store = CachingKeyValueStore::new(cache(), Box::new(inner));
+
+        // Nothing staged in the cache for "k": the read falls through to inner.
+        assert_eq!(store.get(b"k").await, Some(b(b"inner")));
+        // A genuinely-absent key returns None from inner.
+        assert_eq!(store.get(b"missing").await, None);
+    }
+
+    /// `scan_all` overlays the full cache on the full inner store: cache wins on
+    /// collision and a cached tombstone hides the inner value.
+    #[tokio::test]
+    async fn scan_all_merges_cache_and_underlying() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(b(b"a"), b(b"1")).await;
+        inner.put(b(b"b"), b(b"2")).await;
+        inner.put(b(b"c"), b(b"3")).await;
+        let store = CachingKeyValueStore::new(cache(), Box::new(inner));
+
+        store.put(b(b"b"), b(b"9"), ctx()).await; // overrides inner b -> 2
+        store.put(b(b"d"), b(b"4"), ctx()).await; // cache-only
+        store.delete(b(b"c"), ctx()).await; // tombstone hides inner c
+
+        let r = store.scan_all().await;
+        assert_eq!(
+            r,
+            vec![
+                (b(b"a"), b(b"1")), // inner-only
+                (b(b"b"), b(b"9")), // cache wins
+                (b(b"d"), b(b"4")), // cache-only
+            ]
+        );
+    }
+
+    /// `put_inner` / `delete_inner` write straight through, bypassing the cache:
+    /// no dirty entry is staged (a subsequent `flush` drains nothing).
+    #[tokio::test]
+    async fn put_and_delete_inner_bypass_the_cache() {
+        let store = CachingKeyValueStore::new(cache(), Box::new(InMemoryBytes::default()));
+
+        store.put_inner(b(b"k"), b(b"v")).await;
+        // Visible via the cache-first read (falls through to inner) ...
+        assert_eq!(store.get(b"k").await, Some(b(b"v")));
+        // ... and no dirty entry was staged.
+        assert!(store.flush().await.is_empty());
+
+        store.delete_inner(b"k").await;
+        assert_eq!(store.get(b"k").await, None);
+        assert!(store.flush().await.is_empty());
+    }
+
+    /// `clear` empties both the cache layer (dropping staged dirty entries) and
+    /// the inner store.
+    #[tokio::test]
+    async fn clear_empties_cache_and_inner() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(b(b"a"), b(b"1")).await;
+        let store = CachingKeyValueStore::new(cache(), Box::new(inner));
+        store.put(b(b"b"), b(b"2"), ctx()).await; // staged dirty
+
+        store.clear().await;
+
+        // Both the staged entry and the inner value are gone.
+        assert_eq!(store.get(b"a").await, None);
+        assert_eq!(store.get(b"b").await, None);
+        assert!(store.scan_all().await.is_empty());
+        // The cleared cache has no dirty entries to flush.
+        assert!(store.flush().await.is_empty());
+    }
+
+    /// `flush_with_old` reports `old = None` for a key with no prior inner value
+    /// and `old = Some(..)` for one that does, then writes both through.
+    #[tokio::test]
+    async fn flush_with_old_distinguishes_absent_and_present_inner() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(b(b"present"), b(b"old")).await;
+        let store = CachingKeyValueStore::new(cache(), Box::new(inner));
+
+        store.put(b(b"present"), b(b"new"), ctx()).await; // has inner old
+        store.put(b(b"fresh"), b(b"v"), ctx()).await; // no inner old
+
+        let mut drained = store.flush_with_old().await;
+        // Sort by key for a deterministic assertion (insertion order is preserved
+        // by the cache, but make the test independent of it).
+        drained.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(drained.len(), 2);
+
+        let fresh = &drained[0];
+        assert_eq!(fresh.0, b(b"fresh"));
+        assert_eq!(fresh.1, None); // no prior inner value
+        assert_eq!(fresh.2, Some(b(b"v")));
+
+        let present = &drained[1];
+        assert_eq!(present.0, b(b"present"));
+        assert_eq!(present.1, Some(b(b"old"))); // prior inner value captured
+        assert_eq!(present.2, Some(b(b"new")));
+
+        // Both write-throughs landed.
+        assert_eq!(store.get(b"present").await, Some(b(b"new")));
+        assert_eq!(store.get(b"fresh").await, Some(b(b"v")));
+    }
+
+    /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
+    /// value through (the tombstone arm of the write-through).
+    #[tokio::test]
+    async fn flush_with_old_tombstone_deletes_through() {
+        let mut inner = InMemoryBytes::default();
+        inner.put(b(b"k"), b(b"old")).await;
+        let store = CachingKeyValueStore::new(cache(), Box::new(inner));
+
+        store.delete(b(b"k"), ctx()).await;
+
+        let drained = store.flush_with_old().await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, b(b"k"));
+        assert_eq!(drained[0].1, Some(b(b"old"))); // inner OLD captured
+        assert_eq!(drained[0].2, None); // tombstone
+
+        assert_eq!(store.get(b"k").await, None);
+    }
 }

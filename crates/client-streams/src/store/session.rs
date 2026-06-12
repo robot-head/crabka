@@ -583,6 +583,138 @@ mod tests {
         );
     }
 
+    /// Cached `find_closed_sessions` routes through `Backing::Cached::scan_all`,
+    /// overlaying the cache across all keys (read-your-writes before flush).
+    #[tokio::test]
+    async fn cached_find_closed_sessions_overlays_cache() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 5, 1).await;
+        s.put("b".into(), 2, 8, 2).await;
+        s.put("a".into(), 20, 30, 3).await;
+
+        let mut got = s.find_closed_sessions(8).await;
+        got.sort();
+        assert_eq!(
+            got,
+            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]
+        );
+        assert!(s.find_closed_sessions(4).await.is_empty());
+        // Reads only touched the cache; no changelog buffered yet.
+        assert!(s.take_changelog().is_empty());
+    }
+
+    /// On a cached store, `remove` stages a write-back tombstone (deferring its
+    /// changelog) that hides the inner session, then flushes the deduped
+    /// tombstone Change + changelog record.
+    #[tokio::test]
+    async fn cached_remove_stages_tombstone_and_flushes() {
+        use crate::dsl::processors::change::Change;
+        let mut s = cached_store();
+        // Seed + flush a committed session [0, 10] = 1.
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 10, 1).await;
+        let mut seed = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut seed, &[0]).await;
+        let _ = s.take_changelog();
+
+        // remove stages a tombstone (cached → no immediate changelog).
+        s.set_record_context(ctx_at(7));
+        s.remove(&"a".to_string(), 0, 10).await;
+        assert!(s.take_changelog().is_empty());
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
+        let change = buffer[0].1.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.old, Some(1)); // committed value
+        assert_eq!(change.new, None); // tombstone
+        let cl = s.take_changelog();
+        assert_eq!(cl.len(), 1);
+        assert!(cl[0].1.is_none()); // changelog tombstone
+    }
+
+    /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
+    /// → empty cache flush), and a `None` deletes through.
+    #[tokio::test]
+    async fn cached_apply_changelog_goes_below_cache() {
+        let mut s = cached_store();
+        let sk = session_key(
+            &StringSerde.serialize("app-s-changelog", &"a".to_string()),
+            0,
+            10,
+        );
+        s.apply_changelog(sk.clone(), Some(I64Serde.serialize("app-s-changelog", &9)))
+            .await;
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 9)]
+        );
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+        assert!(s.take_changelog().is_empty());
+
+        // None apply deletes through.
+        s.apply_changelog(sk, None).await;
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+    }
+
+    /// `clear` on a cached store empties both the cache layer and inner store.
+    #[tokio::test]
+    async fn cached_clear_empties_everything() {
+        let mut s = cached_store();
+        s.set_record_context(ctx_at(0));
+        s.put("a".into(), 0, 10, 1).await;
+        StateStore::clear(&mut s).await;
+        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+        assert!(s.find_closed_sessions(i64::MAX).await.is_empty());
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert!(buffer.is_empty());
+    }
+
+    /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
+    /// no-op.
+    #[tokio::test]
+    async fn enable_cache_is_idempotent() {
+        let mut s = store();
+        assert!(!s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        assert!(s.is_cached());
+        s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
+        assert!(s.is_cached());
+    }
+
+    /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
+    /// `flush`/`close` are no-ops, and `StateStore::clear` wipes the store + its
+    /// buffered changelog.
+    #[tokio::test]
+    async fn plain_store_lifecycle_logging_flush_close_clear() {
+        let mut s = store();
+        s.set_logging(false);
+        s.put("a".into(), 0, 10, 1).await;
+        assert!(
+            s.take_changelog().is_empty(),
+            "logging off suppresses the changelog"
+        );
+        // Read still works; flush/close are no-ops.
+        assert_eq!(
+            s.find_sessions(&"a".to_string(), 0, 100).await,
+            vec![(0, 10, 1)]
+        );
+        s.flush().await;
+        s.close();
+
+        // Re-enable logging and write, then clear wipes state + changelog.
+        s.set_logging(true);
+        s.put("b".into(), 0, 10, 2).await;
+        StateStore::clear(&mut s).await;
+        assert!(s.find_sessions(&"b".to_string(), 0, 100).await.is_empty());
+        assert!(s.take_changelog().is_empty());
+    }
+
     #[tokio::test]
     async fn plain_session_store_unchanged() {
         let mut s = store();
