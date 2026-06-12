@@ -956,7 +956,7 @@ mod tests {
 
     // ── KStream.to_table cache suppression ───────────────────────────────────
 
-    /// Run `init` then two same-key `process` calls through the [`TableProcessor`]
+    /// Run `init` then two same-key `process` calls through the `to_table`
     /// processor, returning how many records reached the downstream buffer.
     async fn to_table_run_two(stores: &mut StoreRegistry) -> usize {
         let children = [0usize];
