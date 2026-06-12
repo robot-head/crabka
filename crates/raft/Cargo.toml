@@ -17,10 +17,10 @@ categories = ["algorithms", "database-implementations"]
 workspace = true
 
 [dependencies]
-crabka-metadata = { version = "0.3.4", path = "../metadata" }
-crabka-log = { version = "0.3.4", path = "../log" }
-crabka-protocol = { version = "0.3.4", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.4", path = "../client-core" }
+crabka-metadata = { version = "0.3.5", path = "../metadata" }
+crabka-log = { version = "0.3.5", path = "../log" }
+crabka-protocol = { version = "0.3.5", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.5", path = "../client-core" }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }

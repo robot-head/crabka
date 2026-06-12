@@ -21,8 +21,8 @@ default = []
 
 [dependencies]
 bon = { workspace = true }
-crabka-protocol = { version = "0.3.4", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.4", path = "../client-core" }
+crabka-protocol = { version = "0.3.5", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.5", path = "../client-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
@@ -32,7 +32,7 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-security = { version = "0.3.4", path = "../security" }
+crabka-security = { version = "0.3.5", path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest = { workspace = true }
