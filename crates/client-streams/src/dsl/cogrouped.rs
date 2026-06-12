@@ -548,14 +548,16 @@ mod cogroup_caching_tests {
         let b = StreamsBuilder::new();
         let g1 = b.stream::<String, String>(["in1"]).group_by_key();
         let g2 = b.stream::<String, String>(["in2"]).group_by_key();
-        g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
-            .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-            .aggregate_explicit(
-                || 0i64,
-                Materialized::with(StringSerde, I64Serde).as_store("cg"),
-            )
-            .to_stream()
-            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| {
+            acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
+        })
+        .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+        .aggregate_explicit(
+            || 0i64,
+            Materialized::with(StringSerde, I64Serde).as_store("cg"),
+        )
+        .to_stream()
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
         let mut g =
             pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
@@ -582,16 +584,18 @@ mod cogroup_caching_tests {
         let b = StreamsBuilder::new();
         let g1 = b.stream::<String, String>(["in1"]).group_by_key();
         let g2 = b.stream::<String, String>(["in2"]).group_by_key();
-        g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
-            .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-            .aggregate_explicit(
-                || 0i64,
-                Materialized::with(StringSerde, I64Serde)
-                    .as_store("cg")
-                    .with_caching(false),
-            )
-            .to_stream()
-            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| {
+            acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
+        })
+        .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+        .aggregate_explicit(
+            || 0i64,
+            Materialized::with(StringSerde, I64Serde)
+                .as_store("cg")
+                .with_caching(false),
+        )
+        .to_stream()
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
         let g =
             pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
