@@ -79,6 +79,7 @@ where
             key_serde,
             value_serde,
             logging,
+            caching,
             ..
         } = materialized;
         let spec = CogroupSpec::<K, VOut> {
@@ -108,6 +109,7 @@ where
                 grace,
                 procs,
             );
+            state.topology.mark_store_caching(&store_for_reg, caching);
         });
         let merge_id = lower_cogroup::<K, VOut, Windowed<K>>(
             &self.builder,
@@ -126,5 +128,67 @@ where
             value_serde,
         )
         .with_window_grace(Some(self.windows.grace_ms))
+    }
+}
+
+#[cfg(test)]
+mod caching_tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+    use crate::dsl::windows::TimeWindowedSerde;
+    use crate::store::backend::StoreBackend;
+    use crate::{I64Serde, Materialized, Produced, SlidingWindows, StringSerde};
+
+    #[test]
+    fn sliding_windowed_cogroup_marks_store_cached() {
+        let b = StreamsBuilder::new();
+        let g1 = b.stream::<String, String>(["in1"]).group_by_key();
+        let g2 = b.stream::<String, String>(["in2"]).group_by_key();
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| {
+            acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
+        })
+        .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(100))
+        .aggregate_explicit(
+            || 0i64,
+            Materialized::with(StringSerde, I64Serde).as_store("cg"),
+        )
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+        );
+        let built = b.build("app").unwrap();
+        let g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(g.cache_owner.contains_key("cg"));
+    }
+
+    #[test]
+    fn sliding_windowed_cogroup_uncached_when_off() {
+        let b = StreamsBuilder::new();
+        let g1 = b.stream::<String, String>(["in1"]).group_by_key();
+        let g2 = b.stream::<String, String>(["in2"]).group_by_key();
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| {
+            acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
+        })
+        .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(100))
+        .aggregate_explicit(
+            || 0i64,
+            Materialized::with(StringSerde, I64Serde)
+                .as_store("cg")
+                .with_caching(false),
+        )
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+        );
+        let built = b.build("app").unwrap();
+        let g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(!g.cache_owner.contains_key("cg"));
     }
 }

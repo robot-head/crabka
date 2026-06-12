@@ -79,6 +79,7 @@ where
 #[allow(dead_code)]
 pub(crate) struct KStreamToTableProcessor<K, V> {
     pub store_name: String,
+    pub forwarder: TupleForwarder,
     pub _pd: Marker<(K, V)>,
 }
 
@@ -88,21 +89,26 @@ where
     K: std::any::Any + Send + Sync + Clone,
     V: std::any::Any + Send + Clone,
 {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>) {
+        self.forwarder = TupleForwarder::resolve(ctx.store_is_cached(&self.store_name));
+    }
+
     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("to_table requires a non-null key");
+        // Stash the source record context BEFORE the store borrow so a cached
+        // store attaches it to the deduped change it forwards on flush.
+        let rc = ctx.record_context().clone();
         let old = {
             let store = ctx
                 .get_state_store::<K, V>(&self.store_name)
                 .expect("to_table store not found");
+            store.set_record_context(rc);
             let old = store.get(&key).await;
             store.put(key.clone(), r.value.clone()).await;
             old
         };
-        ctx.forward(Record::new(
-            Some(key),
-            Change::update(old, r.value),
-            r.timestamp,
-        ));
+        self.forwarder
+            .maybe_forward(ctx, key, old, r.value, r.timestamp);
     }
 }
 
@@ -936,6 +942,72 @@ mod tests {
     async fn cached_source_suppresses_immediate_forward() {
         let mut stores = source_registry(true);
         check!(source_run_two(&mut stores).await == 0);
+        check!(stores.kv_is_cached("tbl"));
+        let store = stores.get_kv::<String, i64>("tbl").unwrap();
+        check!(store.get(&"k".to_string()).await == Some(2));
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        stores
+            .get_mut("tbl")
+            .unwrap()
+            .flush_cache_into(&mut buffer, &[0])
+            .await;
+        check!(buffer.len() == 1);
+    }
+
+    // ── KStream.to_table cache suppression ───────────────────────────────────
+
+    /// Run `init` then two same-key `process` calls through the `to_table`
+    /// processor, returning how many records reached the downstream buffer.
+    async fn to_table_run_two(stores: &mut StoreRegistry) -> usize {
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+        let mut proc = KStreamToTableProcessor::<String, i64> {
+            store_name: "tbl".into(),
+            forwarder: TupleForwarder::default(),
+            _pd: PhantomData,
+        };
+        for v in 1..3i64 {
+            let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+                globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            if v == 1 {
+                proc.init(&mut ctx).await;
+            }
+            proc.process(&mut ctx, Record::new(Some("k".into()), v, v))
+                .await;
+        }
+        buffer.len()
+    }
+
+    /// Uncached → forwards each record immediately (today's behavior): two
+    /// records → two forwards.
+    #[tokio::test]
+    async fn uncached_to_table_forwards_each_record() {
+        let mut stores = source_registry(false);
+        check!(to_table_run_two(&mut stores).await == 2);
+    }
+
+    /// Cached → the immediate forward is suppressed; the cache buffers the dirty
+    /// entry and flushing emits exactly ONE deduped change. Read-your-writes: the
+    /// cached store reflects the latest value (2) before flush.
+    #[tokio::test]
+    async fn cached_to_table_suppresses_immediate_forward() {
+        let mut stores = source_registry(true);
+        check!(to_table_run_two(&mut stores).await == 0);
         check!(stores.kv_is_cached("tbl"));
         let store = stores.get_kv::<String, i64>("tbl").unwrap();
         check!(store.get(&"k".to_string()).await == Some(2));
