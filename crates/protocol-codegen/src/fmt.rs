@@ -86,3 +86,45 @@ fn run_rustfmt(src: &str) -> Result<String, FmtError> {
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_banner_separates_leading_comment_block() {
+        let src = "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n";
+        let (banner, body) = split_banner(src);
+        assert_eq!(banner, "// AUTO-GENERATED foo\n// line two\n\n");
+        assert_eq!(body, "pub struct X;\n");
+    }
+
+    #[test]
+    fn split_banner_handles_no_banner() {
+        let src = "pub struct X;\n";
+        let (banner, body) = split_banner(src);
+        assert_eq!(banner, "");
+        assert_eq!(body, src);
+    }
+
+    /// Regression guard for the ` :: ` / ` . ` spacing bug: a `to_owned` whose
+    /// fully-qualified return path is too long for rustfmt to fit in `max_width`.
+    /// rustfmt gives up and emits the raw `quote!` token spacing verbatim;
+    /// prettyplease must render it cleanly, and the banner must survive.
+    #[test]
+    fn formats_long_to_owned_path_without_spaced_tokens() {
+        let banner = "// AUTO-GENERATED against deadbeef. Do not edit.\n\n";
+        let body = "impl Foo { pub fn to_owned (& self) -> crate :: owned :: common :: \
+            some_very_long_owning_message_name :: some_very_long_common_struct_name :: \
+            SomeVeryLongCommonStructName { crate :: owned :: common :: \
+            some_very_long_owning_message_name :: some_very_long_common_struct_name :: \
+            SomeVeryLongCommonStructName { field_one : (self . field_one) , } } }";
+        let out = rustfmt(&format!("{banner}{body}")).expect("rustfmt+prettyplease");
+        assert!(
+            out.starts_with("// AUTO-GENERATED against deadbeef."),
+            "banner must be preserved, got:\n{out}"
+        );
+        assert!(!out.contains(" :: "), "spaced `::` survived:\n{out}");
+        assert!(!out.contains(" . "), "spaced `.` survived:\n{out}");
+    }
+}
