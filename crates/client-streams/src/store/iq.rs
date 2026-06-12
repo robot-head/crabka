@@ -179,6 +179,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
+            1000,
         );
         s.put("k".into(), 0, 10, 5).await;
         s.put("k".into(), 1000, 20, 1005).await;

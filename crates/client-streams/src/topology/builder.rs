@@ -563,6 +563,11 @@ impl Topology {
                             Box::new(key_serde.clone()),
                             Box::new(value_serde.clone()),
                             changelog,
+                            // Aggregate window stores need the real window size so the
+                            // cache flush can reconstruct `end = start + size` for the
+                            // downstream `Windowed` key (the store-key bytes hold only
+                            // the start).
+                            size_ms,
                         )) as Box<dyn crate::store::api::StateStore>
                     },
                 ),

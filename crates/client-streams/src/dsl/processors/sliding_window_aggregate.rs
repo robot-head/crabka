@@ -1083,6 +1083,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
         s
     }
@@ -1268,6 +1269,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(StringSerde),
             "app-w-changelog".into(),
+            10,
         )));
         s
     }

@@ -32,6 +32,7 @@
 //! over the windowed-key bounds and `fetch_all` off `all`, then filters each by
 //! key prefix / window start — no parallel key index.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -48,6 +49,9 @@ use crate::store::window_schema::{key_bytes_of, store_key, window_start_of};
 pub(crate) struct CachingWindowStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
+    /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
+    /// under the same identity (mirrors `CachingKeyValueStore`).
+    name: String,
 }
 
 impl CachingWindowStore {
@@ -55,7 +59,106 @@ impl CachingWindowStore {
         cache: Arc<Mutex<NamedCache>>,
         inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
     ) -> Self {
-        Self { cache, inner }
+        Self {
+            cache,
+            inner,
+            name: String::new(),
+        }
+    }
+
+    /// Like [`new`](Self::new) but records the cache's name for `clear`.
+    pub fn with_name(
+        cache: Arc<Mutex<NamedCache>>,
+        inner: Arc<AsyncMutex<Box<dyn ByteKeyValueStore>>>,
+        name: String,
+    ) -> Self {
+        Self { cache, inner, name }
+    }
+
+    /// Cache-first single windowed-store-key read: a cache hit (including a dirty
+    /// `None` tombstone) wins; otherwise fall through to the inner store.
+    pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
+        let key = Bytes::copy_from_slice(key);
+        let cached = {
+            let mut cache = self.cache.lock().unwrap();
+            cache.get_promote(&key).map(|e| e.value.clone())
+        };
+        match cached {
+            Some(value) => value,
+            None => self.inner.lock().await.get(&key).await,
+        }
+    }
+
+    /// Merged raw windowed-key range `[lo, hi)`: inner overlaid with the cache.
+    /// Cache entries win on key collision and a cached tombstone hides the inner
+    /// value. Returns key-sorted `(store_key, wrapped_value)`. Backs the typed
+    /// store's `fetch`/`fetch_with_ts`/IQ range reads.
+    pub async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
+        let mut merged: BTreeMap<Bytes, Bytes> = {
+            let inner = self.inner.lock().await;
+            inner.range(lo, hi).await.into_iter().collect()
+        };
+        let cached = {
+            let cache = self.cache.lock().unwrap();
+            cache.range(lo, hi)
+        };
+        for (k, e) in cached {
+            match e.value {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
+    /// wins on key collision; a cached tombstone hides the inner value. Returns
+    /// key-sorted `(store_key, wrapped_value)`. Backs the typed store's
+    /// `fetch_all_in_range` / range-scan IQ reads.
+    pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        let mut merged: BTreeMap<Bytes, Bytes> = {
+            let inner = self.inner.lock().await;
+            inner.scan_all().await.into_iter().collect()
+        };
+        let cached = {
+            let cache = self.cache.lock().unwrap();
+            cache.all()
+        };
+        for (k, e) in cached {
+            match e.value {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Write straight through to the inner store, bypassing the cache (restore
+    /// path; mirrors `CachingKeyValueStore::put_inner`).
+    pub async fn put_inner(&self, key: Bytes, value: Bytes) {
+        self.inner.lock().await.put(key, value).await;
+    }
+
+    /// Delete straight through to the inner store, bypassing the cache (restore).
+    pub async fn delete_inner(&self, key: &[u8]) {
+        self.inner.lock().await.delete(key).await;
+    }
+
+    /// Clear both the cache layer and the inner store (EOS rollback reset).
+    pub async fn clear(&self) {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            *cache = NamedCache::new(self.name.clone());
+        }
+        self.inner.lock().await.clear().await;
     }
 
     /// Write-back a windowed entry into the cache. `key_schema_bytes` is the
@@ -170,6 +273,42 @@ impl CachingWindowStore {
         }
         drop(inner);
         collected
+    }
+
+    /// Flush dirty entries in insertion order, capturing the inner OLD wrapped
+    /// value BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
+    /// write the new value through (`put` / `delete` on a tombstone), and return
+    /// `(windowed_store_key, old, new, context)`. `old`/`new` are the *wrapped*
+    /// value bytes (`recordTs ‖ serialized`), `None` = absent / tombstone. Mirrors
+    /// `CachingKeyValueStore::flush_with_old`; the typed `WindowBytesStore` decodes
+    /// the windowed key + unwraps the values to build the deduped downstream
+    /// `Change`.
+    pub async fn flush_with_old(
+        &self,
+    ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
+        // Drain dirty entries under the cache lock, dropping the guard before any
+        // await.
+        let mut dirty: Vec<(Bytes, LruCacheEntry)> = Vec::new();
+        {
+            let mut cache = self.cache.lock().unwrap();
+            let mut listener = |k: &Bytes, e: &LruCacheEntry| dirty.push((k.clone(), e.clone()));
+            cache.flush(&mut listener);
+        }
+        let mut out = Vec::with_capacity(dirty.len());
+        {
+            let mut inner = self.inner.lock().await;
+            for (k, e) in dirty {
+                let old = inner.get(&k).await;
+                match &e.value {
+                    Some(v) => inner.put(k.clone(), v.clone()).await,
+                    None => {
+                        inner.delete(&k).await;
+                    }
+                }
+                out.push((k, old, e.value, e.context));
+            }
+        }
+        out
     }
 }
 
@@ -354,5 +493,25 @@ mod tests {
             got_both,
             vec![(a0, wrapped(1, b"a0")), (b50, wrapped(2, b"b50"))]
         );
+    }
+
+    #[tokio::test]
+    async fn flush_with_old_returns_inner_old_then_writes_through() {
+        let s = store();
+        let key = b"a";
+        let sk = store_key(key, 0, 0);
+        // Seed a committed value in the inner store.
+        inner_put(&s, sk.clone(), wrapped(1, b"old")).await;
+        // Stage a new value in the cache.
+        s.put(sk.clone(), wrapped(2, b"new"), ctx());
+
+        let drained = s.flush_with_old().await;
+        assert_eq!(drained.len(), 1);
+        let (k, old, new, _ctx) = &drained[0];
+        assert_eq!(k, &sk);
+        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old"))); // inner OLD captured pre-write
+        assert_eq!(new.as_ref(), Some(&wrapped(2, b"new")));
+        // Write-through landed in the inner store.
+        assert_eq!(inner_get(&s, &sk).await, Some(wrapped(2, b"new")));
     }
 }

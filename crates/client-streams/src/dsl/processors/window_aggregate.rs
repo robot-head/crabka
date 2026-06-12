@@ -302,6 +302,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];
@@ -386,6 +387,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];
@@ -462,6 +464,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
+            10,
         )));
 
         let children = [0usize];

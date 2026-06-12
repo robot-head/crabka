@@ -52,6 +52,9 @@ use crate::store::session_schema::{
 pub(crate) struct CachingSessionStore {
     cache: Arc<Mutex<NamedCache>>,
     inner: AsyncMutex<Box<dyn ByteKeyValueStore>>,
+    /// Cache name, captured so `clear` can rebuild an empty [`NamedCache`]
+    /// under the same identity (mirrors `CachingKeyValueStore`).
+    name: String,
 }
 
 impl CachingSessionStore {
@@ -59,7 +62,105 @@ impl CachingSessionStore {
         Self {
             cache,
             inner: AsyncMutex::new(inner),
+            name: String::new(),
         }
+    }
+
+    /// Like [`new`](Self::new) but records the cache's name for `clear`.
+    pub fn with_name(
+        cache: Arc<Mutex<NamedCache>>,
+        inner: Box<dyn ByteKeyValueStore>,
+        name: String,
+    ) -> Self {
+        Self {
+            cache,
+            inner: AsyncMutex::new(inner),
+            name,
+        }
+    }
+
+    /// Cache-first single session-key read: a cache hit (including a dirty `None`
+    /// tombstone) wins; otherwise fall through to the inner store.
+    pub async fn get(&self, key: &[u8]) -> Option<Bytes> {
+        let key = Bytes::copy_from_slice(key);
+        let cached = {
+            let mut cache = self.cache.lock().unwrap();
+            cache.get_promote(&key).map(|e| e.value.clone())
+        };
+        match cached {
+            Some(value) => value,
+            None => self.inner.lock().await.get(&key).await,
+        }
+    }
+
+    /// Merged raw session-key range `[lo, hi)`: inner overlaid with the cache.
+    /// Cache wins on key collision; a cached tombstone hides the inner value.
+    /// Returns key-sorted `(session_key, value)`.
+    pub async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)> {
+        let mut merged: BTreeMap<Bytes, Bytes> = {
+            let inner = self.inner.lock().await;
+            inner.range(lo, hi).await.into_iter().collect()
+        };
+        let cached = {
+            let cache = self.cache.lock().unwrap();
+            cache.range(lo, hi)
+        };
+        for (k, e) in cached {
+            match e.value {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Merged unbounded scan: every inner entry overlaid with the cache. Cache
+    /// wins on key collision; a cached tombstone hides the inner value. Returns
+    /// key-sorted `(session_key, value)`. Backs `find_closed_sessions`.
+    pub async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        let mut merged: BTreeMap<Bytes, Bytes> = {
+            let inner = self.inner.lock().await;
+            inner.scan_all().await.into_iter().collect()
+        };
+        let cached = {
+            let cache = self.cache.lock().unwrap();
+            cache.all()
+        };
+        for (k, e) in cached {
+            match e.value {
+                Some(v) => {
+                    merged.insert(k, v);
+                }
+                None => {
+                    merged.remove(&k);
+                }
+            }
+        }
+        merged.into_iter().collect()
+    }
+
+    /// Write straight through to the inner store, bypassing the cache (restore
+    /// path; mirrors `CachingKeyValueStore::put_inner`).
+    pub async fn put_inner(&self, key: Bytes, value: Bytes) {
+        self.inner.lock().await.put(key, value).await;
+    }
+
+    /// Delete straight through to the inner store, bypassing the cache (restore).
+    pub async fn delete_inner(&self, key: &[u8]) {
+        self.inner.lock().await.delete(key).await;
+    }
+
+    /// Clear both the cache layer and the inner store (EOS rollback reset).
+    pub async fn clear(&self) {
+        {
+            let mut cache = self.cache.lock().unwrap();
+            *cache = NamedCache::new(self.name.clone());
+        }
+        self.inner.lock().await.clear().await;
     }
 
     /// Write-back put: stage a dirty entry in the cache keyed by the full session
@@ -176,6 +277,42 @@ impl CachingSessionStore {
         }
         collected
     }
+
+    /// Flush dirty entries in insertion order, capturing the inner OLD value
+    /// BEFORE each write-through. For each entry: read `old = inner.get(&k)`,
+    /// write the new value through (`put` / `delete` on a tombstone), and return
+    /// `(session_store_key, old, new, context)`. `old`/`new` are the raw aggregate
+    /// value bytes (`None` = absent / tombstone). Mirrors
+    /// `CachingKeyValueStore::flush_with_old`; the typed `SessionBytesStore` decodes
+    /// the session key + deserializes the values to build the deduped downstream
+    /// `Change`.
+    pub async fn flush_with_old(
+        &self,
+    ) -> Vec<(Bytes, Option<Bytes>, Option<Bytes>, RecordContext)> {
+        // Drain dirty entries under the cache lock, dropping the guard before any
+        // await.
+        let mut dirty: Vec<(Bytes, LruCacheEntry)> = Vec::new();
+        {
+            let mut cache = self.cache.lock().unwrap();
+            let mut listener = |k: &Bytes, e: &LruCacheEntry| dirty.push((k.clone(), e.clone()));
+            cache.flush(&mut listener);
+        }
+        let mut out = Vec::with_capacity(dirty.len());
+        {
+            let mut inner = self.inner.lock().await;
+            for (k, e) in dirty {
+                let old = inner.get(&k).await;
+                match &e.value {
+                    Some(v) => inner.put(k.clone(), v.clone()).await,
+                    None => {
+                        inner.delete(&k).await;
+                    }
+                }
+                out.push((k, old, e.value, e.context));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -290,5 +427,29 @@ mod tests {
 
         let found = store.find_sessions(b"k", 0, 100).await;
         assert_eq!(found, vec![(0, 10, b(b"a"))]);
+    }
+
+    /// `flush_with_old` captures the inner OLD value before writing the staged new
+    /// value through.
+    #[tokio::test]
+    async fn flush_with_old_returns_inner_old_then_writes_through() {
+        let mut inner = InMemoryBytes::default();
+        let sk = session_key(b"k", 0, 10);
+        inner.put(sk.clone(), b(b"old")).await;
+        let store = CachingSessionStore::new(cache(), Box::new(inner));
+        // Stage a new value for the same session key.
+        store.put(sk.clone(), b(b"new"), ctx()).await;
+
+        let drained = store.flush_with_old().await;
+        assert_eq!(drained.len(), 1);
+        let (k, old, new, _ctx) = &drained[0];
+        assert_eq!(k, &sk);
+        assert_eq!(old.as_ref(), Some(&b(b"old"))); // inner OLD captured pre-write
+        assert_eq!(new.as_ref(), Some(&b(b"new")));
+        // Write-through landed; the (now-clean) merge reads the new value.
+        assert_eq!(
+            store.find_sessions(b"k", 0, 100).await,
+            vec![(0, 10, b(b"new"))]
+        );
     }
 }
