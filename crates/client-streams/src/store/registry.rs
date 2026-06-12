@@ -73,6 +73,19 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::session::SessionStore<K, V>)
     }
 
+    /// Typed mutable access: downcast the erased store to the versioned store
+    /// of the requested types. `None` if absent or the types don't match.
+    pub fn get_versioned<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::versioned::VersionedKeyValueStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        let concrete = store
+            .as_any_mut()
+            .downcast_mut::<crate::store::versioned::VersionedBytesStore<K, V>>()?;
+        Some(concrete as &mut dyn crate::store::versioned::VersionedKeyValueStore<K, V>)
+    }
+
     /// Typed mutable access: downcast the erased store to the suppress store
     /// of the requested types. `None` if absent or the types don't match.
     pub(crate) fn get_suppress<K: Send + Sync + 'static, V: Send + 'static>(
@@ -84,6 +97,18 @@ impl StoreRegistry {
             .as_any_mut()
             .downcast_mut::<crate::store::suppress_store::SuppressBytesStore<K, V>>()?;
         Some(concrete as &mut dyn crate::store::suppress_store::SuppressStore<K, V>)
+    }
+
+    /// Typed mutable access: downcast the erased store to the join-grace buffer
+    /// store of the requested types. `None` if absent or the types don't match.
+    pub(crate) fn get_join_grace<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::join_grace_buffer::JoinGraceBufferStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        store
+            .as_any_mut()
+            .downcast_mut::<crate::store::join_grace_buffer::JoinGraceBufferStore<K, V>>()
     }
 
     /// Mutable access to the FK subscription store. `None` if absent / wrong type.
@@ -108,6 +133,32 @@ impl StoreRegistry {
     pub(crate) fn iq_get(&self, name: &str) -> Option<&dyn crate::store::iq::IqQueryable> {
         self.stores.get(name).and_then(|s| s.as_iq())
     }
+
+    /// Whether the named KV store has its record cache enabled, via the erased
+    /// [`StateStore::is_cached_erased`] hook (no `K`/`V` needed). `false` for an
+    /// absent store or a store kind that isn't cache-aware. Used by
+    /// [`ProcessorContext::store_is_cached`] so a materializing processor can
+    /// suppress its immediate forward, and by build-time cache-wiring tests.
+    ///
+    /// [`ProcessorContext::store_is_cached`]: crate::processor::api::ProcessorContext::store_is_cached
+    pub(crate) fn kv_is_cached(&self, name: &str) -> bool {
+        self.stores.get(name).is_some_and(|s| s.is_cached_erased())
+    }
+
+    /// Enable the record cache on the named store via the erased
+    /// [`StateStore::enable_cache_erased`] hook (no `K`/`V` needed). Returns
+    /// `true` if the store is present AND cache-aware (a KV store); `false` for an
+    /// absent store or a store kind whose caching hasn't landed yet (window/
+    /// session), so the caller can skip rooting a `cache_owner` entry for it.
+    pub(crate) fn enable_cache(
+        &mut self,
+        name: &str,
+        cache: std::sync::Arc<std::sync::Mutex<crate::store::cache::named::NamedCache>>,
+    ) -> bool {
+        self.stores
+            .get_mut(name)
+            .is_some_and(|s| s.enable_cache_erased(cache))
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +167,24 @@ mod tests {
     use crate::processor::serde::{I64Serde, StringSerde};
     use crate::store::kv::KeyValueBytesStore;
     use assert2::check;
+
+    #[tokio::test]
+    async fn register_and_downcast_versioned_store() {
+        use crate::store::versioned::VersionedBytesStore;
+        let mut reg = StoreRegistry::default();
+        reg.insert(Box::new(VersionedBytesStore::<String, i64>::in_memory(
+            "v".into(),
+            1_000_000,
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "v-changelog".into(),
+        )));
+        let s = reg.get_versioned::<String, i64>("v").unwrap();
+        s.put("x".into(), Some(5), 10).await;
+        check!(s.get(&"x".to_string()).await.map(|r| r.value) == Some(5));
+        check!(reg.get_versioned::<i64, i64>("v").is_none());
+        check!(reg.get_versioned::<String, i64>("missing").is_none());
+    }
 
     #[tokio::test]
     async fn register_and_downcast_typed_store() {

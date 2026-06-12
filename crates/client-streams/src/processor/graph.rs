@@ -1,4 +1,4 @@
-﻿//! The instantiated, runnable processor graph for one subtopology + partition.
+//! The instantiated, runnable processor graph for one subtopology + partition.
 //! Non-recursive driver loop: a node's `forward` appends `(child_idx,
 //! ErasedRecord)` to a buffer the driver drains, so there is no `&mut` aliasing
 //! across nodes.
@@ -44,9 +44,41 @@ pub(crate) struct Graph {
     /// Last wall-clock value seen; the base a wall-clock schedule stamps its
     /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
     pub wall_clock: i64,
+    /// Total record-cache budget for this graph's stores (JVM
+    /// `statestore.cache.max.bytes`). `0` disables caching (emit-on-update),
+    /// matching the JVM `TopologyTestDriver` default. Threaded from
+    /// [`StreamsApp`](crate::StreamsApp) → [`KafkaStreams`](crate::KafkaStreams) →
+    /// `instantiate`. Read via [`Graph::cache_max_bytes`].
+    // Config-only for now; the record cache that consumes this budget lands in a
+    // later task, so the field/accessor are read only by tests until then.
+    #[allow(dead_code)]
+    pub cache_max_bytes: i64,
+    /// Store name → owning node index, for `flush_caches` to root each cached
+    /// store's forwarded changes at the node that materializes it. Empty in
+    /// production until build-time population lands (sub-task 3b-ii); filled
+    /// manually by tests for now.
+    // Build-time population + the production flush_caches call site land in later
+    // record-caching sub-tasks; read only by tests until then.
+    #[allow(dead_code)]
+    pub(crate) cache_owner: std::collections::HashMap<String, usize>,
+    /// The per-task record cache owning every cached store's [`NamedCache`].
+    /// `instantiate` builds it with the graph's `cache_max_bytes` budget and
+    /// registers a named cache per materialized KV store; eviction/flush route
+    /// through it. Empty/zero-budget when caching is disabled.
+    // Eviction wiring (over-budget forwarding) lands in a later record-caching
+    // sub-task; held here so the per-store NamedCaches share one budget.
+    #[allow(dead_code)]
+    pub(crate) cache: crate::store::cache::thread::ThreadCache,
 }
 
 impl Graph {
+    /// The record-cache budget threaded into this graph (JVM
+    /// `statestore.cache.max.bytes`); `0` means caching disabled.
+    #[allow(dead_code)] // consumed by the record cache in a later task; tests assert it now
+    pub(crate) fn cache_max_bytes(&self) -> i64 {
+        self.cache_max_bytes
+    }
+
     /// Feed one record arriving on `topic`; runs the graph to completion,
     /// appending sink outputs to `self.output`. Unknown topics are ignored.
     pub async fn pipe(
@@ -165,6 +197,43 @@ impl Graph {
         self.children[node_idx] = children;
         self.schedules[sched_idx].punctuator = punct;
         self.drain(buffer, &rc).await
+    }
+
+    /// Flush every cached store and forward its deduped changes downstream, rooted
+    /// at the store's owning node (mirrors `fire_schedule`). Called from the task
+    /// commit/close path before the producer commit. Flushes in ascending owning-
+    /// node order and drains after each store, so a downstream cached store sees an
+    /// upstream store's forwarded changes before it flushes (chained-KTable order).
+    pub(crate) async fn flush_caches(&mut self) -> Result<(), ProcessorError> {
+        let rc = RecordContext {
+            topic: String::new(),
+            partition: -1,
+            offset: -1,
+            timestamp: self.stream_time,
+        };
+        // Collect (node_idx, store_name) and flush in ascending node order so a
+        // chained downstream cached store sees its upstream's forwarded changes
+        // before it flushes.
+        let mut owners: Vec<(usize, String)> = self
+            .cache_owner
+            .iter()
+            .map(|(n, &i)| (i, n.clone()))
+            .collect();
+        owners.sort_by_key(|(i, _)| *i);
+        for (node_idx, name) in owners {
+            let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+            // Take the owning node's children out so the store flush can borrow
+            // `self.stores` mutably without aliasing `self.children` (mirrors the
+            // `mem::take` in `fire_schedule`).
+            let children = std::mem::take(&mut self.children[node_idx]);
+            if let Some(store) = self.stores.get_mut(&name) {
+                store.flush_cache_into(&mut buffer, &children).await;
+            }
+            self.children[node_idx] = children;
+            // `drain` re-borrows `self`; the store borrow above is finished here.
+            self.drain(buffer, &rc).await?;
+        }
+        Ok(())
     }
 
     /// Fire all due `STREAM_TIME` schedules at the current stream-time (each at
@@ -287,17 +356,17 @@ impl Graph {
     pub fn drain_changelogs(
         &mut self,
         reuse_source_topics: &std::collections::HashSet<String>,
-    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
+    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
         let mut out = Vec::new();
         for name in self.stores.names() {
             if let Some(store) = self.stores.get_mut(&name) {
                 let topic = store.changelog_topic().to_string();
-                let entries = store.take_changelog();
+                let entries = store.take_changelog_ts();
                 if reuse_source_topics.contains(&topic) {
                     continue; // reuse-source store: drained, but never re-produced
                 }
-                for (k, v) in entries {
-                    out.push((topic.clone(), k, v));
+                for (k, v, ts) in entries {
+                    out.push((topic.clone(), k, v, ts));
                 }
             }
         }
@@ -311,9 +380,10 @@ impl Graph {
         store_name: &str,
         key: bytes::Bytes,
         value: Option<bytes::Bytes>,
+        timestamp: i64,
     ) {
         if let Some(store) = self.stores.get_mut(store_name) {
-            store.apply_changelog(key, value).await;
+            store.apply_changelog_ts(key, value, timestamp).await;
         }
     }
 
@@ -394,6 +464,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
+            cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -414,6 +487,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
+            cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -484,6 +560,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
+            cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
@@ -563,6 +642,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
+            cache_max_bytes: 0,
+            cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
         };
 
         // init schedules the punctuator: stream base i64::MIN -> next = MIN + 10.
@@ -578,5 +660,114 @@ mod tests {
         check!(out[0].topic == "out-topic");
         // value = i64(25) big-endian
         check!(out[0].value.as_ref().unwrap().as_ref() == 25i64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn flush_caches_roots_and_forwards_deduped_change() {
+        use crate::dsl::processors::change::Change;
+        use crate::processor::record::RecordContext;
+        use crate::processor::serde::{I64Serde, StringSerde};
+        use crate::store::cache::named::NamedCache;
+        use crate::store::kv::KeyValueBytesStore;
+        use crate::store::registry::StoreRegistry;
+        use std::sync::{Arc, Mutex};
+
+        // A recording child: stashes every `Change<i64>` it receives so the test
+        // can assert flush_caches forwarded the deduped change here.
+        type Recorded = Arc<Mutex<Vec<(Option<String>, Change<i64>, i64)>>>;
+        struct Recorder(Recorded);
+        #[async_trait]
+        impl Processor<String, Change<i64>, String, i64> for Recorder {
+            async fn process(
+                &mut self,
+                _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                r: Record<String, Change<i64>>,
+            ) {
+                self.0.lock().unwrap().push((r.key, r.value, r.timestamp));
+            }
+        }
+
+        // The owning (materializing) node — a no-op; flush_caches roots the
+        // forwarded change at it and pushes into its children.
+        struct Owner;
+        #[async_trait]
+        impl Processor<String, i64, String, i64> for Owner {
+            async fn process(
+                &mut self,
+                _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                _r: Record<String, i64>,
+            ) {
+            }
+        }
+
+        let recorded: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let rec_for_node = recorded.clone();
+
+        // nodes: index 0 = owner (materializes "store"), index 1 = recorder.
+        let owner =
+            Box::new(ProcessorNode::new("owner".into(), &(|| Owner))) as Box<dyn ErasedNode>;
+        let rec_node = Box::new(ProcessorNode::new(
+            "recorder".into(),
+            &(move || Recorder(rec_for_node.clone())),
+        )) as Box<dyn ErasedNode>;
+
+        // Register a cached String->i64 store named "store".
+        let mut stores = StoreRegistry::default();
+        let mut kv = KeyValueBytesStore::<String, i64>::in_memory(
+            "store".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "store-changelog".into(),
+        );
+        kv.enable_cache(Arc::new(Mutex::new(NamedCache::new("store".into()))));
+        stores.insert(Box::new(kv));
+
+        let mut graph = Graph {
+            nodes: vec![owner, rec_node],
+            children: vec![vec![1], vec![]], // owner -> recorder ; recorder -> none
+            sources: vec![],
+            output: Vec::new(),
+            stores,
+            globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
+            cache_max_bytes: 1024,
+            cache_owner: std::collections::HashMap::new(),
+            cache: crate::store::cache::thread::ThreadCache::new(0),
+        };
+        // node 0 owns "store".
+        graph.cache_owner.insert("store".into(), 0);
+
+        // Stage dirty entries directly in the store: two writes for the same key
+        // under context ts=7 (deduped to new=3), plus a distinct key "b"=9.
+        {
+            let store = graph
+                .stores
+                .get_kv::<String, i64>("store")
+                .expect("store not found / wrong type");
+            store.set_record_context(RecordContext {
+                topic: "t".into(),
+                partition: 0,
+                offset: 0,
+                timestamp: 7,
+            });
+            store.put("a".into(), 1).await;
+            store.put("a".into(), 3).await; // dedupes to new=3 (old=None: never committed)
+            store.put("b".into(), 9).await;
+        }
+
+        graph.flush_caches().await.unwrap();
+
+        let got = recorded.lock().unwrap();
+        // One emit per dirty key (a, b), each a deduped Change forwarded to the child.
+        check!(got.len() == 2);
+        let by_key = |k: &str| got.iter().find(|(key, _, _)| key.as_deref() == Some(k));
+        let a = by_key("a").expect("change for key a");
+        check!(a.1.old == None); // never committed before this flush
+        check!(a.1.new == Some(3)); // deduped latest
+        check!(a.2 == 7); // forwarded with the dirty entry's context timestamp
+        let b = by_key("b").expect("change for key b");
+        check!(b.1.new == Some(9));
     }
 }

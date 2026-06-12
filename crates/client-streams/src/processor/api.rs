@@ -187,6 +187,16 @@ where
         self.dispatch.stores.get_session::<K2, V2>(name)
     }
 
+    /// Access a connected versioned store (KIP-889), typed. `None` if absent or
+    /// the K/V types don't match. Fetch it per-record (do not hold across
+    /// `process` calls).
+    pub fn get_versioned_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::versioned::VersionedKeyValueStore<K2, V2>> {
+        self.dispatch.stores.get_versioned::<K2, V2>(name)
+    }
+
     /// Access a connected suppress store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
     ///
@@ -197,6 +207,20 @@ where
         name: &str,
     ) -> Option<&mut dyn crate::store::suppress_store::SuppressStore<K2, V2>> {
         self.dispatch.stores.get_suppress::<K2, V2>(name)
+    }
+
+    /// Access a connected join-grace buffer store (KIP-923), typed. `None` if
+    /// absent or the K/V types don't match. Fetch it per-record (do not hold
+    /// across `process` calls).
+    ///
+    /// `pub(crate)`: the grace buffer is a built-in DSL mechanism the stream–table
+    /// join's grace-flush processor reaches via the context, not a user-facing
+    /// store.
+    pub(crate) fn get_join_grace_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::join_grace_buffer::JoinGraceBufferStore<K2, V2>> {
+        self.dispatch.stores.get_join_grace::<K2, V2>(name)
     }
 
     /// Access the connected FK subscription store. `None` if absent.
@@ -214,6 +238,14 @@ where
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {
         self.dispatch.record_ctx
+    }
+
+    /// Whether the named KV state store is record-cached (so this processor should
+    /// suppress its immediate forward and let the cache flush forward the deduped
+    /// change). False for absent/non-KV/uncached stores.
+    #[must_use]
+    pub fn store_is_cached(&self, name: &str) -> bool {
+        self.dispatch.stores.kv_is_cached(name)
     }
 
     /// Schedule a periodic [`Punctuator`]. Callable from `init` or `process`.

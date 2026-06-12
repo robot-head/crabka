@@ -21,6 +21,8 @@ pub struct FetchedRecord {
     pub key: Option<Bytes>,
     /// Record value, if any.
     pub value: Option<Bytes>,
+    /// Record timestamp (epoch millis): batch `base_timestamp` + per-record delta.
+    pub timestamp: i64,
 }
 
 /// Fetch up to `partition_max_bytes` from `(topic, partition)` starting
@@ -142,6 +144,7 @@ fn decode_fetch_response(
                         offset: batch.base_offset + i64::from(r.offset_delta),
                         key: r.key.clone(),
                         value: r.value.clone(),
+                        timestamp: batch.base_timestamp + r.timestamp_delta,
                     });
                 }
             }

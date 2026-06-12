@@ -439,6 +439,48 @@ fn fk_join_inner_matches_jvm() {
 }
 
 #[test]
+fn sliding_window_count_matches_jvm() {
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "sliding_window_count");
+}
+
+#[test]
+fn sliding_window_aggregate_matches_jvm() {
+    use crabka_client_streams::{
+        I64Serde, Materialized, Produced, SlidingWindows, TimeWindowedSerde,
+    };
+    let b = StreamsBuilder::new();
+    b.stream::<String, String>(["in"])
+        .group_by_key()
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .aggregate_explicit(
+            || 0i64,
+            |_k: &String, _v: &String, a: i64| a + 1,
+            Materialized::with(StringSerde, I64Serde),
+        )
+        .to_stream()
+        .to_explicit(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "sliding_window_aggregate");
+}
+
+#[test]
 fn fk_join_left_matches_jvm() {
     // Like the inner FK join but `left_join_on_foreign_key`. The wire topology is
     // byte-identical to the inner golden (the left/inner difference is runtime
@@ -458,4 +500,26 @@ fn fk_join_left_matches_jvm() {
     drop(tb);
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "fk_join_left");
+}
+
+#[test]
+fn versioned_table_matches_jvm() {
+    use crabka_client_streams::{I64Serde, Materialized, StringSerde};
+    // Mirrors Capture.java `versionedTable()`:
+    //   table("in", Consumed, Materialized.as(persistentVersionedKeyValueStore("vt", 600s)))
+    //     .toStream().to("out")
+    // Under optimization=all the JVM reuses the source topic `in` as the store's
+    // changelog (REUSE_KTABLE_SOURCE_TOPICS); the changelog config carries
+    // cleanup.policy=compact, message.timestamp.type=CreateTime,
+    // min.compaction.lag.ms = 600_000 + 86_400_000 = 87_000_000.
+    let b = StreamsBuilder::new();
+    b.table_explicit(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+    )
+    .to_stream()
+    .to_explicit("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "versioned_table");
 }

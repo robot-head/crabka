@@ -1,0 +1,5 @@
+{
+  "count": [{"key": "even", "value": 1}, {"key": "even", "value": 2}, {"key": "even", "value": 2}, {"key": "odd", "value": 1}, {"key": "even", "value": 1}, {"key": "odd", "value": 2}, {"key": "even", "value": 0}],
+  "reduce": [{"key": "even", "value": 2}, {"key": "even", "value": 6}, {"key": "even", "value": 10}, {"key": "odd", "value": 3}, {"key": "even", "value": 6}, {"key": "odd", "value": 8}, {"key": "even", "value": 0}],
+  "aggregate": [{"key": "even", "value": 2}, {"key": "even", "value": 6}, {"key": "even", "value": 10}, {"key": "odd", "value": 3}, {"key": "even", "value": 6}, {"key": "odd", "value": 8}, {"key": "even", "value": 0}]
+}

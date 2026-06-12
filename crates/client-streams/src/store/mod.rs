@@ -2,8 +2,10 @@
 pub mod api;
 pub mod backend;
 pub(crate) mod byte;
+pub(crate) mod cache;
 pub(crate) mod fk_subscription;
 pub mod iq;
+pub(crate) mod join_grace_buffer;
 pub mod join_window;
 pub mod kv;
 pub(crate) mod registry;
@@ -12,6 +14,7 @@ pub(crate) mod session_schema;
 pub(crate) mod suppress_bufval;
 pub mod suppress_store;
 pub(crate) mod turso;
+pub mod versioned;
 pub mod window;
 pub(crate) mod window_schema;
 pub use api::{KeyValueStore, StateStore};
