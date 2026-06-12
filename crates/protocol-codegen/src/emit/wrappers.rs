@@ -105,7 +105,7 @@ pub fn emit(
     out
 }
 
-/// Build `#[cfg(test)] mod tests { ... }` for the Owned flavor as a TokenStream.
+/// Build `#[cfg(test)] mod tests { ... }` for the Owned flavor as a `TokenStream`.
 fn owned_tests_tokens(type_name: &str) -> TokenStream {
     let ty = format_ident!("{type_name}");
     let tokens = quote! {
@@ -150,7 +150,7 @@ fn owned_tests_tokens(type_name: &str) -> TokenStream {
     tokens
 }
 
-/// Build `#[cfg(test)] mod tests { ... }` for the Borrowed flavor as a TokenStream.
+/// Build `#[cfg(test)] mod tests { ... }` for the Borrowed flavor as a `TokenStream`.
 fn borrowed_tests_tokens(type_name: &str) -> TokenStream {
     let ty = format_ident!("{type_name}");
     let tokens = quote! {

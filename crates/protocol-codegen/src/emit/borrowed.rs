@@ -459,16 +459,25 @@ fn bytes_import(use_non_nullable: bool, use_nullable: bool) -> TokenStream {
 /// there are known tagged fields to encode.
 fn tagged_import(flex: bool, tagged: bool) -> TokenStream {
     if flex && tagged {
-        quote!(use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+        quote!(
+            use crate::tagged_fields::{
+                encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields,
+            };
+        )
     } else if flex {
-        quote!(use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+        quote!(
+            use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+        )
     } else {
         quote!()
     }
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn emit_imports(spec: &MessageSpec, res_map: &HashMap<String, Resolution>) -> TokenStream {
+pub(crate) fn emit_imports(
+    spec: &MessageSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> TokenStream {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
@@ -486,9 +495,13 @@ pub(crate) fn emit_imports(spec: &MessageSpec, res_map: &HashMap<String, Resolut
     // `Bytes` is needed for to_owned() on bytes fields.
     // Records fields use `bytes::BytesMut::new()` inline (fully qualified), so no extra import.
     let mut out = if use_bytes {
-        quote!(use bytes::{Bytes, BufMut};)
+        quote!(
+            use bytes::{Bytes, BufMut};
+        )
     } else {
-        quote!(use bytes::BufMut;)
+        quote!(
+            use bytes::BufMut;
+        )
     };
 
     // Emit only the specific fixed-type imports actually used, to avoid unused-import warnings.
@@ -542,9 +555,13 @@ pub(crate) fn emit_imports(spec: &MessageSpec, res_map: &HashMap<String, Resolut
 
     // `Decode` is needed when any tagged field uses owned decode (to call the trait method).
     if has_tagged_fields_needing_owned(spec, res_map) {
-        out.extend(quote!(use crate::{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};));
+        out.extend(quote!(
+            use crate::{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
+        ));
     } else {
-        out.extend(quote!(use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};));
+        out.extend(quote!(
+            use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
+        ));
     }
     out
 }
@@ -565,9 +582,13 @@ pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> To
     let use_nullable_struct = uses_nullable_struct_recursive(fields);
 
     let mut out = if use_bytes {
-        quote!(use bytes::{Bytes, BufMut};)
+        quote!(
+            use bytes::{Bytes, BufMut};
+        )
     } else {
-        quote!(use bytes::BufMut;)
+        quote!(
+            use bytes::BufMut;
+        )
     };
 
     out.extend(fixed_import(&types, use_nullable_struct));
@@ -585,7 +606,9 @@ pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> To
 
     out.extend(tagged_import(has_flex, tagged));
 
-    out.extend(quote!(use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};));
+    out.extend(quote!(
+        use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
+    ));
     out
 }
 

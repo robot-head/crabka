@@ -25,8 +25,10 @@ fn emits_roundtrip_and_header_helpers() {
     // quote! token output uses spaces between punctuation tokens; match on
     // function name fragments that are stable regardless of exact token spacing.
     assert!(out.contains("pub fn roundtrip"));
-    assert!(out.contains("name : & str , version : i16 , bytes : & [u8]") ||
-            out.contains("name: &str, version: i16, bytes: &[u8]"));
+    assert!(
+        out.contains("name : & str , version : i16 , bytes : & [u8]")
+            || out.contains("name: &str, version: i16, bytes: &[u8]")
+    );
     assert!(out.contains("pub fn request_header_version"));
     assert!(out.contains("pub fn response_header_version"));
     assert!(out.contains("pub fn strip_frame_header"));

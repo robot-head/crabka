@@ -24,9 +24,9 @@ use crate::emit::borrowed::{
     owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
     tagged_is_default_cond, to_owned_field_expr, version_cond,
 };
+use crate::emit::common::banner;
 use crate::emit::owned::EmitError;
 use crate::emit::{EmittedMessage, common};
-use crate::emit::common::banner;
 use crate::ir::{FieldSpec, MessageSpec, MessageType};
 use crate::name_conv;
 use crate::resolve::{self, Resolution, StructKind};

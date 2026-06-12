@@ -303,19 +303,3 @@ fn build_strip_frame_header() -> TokenStream {
         }
     }
 }
-
-#[cfg(test)]
-mod show_sig_test {
-    use super::*;
-    #[test]
-    fn show_function_sigs() {
-        let ts: proc_macro2::TokenStream = quote::quote! {
-            pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {}
-            pub fn request_header_version(name: &str, version: i16) -> i16 {}
-            pub fn response_header_version(name: &str, version: i16) -> i16 {}
-            pub fn strip_frame_header(name: &str, version: i16, is_request: bool, frame: &[u8]) -> Vec<u8> {}
-        };
-        let s = ts.to_string();
-        println!("\n\nSIGS OUTPUT:\n{s}\n\n");
-    }
-}

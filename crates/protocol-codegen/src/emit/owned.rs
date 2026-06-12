@@ -36,7 +36,9 @@ pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> To
     let use_bytes = uses_bytes(&types);
     let use_nullable_struct = uses_nullable_struct_recursive(fields);
 
-    let mut out = quote!(use bytes::{Buf, BufMut};);
+    let mut out = quote!(
+        use bytes::{Buf, BufMut};
+    );
 
     {
         let mut gets: Vec<&str> = Vec::new();
@@ -81,7 +83,9 @@ pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> To
 
     out.extend(tagged_import(has_flex, tagged));
 
-    out.extend(quote!(use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};));
+    out.extend(quote!(
+        use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
+    ));
     out
 }
 
@@ -149,9 +153,15 @@ fn bytes_import(use_non_nullable_bytes: bool, use_nullable_bytes: bool) -> Token
 /// there are known tagged fields to encode.
 fn tagged_import(flex: bool, tagged: bool) -> TokenStream {
     if flex && tagged {
-        quote!(use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+        quote!(
+            use crate::tagged_fields::{
+                encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields,
+            };
+        )
     } else if flex {
-        quote!(use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+        quote!(
+            use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+        )
     } else {
         quote!()
     }
@@ -293,7 +303,9 @@ pub(crate) fn emit_imports(spec: &MessageSpec) -> TokenStream {
     let use_nullable_bytes = uses_nullable_bytes_recursive(&spec.fields);
     let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(&spec.fields);
 
-    let mut out = quote!(use bytes::{Buf, BufMut};);
+    let mut out = quote!(
+        use bytes::{Buf, BufMut};
+    );
 
     let use_nullable_struct = uses_nullable_struct_recursive(&spec.fields);
 
@@ -389,7 +401,9 @@ pub(crate) fn emit_imports(spec: &MessageSpec) -> TokenStream {
     // Tagged-fields support: encode_to_bytes only when there are known tagged fields to encode.
     out.extend(tagged_import(flex, tagged));
 
-    out.extend(quote!(use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};));
+    out.extend(quote!(
+        use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
+    ));
     out
 }
 
