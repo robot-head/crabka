@@ -186,8 +186,15 @@ not part of this slice; §6.3 covers the behavior in-process.
 
 ## 7. Open items to resolve during implementation (empirical, per CLAUDE.md)
 
-1. **Exact rejection error code** for the live-members case (§4.4) — probe
-   `apache/kafka:4.2`.
+1. **Exact rejection error code** for the live-members case (§4.4) — **RESOLVED:
+   `GROUP_ID_NOT_FOUND` (69).** Crabka's consumer migration already returns
+   `GROUP_ID_NOT_FOUND` when a classic group cannot serve a next-gen
+   `ConsumerGroupHeartbeat` (`handlers/consumer_group_heartbeat.rs:57,63`), a path
+   JVM-validated against real clients in `#376`. The streams case is the same
+   semantics ("this classic group can't serve the new-protocol heartbeat → report
+   not-found, client falls back"), so the streams path mirrors it. A full
+   `apache/kafka:4.2` Streams-app coexistence capture remains a nice-to-have
+   confirmation but the JVM-validated consumer precedent is authoritative here.
 2. **Confirm no `group.streams.migration.policy`** config exists in
    `apache/kafka:4.2`; if it does, add it (small follow-up) rather than diverge.
 3. **Confirm the conversion trigger boundary** — does Kafka convert on the first
