@@ -782,6 +782,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_sliding_window_uses_true_size_not_retention_span_for_key_end() {
+        // Regression: a CACHED sliding aggregate/reduce builds its window store
+        // with a retention basis of `2 * timeDifferenceMs` but a true window size
+        // of `1 * timeDifferenceMs`. The flushed `Windowed` key end must be
+        // `start + timeDifferenceMs`, NOT `start + 2*timeDifferenceMs`. Before the
+        // fix the store was constructed with the retention span as its window size,
+        // so the end was doubled (this assertion would see `end == 20`).
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::windows::{Window, Windowed};
+
+        // D = 10 (the real sliding window size = time_difference_ms); the retention
+        // basis a sliding aggregate passes is 2*D = 20. The store's window_size_ms
+        // is the TRUE size (D = 10), which is what `add_window_store` now forwards.
+        const D: i64 = 10;
+        let mut s = cached_store(D);
+
+        // Stage a cached put for a window starting at ws = 0.
+        let ws = 0;
+        s.set_record_context(ctx_at(7));
+        s.put("a".into(), ws, 1, 7).await;
+
+        let mut buffer = std::collections::VecDeque::new();
+        s.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
+        let (_child, rec) = &buffer[0];
+        let key = rec
+            .key
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Windowed<String>>()
+            .unwrap();
+        assert_eq!(key.key, "a");
+        // end == ws + D (10), NOT ws + 2*D (20).
+        assert_eq!(
+            key.window,
+            Window {
+                start: ws,
+                end: ws + D
+            }
+        );
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.new, Some(1));
+    }
+
+    #[tokio::test]
     async fn plain_window_store_unchanged() {
         // A non-cached store logs the changelog immediately; flush_cache_into is a
         // no-op (no cache).

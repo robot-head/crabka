@@ -529,12 +529,25 @@ impl Topology {
     /// `windowstore.changelog.additional.retention.ms` default of 1 day).
     ///
     /// [`add_state_store`]: Topology::add_state_store
+    ///
+    /// `size_ms` is the **retention basis**: it drives the changelog
+    /// `retention.ms = size_ms + grace_ms + 86_400_000`. For tumbling/hopping
+    /// windows it equals the window size; for sliding windows it is the
+    /// retention span (`2 * timeDifferenceMs`), which is wider than the window.
+    ///
+    /// `window_size_ms` is the **true window length** used only by the store's
+    /// cache flush to reconstruct the downstream `Windowed<K>` key's
+    /// `end = start + window_size_ms` (the store-key bytes hold only the start).
+    /// For sliding windows this is `timeDifferenceMs` (1×), NOT the retention
+    /// span.
+    #[allow(clippy::too_many_arguments)] // size_ms (retention basis) + window_size_ms (key-end) are distinct
     pub fn add_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
         size_ms: i64,
+        window_size_ms: i64,
         grace_ms: i64,
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
@@ -564,10 +577,11 @@ impl Topology {
                             Box::new(value_serde.clone()),
                             changelog,
                             // Aggregate window stores need the real window size so the
-                            // cache flush can reconstruct `end = start + size` for the
-                            // downstream `Windowed` key (the store-key bytes hold only
-                            // the start).
-                            size_ms,
+                            // cache flush can reconstruct `end = start + window_size_ms`
+                            // for the downstream `Windowed` key (the store-key bytes hold
+                            // only the start). This is distinct from `size_ms`, which is
+                            // the retention basis — they diverge for sliding windows.
+                            window_size_ms,
                         )) as Box<dyn crate::store::api::StateStore>
                     },
                 ),
@@ -1555,9 +1569,11 @@ impl BuiltTopology {
                 continue;
             };
             let nc = cache.register(store_name);
-            // Only KV stores are cache-aware today; `enable_cache_erased` returns
-            // false for window/session stores, so we skip rooting a `cache_owner`
-            // entry the flush mechanism couldn't drive.
+            // KV, window, and session stores are all cache-aware: each overrides
+            // `enable_cache_erased` to return `true` and drives its own
+            // `flush_cache_into`. A store that declines caching (returns `false`)
+            // is skipped so we don't root a `cache_owner` entry the flush
+            // mechanism couldn't drive.
             if store_registry.enable_cache(store_name, nc) {
                 cache_owner.insert(store_name.clone(), owner_idx);
             }
@@ -2070,5 +2086,66 @@ mod tests {
         );
         // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
         assert!(blob.contains("87000000"), "lag value not in wire");
+    }
+
+    #[tokio::test]
+    async fn add_window_store_uses_window_size_not_retention_for_cached_key_end() {
+        // Regression: a CACHED sliding aggregate registers its window store with a
+        // retention basis of `2 * timeDifferenceMs` but a TRUE window size of
+        // `1 * timeDifferenceMs`. The flushed `Windowed` key end must be
+        // `start + windowSize`, NOT `start + retentionBasis`. Before the fix the
+        // factory fed `size_ms` (the retention basis) to `WindowBytesStore::new`,
+        // so the end was doubled (this asserts `end == 10`, which would be `20`).
+        use crate::dsl::processors::change::Change;
+        use crate::dsl::windows::{Window, Windowed};
+        use crate::processor::record::RecordContext;
+        use crate::processor::serde::I64Serde;
+        use crate::store::api::StateStore;
+        use crate::store::byte::InMemoryBytes;
+        use crate::store::cache::named::NamedCache;
+        use crate::store::window::{WindowBytesStore, WindowStore};
+        use std::sync::{Arc, Mutex};
+
+        const D: i64 = 10;
+        let mut t = Topology::new();
+        // size_ms = 2*D (retention basis), window_size_ms = D (true window size).
+        t.add_window_store::<String, i64, _, _>("sw", StringSerde, I64Serde, D * 2, D, 0, ["p"]);
+
+        // Pull the registered factory and instantiate the store over a fresh backend.
+        let (_changelog, factory) = t.store_factories.get("sw").expect("factory registered");
+        let backend: Box<dyn crate::store::byte::ByteKeyValueStore> =
+            Box::new(InMemoryBytes::default());
+        let mut store: Box<dyn crate::store::api::StateStore> =
+            factory("sw", "sw-changelog".to_string(), backend);
+
+        // Enable the record cache and stage a put for a window starting at 0.
+        let typed = store
+            .as_any_mut()
+            .downcast_mut::<WindowBytesStore<String, i64>>()
+            .expect("window store downcast");
+        typed.enable_cache(Arc::new(Mutex::new(NamedCache::new("sw".into()))));
+        typed.set_record_context(RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 7,
+        });
+        typed.put("a".into(), 0, 1, 7).await;
+
+        let mut buffer = std::collections::VecDeque::new();
+        store.flush_cache_into(&mut buffer, &[0]).await;
+        assert_eq!(buffer.len(), 1);
+        let (_child, rec) = &buffer[0];
+        let key = rec
+            .key
+            .as_ref()
+            .unwrap()
+            .downcast_ref::<Windowed<String>>()
+            .unwrap();
+        assert_eq!(key.key, "a");
+        // end == start + window_size (D), NOT start + retention basis (2*D).
+        assert_eq!(key.window, Window { start: 0, end: D });
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(change.new, Some(1));
     }
 }

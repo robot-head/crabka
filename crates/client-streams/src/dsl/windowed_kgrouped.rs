@@ -338,6 +338,8 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Tumbling/hopping: retention basis == window size.
+                windows.size_ms,
                 windows.size_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
@@ -441,6 +443,8 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Tumbling/hopping: retention basis == window size.
+                windows.size_ms,
                 windows.size_ms,
                 windows.grace_ms,
                 [h.name().to_string()],

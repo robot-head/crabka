@@ -89,6 +89,8 @@ where
                 store_for_reg.clone(),
                 ks.clone(),
                 vs.clone(),
+                // Tumbling/hopping: retention basis == window size.
+                size,
                 size,
                 grace,
                 procs,

@@ -301,7 +301,10 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
+                // the true window size for the key end is 1 * timeDiff.
                 windows.time_difference_ms * 2,
+                windows.time_difference_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
@@ -401,7 +404,10 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
+                // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
+                // the true window size for the key end is 1 * timeDiff.
                 windows.time_difference_ms * 2,
+                windows.time_difference_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
             );
