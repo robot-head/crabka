@@ -21,6 +21,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
 use crate::error::BrokerError;
+use crate::time_util::now_ms;
 
 pub(crate) async fn handle(
     broker: &Broker,
@@ -58,6 +59,22 @@ pub(crate) async fn handle(
             || !streams_enabled
         {
             return encode(version, &error(codes::UNSUPPORTED_VERSION));
+        }
+
+        // KIP-1071 cold upgrade: a StreamsGroupHeartbeat for a drained classic group
+        // converts it in place; a classic group with live members is rejected (online
+        // streams migration is unsupported). Non-classic group_ids pass through.
+        match ng
+            .try_convert_classic_to_streams(&req.group_id, now_ms())
+            .await
+        {
+            Ok(
+                crate::coordinator::unified::streams::migration::ConvertOutcome::RejectLiveMembers,
+            ) => {
+                return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
+            }
+            Ok(_) => {} // NotClassic | Converted → serve normally below
+            Err(e) => return Err(e),
         }
 
         ng.mark_streams(&req.group_id);

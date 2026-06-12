@@ -210,6 +210,17 @@ impl GroupCoordinator {
         self.group_types.insert(group_id.into(), GroupType::Classic);
     }
 
+    /// After an in-place classic→streams upgrade (KIP-1071), drop the classic
+    /// seed so a respawn does not re-hydrate the group as classic, and record it
+    /// as streams. Unlike [`Self::mark_streams`] (first-mark-wins via `or_insert`),
+    /// this FORCES the type to `Streams`, overriding any prior `Classic` lock the
+    /// group carried while it was a classic group.
+    pub fn mark_streams_after_upgrade(&self, group_id: &str) {
+        self.seeds.remove(group_id);
+        self.seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Streams);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())
@@ -403,6 +414,52 @@ impl GroupCoordinator {
     #[must_use]
     pub fn find_streams(&self, group_id: &str) -> Option<Arc<StreamsGroupActorHandle>> {
         self.streams_groups.get(group_id).map(|e| e.value().clone())
+    }
+
+    /// KIP-1071 cold upgrade: if `group_id` is a drained classic group, convert
+    /// it to a streams group in place (tombstone the classic k2 `GroupMetadata`,
+    /// force the type lock to `Streams`). Committed offsets survive untouched —
+    /// the classic actor remains in the `groups` map so that `OffsetFetch`
+    /// requests can still read back the committed offset state. Returns
+    /// `NotClassic` for non-classic groups (caller serves normally), `Converted`
+    /// after a successful flip, or `RejectLiveMembers` when live classic members
+    /// remain (online streams migration is unsupported in Kafka).
+    pub(crate) async fn try_convert_classic_to_streams(
+        self: &Arc<Self>,
+        group_id: &str,
+        now_ms: i64,
+    ) -> Result<streams::migration::ConvertOutcome, crate::error::BrokerError> {
+        use streams::migration::{ConvertOutcome, classic_group_metadata_tombstone_batch};
+
+        if self.group_type(group_id) != Some(GroupType::Classic) {
+            return Ok(ConvertOutcome::NotClassic);
+        }
+
+        // Inspect the live classic actor (if any) for remaining members.
+        if let Some(handle) = self.find(group_id) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::ClassicInspect { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+                && !view.members.is_empty()
+            {
+                return Ok(ConvertOutcome::RejectLiveMembers);
+            }
+        }
+
+        // Drained classic group → convert. Tombstone the classic k2 GroupMetadata
+        // to clear any persisted classic metadata (defensive + matching the
+        // KIP-848 upgrade flip; a no-op on replay when none was persisted). Flip
+        // the type lock to Streams; the classic actor (if any) stays in
+        // `self.groups` so its committed_offsets remain accessible to
+        // `OffsetFetch` without a full replay cycle.
+        let batch = classic_group_metadata_tombstone_batch(group_id, now_ms);
+        self.offsets_log.append(batch).await?;
+        self.mark_streams_after_upgrade(group_id);
+        Ok(ConvertOutcome::Converted)
     }
 
     /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
@@ -1104,6 +1161,19 @@ mod tests {
         let b = coord.get_or_create_share("sg");
         assert!(Arc::ptr_eq(&a, &b));
         assert!(coord.find_share("sg").is_some());
+    }
+
+    #[test]
+    fn mark_streams_after_upgrade_forces_streams_over_classic() {
+        let c = make_coord();
+        c.mark_classic("g");
+        assert!(c.group_type("g") == Some(GroupType::Classic));
+        // or_insert mark_streams must NOT override an existing Classic lock:
+        c.mark_streams("g");
+        assert!(c.group_type("g") == Some(GroupType::Classic));
+        // The forced upgrade variant MUST override it:
+        c.mark_streams_after_upgrade("g");
+        assert!(c.group_type("g") == Some(GroupType::Streams));
     }
 
     #[test]
