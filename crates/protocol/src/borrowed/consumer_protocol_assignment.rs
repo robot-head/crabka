@@ -21,14 +21,12 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/generated/ConsumerProtocolAssignment.borrowed.rs"
 ));
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{DecodeBorrow, Encode};
     use assert2::assert;
     use bytes::BytesMut;
-
     fn check(msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = ConsumerProtocolAssignment::decode_borrow(&mut cur, v).unwrap();
@@ -37,14 +35,11 @@ mod tests {
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
         assert!(&reencoded[..] == &msg_bytes[..]);
-        // Exercise the zero-copy -> owned conversion, then confirm the owned
-        // value still encodes to the same bytes.
         let owned = decoded.to_owned();
         let mut owned_buf = BytesMut::new();
         owned.encode(&mut owned_buf, v).unwrap();
         assert!(&owned_buf[..] == &msg_bytes[..]);
     }
-
     #[test]
     fn default_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
@@ -54,7 +49,6 @@ mod tests {
             check(&buf.freeze(), v);
         }
     }
-
     #[test]
     fn populated_roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {

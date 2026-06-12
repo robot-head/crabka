@@ -7,17 +7,14 @@ use crate::primitives::string_bytes::{
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
-
 pub const API_KEY: i16 = 92;
 pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
-
 #[inline]
 fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupOffsetsRequest {
     pub group_id: String,
@@ -192,9 +189,8 @@ impl DeleteShareGroupOffsetsRequestTopic {
         m
     }
 }
-
-/// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
-/// Only includes fields valid for the given version.
+#[doc = " Default JSON payload matching `Self::default()` for JVM oracle differential testing."]
+#[doc = " Only includes fields valid for the given version."]
 #[must_use]
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
@@ -206,7 +202,6 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }
-
 impl crate::ProtocolRequest for DeleteShareGroupOffsetsRequest {
     const API_KEY: i16 = API_KEY;
     const MIN_VERSION: i16 = MIN_VERSION;

@@ -5,16 +5,14 @@
 //! generated file. Supports `commonStructs`.
 
 use std::collections::HashMap;
-use std::fmt::Write;
 
-use crate::emit::EmittedMessage;
-use crate::emit::common::{banner, format_int_literal};
-use crate::emit::default_json;
-use crate::emit::protocol_request;
+use proc_macro2::{Literal, TokenStream};
+use quote::{format_ident, quote};
+
+use crate::emit::common::format_int_literal;
 use crate::ir::{FieldSpec, FlexibleVersions, MessageSpec, MessageType, VersionRange};
 use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
-use crate::type_map;
+use crate::resolve::{self, Resolution};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmitError {
@@ -24,111 +22,22 @@ pub enum EmitError {
     Resolve(#[from] resolve::ResolveError),
 }
 
-pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage, EmitError> {
-    // Build resolution map — validates that all struct references resolve.
-    let res_map = resolve::resolve_message(spec)?;
-
-    // Response-message records fields decode leniently (tolerate a truncated
-    // trailing batch); request-message records stay strict.
-    let lenient_records = matches!(spec.message_type, MessageType::Response);
-
-    let mut primary = banner(schemas_version);
-    emit_imports(&mut primary, spec);
-    emit_constants(&mut primary, spec);
-    emit_struct(&mut primary, spec, &res_map);
-    emit_encode_impl(&mut primary, spec, &res_map);
-    emit_decode_impl(&mut primary, spec, &res_map, lenient_records);
-    emit_populated_impl(
-        &mut primary,
-        &name_conv::type_name(&spec.name),
-        &spec.fields,
-        &res_map,
-    );
-
-    // Emit sibling types for nested structs (depth-first, post-order so parent
-    // types appear before their children's children — order doesn't matter for
-    // Rust, but reading top-down is nicer).
-    let fm = flex_min(spec);
-    emit_nested_structs_for_fields(&mut primary, &spec.fields, fm, &res_map, lenient_records);
-
-    // Emit the default_json() helper for differential testing against the JVM oracle.
-    primary.push_str(&default_json::emit_default_json(spec));
-
-    // Emit `impl crate::ProtocolRequest` for Request-typed messages.
-    if let Some(impl_block) = protocol_request::emit_protocol_request(spec) {
-        primary.push_str(&impl_block);
-    }
-
-    // Emit common structs into separate file bodies.
-    //
-    // `commonStructs` are message-local: each is emitted under a per-message
-    // nested module `common/<message_snake>/<struct_snake>`. The `commons` key
-    // is the relative path stem `<message_snake>/<struct_snake>`; the caller
-    // turns that into the on-disk body path and the wrapper module nesting.
-    let message_snake = name_conv::module_name(&spec.name);
-    let mut commons: Vec<(String, String)> = Vec::new();
-    for cs in &spec.common_structs {
-        let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
-        // Build a modified res_map for the common-struct context:
-        // Common-struct references use sibling paths `super::<struct_snake>::TypeName`
-        // (the body lands in `src/{flavor}/common/<message_snake>/<struct_snake>.rs`,
-        // and sibling common structs of the same message share that parent module).
-        let common_res_map: HashMap<String, Resolution> = res_map
-            .iter()
-            .map(|(k, v)| {
-                let new_path = if v.kind == StructKind::Common {
-                    let snake = name_conv::module_name(k);
-                    format!("super::{snake}::{k}")
-                } else {
-                    v.rust_path.clone()
-                };
-                (
-                    k.clone(),
-                    Resolution {
-                        kind: v.kind.clone(),
-                        rust_path: new_path,
-                        needs_lifetime: v.needs_lifetime,
-                    },
-                )
-            })
-            .collect();
-        let body = emit_common_struct_file(
-            &cs.name,
-            &cs.fields,
-            cs_flex_min,
-            &common_res_map,
-            schemas_version,
-            lenient_records,
-        );
-        let cs_snake = name_conv::module_name(&cs.name);
-        commons.push((format!("{message_snake}/{cs_snake}"), body));
-    }
-
-    Ok(EmittedMessage { primary, commons })
-}
-
-/// Emit a standalone `.rs` file body for a top-level `commonStruct` entry.
-/// The file has the same imports as a primary message file but contains ONLY
-/// the struct definition + Encode/Decode impls for that single struct.
+/// Build the `use` items for a common-struct file body.
+///
+/// Replicates the import selection that the (former) `emit_common_struct_file`
+/// used: it differs from `emit_imports` in that it has NO records-import block
+/// (common structs never carry `records` fields).
 #[allow(clippy::too_many_lines)]
-fn emit_common_struct_file(
-    struct_name: &str,
-    fields: &[FieldSpec],
-    flex_min_val: i16,
-    res_map: &HashMap<String, Resolution>,
-    schemas_version: &str,
-    lenient_records: bool,
-) -> String {
+pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> TokenStream {
     let types = used_field_types_recursive(fields);
     let has_flex = flex_min_val < i16::MAX;
     let tagged = fields.iter().any(|f| f.tag.is_some());
     let use_string = uses_string(&types);
     let use_bytes = uses_bytes(&types);
-
     let use_nullable_struct = uses_nullable_struct_recursive(fields);
-    let mut out = banner(schemas_version);
 
-    writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
+    let mut out = quote!(use bytes::{Buf, BufMut};);
+
     {
         let mut gets: Vec<&str> = Vec::new();
         let mut puts: Vec<&str> = Vec::new();
@@ -154,102 +63,97 @@ fn emit_common_struct_file(
             let mut combined: Vec<&str> = gets.into_iter().chain(puts).collect();
             combined.sort_unstable();
             combined.dedup();
-            writeln!(
-                out,
-                "\nuse crate::primitives::fixed::{{{}}};",
-                combined.join(", ")
-            )
-            .unwrap();
+            let items: Vec<_> = combined.iter().map(|n| format_ident!("{n}")).collect();
+            out.extend(quote!(use crate::primitives::fixed::{ #(#items),* };));
         }
     }
+
     if use_string {
-        if uses_nullable_string_recursive(fields) {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{\n    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,\n    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,\n    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,\n    string_len,\n}};"
-            ).unwrap();
-        } else {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{\n    compact_string_len, get_compact_string_owned, get_string_owned,\n    put_compact_string, put_string, string_len,\n}};"
-            ).unwrap();
-        }
+        out.extend(string_import(uses_nullable_string_recursive(fields)));
     }
+
     if use_bytes {
-        let mut items: Vec<&str> = Vec::new();
-        if uses_non_nullable_bytes_recursive(fields) {
-            items.extend([
-                "bytes_len",
-                "compact_bytes_len",
-                "get_bytes_owned",
-                "get_compact_bytes_owned",
-                "put_bytes",
-                "put_compact_bytes",
-            ]);
-        }
-        if uses_nullable_bytes_recursive(fields) {
-            items.extend([
-                "compact_nullable_bytes_len",
-                "get_compact_nullable_bytes_owned",
-                "get_nullable_bytes_owned",
-                "nullable_bytes_len",
-                "put_compact_nullable_bytes",
-                "put_nullable_bytes",
-            ]);
-        }
-        items.sort_unstable();
-        writeln!(
-            out,
-            "use crate::primitives::string_bytes::{{{}}};",
-            items.join(", ")
-        )
-        .unwrap();
+        out.extend(bytes_import(
+            uses_non_nullable_bytes_recursive(fields),
+            uses_nullable_bytes_recursive(fields),
+        ));
     }
-    if has_flex && tagged {
-        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
-    } else if has_flex {
-        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
-    }
-    writeln!(
-        out,
-        "use crate::{{Decode, Encode, ProtocolError, UnknownTaggedFields}};"
-    )
-    .unwrap();
 
-    // Reuse the existing nested-struct emitter (struct + Encode + Decode impls).
-    emit_nested_struct(
-        &mut out,
-        struct_name,
-        fields,
-        flex_min_val,
-        res_map,
-        lenient_records,
-    );
+    out.extend(tagged_import(has_flex, tagged));
 
+    out.extend(quote!(use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};));
     out
 }
 
-/// Walk fields and emit a nested struct for each field that has its own
-/// `fields:` list. Recurses depth-first.
-fn emit_nested_structs_for_fields(
-    out: &mut String,
-    fields: &[FieldSpec],
-    flex_min_val: i16,
-    res_map: &HashMap<String, Resolution>,
-    lenient_records: bool,
-) {
-    for f in fields {
-        if !f.fields.is_empty() {
-            let struct_name = base_type(&f.field_type);
-            emit_nested_struct(
-                out,
-                struct_name,
-                &f.fields,
-                flex_min_val,
-                res_map,
-                lenient_records,
-            );
-        }
+/// The `string_bytes` import list for string fields (nullable variant pulls in
+/// the nullable-string helpers too).
+fn string_import(use_nullable_string: bool) -> TokenStream {
+    let names: &[&str] = if use_nullable_string {
+        &[
+            "compact_nullable_string_len",
+            "compact_string_len",
+            "get_compact_nullable_string_owned",
+            "get_compact_string_owned",
+            "get_nullable_string_owned",
+            "get_string_owned",
+            "nullable_string_len",
+            "put_compact_nullable_string",
+            "put_compact_string",
+            "put_nullable_string",
+            "put_string",
+            "string_len",
+        ]
+    } else {
+        &[
+            "compact_string_len",
+            "get_compact_string_owned",
+            "get_string_owned",
+            "put_compact_string",
+            "put_string",
+            "string_len",
+        ]
+    };
+    let items: Vec<_> = names.iter().map(|n| format_ident!("{n}")).collect();
+    quote!(use crate::primitives::string_bytes::{ #(#items),* };)
+}
+
+/// The `string_bytes` import list for `bytes` fields.
+fn bytes_import(use_non_nullable_bytes: bool, use_nullable_bytes: bool) -> TokenStream {
+    let mut items: Vec<&str> = Vec::new();
+    if use_non_nullable_bytes {
+        items.extend([
+            "bytes_len",
+            "compact_bytes_len",
+            "get_bytes_owned",
+            "get_compact_bytes_owned",
+            "put_bytes",
+            "put_compact_bytes",
+        ]);
+    }
+    if use_nullable_bytes {
+        items.extend([
+            "compact_nullable_bytes_len",
+            "get_compact_nullable_bytes_owned",
+            "get_nullable_bytes_owned",
+            "nullable_bytes_len",
+            "put_compact_nullable_bytes",
+            "put_nullable_bytes",
+        ]);
+    }
+    items.sort_unstable();
+    let idents: Vec<_> = items.iter().map(|n| format_ident!("{n}")).collect();
+    quote!(use crate::primitives::string_bytes::{ #(#idents),* };)
+}
+
+/// The `tagged_fields` import line. `encode_to_bytes` is only pulled in when
+/// there are known tagged fields to encode.
+fn tagged_import(flex: bool, tagged: bool) -> TokenStream {
+    if flex && tagged {
+        quote!(use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+    } else if flex {
+        quote!(use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};)
+    } else {
+        quote!()
     }
 }
 
@@ -379,7 +283,7 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn emit_imports(out: &mut String, spec: &MessageSpec) {
+pub(crate) fn emit_imports(spec: &MessageSpec) -> TokenStream {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
@@ -389,7 +293,7 @@ pub(crate) fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let use_nullable_bytes = uses_nullable_bytes_recursive(&spec.fields);
     let use_non_nullable_bytes = uses_non_nullable_bytes_recursive(&spec.fields);
 
-    writeln!(out, "\nuse bytes::{{Buf, BufMut}};").unwrap();
+    let mut out = quote!(use bytes::{Buf, BufMut};);
 
     let use_nullable_struct = uses_nullable_struct_recursive(&spec.fields);
 
@@ -435,70 +339,19 @@ pub(crate) fn emit_imports(out: &mut String, spec: &MessageSpec) {
                 v.sort_unstable();
                 v
             };
-            writeln!(
-                out,
-                "\nuse crate::primitives::fixed::{{{}}};",
-                sorted.join(", ")
-            )
-            .unwrap();
+            let items: Vec<_> = sorted.iter().map(|n| format_ident!("{n}")).collect();
+            out.extend(quote!(use crate::primitives::fixed::{ #(#items),* };));
         }
     }
 
     if use_string {
         // Emit only the string helpers that are actually needed for the fields
         // present in this message to avoid unused-import warnings.
-        if use_nullable_string {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
-}};"
-            )
-            .unwrap();
-        } else {
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
-}};"
-            )
-            .unwrap();
-        }
+        out.extend(string_import(use_nullable_string));
     }
 
     if use_bytes {
-        let mut items: Vec<&str> = Vec::new();
-        if use_non_nullable_bytes {
-            items.extend([
-                "bytes_len",
-                "compact_bytes_len",
-                "get_bytes_owned",
-                "get_compact_bytes_owned",
-                "put_bytes",
-                "put_compact_bytes",
-            ]);
-        }
-        if use_nullable_bytes {
-            items.extend([
-                "compact_nullable_bytes_len",
-                "get_compact_nullable_bytes_owned",
-                "get_nullable_bytes_owned",
-                "nullable_bytes_len",
-                "put_compact_nullable_bytes",
-                "put_nullable_bytes",
-            ]);
-        }
-        items.sort_unstable();
-        writeln!(
-            out,
-            "use crate::primitives::string_bytes::{{{}}};",
-            items.join(", ")
-        )
-        .unwrap();
+        out.extend(bytes_import(use_non_nullable_bytes, use_nullable_bytes));
     }
 
     // Records fields: import the byte-primitive helpers used in the generated wrapper code.
@@ -528,55 +381,43 @@ pub(crate) fn emit_imports(out: &mut String, spec: &MessageSpec) {
             }
             items.sort_unstable();
             items.dedup();
-            writeln!(
-                out,
-                "use crate::primitives::string_bytes::{{{}}};",
-                items.join(", ")
-            )
-            .unwrap();
+            let idents: Vec<_> = items.iter().map(|n| format_ident!("{n}")).collect();
+            out.extend(quote!(use crate::primitives::string_bytes::{ #(#idents),* };));
         }
     }
 
     // Tagged-fields support: encode_to_bytes only when there are known tagged fields to encode.
-    if flex && tagged {
-        writeln!(out, "use crate::tagged_fields::{{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
-    } else if flex {
-        writeln!(out, "use crate::tagged_fields::{{read_tagged_fields, tagged_fields_len, WriteTaggedFields}};").unwrap();
-    }
+    out.extend(tagged_import(flex, tagged));
 
-    writeln!(
-        out,
-        "use crate::{{Decode, Encode, ProtocolError, UnknownTaggedFields}};"
-    )
-    .unwrap();
+    out.extend(quote!(use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};));
+    out
 }
 
-pub(crate) fn emit_constants(out: &mut String, spec: &MessageSpec) {
-    let min_version = spec.valid_versions.min;
-    let max_version = spec.valid_versions.max;
-    let flex = flex_min(spec);
+pub(crate) fn emit_constants(spec: &MessageSpec) -> TokenStream {
+    let min_version = Literal::i16_unsuffixed(spec.valid_versions.min);
+    let max_version = Literal::i16_unsuffixed(spec.valid_versions.max);
+    let flex = Literal::i16_unsuffixed(flex_min(spec));
     // Request/Response schemas have an API key; Header/Data schemas do not.
-    match spec.message_type {
+    let api_key_const = match spec.message_type {
         MessageType::Request | MessageType::Response => {
-            let api_key = spec
-                .api_key
-                .expect("Request/Response must have apiKey in schema");
-            writeln!(out, "\npub const API_KEY: i16 = {api_key};").unwrap();
+            let api_key = Literal::i16_unsuffixed(
+                spec.api_key
+                    .expect("Request/Response must have apiKey in schema"),
+            );
+            quote!(pub const API_KEY: i16 = #api_key;)
         }
-        MessageType::Header | MessageType::Data => {
-            // No API_KEY const for framing/data types.
-        }
-    }
-    writeln!(
-        out,
-        "pub const MIN_VERSION: i16 = {min_version};
-pub const MAX_VERSION: i16 = {max_version};
-pub const FLEXIBLE_MIN: i16 = {flex};
+        // No API_KEY const for framing/data types.
+        MessageType::Header | MessageType::Data => quote!(),
+    };
+    quote! {
+        #api_key_const
+        pub const MIN_VERSION: i16 = #min_version;
+        pub const MAX_VERSION: i16 = #max_version;
+        pub const FLEXIBLE_MIN: i16 = #flex;
 
-#[inline]
-fn is_flexible(version: i16) -> bool {{ version >= FLEXIBLE_MIN }}"
-    )
-    .unwrap();
+        #[inline]
+        fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+    }
 }
 
 /// Returns a Rust expression for the default value of an owned field, respecting the
@@ -671,68 +512,6 @@ pub(crate) fn needs_manual_default(fields: &[FieldSpec]) -> bool {
     })
 }
 
-fn emit_struct(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
-    let type_name = name_conv::type_name(&spec.name);
-    let manual_default = needs_manual_default(&spec.fields);
-    let derive_default = if manual_default { "" } else { ", Default" };
-    let eq_derive = if has_float64_recursive(&spec.fields) {
-        ""
-    } else {
-        ", Eq"
-    };
-    writeln!(
-        out,
-        "
-#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
-pub struct {type_name} {{"
-    )
-    .unwrap();
-
-    for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f);
-        let struct_path = struct_path_for(f, res_map);
-        let rust_type = type_map::owned_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    for f in spec.fields.iter().filter(|f| is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let struct_path = struct_path_for(f, res_map);
-        let rust_type = type_map::owned_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
-    writeln!(out, "}}").unwrap();
-
-    if manual_default {
-        writeln!(
-            out,
-            "
-impl Default for {type_name} {{
-    fn default() -> Self {{
-        Self {{"
-        )
-        .unwrap();
-        for f in spec.fields.iter().filter(|f| !is_tagged(f)) {
-            let field = name_conv::field_name(&f.name);
-            let default_expr = owned_default_expr(f);
-            writeln!(out, "            {field}: {default_expr},").unwrap();
-        }
-        for f in spec.fields.iter().filter(|f| is_tagged(f)) {
-            let field = name_conv::field_name(&f.name);
-            let default_expr = owned_default_expr(f);
-            writeln!(out, "            {field}: {default_expr},").unwrap();
-        }
-        writeln!(
-            out,
-            "            unknown_tagged_fields: Default::default(),"
-        )
-        .unwrap();
-        writeln!(out, "        }}\n    }}\n}}").unwrap();
-    }
-}
-
 /// Returns the resolved Rust path for a struct-typed field, or `None` for primitives.
 pub(crate) fn struct_path_for(
     f: &FieldSpec,
@@ -748,409 +527,6 @@ pub(crate) fn struct_path_for(
 
 pub(crate) fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
-}
-
-fn emit_encode_impl(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
-    let type_name = name_conv::type_name(&spec.name);
-    let has_flex = has_any_flex(spec);
-    let version_err = match spec.message_type {
-        MessageType::Request | MessageType::Response => {
-            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
-                .to_owned()
-        }
-        MessageType::Header | MessageType::Data => {
-            let name = &spec.name;
-            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
-        }
-    };
-    writeln!(
-        out,
-        "
-impl Encode for {type_name} {{
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {{
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            {version_err}
-        }}
-        let flex = is_flexible(version);"
-    )
-    .unwrap();
-
-    encode_struct_body(out, &spec.fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        Ok(())\n    }}").unwrap();
-
-    // encoded_len
-    writeln!(
-        out,
-        "    fn encoded_len(&self, version: i16) -> usize {{
-        let flex = is_flexible(version);
-        let mut n: usize = 0;"
-    )
-    .unwrap();
-
-    encoded_len_struct_body(out, &spec.fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        n\n    }}\n}}").unwrap();
-}
-
-fn emit_decode_impl(
-    out: &mut String,
-    spec: &MessageSpec,
-    res_map: &HashMap<String, Resolution>,
-    lenient_records: bool,
-) {
-    let type_name = name_conv::type_name(&spec.name);
-    let has_flex = has_any_flex(spec);
-    let version_err = match spec.message_type {
-        MessageType::Request | MessageType::Response => {
-            "return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });"
-                .to_owned()
-        }
-        MessageType::Header | MessageType::Data => {
-            let name = &spec.name;
-            format!("return Err(ProtocolError::SchemaMismatch(\"{name} version out of range\"));")
-        }
-    };
-    writeln!(
-        out,
-        "
-impl<'de> Decode<'de> for {type_name} {{
-    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {{
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {{
-            {version_err}
-        }}
-        let flex = is_flexible(version);
-        let mut out = Self::default();"
-    )
-    .unwrap();
-
-    decode_struct_body(
-        out,
-        &spec.fields,
-        res_map,
-        "        ",
-        has_flex,
-        lenient_records,
-    );
-
-    writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
-}
-
-// --- shared struct-body generators (used by top-level and nested emitters) ---
-
-/// Emit the body of an Encode impl for the given fields.
-/// Assumes `buf`, `version`, `flex` are in scope.
-/// `has_flex` controls whether the tagged-fields trailer block is emitted.
-fn encode_struct_body(
-    out: &mut String,
-    fields: &[FieldSpec],
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-    has_flex: bool,
-) {
-    for f in fields.iter().filter(|f| !is_tagged(f)) {
-        emit_encode_one(out, f, res_map, indent);
-    }
-
-    if has_flex {
-        let has_tagged = fields.iter().any(is_tagged);
-        let mut_kw = if has_tagged { "mut " } else { "" };
-        writeln!(out, "{indent}if flex {{").unwrap();
-        writeln!(
-            out,
-            "{indent}    let {mut_kw}tagged = WriteTaggedFields::new();"
-        )
-        .unwrap();
-        for f in fields.iter().filter(|f| is_tagged(f)) {
-            emit_encode_tagged(out, f, res_map, indent);
-        }
-        writeln!(
-            out,
-            "{indent}    tagged.write(buf, &self.unknown_tagged_fields);"
-        )
-        .unwrap();
-        writeln!(out, "{indent}}}").unwrap();
-    }
-}
-
-/// Emit the body of an `encoded_len` impl for the given fields.
-/// Assumes `flex` and `n` are in scope.
-/// `has_flex` controls whether the tagged-fields length block is emitted.
-fn encoded_len_struct_body(
-    out: &mut String,
-    fields: &[FieldSpec],
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-    has_flex: bool,
-) {
-    for f in fields.iter().filter(|f| !is_tagged(f)) {
-        emit_encoded_len_one(out, f, res_map, indent);
-    }
-
-    if has_flex {
-        let has_tagged = fields.iter().any(is_tagged);
-        let pairs_mut = if has_tagged { "mut " } else { "" };
-        writeln!(
-            out,
-            "{indent}if flex {{
-{indent}    let {pairs_mut}known_pairs: Vec<(u32, usize)> = Vec::new();"
-        )
-        .unwrap();
-        for f in fields.iter().filter(|f| is_tagged(f)) {
-            emit_encoded_len_tagged(out, f, res_map, indent);
-        }
-        writeln!(
-            out,
-            "{indent}    n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
-{indent}}}"
-        )
-        .unwrap();
-    }
-}
-
-/// Emit the body of a Decode impl for the given fields.
-/// Assumes `buf`, `version`, `flex`, and `out` are in scope.
-/// `has_flex` controls whether the tagged-fields decode block is emitted.
-fn decode_struct_body(
-    out: &mut String,
-    fields: &[FieldSpec],
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-    has_flex: bool,
-    lenient_records: bool,
-) {
-    for f in fields.iter().filter(|f| !is_tagged(f)) {
-        emit_decode_one(out, f, res_map, indent, lenient_records);
-    }
-
-    if has_flex {
-        let has_tagged = fields.iter().any(is_tagged);
-        writeln!(out, "{indent}if flex {{").unwrap();
-        if has_tagged {
-            writeln!(
-                out,
-                "{indent}    // Pre-declare typed slots for known tagged fields."
-            )
-            .unwrap();
-            for f in fields.iter().filter(|f| is_tagged(f)) {
-                let field = name_conv::field_name(&f.name);
-                writeln!(out, "{indent}    let mut tag_{field} = None;").unwrap();
-            }
-        }
-        let closure_args = if has_tagged {
-            "|tag, payload|"
-        } else {
-            "|_tag, _payload|"
-        };
-        writeln!(
-            out,
-            "{indent}    out.unknown_tagged_fields = read_tagged_fields(buf, {closure_args} {{"
-        )
-        .unwrap();
-        if has_tagged {
-            writeln!(out, "{indent}        match tag {{").unwrap();
-            for f in fields.iter().filter(|f| is_tagged(f)) {
-                emit_decode_tagged_arm(out, f, res_map, indent, lenient_records);
-            }
-            writeln!(
-                out,
-                "{indent}            _ => Ok(false),
-{indent}        }}"
-            )
-            .unwrap();
-        } else {
-            writeln!(out, "{indent}        Ok(false)").unwrap();
-        }
-        writeln!(out, "{indent}    }})?;").unwrap();
-        if has_tagged {
-            for f in fields.iter().filter(|f| is_tagged(f)) {
-                let field = name_conv::field_name(&f.name);
-                writeln!(
-                    out,
-                    "{indent}    if let Some(v) = tag_{field} {{ out.{field} = v; }}"
-                )
-                .unwrap();
-            }
-        }
-        writeln!(out, "{indent}}}").unwrap();
-    }
-}
-
-// --- nested struct emitter -----------------------------------------------
-
-fn emit_nested_struct(
-    out: &mut String,
-    struct_name: &str,
-    fields: &[FieldSpec],
-    flex_min_val: i16,
-    res_map: &HashMap<String, Resolution>,
-    lenient_records: bool,
-) {
-    let manual_default = needs_manual_default(fields);
-    let derive_default = if manual_default { "" } else { ", Default" };
-    let eq_derive = if has_float64_recursive(fields) {
-        ""
-    } else {
-        ", Eq"
-    };
-    // Struct definition
-    writeln!(
-        out,
-        "
-#[derive(Debug, Clone, PartialEq{eq_derive}{derive_default})]
-pub struct {struct_name} {{"
-    )
-    .unwrap();
-
-    for f in fields.iter().filter(|f| !is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f);
-        let struct_path = struct_path_for(f, res_map);
-        let rust_type = type_map::owned_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    for f in fields.iter().filter(|f| is_tagged(f)) {
-        let field = name_conv::field_name(&f.name);
-        let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        let struct_path = struct_path_for(f, res_map);
-        let rust_type = type_map::owned_type(&f.field_type, nullable, struct_path.as_deref());
-        writeln!(out, "    pub {field}: {rust_type},").unwrap();
-    }
-    writeln!(out, "    pub unknown_tagged_fields: UnknownTaggedFields,").unwrap();
-    writeln!(out, "}}").unwrap();
-
-    if manual_default {
-        writeln!(
-            out,
-            "
-impl Default for {struct_name} {{
-    fn default() -> Self {{
-        Self {{"
-        )
-        .unwrap();
-        for f in fields.iter().filter(|f| !is_tagged(f)) {
-            let field = name_conv::field_name(&f.name);
-            let default_expr = owned_default_expr(f);
-            writeln!(out, "            {field}: {default_expr},").unwrap();
-        }
-        for f in fields.iter().filter(|f| is_tagged(f)) {
-            let field = name_conv::field_name(&f.name);
-            let default_expr = owned_default_expr(f);
-            writeln!(out, "            {field}: {default_expr},").unwrap();
-        }
-        writeln!(
-            out,
-            "            unknown_tagged_fields: Default::default(),"
-        )
-        .unwrap();
-        writeln!(out, "        }}\n    }}\n}}").unwrap();
-    }
-
-    let has_flex = flex_min_val < i16::MAX;
-
-    // Encode impl — no version-range guard; version flows in from parent
-    writeln!(
-        out,
-        "
-impl Encode for {struct_name} {{
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {{
-        let flex = version >= {flex_min_val};"
-    )
-    .unwrap();
-
-    encode_struct_body(out, fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        Ok(())\n    }}").unwrap();
-
-    writeln!(
-        out,
-        "    fn encoded_len(&self, version: i16) -> usize {{
-        let flex = version >= {flex_min_val};
-        let mut n: usize = 0;"
-    )
-    .unwrap();
-
-    encoded_len_struct_body(out, fields, res_map, "        ", has_flex);
-
-    writeln!(out, "        n\n    }}\n}}").unwrap();
-
-    // Decode impl
-    writeln!(
-        out,
-        "
-impl<'de> Decode<'de> for {struct_name} {{
-    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {{
-        let flex = version >= {flex_min_val};
-        let mut out = Self::default();"
-    )
-    .unwrap();
-
-    decode_struct_body(out, fields, res_map, "        ", has_flex, lenient_records);
-
-    writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
-
-    emit_populated_impl(out, struct_name, fields, res_map);
-
-    // Recurse into deeper nesting
-    emit_nested_structs_for_fields(out, fields, flex_min_val, res_map, lenient_records);
-}
-
-/// Emit a test-only `populated(version)` constructor for an owned struct.
-///
-/// `default()` leaves every collection empty and every scalar zero, so the
-/// derived round-trip tests never reach array-element, nested-struct, or
-/// tagged-field encode/decode paths. `populated(version)` starts from
-/// `Self::default()` and overwrites each field that is valid at `version` with a
-/// non-default value (single-element arrays, recursively populated nested
-/// structs). Building on top of `default()` guarantees that fields outside their
-/// version range keep their exact default value — important for tagged fields,
-/// which the encoder emits whenever the message is flexible (independent of the
-/// field's own version range): leaving them at default makes the encoder skip
-/// them, so the round-trip stays byte-exact. `records` fields are left at default
-/// to avoid constructing invalid record batches.
-fn emit_populated_impl(
-    out: &mut String,
-    type_name: &str,
-    fields: &[FieldSpec],
-    res_map: &HashMap<String, Resolution>,
-) {
-    writeln!(
-        out,
-        "
-#[cfg(test)]
-impl {type_name} {{
-    #[must_use]
-    pub fn populated(version: i16) -> Self {{
-        let mut m = Self::default();"
-    )
-    .unwrap();
-    for f in fields.iter().filter(|f| !is_tagged(f)) {
-        emit_owned_populated_field(out, f, res_map, is_nullable(f));
-    }
-    for f in fields.iter().filter(|f| is_tagged(f)) {
-        let option = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-        emit_owned_populated_field(out, f, res_map, option);
-    }
-    writeln!(out, "        m\n    }}\n}}").unwrap();
-}
-
-/// Emit one conditional assignment for the populated constructor, guarding the
-/// non-default value behind the field's version range so it matches the bytes
-/// the encoder produces at that version. `records` fields are skipped (left at
-/// default).
-fn emit_owned_populated_field(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    option: bool,
-) {
-    if base_type(&f.field_type) == "records" {
-        return;
-    }
-    let field = name_conv::field_name(&f.name);
-    let value = owned_populated_value(f, res_map, option);
-    let cond = version_cond(f.versions, "version");
-    writeln!(out, "        if {cond} {{ m.{field} = {value}; }}").unwrap();
 }
 
 /// Build the populated-value expression for one owned field. `option` mirrors
@@ -1212,129 +588,6 @@ pub(crate) fn field_forces_non_flex(f: &FieldSpec) -> bool {
     matches!(f.flexible_versions, Some(FlexibleVersions::None))
 }
 
-fn emit_encode_one(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-) {
-    let field = name_conv::field_name(&f.name);
-    let cond = version_cond(f.versions, "version");
-    // Per-field `flexibleVersions: "none"` forces legacy encoding for this field.
-    let force_non_flex = field_forces_non_flex(f);
-    let flex_prefix = if force_non_flex {
-        "{ let flex = false; ".to_owned()
-    } else {
-        String::new()
-    };
-    let flex_suffix = if force_non_flex { " }" } else { "" };
-    // Version-conditional nullability: the field is nullable only within its
-    // nullableVersions range. Where that range is narrower than the field's own
-    // versions (on either end), switch codec per version.
-    if let Some(ncond) = nullable_split_cond(f) {
-        let nullable_body = encode_call(&f.field_type, &format!("self.{field}"), true, res_map);
-        // For the non-nullable path, the Rust type is still Option<T> so we must unwrap.
-        let non_nullable_body =
-            encode_call_option_as_non_nullable(&f.field_type, &format!("self.{field}"), res_map);
-        writeln!(
-            out,
-            "{indent}if {cond} {{ {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix} }}"
-        ).unwrap();
-    } else {
-        let body = encode_call(
-            &f.field_type,
-            &format!("self.{field}"),
-            is_nullable(f),
-            res_map,
-        );
-        writeln!(
-            out,
-            "{indent}if {cond} {{ {flex_prefix}{body}{flex_suffix} }}"
-        )
-        .unwrap();
-    }
-}
-
-fn emit_encoded_len_one(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-) {
-    let field = name_conv::field_name(&f.name);
-    let cond = version_cond(f.versions, "version");
-    let force_non_flex = field_forces_non_flex(f);
-    let flex_prefix = if force_non_flex {
-        "{ let flex = false; ".to_owned()
-    } else {
-        String::new()
-    };
-    let flex_suffix = if force_non_flex { " }" } else { "" };
-    if let Some(ncond) = nullable_split_cond(f) {
-        let nullable_body =
-            encoded_len_expr(&f.field_type, &format!("self.{field}"), true, res_map);
-        // For the non-nullable path, the Rust type is still Option<T> so unwrap.
-        let non_nullable_body = encoded_len_expr_option_as_non_nullable(
-            &f.field_type,
-            &format!("self.{field}"),
-            res_map,
-        );
-        writeln!(
-            out,
-            "{indent}if {cond} {{ n += {flex_prefix}if {ncond} {{ {nullable_body} }} else {{ {non_nullable_body} }}{flex_suffix}; }}"
-        ).unwrap();
-    } else {
-        let body = encoded_len_expr(
-            &f.field_type,
-            &format!("self.{field}"),
-            is_nullable(f),
-            res_map,
-        );
-        writeln!(
-            out,
-            "{indent}if {cond} {{ n += {flex_prefix}{body}{flex_suffix}; }}"
-        )
-        .unwrap();
-    }
-}
-
-fn emit_decode_one(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-    lenient_records: bool,
-) {
-    let field = name_conv::field_name(&f.name);
-    let cond = version_cond(f.versions, "version");
-    // Per-field `flexibleVersions: "none"` forces legacy encoding for this field.
-    let force_non_flex = field_forces_non_flex(f);
-    let flex_prefix = if force_non_flex {
-        "{ let flex = false; ".to_owned()
-    } else {
-        String::new()
-    };
-    let flex_suffix = if force_non_flex { " }" } else { "" };
-    if let Some(ncond) = nullable_split_cond(f) {
-        let nullable_call = decode_call(&f.field_type, true, res_map, lenient_records);
-        let non_nullable_call = decode_call(&f.field_type, false, res_map, lenient_records);
-        // Non-nullable decode returns a bare value; we must wrap it to match the Option type.
-        let non_nullable_wrapped =
-            wrap_non_nullable_for_option(&f.field_type, &non_nullable_call, res_map);
-        writeln!(
-            out,
-            "{indent}if {cond} {{ out.{field} = {flex_prefix}if {ncond} {{ {nullable_call} }} else {{ {non_nullable_wrapped} }}{flex_suffix}; }}"
-        ).unwrap();
-    } else {
-        let call = decode_call(&f.field_type, is_nullable(f), res_map, lenient_records);
-        writeln!(
-            out,
-            "{indent}if {cond} {{ out.{field} = {flex_prefix}{call}{flex_suffix}; }}"
-        )
-        .unwrap();
-    }
-}
-
 /// When a non-nullable decode is used but the field type is `Option<T>`, wrap the
 /// result in `Some`. For array-of-struct this wraps the whole block.
 pub(crate) fn wrap_non_nullable_for_option(
@@ -1379,71 +632,6 @@ pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     }
     // No schema default; fall back to Rust's Default.
     format!("crate::codegen_helpers::is_default(&self.{field})")
-}
-
-fn emit_encode_tagged(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-) {
-    let field = name_conv::field_name(&f.name);
-    let tag = f.tag.expect("tagged field must have tag");
-    let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-    // Generate encode call using `b` (the closure's buffer parameter, not the outer `buf`).
-    let encode_body = encode_call_with_buf(
-        &f.field_type,
-        &format!("self.{field}"),
-        nullable,
-        res_map,
-        "b",
-    );
-    let is_default_cond = tagged_is_default_cond(f);
-    writeln!(
-        out,
-        "{indent}    if !({is_default_cond}) {{
-{indent}        let payload = encode_to_bytes({len_expr}, |b| {{ {encode_body}; Ok(()) }});
-{indent}        tagged.add({tag}, payload);
-{indent}    }}",
-        len_expr = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map),
-        tag = tag,
-    )
-    .unwrap();
-}
-
-fn emit_encoded_len_tagged(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-) {
-    let field = name_conv::field_name(&f.name);
-    let tag = f.tag.expect("tagged field must have tag");
-    let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-    let len = encoded_len_expr(&f.field_type, &format!("self.{field}"), nullable, res_map);
-    let is_default_cond = tagged_is_default_cond(f);
-    writeln!(
-        out,
-        "{indent}    if !({is_default_cond}) {{
-{indent}        known_pairs.push(({tag}, {len}));
-{indent}    }}"
-    )
-    .unwrap();
-}
-
-fn emit_decode_tagged_arm(
-    out: &mut String,
-    f: &FieldSpec,
-    res_map: &HashMap<String, Resolution>,
-    indent: &str,
-    lenient_records: bool,
-) {
-    let field = name_conv::field_name(&f.name);
-    let tag = f.tag.expect("tagged field must have tag");
-    let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
-    // Bind `b` to the payload slice so generated decode calls use the right buffer.
-    let call = decode_call_with_buf(&f.field_type, nullable, res_map, "b", lenient_records);
-    writeln!(out, "{indent}        {tag} => {{ tag_{field} = Some({{ let b: &mut &[u8] = payload; {call} }}); Ok(true) }}").unwrap();
 }
 
 // --- primitive encode/decode call generators ------------------------------

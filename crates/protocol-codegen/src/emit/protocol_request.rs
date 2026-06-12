@@ -4,7 +4,7 @@
 //! type is derived by replacing the `Request` suffix with `Response` in
 //! the type name, and converting the result to a `snake_case` module name.
 
-use std::fmt::Write;
+use quote::{format_ident, quote};
 
 use crate::ir::{MessageSpec, MessageType};
 use crate::name_conv;
@@ -31,19 +31,24 @@ pub fn emit_protocol_request(spec: &MessageSpec) -> Option<String> {
 
     let response_module = name_conv::module_name(&response_type_name);
 
-    let mut out = String::new();
-    writeln!(out).unwrap();
-    writeln!(out, "impl crate::ProtocolRequest for {type_name} {{").unwrap();
-    writeln!(out, "    const API_KEY: i16 = API_KEY;").unwrap();
-    writeln!(out, "    const MIN_VERSION: i16 = MIN_VERSION;").unwrap();
-    writeln!(out, "    const MAX_VERSION: i16 = MAX_VERSION;").unwrap();
-    writeln!(out, "    const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;").unwrap();
-    writeln!(
-        out,
-        "    type Response = super::{response_module}::{response_type_name};"
-    )
-    .unwrap();
-    writeln!(out, "}}").unwrap();
+    let type_ident = format_ident!("{type_name}");
+    let response_module_ident = format_ident!("{response_module}");
+    let response_type_ident = format_ident!("{response_type_name}");
 
-    Some(out)
+    let tokens = quote! {
+        impl crate::ProtocolRequest for #type_ident {
+            const API_KEY: i16 = API_KEY;
+            const MIN_VERSION: i16 = MIN_VERSION;
+            const MAX_VERSION: i16 = MAX_VERSION;
+            const FLEXIBLE_MIN: i16 = FLEXIBLE_MIN;
+            type Response = super::#response_module_ident::#response_type_ident;
+        }
+    };
+
+    // Validate at generation time; rustfmt (applied by the caller) does the
+    // actual formatting. See `crate::fmt`.
+    syn::parse2::<syn::ItemImpl>(tokens.clone())
+        .expect("generated ProtocolRequest impl must be valid Rust");
+
+    Some(format!("\n{tokens}"))
 }

@@ -9,7 +9,11 @@
 //! the requested version, and emits null only for versions where the field is
 //! actually nullable, preventing the JVM converter from rejecting bad input.
 
-use std::fmt::Write;
+use std::fmt::Write as FmtWrite;
+use std::str::FromStr;
+
+use proc_macro2::TokenStream;
+use quote::quote;
 
 use crate::ir::{FieldSpec, MessageSpec, VersionRange};
 
@@ -18,58 +22,64 @@ use crate::ir::{FieldSpec, MessageSpec, VersionRange};
 /// per-message owned module body.
 #[must_use]
 pub fn emit_default_json(spec: &MessageSpec) -> String {
-    let mut out = String::new();
-    writeln!(out).unwrap();
-    writeln!(
-        out,
-        "/// Default JSON payload matching `Self::default()` for JVM oracle differential testing."
-    )
-    .unwrap();
-    writeln!(out, "/// Only includes fields valid for the given version.").unwrap();
-    writeln!(out, "#[must_use]").unwrap();
-    writeln!(out, "#[allow(unused_comparisons)]").unwrap();
-    writeln!(
-        out,
-        "pub fn default_json(version: i16) -> ::serde_json::Value {{"
-    )
-    .unwrap();
-    writeln!(out, "    let mut obj = ::serde_json::Map::new();").unwrap();
-    emit_fields_stmts(&mut out, &spec.fields, "    ");
-    writeln!(out, "    ::serde_json::Value::Object(obj)").unwrap();
-    writeln!(out, "}}").unwrap();
-    out
+    let field_stmts = fields_stmts_tokens(&spec.fields);
+
+    let tokens = quote! {
+        #[doc = " Default JSON payload matching `Self::default()` for JVM oracle differential testing."]
+        #[doc = " Only includes fields valid for the given version."]
+        #[must_use]
+        #[allow(unused_comparisons)]
+        pub fn default_json(version: i16) -> ::serde_json::Value {
+            let mut obj = ::serde_json::Map::new();
+            #field_stmts
+            ::serde_json::Value::Object(obj)
+        }
+    };
+
+    // Validate at generation time — a parse failure is a generator bug.
+    let _validate: syn::Item =
+        syn::parse2(tokens.clone()).expect("generated default_json fn must be valid Rust");
+
+    tokens.to_string()
 }
 
-/// Emit `obj.insert(...)` statements for each field, guarded by version range checks.
-fn emit_fields_stmts(out: &mut String, fields: &[FieldSpec], indent: &str) {
-    for f in fields {
-        let key = json_field_name(&f.name);
-        // Determine the field's version condition.
-        let field_cond = version_cond(f.versions);
-        // Compute the value expression, which may itself be version-conditional
-        // (e.g. null only for nullable versions, non-null otherwise).
-        let val_expr = json_value_expr_versioned(f);
+/// Build a `TokenStream` of `obj.insert(...)` statements for each field,
+/// guarded by version range checks.
+fn fields_stmts_tokens(fields: &[FieldSpec]) -> TokenStream {
+    let stmts: Vec<TokenStream> = fields
+        .iter()
+        .map(|f| {
+            let key = json_field_name(&f.name);
+            let field_cond = version_cond(f.versions);
+            let val_expr_str = json_value_expr_versioned(f);
+            let val_tokens = parse_expr(&val_expr_str);
 
-        match field_cond.as_deref() {
-            None => {
-                // Always valid.
-                writeln!(
-                    out,
-                    "{indent}obj.insert(\"{key}\".to_string(), {val_expr});"
-                )
-                .unwrap();
+            match field_cond.as_deref() {
+                None => {
+                    // Always valid.
+                    quote! {
+                        obj.insert(#key.to_string(), #val_tokens);
+                    }
+                }
+                Some(cond) => {
+                    let cond_tokens = parse_expr(cond);
+                    quote! {
+                        if #cond_tokens {
+                            obj.insert(#key.to_string(), #val_tokens);
+                        }
+                    }
+                }
             }
-            Some(cond) => {
-                writeln!(out, "{indent}if {cond} {{").unwrap();
-                writeln!(
-                    out,
-                    "{indent}    obj.insert(\"{key}\".to_string(), {val_expr});"
-                )
-                .unwrap();
-                writeln!(out, "{indent}}}").unwrap();
-            }
-        }
-    }
+        })
+        .collect();
+
+    quote! { #(#stmts)* }
+}
+
+/// Parse an emitter-produced Rust fragment into tokens. The fragment came from
+/// a trusted generator, so a lex error is a generator bug, not bad input.
+fn parse_expr(s: &str) -> TokenStream {
+    TokenStream::from_str(s).expect("leaf generator produced an unlexable fragment")
 }
 
 /// Return the condition string for a version range, or None if always valid.
