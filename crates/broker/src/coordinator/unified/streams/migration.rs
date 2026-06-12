@@ -1,8 +1,11 @@
 //! KIP-1071 classic→streams cold conversion. When a drained classic group
 //! receives a `StreamsGroupHeartbeat`, the group is converted in place: the
-//! classic `GroupMetadata` (k2) is tombstoned, the type lock is forced to
-//! `Streams`, and the classic actor is dropped. Committed offsets (k0/k1) are
-//! protocol-agnostic and are left untouched. Streams migration is COLD only
+//! classic `GroupMetadata` (k2) is tombstoned (defensive — a no-op when the
+//! classic path persisted none) and the type lock is forced to `Streams`. The
+//! drained classic actor is KEPT in the `groups` registry as the protocol-
+//! agnostic offset home (`OffsetFetch`/`OffsetCommit` route there via
+//! `coordinator.find()` for every protocol, streams included), so committed
+//! offsets (k0/k1) survive the flip untouched. Streams migration is COLD only
 //! (Kafka does not support online streams migration), so there is no
 //! hosted-classic-member translation here.
 

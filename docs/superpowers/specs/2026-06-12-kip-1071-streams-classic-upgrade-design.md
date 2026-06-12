@@ -224,6 +224,24 @@ not part of this slice; §6.3 covers the behavior in-process.
    "after … session.timeout.ms expire", implying the drained-but-still-present
    case converts; confirm with a capture.
 
+## 7a. Deferred to slice 2 (admin-observability seams; surfaced in final review)
+
+Because the converted group keeps its classic actor in the `groups` registry as
+the offset home (§4.2.1), some admin paths still report it through the classic
+projection. None corrupt offsets or panic; all are cold-migration-acceptable for
+slice 1 and should be addressed in the downgrade/admin-polish slice:
+
+- **Unfiltered `ListGroups` / `DescribeGroups`** report the converted group as
+  `classic` (state `Empty`), because the classic actor is enumerated and the
+  classic snapshot pass wins the dedup. The JVM `kafka-streams-groups.sh --list`
+  (`types_filter=["streams"]`) reports it correctly as `streams`; only the broad
+  unfiltered view is wrong.
+- **`DeleteGroups`** targets the classic actor and only checks classic emptiness,
+  so it could delete the converted group's offset home out from under the live
+  streams group. Guard this in slice 2.
+- **Steady-state test gap:** add a restart-after-conversion replay test and a
+  post-conversion `DescribeGroups`/`ListGroups` assertion.
+
 ## 8. Coverage map
 
 - §1 goal (offset continuity) → tests §6.3.

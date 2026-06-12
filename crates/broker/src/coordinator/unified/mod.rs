@@ -450,9 +450,10 @@ impl GroupCoordinator {
             }
         }
 
-        // Drained classic group → convert. Tombstone the k2 GroupMetadata so
-        // log-replay does not resurrect this group as classic after a restart.
-        // Flip the type lock to Streams; the classic actor (if any) stays in
+        // Drained classic group → convert. Tombstone the classic k2 GroupMetadata
+        // to clear any persisted classic metadata (defensive + matching the
+        // KIP-848 upgrade flip; a no-op on replay when none was persisted). Flip
+        // the type lock to Streams; the classic actor (if any) stays in
         // `self.groups` so its committed_offsets remain accessible to
         // `OffsetFetch` without a full replay cycle.
         let batch = classic_group_metadata_tombstone_batch(group_id, now_ms);
