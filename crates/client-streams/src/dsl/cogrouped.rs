@@ -329,12 +329,10 @@ where
                         vs.clone(),
                     );
             }
-            // cogroup caching deferred — needs suppression on the cogroup forward
-            // path (the merge passthrough forwards unconditionally, so a cached
-            // store would double-emit: once on the immediate forward, once on the
-            // flush of the deduped change). Uncached = correct emit-on-update.
-            let _ = caching;
-            state.topology.mark_store_caching(&store_for_reg, false);
+            // Per-input aggregators suppress their immediate forward when this
+            // store is cached; the merge passthrough then only relays the cache
+            // flush's deduped change. Honor Materialized::with_caching.
+            state.topology.mark_store_caching(&store_for_reg, caching);
         });
         let suppress = crate::dsl::ktable::kv_suppress_factory::<K, VOut, KS, VS>(
             key_serde.clone(),
@@ -499,13 +497,12 @@ mod tests {
 
     use crate::dsl::StreamsBuilder;
 
-    /// Regression: a cogroup result store must NOT be record-cached even with a
-    /// positive cache budget. The cogroup merge passthrough forwards every change
-    /// unconditionally (no `TupleForwarder` suppression), so caching the store
-    /// would double-emit — once on the immediate forward, once on the flush of the
-    /// deduped change. Sub-task 3d-ii leaves cogroup stores uncached; this pins it.
+    /// Cogroup store is record-cached when the budget is positive and caching is
+    /// enabled (the default). Per-input aggregators suppress their immediate forward
+    /// when the store is cached; the merge passthrough relays only the deduped flush
+    /// change, so there is no double-emit.
     #[test]
-    fn cogroup_store_is_not_cached_with_positive_budget() {
+    fn cogroup_store_is_cached_with_positive_budget() {
         let b = StreamsBuilder::new();
         let g1 = b.stream::<String, String>(["in1"]).group_by_key();
         let g2 = b.stream::<String, String>(["in2"]).group_by_key();
@@ -519,16 +516,85 @@ mod tests {
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            // A generous (default-sized) budget: if the cogroup store were marked
-            // caching, it would land in cache_owner. It must not.
+            // A generous (default-sized) budget: a marked cogroup store must land
+            // in cache_owner.
             10_485_760,
         ))
         .unwrap();
         check!(
-            !g.cache_owner.contains_key("co"),
-            "cogroup store must stay uncached to avoid the merge double-emit, \
+            g.cache_owner.contains_key("co"),
+            "cogroup store must be cached when budget > 0 and caching enabled, \
              cache_owner = {:?}",
             g.cache_owner
         );
+    }
+}
+
+#[cfg(test)]
+mod cogroup_caching_tests {
+    use assert2::check;
+
+    use crate::dsl::StreamsBuilder;
+    use crate::store::backend::StoreBackend;
+    use crate::{I64Serde, Materialized, Produced, StringSerde};
+
+    /// Two co-grouped inputs aggregating into one cached KV store. Within a
+    /// single batch, in1 adds `len(value)` and in2 adds 1; the cached store is
+    /// marked (`cache_owner` rooted), both per-input forwards are suppressed,
+    /// and flush emits ONE deduped record whose value (3 = 2 + 1) proves in2's
+    /// aggregator read in1's buffered accumulator (cross-input read-your-writes).
+    #[test]
+    fn cogroup_caches_marks_and_dedups_cross_input() {
+        let b = StreamsBuilder::new();
+        let g1 = b.stream::<String, String>(["in1"]).group_by_key();
+        let g2 = b.stream::<String, String>(["in2"]).group_by_key();
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
+            .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+            .aggregate_explicit(
+                || 0i64,
+                Materialized::with(StringSerde, I64Serde).as_store("cg"),
+            )
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let mut g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(g.cache_owner.contains_key("cg"));
+        pollster::block_on(g.init_processors()).unwrap();
+
+        // in1: key "a" value "xx" (len 2) → acc 2 ; in2: key "a" value "z" → acc 3.
+        pollster::block_on(g.pipe("in1", Some(b"a"), b"xx", 0)).unwrap();
+        pollster::block_on(g.pipe("in2", Some(b"a"), b"z", 1)).unwrap();
+        // Both per-input forwards suppressed until flush.
+        check!(g.take_output().is_empty());
+
+        pollster::block_on(g.flush_caches()).unwrap();
+        let out = g.take_output();
+        check!(out.len() == 1);
+        check!(out[0].topic == "out");
+        // 3 = in1(+2) then in2(+1) — in2 read in1's buffered accumulator.
+        check!(out[0].value.as_ref().unwrap().as_ref() == 3i64.to_be_bytes());
+    }
+
+    /// `with_caching(false)`: the cogroup store stays uncached even with budget.
+    #[test]
+    fn cogroup_uncached_when_caching_off() {
+        let b = StreamsBuilder::new();
+        let g1 = b.stream::<String, String>(["in1"]).group_by_key();
+        let g2 = b.stream::<String, String>(["in2"]).group_by_key();
+        g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
+            .cogroup(g2, |_k, _v: &String, acc| acc + 1)
+            .aggregate_explicit(
+                || 0i64,
+                Materialized::with(StringSerde, I64Serde)
+                    .as_store("cg")
+                    .with_caching(false),
+            )
+            .to_stream()
+            .to_explicit("out", Produced::with(StringSerde, I64Serde));
+        let built = b.build("app").unwrap();
+        let g =
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        check!(!g.cache_owner.contains_key("cg"));
     }
 }
