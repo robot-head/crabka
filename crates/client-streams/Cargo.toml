@@ -17,13 +17,13 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-protocol = { version = "0.3.4", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.3.5", path = "../protocol", default-features = false }
 # Schema-registry serdes (Avro/Protobuf/JSON) are a first-class, always-on part
 # of the streams client — no feature gate.
-crabka-schema-serde = { version = "0.3.4", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
-crabka-client-core = { version = "0.3.4", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.4", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.4", path = "../client-producer" }
+crabka-schema-serde = { version = "0.3.5", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
+crabka-client-core = { version = "0.3.5", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.5", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.5", path = "../client-producer" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
@@ -39,7 +39,7 @@ pollster = "0.4"
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
-crabka-broker = { version = "0.3.4", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3.5", path = "../broker", features = ["test-helpers"] }
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }

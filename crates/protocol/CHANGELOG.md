@@ -5,6 +5,21 @@ All notable changes to `crabka-protocol` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.5] — 2026-06-12
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Format generated code with prettyplease before rustfmt ([#495](https://github.com/robot-head/crabka/pull/495))
+
+
+### <!-- 2 -->🚜 Refactor
+
+
+- Emit all generated code via quote! instead of writeln! ([#493](https://github.com/robot-head/crabka/pull/493))
+
+
 ## [0.1.1] — 2026-05-29
 
 

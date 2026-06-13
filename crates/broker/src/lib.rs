@@ -117,7 +117,7 @@
 //! `acks=all` produces survive arbitrary single-broker failures with
 //! no data loss and no zombie writes.
 
-#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.4")]
+#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.5")]
 
 pub mod api_catalog;
 pub(crate) mod assign_dirs;

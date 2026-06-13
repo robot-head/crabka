@@ -42,7 +42,7 @@
 //! assert_eq!(key[1].0, "user");
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-metadata/0.3.4")]
+#![doc(html_root_url = "https://docs.rs/crabka-metadata/0.3.5")]
 
 pub mod acl;
 mod error;

@@ -51,7 +51,7 @@
 //! `key` and `value` are raw `Bytes`, so schema-registry or serde integration
 //! can be layered without constraining the producer API.
 
-#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.4")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.5")]
 
 mod accumulator;
 mod builder;
