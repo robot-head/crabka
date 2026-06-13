@@ -1,0 +1,112 @@
+name: publish-images
+
+on:
+  push:
+    tags:
+      # release-plz tags every crate per release at the shared workspace
+      # version (e.g. crabka-broker-v0.3.5) — there is no bare `v0.3.5` tag.
+      # Anchor on the broker tag so the image set publishes exactly once per
+      # release rather than once per crate tag.
+      - "crabka-broker-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to publish (default: git tag or 'edge')"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write  # for GHCR
+
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange + apko
+        run: |
+          go install chainguard.dev/melange@latest
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Determine image tag
+        id: tags
+        run: |
+          if [[ -n "${{ inputs.tag }}" ]]; then
+            VERSION="${{ inputs.tag }}"
+          elif [[ "${GITHUB_REF_NAME}" == crabka-broker-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#crabka-broker-v}"
+          else
+            VERSION="edge"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache melange/cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .melange-cache
+          key: melange-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            melange-${{ runner.os }}-
+
+      - name: Build APK packages (single compile for all images)
+        run: |
+          mkdir -p packages .melange-cache
+          melange keygen
+          melange build packaging/melange/crabka.yaml \
+            --source-dir . \
+            --signing-key melange.rsa \
+            --arch x86_64 \
+            --runner docker \
+            --cache-dir "$PWD/.melange-cache" \
+            --out-dir packages/
+
+      - name: Publish images to DockerHub + GHCR
+        env:
+          VERSION: ${{ steps.tags.outputs.version }}
+        run: |
+          for image in crabka-broker crabka-operator crabka-schema-registry; do
+            DOCKERHUB_IMAGE="robothead/${image}"
+            GHCR_IMAGE="ghcr.io/robot-head/${image}"
+            TAGS=(
+              "${DOCKERHUB_IMAGE}:${VERSION}"
+              "${GHCR_IMAGE}:${VERSION}"
+            )
+            # Also tag as latest on proper release tags (not edge builds).
+            if [[ "${VERSION}" != "edge" ]]; then
+              TAGS+=(
+                "${DOCKERHUB_IMAGE}:latest"
+                "${GHCR_IMAGE}:latest"
+              )
+            fi
+            apko publish "packaging/apko/${image}.yaml" \
+              "${TAGS[@]}" \
+              --arch x86_64 \
+              --repository-append "$PWD/packages" \
+              --keyring-append "$PWD/melange.rsa.pub"
+          done

@@ -76,20 +76,30 @@ jobs:
         run: |
           melange version
           apko version
-      - name: Build crabka-operator + crabka-broker apk + OCI images
+      - name: Cache melange/cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: .melange-cache
+          key: melange-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            melange-${{ runner.os }}-
+      - name: Build crabka apks + per-image OCI tarballs
         run: |
-          mkdir -p packages
+          mkdir -p packages .melange-cache
           melange keygen
-          for recipe in crabka-operator crabka-broker crabka-schema-registry; do
-            melange build "packaging/melange/${recipe}.yaml" \
-              --source-dir . \
-              --signing-key melange.rsa \
-              --arch x86_64 \
-              --runner docker \
-              --out-dir packages/
-            apko build "packaging/apko/${recipe}.yaml" \
-              "${recipe}:e2e" \
-              "${recipe}.tar" \
+          # One compile produces every binary; apko then carves out one image
+          # per service from the shared package set.
+          melange build packaging/melange/crabka.yaml \
+            --source-dir . \
+            --signing-key melange.rsa \
+            --arch x86_64 \
+            --runner docker \
+            --cache-dir "$PWD/.melange-cache" \
+            --out-dir packages/
+          for image in crabka-operator crabka-broker crabka-schema-registry; do
+            apko build "packaging/apko/${image}.yaml" \
+              "${image}:e2e" \
+              "${image}.tar" \
               --arch x86_64 \
               --repository-append "$PWD/packages" \
               --keyring-append "$PWD/melange.rsa.pub"
@@ -857,6 +867,11 @@ jobs:
             [ "$loaded" = "${img}:e2e" ] || docker tag "$loaded" "${img}:e2e"
             kind load docker-image "${img}:e2e" --name crabka-sr-e2e
           done
+          # Pre-load the curl image used in the schema round-trip test so the
+          # pod doesn't need to pull from DockerHub mid-test (rate-limits / slow
+          # pulls cause spurious failures in that step).
+          docker pull curlimages/curl:8.10.1
+          kind load docker-image curlimages/curl:8.10.1 --name crabka-sr-e2e
       - name: Install prometheus-operator CRDs
         run: |
           PROM_OP_TAG=v0.79.2
@@ -915,6 +930,9 @@ jobs:
             kubectl get deploy sr-sr -n default >/dev/null 2>&1 && break || sleep 5
           done
           kubectl rollout status -n default deploy/sr-sr --timeout=300s
+          # Wait for the operator to mark the SR Ready, ensuring the service
+          # endpoints are registered before the curl round-trip hits them.
+          kubectl wait schemaregistry/sr -n default --for=condition=Ready --timeout=120s
       - name: Register + fetch a schema (round-trip) via an in-cluster curl pod
         run: |
           BASE=http://sr-sr.default.svc.cluster.local:8081

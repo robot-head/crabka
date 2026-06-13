@@ -77,7 +77,7 @@ build-driver-image:
     @echo "→ building crabka-bench-driver apk + OCI"
     mkdir -p packages
     test -f melange.rsa || melange keygen
-    melange build packaging/melange/bench-driver.yaml \
+    melange build packaging/melange/crabka.yaml \
         --source-dir . --signing-key melange.rsa \
         --arch x86_64 --runner docker --out-dir packages/
     apko build packaging/apko/bench-driver.yaml \
