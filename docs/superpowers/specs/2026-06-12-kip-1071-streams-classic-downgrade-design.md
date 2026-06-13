@@ -146,11 +146,13 @@ A new function in the existing streams-migration module
    the group-level k15 `GroupMetadata`, k17 `Topology`, k18 `PartitionMetadata`,
    and k19 `TargetAssignmentMetadata`, plus per-member k16 `MemberMetadata`, k20
    `TargetAssignmentMember`, and k21 `CurrentMemberAssignment` for any persisted
-   member. Built with the existing `PendingStreamsRecords` encoder
-   (`streams/persistence.rs`), whose `None` entries already emit null-value
-   tombstones. **k15 is load-bearing**: a surviving k15 would reconstruct a
-   streams group on bootstrap replay (the streams analog of the consumer
-   downgrade's load-bearing k6 tombstone, `migration.rs:185-211`).
+   member. Built **directly** from the `streams/persistence.rs` key encoders
+   (`encode_group_metadata_key`, etc.) emitting `Record { value: None }` per key —
+   not via `PendingStreamsRecords`, whose group-level fields are `Option<Value>`
+   (present-or-absent) and so cannot express a group-level null-value tombstone
+   (only its per-member `Vec` fields can). **k15 is load-bearing**: a surviving
+   k15 would reconstruct a streams group on bootstrap replay (the streams analog
+   of the consumer downgrade's load-bearing k6 tombstone, `migration.rs:185-211`).
 3. Force the type lock `Streams → Classic` via a new
    `mark_classic_after_streams_downgrade(group_id)` that **overrides** the prior
    `Streams` lock AND drops the `streams_seeds` / `streams_seeds_cache` for the
