@@ -304,39 +304,36 @@ pub async fn start_n_node_with(
         out.push((broker, cfg, dir));
     }
 
-    // Wait (bounded) for the static set to elect a leader and for *some* node
-    // to report the full `n`-voter committed set. With a static set every node
-    // is seeded with all `n` voters from the start, so once a leader emerges
-    // the count is `n` immediately; we poll all handles so whichever node won
-    // the election satisfies the check.
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let mut any_leader_with_full_set = false;
-        for (h, _, _) in &out {
-            if h.controller_leader_id().await.is_some() && h.voter_count_for_test() >= n_usize {
-                any_leader_with_full_set = true;
-                break;
-            }
-        }
-        if any_leader_with_full_set {
-            break;
-        }
-        if std::time::Instant::now() > deadline {
-            let counts: Vec<usize> = out
-                .iter()
-                .map(|(h, _, _)| h.voter_count_for_test())
-                .collect();
-            let mut leaders = Vec::with_capacity(out.len());
-            for (h, _, _) in &out {
-                leaders.push(h.controller_leader_id().await);
-            }
-            return Err(BrokerError::Startup(format!(
-                "static cluster did not elect a leader with {n_usize} voters within 30s \
-                 (voter counts={counts:?}, leader_ids={leaders:?})"
-            )));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait (event-driven, bounded) for the static set to elect a leader. We await
+    // the first broker's controller leader watch channel rather than the panicking
+    // `wait_until_controller_leader()` helper, because a timeout here must return
+    // `Err` so `start_n_node_with_retry` can retry (a panic would not be retried).
+    let mut leader_rx = out[0].0.watch_leader_for_test();
+    let elected = tokio::time::timeout(
+        Duration::from_secs(30),
+        leader_rx.wait_for(|l| matches!(l, Some(id) if *id != 0)),
+    )
+    .await;
+    let timed_out = match &elected {
+        Err(_elapsed) => true,      // tokio::time::timeout fired
+        Ok(Err(_recv_err)) => true, // watch channel closed unexpectedly
+        Ok(Ok(_)) => false,
+    };
+    if timed_out {
+        let counts: Vec<usize> = out
+            .iter()
+            .map(|(h, _, _)| h.voter_count_for_test())
+            .collect();
+        return Err(BrokerError::Startup(format!(
+            "static cluster did not elect a leader with {n_usize} voters within 30s \
+             (voter counts={counts:?})"
+        )));
     }
+    assert!(
+        out.iter()
+            .any(|(h, _, _)| h.voter_count_for_test() >= n_usize),
+        "leader elected but voter set not committed to {n_usize}"
+    );
 
     Ok(out)
 }
@@ -359,31 +356,19 @@ pub async fn start_n_node_with_retry(n: u64) -> Vec<(BrokerHandle, BrokerConfig,
     panic!("cluster start failed after 3 attempts; last error: {last_err:?}");
 }
 
-/// Poll every broker's controller image until each one sees `n`
-/// brokers registered. Required before any test that needs the
-/// partition's replica set to include all `n` nodes (`CreateTopics`
-/// reads `image.brokers()` to pick replicas; a race here silently
-/// degrades to a smaller replica set).
+/// Await every broker's controller image until each one sees `n` brokers
+/// registered. Required before any test that needs the partition's replica set
+/// to include all `n` nodes (`CreateTopics` reads `image.brokers()` to pick
+/// replicas; a race here silently degrades to a smaller replica set).
+///
+/// Uses the panicking `wait_until_brokers_registered` awaiter — that is
+/// intentional here: this helper is called directly from tests (not from the
+/// `start_n_node_with_retry` path), so a timeout should fail the test loudly.
 pub async fn wait_for_all_brokers_registered(
     cluster: &[(BrokerHandle, BrokerConfig, TempDir)],
     n: usize,
 ) {
-    let deadline = std::time::Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all = true;
-        for (h, _, _) in cluster {
-            if h.broker_count().await < n {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "brokers didn't converge on {n}-broker view within 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for (h, _, _) in cluster {
+        h.wait_until_brokers_registered(n).await;
     }
 }
