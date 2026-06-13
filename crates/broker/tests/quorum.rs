@@ -70,22 +70,20 @@ async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
 async fn three_node_cluster_elects_leader() {
     let _g = cluster_lock().lock().await;
     let cluster = support::start_n_node_with_retry(3).await;
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut leaders = std::collections::HashSet::new();
-        for (h, _, _) in &cluster {
-            if let Some(l) = h.controller_leader_id().await {
-                leaders.insert(l);
-            }
-        }
-        if leaders.len() == 1 && !leaders.contains(&0) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("leader not converged within 2 min; current views: {leaders:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Each node's controller leader channel converges to the same elected id.
+    for (h, _, _) in &cluster {
+        h.wait_until_controller_leader().await;
     }
+    let mut leaders = std::collections::HashSet::new();
+    for (h, _, _) in &cluster {
+        if let Some(l) = h.controller_leader_id().await {
+            leaders.insert(l);
+        }
+    }
+    assert!(
+        leaders.len() == 1 && !leaders.contains(&0),
+        "leader not converged: {leaders:?}"
+    );
     for (h, _, _) in cluster {
         h.shutdown().await;
     }
@@ -124,17 +122,14 @@ async fn create_topic_on_any_node_propagates() {
         .build()
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let m = c2.send(MetadataRequest::default()).await.unwrap();
-        if m.topics.iter().any(|t| t.name.as_deref() == Some("prop")) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("topic not propagated to node 2 within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    // Await the topic in node 2's controller image (deterministic), then the
+    // client metadata reflects it immediately.
+    cluster[2].0.wait_until_partition_present("prop", 0).await;
+    let m = c2.send(MetadataRequest::default()).await.unwrap();
+    assert!(
+        m.topics.iter().any(|t| t.name.as_deref() == Some("prop")),
+        "topic 'prop' not visible to node 2"
+    );
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -162,26 +157,28 @@ async fn leader_kill_recovers() {
     let killed_node_id = leader_cfg.node_id;
     leader.shutdown().await;
 
-    // Survivors elect a *new* leader within 2 min. We must wait for a
-    // leader whose id is different from the one we just killed —
-    // openraft's `current_leader` can briefly continue reporting the
-    // dead leader during the lease window before the election fires.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut leaders = std::collections::HashSet::new();
-        for (h, _, _) in &cluster {
-            if let Some(l) = h.controller_leader_id().await {
-                leaders.insert(l);
-            }
-        }
-        if leaders.len() == 1 && !leaders.contains(&0) && !leaders.contains(&killed_node_id) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("no new leader within 2 min of kill; saw leaders={leaders:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Survivors elect a new leader (id != killed). Await each survivor's leader
+    // channel, then assert convergence to a single new leader.
+    for (h, _, _) in &cluster {
+        let mut rx = h.watch_leader_for_test();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            rx.wait_for(|l| matches!(l, Some(id) if *id != 0 && *id != killed_node_id)),
+        )
+        .await
+        .expect("no new leader within 30s after kill")
+        .expect("leader channel closed");
     }
+    let mut leaders = std::collections::HashSet::new();
+    for (h, _, _) in &cluster {
+        if let Some(l) = h.controller_leader_id().await {
+            leaders.insert(l);
+        }
+    }
+    assert!(
+        leaders.len() == 1 && !leaders.contains(&0) && !leaders.contains(&killed_node_id),
+        "no single new leader: {leaders:?}"
+    );
 
     // CreateTopics against a survivor succeeds.
     let c = Client::builder()
