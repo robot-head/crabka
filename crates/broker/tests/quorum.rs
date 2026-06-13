@@ -11,20 +11,15 @@
 //! openraft to converge on a leader, and `cluster_lock` serializes the
 //! tests so three slow startups accumulate.
 
-// Test-file pragmatism: deadlines are expressed as `if Instant::now() > … { panic!(…) }`
-// for readability (each panic message describes the test scenario it
-// covers) and as plain `u64::try_from(i+1).unwrap()`-style casts when
-// turning 1-based `i` into broker ids. Hoisting these into named
-// assertions / helpers would obscure the per-test narrative.
-#![allow(
-    clippy::manual_assert,
-    clippy::cast_possible_truncation,
-    clippy::default_trait_access
-)]
+// Test-file pragmatism: broker ids are formed with plain
+// `u64::try_from(i+1).unwrap()`-style casts when turning 1-based `i` into broker
+// ids, and topics are built with `..Default::default()`. Hoisting these into
+// named helpers would obscure the per-test narrative.
+#![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
 
 use assert2::assert;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crabka_broker::{BrokerConfig, BrokerHandle};
 use tokio::sync::Mutex;
@@ -50,19 +45,13 @@ use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopics
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use tempfile::TempDir;
 
-/// Poll each broker until at least one of them reports a leader.
+/// Await every broker reporting an elected (non-zero) controller leader.
+/// Event-driven (each handle awaits its leader watch channel); stricter than the
+/// old "any one node" poll and exactly the precondition the callers need before
+/// issuing client requests to a specific node.
 async fn wait_for_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) {
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        for (h, _, _) in cluster {
-            if h.controller_leader_id().await.is_some() {
-                return;
-            }
-        }
-        if Instant::now() > deadline {
-            panic!("no leader within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for (h, _, _) in cluster {
+        h.wait_until_controller_leader().await;
     }
 }
 
