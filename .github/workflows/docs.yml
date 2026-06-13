@@ -51,7 +51,7 @@ jobs:
           cp docs/*.png website/static/images/ || true
       - uses: azure/setup-helm@v5
         with:
-          version: v3.21.1
+          version: v4.2.1
       - name: Package Helm charts and generate repository index
         run: |
           mkdir -p website/static/charts

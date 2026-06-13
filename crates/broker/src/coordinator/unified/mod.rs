@@ -221,6 +221,19 @@ impl GroupCoordinator {
         self.group_types.insert(group_id.into(), GroupType::Streams);
     }
 
+    /// After an in-place streams→classic downgrade (KIP-1071), drop the streams
+    /// seed so a respawn does not re-hydrate the group as streams, and record it as
+    /// classic. Unlike [`Self::mark_classic`] (first-mark-wins via `or_insert`),
+    /// this FORCES the type to `Classic`, overriding any prior `Streams` lock — the
+    /// mirror of [`Self::mark_streams_after_upgrade`]. Drops the **streams** seeds
+    /// (`streams_seeds`/`streams_seeds_cache`), not the consumer `seeds` that
+    /// [`Self::mark_classic_after_downgrade`] drops.
+    pub fn mark_classic_after_streams_downgrade(&self, group_id: &str) {
+        self.streams_seeds.remove(group_id);
+        self.streams_seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Classic);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())
@@ -462,6 +475,54 @@ impl GroupCoordinator {
         Ok(ConvertOutcome::Converted)
     }
 
+    /// KIP-1071 cold downgrade: if `group_id` is a drained streams group, convert
+    /// it to a classic group in place — tombstone its streams records (k15–21),
+    /// force the type lock to `Classic`, and drop the streams actor. Committed
+    /// offsets (k0/k1) and the offset-home `groups` entry survive. Returns
+    /// `NotStreams` for non-streams groups (caller serves the classic `JoinGroup`
+    /// normally), `Converted` after a successful flip, or `RejectLiveMembers` when
+    /// the streams group still has live members (online streams migration is
+    /// unsupported in Kafka). The mirror of [`Self::try_convert_classic_to_streams`].
+    pub(crate) async fn try_convert_streams_to_classic(
+        self: &Arc<Self>,
+        group_id: &str,
+        now_ms: i64,
+    ) -> Result<streams::migration::DowngradeOutcome, crate::error::BrokerError> {
+        use streams::actor::StreamsGroupActorMessage;
+        use streams::migration::{DowngradeOutcome, streams_records_tombstone_batch};
+
+        if self.group_type(group_id) != Some(GroupType::Streams) {
+            return Ok(DowngradeOutcome::NotStreams);
+        }
+
+        // Reject if the streams actor (if any) still has live members; a drained
+        // group falls through to convert. Mirrors slice 1's `ClassicInspect` check.
+        if let Some(handle) = self.find_streams(group_id) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if handle
+                .tx
+                .send(StreamsGroupActorMessage::Describe { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+                && !view.members.is_empty()
+            {
+                return Ok(DowngradeOutcome::RejectLiveMembers);
+            }
+        }
+
+        // Drained streams group → convert. Tombstone the group-level streams keys
+        // (k15/k17/k18/k19), flip the lock to Classic, drop the streams actor. A
+        // drained group's per-member records (k16/k20/k21) were already tombstoned
+        // when those members left/expired, so no member ids are needed here. The
+        // offset-home `groups` entry stays.
+        let batch = streams_records_tombstone_batch(group_id, &[], now_ms);
+        self.offsets_log.append(batch).await?;
+        self.mark_classic_after_streams_downgrade(group_id);
+        self.streams_groups.remove(group_id);
+        Ok(DowngradeOutcome::Converted)
+    }
+
     /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
     /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
     /// `group_type="streams"` entries without a per-group `Describe` hop.
@@ -541,6 +602,12 @@ impl GroupCoordinator {
     /// Drop a **classic** group from the registry. `NonEmpty` if it still has
     /// live members; `NotFound` if unknown / consumer.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        // KIP-1071: a Streams-locked group is deleted through the streams path —
+        // never fall through to the classic path, which would remove the offset-home
+        // `groups` entry out from under a live streams group.
+        if self.group_type(group_id) == Some(GroupType::Streams) {
+            return self.delete_streams_group(group_id).await;
+        }
         let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
         // `ClassicInspect` replies ONLY when the actor's LIVE group is classic;
         // a consumer-kind group drops the sender, so `rx.await` errors and we
@@ -559,6 +626,46 @@ impl GroupCoordinator {
             return Err(DeleteGroupError::NonEmpty);
         }
         self.groups.remove(group_id);
+        Ok(())
+    }
+
+    /// Delete a **streams** group (KIP-1071): `NonEmpty` if the streams actor still
+    /// has live members; `NotFound` if no streams actor exists for the id; else
+    /// tombstone its records (k15–21), drop the streams actor, and remove the
+    /// offset-home `groups` entry. `Internal` if the tombstone append fails.
+    async fn delete_streams_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        // A Streams-locked id with no live streams actor reports NotFound — the
+        // safe failure mode (never silently drop an offset home). In practice a
+        // live streams group always has an actor (respawned by finalize_bootstrap
+        // on replay), so this only guards a genuinely-absent group.
+        let handle = self
+            .find_streams(group_id)
+            .ok_or(DeleteGroupError::NotFound)?;
+        let (tx, rx) = oneshot::channel();
+        handle
+            .tx
+            .send(streams::actor::StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .map_err(|_| DeleteGroupError::NotFound)?;
+        let view = rx.await.map_err(|_| DeleteGroupError::NotFound)?;
+        if !view.members.is_empty() {
+            return Err(DeleteGroupError::NonEmpty);
+        }
+        // Drained group: per-member records (k16/k20/k21) were already tombstoned
+        // on member leave/expiry, so only the group-level keys remain.
+        let batch = streams::migration::streams_records_tombstone_batch(
+            group_id,
+            &[],
+            crate::time_util::now_ms(),
+        );
+        self.offsets_log
+            .append(batch)
+            .await
+            .map_err(|_| DeleteGroupError::Internal)?;
+        self.streams_groups.remove(group_id);
+        self.groups.remove(group_id);
+        self.streams_seeds.remove(group_id);
+        self.streams_seeds_cache.remove(group_id);
         Ok(())
     }
 
@@ -929,6 +1036,12 @@ impl GroupCoordinator {
 
     /// Apply a tombstone for a streams-group key. Removes the corresponding
     /// entry from both `streams_seeds` and `streams_seeds_cache`.
+    ///
+    /// A `GroupMetadata` (k15) tombstone is the "load-bearing" downgrade
+    /// tombstone (KIP-1071): it removes the entire seed so `finalize_bootstrap`
+    /// does not respawn the group as streams, and it removes the `Streams` type
+    /// lock so a subsequent classic `GroupMetadata` (k2) write can re-lock it as
+    /// `Classic`.
     pub fn replay_streams_tombstone(&self, key: &streams::persistence::StreamsGroupKey) {
         use streams::persistence::StreamsGroupKey as K;
         let group_id = match key {
@@ -940,8 +1053,17 @@ impl GroupCoordinator {
             | K::TargetAssignmentMember { group_id, .. }
             | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
         };
+        // k15 GroupMetadata tombstone: purge the whole seed so finalize_bootstrap
+        // does not respawn this group as streams; also drop the Streams type lock
+        // so a later classic join can re-lock it as Classic.
+        if matches!(key, K::GroupMetadata { .. }) {
+            self.streams_seeds.remove(group_id);
+            self.streams_seeds_cache.remove(group_id);
+            self.group_types.remove(group_id);
+            return;
+        }
         let scrub = |seed: &mut StreamsGroupSeed| match key {
-            K::GroupMetadata { .. } => seed.group_epoch = 0,
+            K::GroupMetadata { .. } => unreachable!("handled above"),
             K::MemberMetadata { member_id, .. } => {
                 seed.members.remove(member_id);
             }
@@ -1174,6 +1296,19 @@ mod tests {
         // The forced upgrade variant MUST override it:
         c.mark_streams_after_upgrade("g");
         assert!(c.group_type("g") == Some(GroupType::Streams));
+    }
+
+    #[test]
+    fn mark_classic_after_streams_downgrade_forces_classic_over_streams() {
+        let c = make_coord();
+        c.mark_streams("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
+        // mark_classic is first-mark-wins, so it must NOT override an existing lock:
+        c.mark_classic("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
+        // The forced downgrade variant MUST override it:
+        c.mark_classic_after_streams_downgrade("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Classic));
     }
 
     #[test]

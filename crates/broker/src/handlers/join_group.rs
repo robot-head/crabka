@@ -17,6 +17,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
+use crate::time_util::now_ms;
 
 pub(crate) async fn handle(
     broker: &Broker,
@@ -61,6 +62,30 @@ pub(crate) async fn handle(
     // same id can detect it as a classic group and either convert or reject it
     // (KIP-1071 cold upgrade). First-mark-wins: a prior `mark_next_gen` (or any
     // other type lock) from a consumer-protocol group is not overridden.
+    // KIP-1071 cold downgrade: a classic JoinGroup for a drained streams group
+    // converts it in place to a classic group; a streams group with live members
+    // is rejected (online streams migration is unsupported). Non-streams group
+    // ids pass through unchanged.
+    match broker
+        .group_coordinator
+        .try_convert_streams_to_classic(&req.group_id, now_ms())
+        .await
+    {
+        Ok(
+            crate::coordinator::unified::streams::migration::DowngradeOutcome::RejectLiveMembers,
+        ) => {
+            return encode(
+                version,
+                &JoinGroupResponse {
+                    error_code: codes::GROUP_ID_NOT_FOUND,
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(_) => {} // NotStreams | Converted → serve the classic JoinGroup below
+        Err(e) => return Err(e),
+    }
+
     broker.group_coordinator.mark_classic(&req.group_id);
     let handle = broker
         .group_coordinator
