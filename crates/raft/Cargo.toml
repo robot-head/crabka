@@ -36,5 +36,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+stateright = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -8,7 +8,7 @@ pub use crate::types::NodeId;
 
 /// A simulated/logical instant in milliseconds. Time is always injected, never
 /// read from the system clock (keeps the state machine deterministic).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SimInstant(pub u64);
 
 impl SimInstant {
@@ -23,14 +23,14 @@ impl SimInstant {
 pub type LeaderEpoch = u32;
 
 /// Identifies a voter by node id + directory id (Kafka's `ReplicaKey`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReplicaKey {
     pub id: NodeId,
     pub directory_id: Uuid,
 }
 
 /// A log position: an offset together with the leader epoch that produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LogOffsetMetadata {
     pub offset: i64,
     pub epoch: LeaderEpoch,
@@ -51,7 +51,7 @@ pub trait LogView {
 
 /// The durable quorum state — the logical content of the `quorum-state` file.
 /// This is the in-memory model; file persistence is owned by the log layer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuorumState {
     pub cluster_id: Uuid,
     pub leader_epoch: LeaderEpoch,

@@ -33,6 +33,7 @@ pub(crate) fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -
 /// takes the current time as an injected [`SimInstant`], and produces a list of
 /// [`Action`]s for the caller to execute. It never touches the clock, the wire,
 /// or the log bytes directly.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct QuorumStateMachine {
     me: NodeId,
     state: QuorumState,

@@ -3,13 +3,13 @@
 use crate::kraft::types::{LeaderEpoch, NodeId};
 
 /// A peer's view of its log tip, carried in Vote/Fetch requests.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LogEnd {
     pub last_epoch: LeaderEpoch,
     pub last_offset: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Event {
     /// The election timer fired.
     ElectionTimeout,
