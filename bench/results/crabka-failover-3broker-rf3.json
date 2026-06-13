@@ -1,0 +1,44 @@
+{
+  "scenario": {
+    "name": "failover",
+    "mode_tag": "ci",
+    "msg_size_bytes": 1024,
+    "key_size_bytes": 0,
+    "partitions": 12,
+    "replication_factor": 3,
+    "producers": 1,
+    "consumers": 1,
+    "mode": {
+      "kind": "failover"
+    },
+    "acks": "all",
+    "compression": "none",
+    "linger_ms": 5,
+    "batch_size": 16384,
+    "duration_s": 120,
+    "warmup_s": 20,
+    "failover": null
+  },
+  "stack": "crabka",
+  "topology": {
+    "partitions": 12,
+    "replication_factor": 3,
+    "broker_count": 3
+  },
+  "wallclock_start_unix_ms": null,
+  "wallclock_end_unix_ms": null,
+  "throughput": null,
+  "producer_latency_ms": null,
+  "consumer_e2e_latency_ms": null,
+  "resource": null,
+  "first_ack_ms": null,
+  "errors": [
+    "SCENARIO_NOT_SUPPORTED: Crabka KafkaNodePool enforces replicas=1 per pool. Multiple KafkaNodePools (broker-0, broker-1, broker-2) each start independent single-broker KRaft clusters; they do not federate into a single multi-broker cluster. Topic creation with replication_factor=3 fails with INVALID_REPLICATION_FACTOR (Kafka error 38) because each broker only knows about itself. The failover scenario requires rf=3 and is architecturally not supported by Crabka in the 3broker-rf3 topology."
+  ],
+  "notes": [
+    "Crabka is designed for single-broker deployments (KafkaNodePool.spec.replicas max=1). The 3broker-rf3 topology achieves 3x parallelism via 3 independent pools, not 3-way replication. Failover with data durability guarantees (rf=3, min.insync.replicas=2) is not available."
+  ],
+  "startup_ms": 24097,
+  "skipped": true,
+  "skip_reason": "INVALID_REPLICATION_FACTOR: Crabka does not support multi-broker rf>1 clusters via KafkaNodePools"
+}

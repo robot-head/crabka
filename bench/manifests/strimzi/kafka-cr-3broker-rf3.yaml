@@ -18,10 +18,24 @@ spec:
   resources:
     requests:
       cpu: "2"
-      memory: 4Gi
+      memory: 6Gi
     limits:
       cpu: "4"
-      memory: 8Gi
+      memory: 12Gi
+  template:
+    pod:
+      metadata:
+        labels:
+          bench-pool: beefy
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-nodepool
+                    operator: In
+                    values:
+                      - beefy-pool
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: Kafka
