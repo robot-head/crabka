@@ -6,14 +6,6 @@ metadata:
   namespace: default
 spec:
   kafkaVersion: "3.7.0"
-  # Per-listener auth shape (not active here; benchmark assumes plaintext):
-  # listeners:
-  #   - name: internal
-  #     port: 9092
-  #     type: internal
-  #     tls: true
-  #     authentication:
-  #       type: scram-sha-512  # or: tls (mTLS), or: scram-sha-256
   config:
     log.retention.hours: "24"
     default.replication.factor: "3"
@@ -25,13 +17,13 @@ spec:
 apiVersion: crabka.io/v1alpha1
 kind: KafkaNodePool
 metadata:
-  name: brokers
+  name: broker-0
   namespace: default
   labels:
     crabka.io/cluster: demo
 spec:
   roles: [Controller, Broker]
-  replicas: 3
+  replicas: 1
   nodeIdStart: 0
   storage:
     type: PersistentClaim
@@ -40,7 +32,71 @@ spec:
   resources:
     requests:
       cpu: "2"
-      memory: 4Gi
+      memory: 6Gi
     limits:
       cpu: "4"
-      memory: 8Gi
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    metadata:
+      labels:
+        bench-pool: beefy
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: broker-1
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 1
+  storage:
+    type: PersistentClaim
+    size: 20Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    metadata:
+      labels:
+        bench-pool: beefy
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: broker-2
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 2
+  storage:
+    type: PersistentClaim
+    size: 20Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    metadata:
+      labels:
+        bench-pool: beefy
