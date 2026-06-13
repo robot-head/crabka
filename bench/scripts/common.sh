@@ -40,6 +40,7 @@ kafka_kind() {
 
 # wait_kafka_ready STACK [TIMEOUT_S]
 #   poll the Kafka CR until status.conditions[type=Ready].status == True
+#   (and for Crabka: all BENCH_BROKER_COUNT brokers are listed as ready)
 #   or TIMEOUT_S elapses. Echo the elapsed wall-clock seconds.
 wait_kafka_ready() {
   local stack="$1"
@@ -50,7 +51,9 @@ wait_kafka_ready() {
     kafka|strimzi) kind="kafka.kafka.strimzi.io"; name="demo" ;;
   esac
   local started=$(date +%s)
-  local now status
+  local now status msg
+  # Number of brokers we expect (set by run-scenario.sh before sourcing common.sh).
+  local expected_brokers="${BENCH_BROKER_COUNT:-1}"
   while :; do
     now=$(date +%s)
     if (( now - started > timeout )); then
@@ -61,12 +64,25 @@ wait_kafka_ready() {
     status=$(kubectl get "$kind" "$name" -n "$BENCH_NAMESPACE" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
     if [[ "$status" == "True" ]]; then
+      # For Crabka multi-broker: also verify all brokers have joined.
+      # The operator sets message like "3/3 brokers ready across 3 pool(s)".
+      if [[ "$stack" == "crabka" && "$expected_brokers" -gt 1 ]]; then
+        msg=$(kubectl get "$kind" "$name" -n "$BENCH_NAMESPACE" \
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || echo "")
+        if echo "$msg" | grep -q "${expected_brokers}/${expected_brokers} brokers ready"; then
+          echo "$(( now - started ))"
+          return 0
+        fi
+        sleep 5
+        continue
+      fi
       echo "$(( now - started ))"
       return 0
     fi
     sleep 5
   done
 }
+
 
 # wait_kafka_topic_ready STACK TOPIC [TIMEOUT_S]
 wait_kafka_topic_ready() {
