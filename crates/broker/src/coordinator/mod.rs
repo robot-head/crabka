@@ -19,6 +19,8 @@ pub enum DeleteGroupError {
     NotFound,
     /// Group still has at least one live member.
     NonEmpty,
+    /// A durable side effect of the delete (e.g. tombstone append) failed.
+    Internal,
 }
 
 /// Read-only projection of a classic `Group` for the `ListGroups` /
