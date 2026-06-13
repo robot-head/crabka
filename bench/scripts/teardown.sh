@@ -47,7 +47,9 @@ esac
 for i in $(seq 1 60); do
   case "$STACK" in
     crabka)
-      pods=$(kubectl get pods -n "$BENCH_NAMESPACE" -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l | tr -d ' ')
+      pods=$(kubectl get pods -n "$BENCH_NAMESPACE" \
+        -l "app.kubernetes.io/instance=demo,app.kubernetes.io/managed-by=crabka-operator" \
+        -o name 2>/dev/null | wc -l | tr -d ' ')
       ;;
     *)
       pods=$(kubectl get pods -n "$BENCH_NAMESPACE" -l strimzi.io/cluster=demo -o name 2>/dev/null | wc -l | tr -d ' ')
