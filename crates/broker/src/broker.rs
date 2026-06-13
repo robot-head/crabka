@@ -744,6 +744,183 @@ impl BrokerHandle {
             .cloned()
     }
 
+    /// Test-only: subscribe to the controller's metadata-image watch channel.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn watch_image_for_test(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::sync::Arc<crabka_metadata::MetadataImage>> {
+        self._broker.controller.watch_image()
+    }
+
+    /// Test-only: subscribe to the controller's leader watch channel.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn watch_leader_for_test(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
+        self._broker.controller.watch_leader()
+    }
+
+    /// Test-only: borrow the local `Partition` (for its `append_notify` / LEO).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn partition_for_test(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Option<std::sync::Arc<crate::partition::Partition>> {
+        self._broker.partitions.get(topic, partition)
+    }
+
+    /// Test-only: await until `pred` holds for the controller metadata image.
+    /// Subscribes to the image watch channel and `.await`s changes — no polling
+    /// sleep. Bounded by a 30s safety-net so a stuck condition fails loudly.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_for_image<F>(&self, pred: F)
+    where
+        F: Fn(&crabka_metadata::MetadataImage) -> bool,
+    {
+        let mut rx = self._broker.controller.watch_image();
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                // Scope the borrow so it is dropped before the await.
+                if pred(&rx.borrow_and_update()) {
+                    return;
+                }
+                if rx.changed().await.is_err() {
+                    return; // sender dropped (broker shutting down)
+                }
+            }
+        })
+        .await;
+        assert!(res.is_ok(), "wait_for_image timed out after 30s");
+    }
+
+    /// Test-only: await until a non-zero controller leader is elected.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_controller_leader(&self) -> crabka_raft::NodeId {
+        let mut rx = self.watch_leader_for_test();
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(id) = *rx.borrow_and_update()
+                    && id != 0
+                {
+                    return id;
+                }
+                if rx.changed().await.is_err() {
+                    return 0;
+                }
+            }
+        })
+        .await;
+        let id = res.expect("wait_until_controller_leader timed out after 30s");
+        assert!(id != 0, "leader channel closed before a leader was elected");
+        id
+    }
+
+    /// Test-only: await until this node's metadata image sees `>= n` brokers.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_brokers_registered(&self, n: usize) {
+        self.wait_for_image(|img| img.brokers().count() >= n).await;
+    }
+
+    /// Test-only: await until `topic-partition` is present in the metadata image.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_partition_present(&self, topic: &str, partition: i32) {
+        self.wait_for_image(|img| img.partition(topic, partition).is_some())
+            .await;
+    }
+
+    /// Test-only: await until `topic-partition`'s leader equals `leader` with a
+    /// non-zero leader epoch (i.e. a real election outcome).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_partition_leader_is(&self, topic: &str, partition: i32, leader: u64) {
+        self.wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.leader == leader && p.leader_epoch > 0)
+        })
+        .await;
+    }
+
+    /// Test-only: await until `topic-partition`'s leader is some non-`exclude`
+    /// node with a non-zero epoch.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_partition_leader_changed(
+        &self,
+        topic: &str,
+        partition: i32,
+        exclude: u64,
+    ) {
+        self.wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.leader != 0 && p.leader != exclude && p.leader_epoch > 0)
+        })
+        .await;
+    }
+
+    /// Test-only: await until `topic-partition`'s ISR has exactly `len` members.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_isr_len(&self, topic: &str, partition: i32, len: usize) {
+        self.wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.isr.len() == len)
+        })
+        .await;
+    }
+
+    /// Test-only: await until the LOCAL log for `topic-partition` reaches
+    /// `log_end_offset >= min`. Uses the partition's `append_notify`; if the
+    /// partition has not yet materialized locally, awaits a metadata image change
+    /// and retries. The `notified()` future is created BEFORE the offset check to
+    /// avoid a lost wakeup.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                    let notified = part.append_notify.notified();
+                    if part.log_end_offset() >= min {
+                        return;
+                    }
+                    notified.await;
+                } else {
+                    let mut img = self._broker.controller.watch_image();
+                    if img.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "local log_end_offset({topic}-{partition}) did not reach {min} within 30s"
+        );
+    }
+
     /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
     /// broker has served since startup. The KIP-320 proactive-validation
     /// integration test reads this before and after a `Consumer::poll` to
