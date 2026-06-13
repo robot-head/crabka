@@ -221,6 +221,19 @@ impl GroupCoordinator {
         self.group_types.insert(group_id.into(), GroupType::Streams);
     }
 
+    /// After an in-place streams→classic downgrade (KIP-1071), drop the streams
+    /// seed so a respawn does not re-hydrate the group as streams, and record it as
+    /// classic. Unlike [`Self::mark_classic`] (first-mark-wins via `or_insert`),
+    /// this FORCES the type to `Classic`, overriding any prior `Streams` lock — the
+    /// mirror of [`Self::mark_streams_after_upgrade`]. Drops the **streams** seeds
+    /// (`streams_seeds`/`streams_seeds_cache`), not the consumer `seeds` that
+    /// [`Self::mark_classic_after_downgrade`] drops.
+    pub fn mark_classic_after_streams_downgrade(&self, group_id: &str) {
+        self.streams_seeds.remove(group_id);
+        self.streams_seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Classic);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())
@@ -460,6 +473,53 @@ impl GroupCoordinator {
         self.offsets_log.append(batch).await?;
         self.mark_streams_after_upgrade(group_id);
         Ok(ConvertOutcome::Converted)
+    }
+
+    /// KIP-1071 cold downgrade: if `group_id` is a drained streams group, convert
+    /// it to a classic group in place — tombstone its streams records (k15–21),
+    /// force the type lock to `Classic`, and drop the streams actor. Committed
+    /// offsets (k0/k1) and the offset-home `groups` entry survive. Returns
+    /// `NotStreams` for non-streams groups (caller serves the classic `JoinGroup`
+    /// normally), `Converted` after a successful flip, or `RejectLiveMembers` when
+    /// the streams group still has live members (online streams migration is
+    /// unsupported in Kafka). The mirror of [`Self::try_convert_classic_to_streams`].
+    pub(crate) async fn try_convert_streams_to_classic(
+        self: &Arc<Self>,
+        group_id: &str,
+        now_ms: i64,
+    ) -> Result<streams::migration::DowngradeOutcome, crate::error::BrokerError> {
+        use streams::actor::StreamsGroupActorMessage;
+        use streams::migration::{DowngradeOutcome, streams_records_tombstone_batch};
+
+        if self.group_type(group_id) != Some(GroupType::Streams) {
+            return Ok(DowngradeOutcome::NotStreams);
+        }
+
+        // Inspect the live streams actor (if any) for remaining members.
+        let mut member_ids: Vec<String> = Vec::new();
+        if let Some(handle) = self.find_streams(group_id) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if handle
+                .tx
+                .send(StreamsGroupActorMessage::Describe { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+            {
+                if !view.members.is_empty() {
+                    return Ok(DowngradeOutcome::RejectLiveMembers);
+                }
+                member_ids = view.members.into_iter().map(|m| m.member_id).collect();
+            }
+        }
+
+        // Drained streams group → convert. Tombstone k15–21, flip the lock to
+        // Classic, drop the streams actor. The offset-home `groups` entry stays.
+        let batch = streams_records_tombstone_batch(group_id, &member_ids, now_ms);
+        self.offsets_log.append(batch).await?;
+        self.mark_classic_after_streams_downgrade(group_id);
+        self.streams_groups.remove(group_id);
+        Ok(DowngradeOutcome::Converted)
     }
 
     /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
@@ -1174,6 +1234,19 @@ mod tests {
         // The forced upgrade variant MUST override it:
         c.mark_streams_after_upgrade("g");
         assert!(c.group_type("g") == Some(GroupType::Streams));
+    }
+
+    #[test]
+    fn mark_classic_after_streams_downgrade_forces_classic_over_streams() {
+        let c = make_coord();
+        c.mark_streams("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
+        // mark_classic is first-mark-wins, so it must NOT override an existing lock:
+        c.mark_classic("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
+        // The forced downgrade variant MUST override it:
+        c.mark_classic_after_streams_downgrade("g");
+        assert_eq!(c.group_type("g"), Some(GroupType::Classic));
     }
 
     #[test]
