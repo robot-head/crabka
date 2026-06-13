@@ -1694,6 +1694,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-logfmt"
+version = "0.3.6"
+dependencies = [
+ "assert2",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "crabka-metadata"
 version = "0.3.6"
 dependencies = [
@@ -1724,6 +1734,7 @@ dependencies = [
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-core",
+ "crabka-logfmt",
  "crabka-metadata",
  "crabka-rebalancer",
  "crabka-security",
@@ -1921,6 +1932,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-logfmt",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
@@ -2007,6 +2019,7 @@ name = "crabka-telemetry"
 version = "0.3.6"
 dependencies = [
  "assert2",
+ "crabka-logfmt",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

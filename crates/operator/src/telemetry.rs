@@ -12,12 +12,13 @@ pub type SharedRegistry = Arc<Mutex<Registry>>;
 /// no-ops if a global subscriber is already installed (e.g., in tests
 /// that call this more than once across a process).
 pub fn init_tracing(filter: &str) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let env = tracing_subscriber::EnvFilter::try_new(filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env)
-        .with_target(true)
-        .json()
+    let _ = tracing_subscriber::registry()
+        .with(crabka_logfmt::layer(env, std::io::stdout))
         .try_init();
 }
 

@@ -192,12 +192,18 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "crabka_schema_registry=info,info".into()),
-        )
-        .init();
+    // Structured Cloud Logging-friendly JSON to stdout (see `crabka_logfmt`),
+    // so GKE / Cloud Logging ingests fields rather than ANSI-coloured text.
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "crabka_schema_registry=info,info".into());
+        tracing_subscriber::registry()
+            .with(crabka_logfmt::layer(filter, std::io::stdout))
+            .init();
+    }
 
     let args = Args::parse();
     let crabka_schema_registry::cli::SecurityOutput {
