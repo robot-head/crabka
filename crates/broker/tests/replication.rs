@@ -4,31 +4,22 @@
 //! `log_end_offset`. Exercises the full replication path:
 //! supervisor reconcile, follower Fetch loop, and
 //! `Partition::replicate_batch`.
-//!
-//! Deadlines are 2 minutes throughout — same reasoning as `quorum.rs`:
-//! a cold 3-broker cluster on a hosted CI runner can take tens of
-//! seconds for openraft to converge, and `cluster_lock` serializes the
-//! tests so slow startups accumulate.
 
-// Test-file pragmatism: deadlines are expressed as
-// `if Instant::now() > … { panic!(…) }` for readability, and casts
-// turn 1-based `i` into broker ids. Hoisting these into named helpers
-// would obscure the per-test narrative.
+// Test-file pragmatism: casts turn 1-based `i` into broker ids.
+// Hoisting these into named helpers would obscure the per-test narrative.
 #![allow(
-    clippy::manual_assert,
     clippy::cast_possible_truncation,
     clippy::default_trait_access,
     // The full propagation test reads top-to-bottom as one scenario
     // (bring up cluster → wait for brokers → CreateTopics → wait for
     // propagation → produce → wait for convergence). Splitting it into
-    // helpers obscures the per-stage `deadline`/poll pattern without
-    // making any individual piece reusable.
+    // helpers obscures the per-stage narrative without making any
+    // individual piece reusable.
     clippy::too_many_lines
 )]
 
 use assert2::assert;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -55,23 +46,8 @@ async fn replication_factor_three_propagates_to_all_followers() {
     let cluster = support::start_n_node_with_retry(3).await;
 
     // Wait for all 3 brokers to register in each other's MetadataImage.
-    // Iterate sequentially with `.await` (no `block_on`).
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_see_three = true;
-        for (h, _, _) in &cluster {
-            if h.broker_count().await < 3 {
-                all_see_three = false;
-                break;
-            }
-        }
-        if all_see_three {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("brokers didn't converge on 3-broker view within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_brokers_registered(3).await;
     }
 
     // `start_n_node_with_retry` binds brokers in order, so cluster[0]
@@ -109,22 +85,8 @@ async fn replication_factor_three_propagates_to_all_followers() {
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the topic to propagate to every broker's MetadataImage.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_have = true;
-        for (h, _, _) in &cluster {
-            if !h.has_partition("repl", 0).await {
-                all_have = false;
-                break;
-            }
-        }
-        if all_have {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("topic 'repl' didn't propagate to all 3 brokers within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_partition_present("repl", 0).await;
     }
 
     // Produce 20 records to the leader.
@@ -166,19 +128,8 @@ async fn replication_factor_three_propagates_to_all_followers() {
     assert!(prod.responses[0].partition_responses[0].error_code == 0);
 
     // Wait until every broker's local log shows log_end_offset >= 20.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut offsets = Vec::with_capacity(cluster.len());
-        for (h, _, _) in &cluster {
-            offsets.push(h.local_log_end_offset("repl", 0).await.unwrap_or(0));
-        }
-        if offsets.iter().all(|&n| n >= 20) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("not all 3 brokers caught up to 20 records within 2 min; saw: {offsets:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_local_log_end_offset("repl", 0, 20).await;
     }
 
     for (h, _, _) in cluster {
@@ -192,22 +143,8 @@ async fn out_of_range_truncates_and_recovers() {
     let cluster = support::start_n_node_with_retry(3).await;
 
     // Same broker-discovery wait as the propagation test.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_see_three = true;
-        for (h, _, _) in &cluster {
-            if h.broker_count().await < 3 {
-                all_see_three = false;
-                break;
-            }
-        }
-        if all_see_three {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("brokers didn't converge on 3-broker view within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_brokers_registered(3).await;
     }
 
     // CreateTopics("oor", num_partitions=1, replication_factor=3) against
@@ -235,22 +172,8 @@ async fn out_of_range_truncates_and_recovers() {
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the topic to propagate to every broker's MetadataImage.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all_have = true;
-        for (h, _, _) in &cluster {
-            if !h.has_partition("oor", 0).await {
-                all_have = false;
-                break;
-            }
-        }
-        if all_have {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("topic 'oor' didn't propagate to all 3 brokers within 2 min");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_partition_present("oor", 0).await;
     }
 
     // Produce 50 records in 50 separate single-record batches so the
@@ -298,19 +221,8 @@ async fn out_of_range_truncates_and_recovers() {
     }
 
     // Wait for every broker's local log to catch up to 50.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut offsets = Vec::with_capacity(cluster.len());
-        for (h, _, _) in &cluster {
-            offsets.push(h.local_log_end_offset("oor", 0).await.unwrap_or(0));
-        }
-        if offsets.iter().all(|&n| n >= 50) {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("initial replication didn't reach 50 in 2 min: {offsets:?}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_local_log_end_offset("oor", 0, 50).await;
     }
 
     // Simulate broker 3 "falling behind past retention": truncate its
@@ -332,21 +244,10 @@ async fn out_of_range_truncates_and_recovers() {
 
     // Wait for broker 3 to converge again — log_end_offset should reach
     // 50 once it has fetched records 25..50 from the leader.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let lag = cluster[2]
-            .0
-            .local_log_end_offset("oor", 0)
-            .await
-            .unwrap_or(0);
-        if lag >= 50 {
-            break;
-        }
-        if Instant::now() > deadline {
-            panic!("broker 3 didn't recover from OFFSET_OUT_OF_RANGE in 2 min; saw log_end={lag}");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    cluster[2]
+        .0
+        .wait_until_local_log_end_offset("oor", 0, 50)
+        .await;
 
     for (h, _, _) in cluster {
         h.shutdown().await;
