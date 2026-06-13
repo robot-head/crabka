@@ -1030,6 +1030,12 @@ impl GroupCoordinator {
 
     /// Apply a tombstone for a streams-group key. Removes the corresponding
     /// entry from both `streams_seeds` and `streams_seeds_cache`.
+    ///
+    /// A `GroupMetadata` (k15) tombstone is the "load-bearing" downgrade
+    /// tombstone (KIP-1071): it removes the entire seed so `finalize_bootstrap`
+    /// does not respawn the group as streams, and it removes the `Streams` type
+    /// lock so a subsequent classic `GroupMetadata` (k2) write can re-lock it as
+    /// `Classic`.
     pub fn replay_streams_tombstone(&self, key: &streams::persistence::StreamsGroupKey) {
         use streams::persistence::StreamsGroupKey as K;
         let group_id = match key {
@@ -1041,8 +1047,17 @@ impl GroupCoordinator {
             | K::TargetAssignmentMember { group_id, .. }
             | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
         };
+        // k15 GroupMetadata tombstone: purge the whole seed so finalize_bootstrap
+        // does not respawn this group as streams; also drop the Streams type lock
+        // so a later classic join can re-lock it as Classic.
+        if matches!(key, K::GroupMetadata { .. }) {
+            self.streams_seeds.remove(group_id);
+            self.streams_seeds_cache.remove(group_id);
+            self.group_types.remove(group_id);
+            return;
+        }
         let scrub = |seed: &mut StreamsGroupSeed| match key {
-            K::GroupMetadata { .. } => seed.group_epoch = 0,
+            K::GroupMetadata { .. } => unreachable!("handled above"),
             K::MemberMetadata { member_id, .. } => {
                 seed.members.remove(member_id);
             }

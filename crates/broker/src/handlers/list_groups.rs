@@ -70,6 +70,8 @@ pub(crate) async fn handle(
         // KIP-1071: a Streams-locked group keeps its drained classic-kind
         // offset-home actor in this classic snapshot. Report it via the streams
         // pass (group_type="streams"), never here as "classic".
+        // NOTE: do NOT add to `emitted` here — the streams pass must still be
+        // able to emit it. The consumer pass is guarded separately below.
         if broker.group_coordinator.group_type(&s.group_id) == Some(GroupType::Streams) {
             continue;
         }
@@ -102,11 +104,19 @@ pub(crate) async fn handle(
     // These live in the unified coordinator's consumer registry, separate
     // from the classic group registry.
     let ng = &broker.group_coordinator;
+    // KIP-1071: consumer_group_ids returns ALL ids from self.groups (classic
+    // included). Filter out Streams-locked ids so a converted group does not
+    // appear here as "consumer" — it will be emitted by the streams pass.
+    let consumer_ids: Vec<String> = ng
+        .consumer_group_ids()
+        .into_iter()
+        .filter(|id| ng.group_type(id) != Some(GroupType::Streams))
+        .collect();
     append_next_gen(
         &mut groups,
         &mut emitted,
         "consumer",
-        ng.consumer_group_ids(),
+        consumer_ids,
         &req,
         states_active,
         types_active,
