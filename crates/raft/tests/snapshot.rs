@@ -19,17 +19,11 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 async fn wait_for_leader(controller: &crabka_raft::ControllerHandle) {
-    let deadline = std::time::Instant::now() + Duration::from_mins(2);
-    loop {
-        if controller.watch_leader().borrow().is_some() {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "no leader elected within 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut rx = controller.watch_leader();
+    tokio::time::timeout(Duration::from_secs(30), rx.wait_for(Option::is_some))
+        .await
+        .expect("no leader elected within 30s")
+        .expect("leader watch channel closed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
