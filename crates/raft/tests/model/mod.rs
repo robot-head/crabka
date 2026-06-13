@@ -12,12 +12,55 @@ use crabka_raft::kraft::action::{Action, TimerKind};
 use crabka_raft::kraft::event::{Event, LogEnd};
 use crabka_raft::kraft::role::Role;
 use crabka_raft::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
+use stateright::semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec};
 use stateright::{Model, Property};
 
 /// Constant logical time. Timeouts are modeled as nondeterministic actions, so
 /// the core never needs a varying clock; constant `now` keeps role deadlines
 /// constant and the state space finite.
 const NOW: SimInstant = SimInstant(0);
+
+/// Identifies a client request thread for the linearizability tester. Each
+/// `ClientAppend` uses a fresh id, so every "thread" has exactly one in-flight
+/// operation (invoke once, return once).
+pub type ClientId = u64;
+
+/// Sequential reference model of the committed log: appends return the assigned
+/// offset; a read returns the committed value sequence. A committed Kafka log is
+/// an append-only sequence (not a single-value register), so we define our own
+/// `SequentialSpec` rather than reuse the built-in register. The linearization
+/// point of an append is when the value enters the committed prefix (the
+/// leader's high-watermark passes its offset).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct KraftLogSpec {
+    committed: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LogOp {
+    Append(u64),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LogRet {
+    /// The committed client-value prefix (in commit order) up to and including
+    /// this append, observed at the moment it committed. Using the value prefix
+    /// rather than a physical offset avoids the leader-change control records
+    /// that occupy raft offsets, and makes a lost/reordered committed entry
+    /// produce an unserializable history.
+    Committed(Vec<u64>),
+}
+
+impl SequentialSpec for KraftLogSpec {
+    type Op = LogOp;
+    type Ret = LogRet;
+
+    fn invoke(&mut self, op: &Self::Op) -> Self::Ret {
+        let LogOp::Append(v) = op;
+        self.committed.push(*v);
+        LogRet::Committed(self.committed.clone())
+    }
+}
 
 /// In-memory replicated log: `epochs[i]` is the leader epoch of offset `i`.
 /// (A self-contained copy of the sim-harness `SimLog`, made `Eq + Hash` so it
@@ -92,25 +135,63 @@ pub struct Envelope {
 pub struct ModelState {
     pub nodes: BTreeMap<NodeId, NodeModel>,
     /// Unordered in-flight messages. `BTreeSet` => deterministic Hash/Eq and
-    /// identical duplicate envelopes collapse to one (we model duplication via
-    /// an explicit `DuplicateDeliver` action instead).
+    /// identical duplicate envelopes collapse to one (message duplication is
+    /// modeled by an explicit action in a later task).
     pub network: BTreeSet<Envelope>,
+    /// Linearizability auxiliary state, recomputed + fingerprinted per state.
+    pub linz: LinearizabilityTester<ClientId, KraftLogSpec>,
+    /// Client appends not yet observed committed, keyed by the leader-assigned
+    /// offset they were written at. When some node's high-watermark passes an
+    /// offset, that append's `on_return` is recorded.
+    pub pending: BTreeMap<i64, (ClientId, u64)>,
+    /// Authoritative committed client values, in commit order. Grown as appends
+    /// commit; the linearizability return values are checked against it.
+    pub committed: Vec<u64>,
+    /// Total client appends issued so far (bounded by `MAX_APPENDS`).
+    pub appends_issued: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ModelAction {
     Deliver(Envelope),
     Timeout(NodeId, TimerKind),
+    /// A client appends `value` (as `client`) to the single current leader.
+    ClientAppend(ClientId, u64),
 }
 
 pub struct ConsensusModel {
     pub voter_ids: Vec<NodeId>,
+    /// Max client appends issued across a path. `0` disables the client-append /
+    /// linearizability machinery entirely (election/log-matching focus).
+    pub max_appends: u32,
+    /// Cap on in-flight messages (state-space bound).
+    pub max_inflight: usize,
+    /// Cap on leader epoch (state-space bound).
+    pub max_epoch: LeaderEpoch,
 }
 
 impl ConsensusModel {
-    pub fn new(voter_ids: &[NodeId]) -> Self {
+    /// Election + log-matching focus: NO client appends, so the space stays the
+    /// small/fast one from the scaffolding task. Exercises leader election and
+    /// log replication safety across N voters.
+    pub fn elections(voter_ids: &[NodeId]) -> Self {
         Self {
             voter_ids: voter_ids.to_vec(),
+            max_appends: 0,
+            max_inflight: 3,
+            max_epoch: 2,
+        }
+    }
+
+    /// Linearizability focus: client appends ENABLED but with tight bounds, since
+    /// the linearizability tester (history in the fingerprinted state) makes the
+    /// space far larger. Kept small enough to exhaust exactly.
+    pub fn linearizable(voter_ids: &[NodeId], max_appends: u32) -> Self {
+        Self {
+            voter_ids: voter_ids.to_vec(),
+            max_appends,
+            max_inflight: 3,
+            max_epoch: 2,
         }
     }
 
@@ -214,6 +295,17 @@ impl ConsensusModel {
                     let log = &state.nodes[&id].log;
                     (log.last_epoch(), log.end_offset())
                 };
+                // Single outstanding fetch per follower (one Kafka fetch
+                // connection): a new fetch supersedes any in-flight one from this
+                // node. Without this, the unordered network could deliver a stale
+                // lower-offset fetch after a newer one, regressing the leader's
+                // recorded follower progress — which the production core forbids
+                // (`handle_fetch` overwrites `progress.fetch_offset`
+                // unconditionally, relying on per-follower fetch offsets arriving
+                // monotonically, as they do over a single TCP connection).
+                state
+                    .network
+                    .retain(|e| !(e.src == id && matches!(e.event, Event::ReceiveFetch { .. })));
                 state.network.insert(Envelope {
                     src: id,
                     dst: leader_id,
@@ -323,6 +415,33 @@ fn is_leader(n: &NodeModel) -> bool {
     n.machine.role().is_leader()
 }
 
+/// Record `on_return` for any pending append whose offset is now committed (the
+/// max high-watermark across nodes has passed it). Returns are recorded in
+/// ascending offset order — the order in which the committed prefix grows.
+fn settle_committed(state: &mut ModelState) {
+    let max_hwm = state
+        .nodes
+        .values()
+        .map(node_high_watermark)
+        .max()
+        .unwrap_or(0);
+    // Offsets strictly below the high-watermark are committed (HWM is one past
+    // the last committed offset).
+    let ready: Vec<i64> = state
+        .pending
+        .range(..max_hwm)
+        .map(|(&off, _)| off)
+        .collect();
+    for off in ready {
+        let (client, value) = state.pending.remove(&off).expect("pending entry exists");
+        state.committed.push(value);
+        let _ = state
+            .linz
+            .on_return(client, LogRet::Committed(state.committed.clone()))
+            .expect("matching invoke recorded");
+    }
+}
+
 impl Model for ConsensusModel {
     type State = ModelState;
     type Action = ModelAction;
@@ -348,6 +467,10 @@ impl Model for ConsensusModel {
         vec![ModelState {
             nodes,
             network: BTreeSet::new(),
+            linz: LinearizabilityTester::new(KraftLogSpec::default()),
+            pending: BTreeMap::new(),
+            committed: Vec::new(),
+            appends_issued: 0,
         }]
     }
 
@@ -369,6 +492,20 @@ impl Model for ConsensusModel {
                 _ => actions.push(ModelAction::Timeout(id, TimerKind::Election)),
             }
         }
+        // A client appends to the single current leader (only when the target is
+        // unambiguous and the append budget remains). A fresh client id per
+        // append keeps every linearizability "thread" single-op.
+        let leaders: Vec<NodeId> = state
+            .nodes
+            .iter()
+            .filter(|(_, n)| is_leader(n))
+            .map(|(&id, _)| id)
+            .collect();
+        if leaders.len() == 1 && state.appends_issued < self.max_appends {
+            let client = ClientId::from(state.appends_issued) + 1;
+            let value = u64::from(state.appends_issued) + 1;
+            actions.push(ModelAction::ClientAppend(client, value));
+        }
     }
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -387,7 +524,33 @@ impl Model for ConsensusModel {
                 };
                 self.step(&mut state, id, event);
             }
+            ModelAction::ClientAppend(client, value) => {
+                let leader = state
+                    .nodes
+                    .iter()
+                    .find(|(_, n)| is_leader(n))
+                    .map(|(&id, _)| id)?;
+                let epoch = state.nodes[&leader].machine.quorum_state().leader_epoch;
+                let offset = state.nodes[&leader].log.end_offset();
+                // Record the invocation, append at the leader, track until committed.
+                let _ = state
+                    .linz
+                    .on_invoke(client, LogOp::Append(value))
+                    .expect("fresh client id has no in-flight op");
+                state
+                    .nodes
+                    .get_mut(&leader)
+                    .expect("leader exists")
+                    .log
+                    .append_in_epoch(epoch, 1);
+                state.pending.insert(offset, (client, value));
+                state.appends_issued += 1;
+            }
         }
+        // After ANY transition, record `on_return` for appends whose offset is
+        // now committed (some node's high-watermark passed it). HWM advances on
+        // fetch deliveries, so commits land on later steps than the append.
+        settle_committed(&mut state);
         Some(state)
     }
 
@@ -413,20 +576,33 @@ impl Model for ConsensusModel {
                 }
                 true
             }),
+            // Safety: the committed log is linearizable — there exists a single
+            // total order of client appends consistent with every observed
+            // invoke/return. A lost or reordered committed entry has no such
+            // serialization.
+            Property::always("linearizable", |_, s: &ModelState| {
+                s.linz.serialized_history().is_some()
+            }),
+            // Anti-vacuity witness: a CLIENT append is actually committed.
+            // Without this, `linearizable` could hold vacuously because no
+            // client value ever committed (a control-record-only HWM advance
+            // would not count).
+            Property::sometimes("entry_committed", |m: &ConsensusModel, s: &ModelState| {
+                // Only required when client appends are enabled; a no-append
+                // config (election focus) satisfies this trivially.
+                m.max_appends == 0 || !s.committed.is_empty()
+            }),
         ]
     }
 
     fn within_boundary(&self, state: &Self::State) -> bool {
         // Bound the space HARD: stateright BFS/DFS keeps every visited unique
         // state in memory, so loose bounds OOM the machine. Cap in-flight
-        // messages and the maximum leader epoch tightly; these suffice to
-        // exercise election safety while keeping the reachable set small.
-        const MAX_INFLIGHT: usize = 4;
-        const MAX_EPOCH: LeaderEpoch = 3;
-        state.network.len() <= MAX_INFLIGHT
+        // messages and the maximum leader epoch per the model's config.
+        state.network.len() <= self.max_inflight
             && state
                 .nodes
                 .values()
-                .all(|n| n.machine.quorum_state().leader_epoch <= MAX_EPOCH)
+                .all(|n| n.machine.quorum_state().leader_epoch <= self.max_epoch)
     }
 }
