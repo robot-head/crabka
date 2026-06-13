@@ -13,16 +13,10 @@ if [ ! -f melange.rsa ]; then
   melange keygen
 fi
 
-# Build the crabka-operator apk.
-melange build packaging/melange/crabka-operator.yaml \
-  --source-dir "$WORK" \
-  --signing-key melange.rsa \
-  --arch x86_64 \
-  --runner "$RUNNER" \
-  --out-dir packages/
-
-# Build the crabka-broker apk (contains both crabka-broker and crabka binaries).
-melange build packaging/melange/crabka-broker.yaml \
+# Build every crabka apk with a single compile. The unified recipe emits one
+# subpackage per service (crabka-operator, crabka-broker, ...), so apko below
+# can carve each image out of the shared package set.
+melange build packaging/melange/crabka.yaml \
   --source-dir "$WORK" \
   --signing-key melange.rsa \
   --arch x86_64 \
