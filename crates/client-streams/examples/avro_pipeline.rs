@@ -3,16 +3,17 @@
 //! running broker (`127.0.0.1:9092`) and a Confluent-compatible registry
 //! (`http://127.0.0.1:8081`).
 //!
-//! Pipeline: read Avro `Order` records from `orders`, keep the paid ones, project
-//! each into an Avro `OrderSummary` (line-item count + discounted total), and
-//! write them to `order-summaries`. Every value crossing a topic boundary is a
-//! nested Avro record (structs, a `Vec`, an `Option`, and an enum) registered and
-//! resolved against the schema registry.
+//! Pipeline: read Avro `Order` records from `orders`, run them through a custom
+//! Processor-API node, keep the paid ones, project each into an Avro
+//! `OrderSummary` (line-item count + discounted total), and write them to
+//! `order-summaries`. Every value crossing a topic boundary is a nested Avro
+//! record (structs, a `Vec`, an `Option`, and an enum) registered and resolved
+//! against the schema registry.
 //!
 //! Run: `cargo run -p crabka-client-streams --example avro_pipeline`
 
 use apache_avro::AvroSchema;
-use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
+use crabka_client_streams::{DefaultSerde, Record, SchemaSerde, StreamsApp, impl_processor};
 use crabka_schema_serde::format::avro::AvroSerde;
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +89,23 @@ fn summarize(order: &Order) -> OrderSummary {
     }
 }
 
+struct PaidOrderSummarizer;
+impl_processor! {
+    impl PaidOrderSummarizer: (String, Order) -> (String, OrderSummary) {
+        async fn process(&mut self, ctx, r) {
+            if r.value.status != OrderStatus::Paid {
+                return;
+            }
+            let summary = summarize(&r.value);
+            ctx.forward(Record::new(
+                Some(summary.customer_id.clone()),
+                summary,
+                r.timestamp,
+            ));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = StreamsApp::builder()
@@ -99,8 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topology = app.streams_builder();
     topology
         .stream::<String, Order>(["orders"])
-        .filter(|_id, order| order.status == OrderStatus::Paid)
-        .map_values(summarize)
+        .process(|| PaidOrderSummarizer, std::iter::empty::<String>())
         .to("order-summaries");
 
     let mut streams = app.run(topology).await?;

@@ -303,14 +303,11 @@ mod tests {
     use std::collections::VecDeque;
 
     struct Upper;
-    #[async_trait]
-    impl Processor<String, String, String, String> for Upper {
-        async fn process(
-            &mut self,
-            ctx: &mut ProcessorContext<'_, '_, String, String>,
-            r: Record<String, String>,
-        ) {
-            ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+    crate::impl_processor! {
+        impl Upper: (String, String) -> (String, String) {
+            async fn process(&mut self, ctx, r) {
+                ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+            }
         }
     }
 
