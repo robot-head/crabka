@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.6] — 2026-06-13
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Drop rustdoc hidden-line syntax from README examples ([#498](https://github.com/robot-head/crabka/pull/498))
+
 ## [0.3.5] — 2026-06-12
 
 
