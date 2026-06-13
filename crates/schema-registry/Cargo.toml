@@ -27,6 +27,7 @@ crabka-client-producer = { version = "0.3.6", path = "../client-producer" }
 crabka-protocol = { version = "0.3.6", path = "../protocol", default-features = false }
 crabka-security = { version = "0.3.6", path = "../security" }
 crabka-authz = { version = "0.3.6", path = "../authz" }
+crabka-logfmt = { version = "0.3.6", path = "../logfmt" }
 crabka-metadata = { version = "0.3.6", path = "../metadata" }
 arc-swap = { workspace = true }
 base64 = { workspace = true }

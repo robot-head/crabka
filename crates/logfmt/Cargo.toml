@@ -1,0 +1,25 @@
+[package]
+name = "crabka-logfmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Structured-JSON (Cloud Logging-friendly) tracing log formatter shared across Crabka services"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-logfmt"
+readme = "README.md"
+keywords = ["kafka", "logging", "tracing", "json", "crabka"]
+categories = ["development-tools::debugging"]
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }

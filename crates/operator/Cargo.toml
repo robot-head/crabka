@@ -27,6 +27,7 @@ axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.3.6", path = "../client-admin" }
+crabka-logfmt = { version = "0.3.6", path = "../logfmt" }
 crabka-metadata = { version = "0.3.6", path = "../metadata" }
 crabka-security = { workspace = true }
 base64 = { workspace = true }

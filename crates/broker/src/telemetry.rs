@@ -1,7 +1,8 @@
 //! Broker tracing + OTLP distributed-tracing pipeline.
 //!
-//! The broker always installs a `tracing_subscriber` `fmt` layer (stdout,
-//! gated by the usual `RUST_LOG` `EnvFilter`). When OTLP export is
+//! The broker always installs a structured-JSON `tracing_subscriber` `fmt`
+//! layer (stdout, gated by the usual `RUST_LOG` `EnvFilter`) so GKE / Cloud
+//! Logging ingests fields rather than ANSI text. When OTLP export is
 //! configured via the environment, a second `tracing-opentelemetry` layer
 //! is attached that converts `tracing` spans into OpenTelemetry spans and
 //! batch-exports them over OTLP to a collector (gRPC `:4317` or
