@@ -9,11 +9,16 @@ on:
       - "crates/operator/**"
       - "crates/broker/**"
       - "crates/protocol/**"
+      - "charts/**"
       - ".github/workflows/docs.yml"
+    tags:
+      # Same anchor as publish-images: one Helm repo update per workspace release.
+      - "crabka-broker-v*"
   pull_request:
     paths:
       - "website/**"
       - "crates/docgen/**"
+      - "charts/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -44,6 +49,17 @@ jobs:
         run: |
           mkdir -p website/static/images
           cp docs/*.png website/static/images/ || true
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.21.1
+      - name: Package Helm charts and generate repository index
+        run: |
+          mkdir -p website/static/charts
+          for chart in charts/*/; do
+            helm package "$chart" -d website/static/charts/
+          done
+          helm repo index website/static/charts/ \
+            --url https://robot-head.github.io/crabka/charts/
       - name: Install Zola
         uses: taiki-e/install-action@v2
         with:
@@ -52,13 +68,13 @@ jobs:
         run: zola build
         working-directory: website
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/crabka-broker-v')
         uses: actions/upload-pages-artifact@v5
         with:
           path: website/public
 
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/crabka-broker-v')
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 45
