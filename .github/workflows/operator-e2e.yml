@@ -2969,6 +2969,19 @@ jobs:
       # runners Keycloak can still be in the first Quarkus configuration pass
       # at that point, so enable a generous startupProbe to gate liveness until
       # the HTTPS port is actually accepting connections.
+      #
+      # `resourcesPreset=none` + explicit `resources` — the chart's default
+      # preset caps the container at 768Mi, but Keycloak 26's in-process
+      # Quarkus augmentation (the `production=false` dev profile rebuilds the
+      # app on every boot) peaks around ~900Mi. At 768Mi that build runs right
+      # at the cgroup ceiling; on a CPU-contended shared runner a transient
+      # spike OOM-kills the build mid-write, leaving a truncated
+      # `quarkus-application.dat` that persists in the Bitnami
+      # `prepare-write-dirs` emptyDir across container restarts — so the pod
+      # crashloops forever on `EOFException` in SerializedApplication.read and
+      # the install's `--wait` burns its full timeout. Raise the limit to 2Gi
+      # (cpu 2 so the build finishes fast, shrinking the at-risk window) for
+      # ~2x headroom over the measured peak.
       # ─────────────────────────────────────────────────────────────────────
       - name: Install Bitnami Keycloak chart
         run: |
@@ -2992,6 +3005,11 @@ jobs:
             --set startupProbe.periodSeconds=10 \
             --set startupProbe.timeoutSeconds=5 \
             --set startupProbe.failureThreshold=120 \
+            --set resourcesPreset=none \
+            --set resources.requests.cpu=500m \
+            --set resources.requests.memory=1Gi \
+            --set resources.limits.cpu=2 \
+            --set resources.limits.memory=2Gi \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
@@ -3660,8 +3678,9 @@ jobs:
       # Install Bitnami Keycloak chart with TLS enabled.
       #
       # Same pin/config as kind-oauth — see that job's comment for context,
-      # including the startupProbe override that prevents liveness from killing
-      # slow first-boot Keycloak containers during Quarkus configuration.
+      # including the startupProbe + resources overrides that keep the Quarkus
+      # first-boot build from being OOM-killed (truncated build → EOFException
+      # crashloop) on a contended runner.
       # Introspection-mode validation still requires HTTPS to the
       # introspection + userinfo endpoints, so the CA bundle is still wired
       # via `tlsTrustedCertificates`.
@@ -3688,6 +3707,11 @@ jobs:
             --set startupProbe.periodSeconds=10 \
             --set startupProbe.timeoutSeconds=5 \
             --set startupProbe.failureThreshold=120 \
+            --set resourcesPreset=none \
+            --set resources.requests.cpu=500m \
+            --set resources.requests.memory=1Gi \
+            --set resources.limits.cpu=2 \
+            --set resources.limits.memory=2Gi \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
