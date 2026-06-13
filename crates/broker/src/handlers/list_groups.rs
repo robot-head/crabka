@@ -22,6 +22,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
@@ -66,6 +67,12 @@ pub(crate) async fn handle(
 
     // ── Classic groups (group_type "classic") ───────────────────────────
     for s in snapshots {
+        // KIP-1071: a Streams-locked group keeps its drained classic-kind
+        // offset-home actor in this classic snapshot. Report it via the streams
+        // pass (group_type="streams"), never here as "classic".
+        if broker.group_coordinator.group_type(&s.group_id) == Some(GroupType::Streams) {
+            continue;
+        }
         if !authorized(s.group_id.as_str()) {
             continue;
         }
