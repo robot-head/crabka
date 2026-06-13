@@ -48,8 +48,13 @@ case "$TOPOLOGY" in
   *) log "unknown topology '$TOPOLOGY'"; exit 2 ;;
 esac
 
-KAFKA_CR_PATH="$REPO_ROOT/bench/manifests/$STACK/kafka-cr-${TOPOLOGY}.yaml"
-TOPIC_PATH="$REPO_ROOT/bench/manifests/$STACK/kafkatopic-bench.yaml"
+manifest_stack="$STACK"
+if [[ "$manifest_stack" == "kafka" ]]; then
+  manifest_stack="strimzi"
+fi
+
+KAFKA_CR_PATH="$REPO_ROOT/bench/manifests/$manifest_stack/kafka-cr-${TOPOLOGY}.yaml"
+TOPIC_PATH="$REPO_ROOT/bench/manifests/$manifest_stack/kafkatopic-bench.yaml"
 JOB_TEMPLATE="$REPO_ROOT/bench/manifests/driver/job-template.yaml"
 RBAC_PATH="$REPO_ROOT/bench/manifests/driver/rbac.yaml"
 
@@ -92,16 +97,12 @@ envsubst < "$JOB_TEMPLATE" | kubectl apply -f -
 job_timeout=$(( BENCH_DURATION_S + BENCH_WARMUP_S + 300 ))
 wait_job_complete "$JOB_NAME" "$job_timeout"
 
-# Pull the result JSON out of the (now-completed) driver pod.
+# Pull the result JSON out of the (now-completed) driver pod logs.
 pod=$(kubectl get pod -n "$BENCH_NAMESPACE" -l "job-name=$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
-out_json="$BENCH_RESULTS_DIR/${STACK}-${SCENARIO}-${TOPOLOGY}.json"
-log "[$STACK/$SCENARIO/$TOPOLOGY] copying /results/run.json from $pod → $out_json"
+out_json="bench/results/${STACK}-${SCENARIO}-${TOPOLOGY}.json"
+log "[$STACK/$SCENARIO/$TOPOLOGY] extracting results from logs of pod $pod → $out_json"
 
-# Job pods may have already exited; kubectl cp works against completed
-# pods as long as ttlSecondsAfterFinished hasn't elapsed.
-kubectl cp -n "$BENCH_NAMESPACE" --retries=3 \
-  "${pod}:/results/run.json" "$out_json" \
-  -c driver
+kubectl logs -n "$BENCH_NAMESPACE" "$pod" -c driver | awk '/===RESULT_START===/{flag=1;next} /===RESULT_END===/{flag=0} flag' > "$out_json"
 
 # Augment the JSON with operator-latency captured here (the driver itself
 # can't observe T0 → Ready).
