@@ -15,8 +15,6 @@ use assert2::assert;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use tokio::time::sleep;
-
 use tempfile::TempDir;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
@@ -31,22 +29,18 @@ use crabka_protocol::records::{Record, RecordBatch};
 
 mod support;
 
-/// Poll the cluster until exactly one broker reports itself as the openraft
-/// controller leader. Returns the cluster index of that broker (0-based).
+/// Await until exactly one broker reports itself as the openraft controller
+/// leader. Returns the cluster index of that broker (0-based).
 async fn find_controller_leader(cluster: &[(BrokerHandle, BrokerConfig, TempDir)]) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        for (i, (h, cfg, _)) in cluster.iter().enumerate() {
-            if h.controller_leader_id().await == Some(cfg.node_id) {
-                return i;
-            }
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "no controller leader found within 10s"
-        );
-        sleep(Duration::from_millis(50)).await;
+    for (h, _, _) in cluster {
+        h.wait_until_controller_leader().await;
     }
+    for (i, (h, cfg, _)) in cluster.iter().enumerate() {
+        if h.controller_leader_id().await == Some(cfg.node_id) {
+            return i;
+        }
+    }
+    panic!("a leader was elected but no handle self-identifies as leader");
 }
 
 async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i16) {
@@ -69,14 +63,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         .await
         .expect("CreateTopics");
     assert!(resp.topics[0].error_code == 0, "CreateTopics: {resp:?}");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !broker.has_partition(name, 0).await {
-        assert!(
-            Instant::now() <= deadline,
-            "partition `{name}-0` never materialized locally"
-        );
-        sleep(Duration::from_millis(50)).await;
-    }
+    broker.wait_until_partition_present(name, 0).await;
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -170,41 +157,34 @@ async fn broker_death_elects_new_leader() {
     let dead = cluster.remove(0);
     dead.0.shutdown().await;
 
-    // Wait for election: poll the surviving brokers' metadata image
-    // until `partition.leader_id != 1` AND `leader_epoch > 0`.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut elected: Option<(i32, i32)> = None;
-    while Instant::now() < deadline {
-        // Read from cluster[0] which is now broker 2.
-        let client = Client::builder()
-            .bootstrap(cluster[0].1.listen_addr.to_string())
-            .build()
-            .await
-            .unwrap();
-        let resp = client
-            .send(MetadataRequest {
-                topics: Some(vec![MetadataRequestTopic {
-                    name: Some("elect".into()),
-                    ..Default::default()
-                }]),
+    // Wait for election: await until the surviving broker sees a new leader.
+    // cluster[0] is now broker 2 (broker 1 was removed above).
+    cluster[0]
+        .0
+        .wait_until_partition_leader_changed("elect", 0, 1)
+        .await;
+    let client = Client::builder()
+        .bootstrap(cluster[0].1.listen_addr.to_string())
+        .build()
+        .await
+        .unwrap();
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some("elect".into()),
                 ..Default::default()
-            })
-            .await
-            .expect("metadata");
-        if let Some(t) = resp
-            .topics
-            .iter()
-            .find(|t| t.name.as_deref() == Some("elect"))
-            && let Some(p) = t.partitions.first()
-            && p.leader_id != 1
-            && p.leader_epoch > 0
-        {
-            elected = Some((p.leader_id, p.leader_epoch));
-            break;
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    let (new_leader, new_epoch) = elected.expect("election did not happen within 10s");
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("metadata");
+    let t = resp
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some("elect"))
+        .expect("topic");
+    let p = t.partitions.first().expect("partition");
+    let (new_leader, new_epoch) = (p.leader_id, p.leader_epoch);
     assert!(
         new_leader == 2 || new_leader == 3,
         "unexpected new leader: {new_leader}"
@@ -324,37 +304,7 @@ async fn isr_expand_on_catchup() {
         .expect("promote reborn node 3 to voter");
 
     // 7. Wait for the partition's ISR to expand back to {1, 2, 3}.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut expanded = false;
-    while Instant::now() < deadline {
-        let client = Client::builder()
-            .bootstrap(bootstrap_1.clone())
-            .build()
-            .await
-            .unwrap();
-        let resp = client
-            .send(MetadataRequest {
-                topics: Some(vec![MetadataRequestTopic {
-                    name: Some("expand".into()),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            })
-            .await
-            .expect("metadata");
-        if let Some(t) = resp
-            .topics
-            .iter()
-            .find(|t| t.name.as_deref() == Some("expand"))
-            && let Some(p) = t.partitions.first()
-            && p.isr_nodes.len() == 3
-        {
-            expanded = true;
-            break;
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    assert!(expanded, "ISR did not expand back to 3 within 10s");
+    cluster[0].0.wait_until_isr_len("expand", 0, 3).await;
 
     reborn.shutdown().await;
     for (h, _, _) in cluster {
@@ -382,8 +332,11 @@ async fn produce_during_leader_failover() {
     let dead = cluster.remove(0);
     dead.0.shutdown().await;
 
-    // Wait briefly for election.
-    sleep(Duration::from_secs(4)).await;
+    // Wait for the new leader to be elected (node 1 was killed).
+    cluster[0]
+        .0
+        .wait_until_partition_leader_changed("failover", 0, 1)
+        .await;
 
     // Continue producing. The first attempt may hit NOT_LEADER_OR_FOLLOWER;
     // retry via bootstrap_2.

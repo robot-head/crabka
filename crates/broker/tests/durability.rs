@@ -99,16 +99,9 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
     );
     // CreateTopics ack means the controller's quorum committed the
     // metadata record, but the supervisor's reconcile loop materializes
-    // the partition locally asynchronously. Poll until it appears so
+    // the partition locally asynchronously. Wait until it appears so
     // subsequent Produce/Fetch don't race the materialization.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !broker.has_partition(name, 0).await {
-        assert!(
-            Instant::now() <= deadline,
-            "partition `{name}-0` never materialized locally after CreateTopics"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    broker.wait_until_partition_present(name, 0).await;
 }
 
 async fn produce_acks(
@@ -268,6 +261,10 @@ async fn read_committed_under_rf1_unchanged() {
         .await
         .unwrap();
 
+    // Await the records committed to the local log before polling the consumer
+    // so the consumer poll returns promptly rather than racing the commit.
+    broker.wait_until_local_log_end_offset("rctxn", 0, 3).await;
+
     let mut seen: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && Instant::now() < deadline {
@@ -288,8 +285,10 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     support::wait_for_all_brokers_registered(&cluster, 3).await;
     let bootstrap_1 = cluster[0].1.listen_addr.to_string();
     create_topic(&cluster[0].0, &bootstrap_1, "shrink", 3).await;
-    // Give follower replicators a moment to spawn and start fetching.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for all 3 replicas to join the ISR before killing broker 3
+    // so the scenario genuinely exercises ISR shrink rather than racing the
+    // initial ISR population.
+    cluster[0].0.wait_until_isr_len("shrink", 0, 3).await;
 
     // Kill broker 3 — its absence forces ISR to shrink within
     // replica_lag_time_max_ms (2s on CI), unblocking the acks=-1 produce.
