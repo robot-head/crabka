@@ -1,7 +1,9 @@
 //! Generic OTLP distributed-tracing pipeline for Crabka services.
 //!
-//! The consuming service always installs a `tracing_subscriber` `fmt` layer
-//! (stdout, gated by the usual `RUST_LOG` `EnvFilter`). When OTLP export is
+//! The consuming service always installs a structured-JSON `tracing_subscriber`
+//! `fmt` layer (stdout, gated by the usual `RUST_LOG` `EnvFilter`) so container
+//! log collectors (GKE / Cloud Logging, Loki, …) ingest each line as fields
+//! rather than ANSI-coloured human text. When OTLP export is
 //! configured via the environment, a second `tracing-opentelemetry` layer is
 //! attached that converts `tracing` spans into OpenTelemetry spans and
 //! batch-exports them over OTLP to a collector (gRPC `:4317` or
@@ -235,7 +237,7 @@ impl TelemetryGuard {
     }
 }
 
-/// Install the global `tracing` subscriber: a stdout `fmt` layer plus,
+/// Install the global `tracing` subscriber: a stdout JSON `fmt` layer plus,
 /// when `otlp` is `Some`, a batch OTLP export layer.
 ///
 /// - `fmt_default_filter`: the `fmt` layer's filter when `RUST_LOG` is unset.
@@ -253,7 +255,9 @@ pub fn init(
 ) -> Result<TelemetryGuard, TelemetryError> {
     let fmt_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(fmt_default_filter));
-    let fmt_layer = tracing_subscriber::fmt::layer().with_filter(fmt_filter);
+    // Structured Cloud Logging-friendly JSON to stdout (see `crabka_logfmt`),
+    // so GKE / Cloud Logging ingests fields rather than ANSI-coloured text.
+    let fmt_layer = crabka_logfmt::layer(fmt_filter, std::io::stdout);
 
     let Some(cfg) = otlp else {
         tracing_subscriber::registry().with(fmt_layer).init();
