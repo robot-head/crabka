@@ -180,6 +180,7 @@ const INIT_SCRIPT: &str = "set -eu\n\
 ORDINAL=\"${HOSTNAME##*-}\"\n\
 NODE_ID=$((NODE_ID_START + ORDINAL))\n\
 mkdir -p /var/lib/crabka/data\n\
+rm -rf /var/lib/crabka/data/lost+found\n\
 if [ ! -f /var/lib/crabka/data/.formatted ]; then\n\
   /usr/bin/crabka format --log-dir /var/lib/crabka/data --cluster-id \"$CRABKA_CLUSTER_ID\" --release-version \"$CRABKA_METADATA_VERSION\"\n\
   touch /var/lib/crabka/data/.formatted\n\

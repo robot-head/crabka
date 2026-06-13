@@ -90,7 +90,7 @@ jobs:
         env:
           VERSION: ${{ steps.tags.outputs.version }}
         run: |
-          for image in crabka-broker crabka-operator crabka-schema-registry; do
+          for image in crabka-broker crabka-operator crabka-schema-registry bench-driver; do
             DOCKERHUB_IMAGE="robothead/${image}"
             GHCR_IMAGE="ghcr.io/robot-head/${image}"
             TAGS=(

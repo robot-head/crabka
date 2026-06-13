@@ -37,7 +37,13 @@ spec:
           image: ${BENCH_DRIVER_IMAGE}
           imagePullPolicy: IfNotPresent
           command:
-            - /usr/bin/crabka-bench-driver
+            - /bin/sh
+            - -c
+            - |
+              /usr/bin/crabka-bench-driver
+              echo "===RESULT_START==="
+              cat /results/run.json
+              printf "\n===RESULT_END===\n"
           env:
             - name: BENCH_SCENARIO_PATH
               value: /etc/crabka-bench/scenarios/${BENCH_SCENARIO_NAME}.yaml
@@ -62,7 +68,7 @@ spec:
               mountPath: /results
           resources:
             requests:
-              cpu: "500m"
+              cpu: "100m"
               memory: 256Mi
             limits:
               cpu: "2"
