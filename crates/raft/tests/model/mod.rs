@@ -1,8 +1,9 @@
 //! Stateright model of the KIP-595/996 `KRaft` consensus core. The model state
 //! holds the REAL `QuorumStateMachine` per node plus an in-memory log and an
 //! unordered message network; `next_state` runs the production `on_event` and
-//! the checker explores every interleaving. Faults (loss/dup/crash) and the
-//! linearizability tester are layered in by later tasks.
+//! the checker explores every interleaving. The committed-log linearizability
+//! tester lives here too; message-loss/duplication and node crashes are layered
+//! in by a later task.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -147,7 +148,7 @@ pub struct ModelState {
     /// Authoritative committed client values, in commit order. Grown as appends
     /// commit; the linearizability return values are checked against it.
     pub committed: Vec<u64>,
-    /// Total client appends issued so far (bounded by `MAX_APPENDS`).
+    /// Total client appends issued so far (bounded by `ConsensusModel::max_appends`).
     pub appends_issued: u32,
 }
 
