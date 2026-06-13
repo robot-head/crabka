@@ -36,6 +36,12 @@ pub enum FileConfigError {
     /// (local backend) and `[remote_storage.s3]` (object-store backend).
     #[error("invalid config: {0}")]
     InvalidConfig(String),
+    /// A `controller_quorum_voters` entry is malformed (no `@`, non-numeric
+    /// node id) or its `<host>:<port>` could not be DNS-resolved within the
+    /// startup retry budget. The payload is the offending entry plus the
+    /// underlying reason.
+    #[error("invalid controller_quorum_voters entry: {0}")]
+    InvalidQuorumVoter(String),
 }
 
 /// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
@@ -71,6 +77,15 @@ pub struct FileConfig {
     /// default `usize::MAX` (unlimited).
     #[serde(default)]
     pub max_connections_per_ip: Option<usize>,
+
+    /// KIP-595 static controller quorum voter set. Each entry is
+    /// `<node_id>@<host>:<port>` pointing at a broker's controller listener
+    /// (port 9093). At apply time each host is DNS-resolved to a SocketAddr
+    /// (with retry, to ride out the StatefulSet headless-Service DNS startup
+    /// race) and the result replaces `BrokerConfig::controller_quorum_voters`.
+    /// Empty leaves the single self-voter the binary seeds (standalone).
+    #[serde(default)]
+    pub controller_quorum_voters: Vec<String>,
 
     #[serde(default)]
     pub listeners: Vec<FileListener>,
@@ -484,6 +499,12 @@ pub struct FileOAuthBearerConfig {
 
 /// Kafka protocol default for `sasl.kerberos.service.name`.
 const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
+
+/// Max DNS-resolution attempts per `controller_quorum_voters` entry, one
+/// second apart — a ~60s total budget to ride out the StatefulSet
+/// headless-Service DNS startup race for a peer pod that hasn't published
+/// its A record yet when this broker boots.
+const QUORUM_VOTER_DNS_ATTEMPTS: u32 = 60;
 
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
@@ -1063,7 +1084,71 @@ impl FileConfig {
             });
         }
 
+        // KIP-595 static multi-voter quorum. A non-empty list wholesale
+        // replaces the single self-voter the binary seeds; an empty list
+        // (standalone) is left untouched. `apply_to` is sync and runs once
+        // at startup before serving traffic, so blocking DNS + sleep is fine.
+        if !self.controller_quorum_voters.is_empty() {
+            let mut voters: Vec<(crabka_raft::NodeId, SocketAddr)> =
+                Vec::with_capacity(self.controller_quorum_voters.len());
+            for entry in &self.controller_quorum_voters {
+                voters.push(Self::resolve_quorum_voter(entry)?);
+            }
+            cfg.controller_quorum_voters = voters;
+        }
+
         Ok(())
+    }
+
+    /// Parse a single `controller_quorum_voters` entry of the form
+    /// `<node_id>@<host>:<port>` into a `(NodeId, SocketAddr)`. The host is
+    /// DNS-resolved in a bounded retry loop (up to
+    /// [`QUORUM_VOTER_DNS_ATTEMPTS`] attempts, one second apart) so a peer
+    /// pod's headless-Service DNS record that isn't yet populated when this
+    /// broker boots gets a chance to appear. Returns the first resolved
+    /// address.
+    ///
+    /// # Errors
+    ///
+    /// [`FileConfigError::InvalidQuorumVoter`] when the entry has no `@`, a
+    /// non-numeric node id, or its `<host>:<port>` cannot be resolved within
+    /// the retry budget.
+    fn resolve_quorum_voter(
+        entry: &str,
+    ) -> Result<(crabka_raft::NodeId, SocketAddr), FileConfigError> {
+        use std::net::ToSocketAddrs;
+
+        let (id_str, host_port) = entry.split_once('@').ok_or_else(|| {
+            FileConfigError::InvalidQuorumVoter(format!(
+                "{entry:?}: expected `<node_id>@<host>:<port>` (missing `@`)"
+            ))
+        })?;
+        let node_id: crabka_raft::NodeId = id_str.parse().map_err(|e| {
+            FileConfigError::InvalidQuorumVoter(format!(
+                "{entry:?}: invalid node id {id_str:?}: {e}"
+            ))
+        })?;
+
+        let mut last_err: Option<String> = None;
+        for attempt in 0..QUORUM_VOTER_DNS_ATTEMPTS {
+            match host_port.to_socket_addrs() {
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        return Ok((node_id, addr));
+                    }
+                    last_err = Some("resolved to zero addresses".to_string());
+                }
+                Err(e) => last_err = Some(e.to_string()),
+            }
+            // Don't sleep after the final attempt.
+            if attempt + 1 < QUORUM_VOTER_DNS_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        Err(FileConfigError::InvalidQuorumVoter(format!(
+            "{entry:?}: could not resolve {host_port:?} after {QUORUM_VOTER_DNS_ATTEMPTS} attempts: {}",
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )))
     }
 }
 
@@ -1362,6 +1447,74 @@ max_connections_per_ip = 8
         // Omitted → unchanged from the (unlimited) BrokerConfig default.
         assert!(cfg.max_connections == usize::MAX);
         assert!(cfg.max_connections_per_ip == usize::MAX);
+    }
+
+    #[test]
+    fn apply_to_resolves_multi_voter_quorum_in_order() {
+        use crate::config::BrokerConfig;
+
+        // Literal IPs → resolution is offline and deterministic; no DNS.
+        let src = r#"
+controller_quorum_voters = ["0@127.0.0.1:9093", "1@127.0.0.2:9093", "2@127.0.0.3:9093"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        let expected: Vec<(crabka_raft::NodeId, std::net::SocketAddr)> = vec![
+            (0, "127.0.0.1:9093".parse().unwrap()),
+            (1, "127.0.0.2:9093".parse().unwrap()),
+            (2, "127.0.0.3:9093".parse().unwrap()),
+        ];
+        assert!(cfg.controller_quorum_voters == expected);
+    }
+
+    #[test]
+    fn apply_to_rejects_malformed_quorum_voter_missing_at() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"
+controller_quorum_voters = ["127.0.0.1:9093"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
+    }
+
+    #[test]
+    fn apply_to_rejects_malformed_quorum_voter_non_numeric_id() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"
+controller_quorum_voters = ["foo@127.0.0.1:9093"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
+    }
+
+    #[test]
+    fn apply_to_empty_quorum_voters_leaves_existing_unchanged() {
+        use crate::config::BrokerConfig;
+
+        // No `controller_quorum_voters` key at all → empty default.
+        let file: FileConfig = toml::from_str("broker_id = 0").unwrap();
+        assert!(file.controller_quorum_voters.is_empty());
+
+        // Seed a pre-existing single self-voter as the binary would.
+        let seeded: Vec<(crabka_raft::NodeId, std::net::SocketAddr)> =
+            vec![(7, "127.0.0.1:9093".parse().unwrap())];
+        let mut cfg = BrokerConfig {
+            controller_quorum_voters: seeded.clone(),
+            ..BrokerConfig::default()
+        };
+
+        file.apply_to(&mut cfg).unwrap();
+
+        // Empty list must NOT clear the seeded voter set.
+        assert!(cfg.controller_quorum_voters == seeded);
     }
 
     #[test]

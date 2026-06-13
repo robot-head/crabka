@@ -27,6 +27,10 @@ use crate::crd::{Kafka, KafkaCondition};
 pub(crate) const FIELD_MANAGER: &str = "crabka-operator";
 
 pub(crate) const BROKER_PORT: i32 = 9092;
+/// KRaft controller listener port. Every broker binds its controller
+/// listener on `0.0.0.0:9093` and peers reach each other on this port
+/// via the headless Service's per-pod DNS A-records.
+pub(crate) const CONTROLLER_PORT: i32 = 9093;
 pub(crate) const APP_LABEL: &str = "crabka-broker";
 pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-broker:",
@@ -262,13 +266,25 @@ pub(crate) fn render_service(owner: &Kafka) -> Result<Service, ReconcileError> {
         },
         "spec": {
             "clusterIP": "None",
+            // Publish per-pod DNS A-records before pods are Ready. KRaft
+            // peers resolve each other's controller FQDN at cold start —
+            // gating DNS on readiness would deadlock quorum formation.
+            "publishNotReadyAddresses": true,
             "selector": selector,
-            "ports": [{
-                "name": "kafka-internal",
-                "port": BROKER_PORT,
-                "protocol": "TCP",
-                "targetPort": BROKER_PORT,
-            }],
+            "ports": [
+                {
+                    "name": "kafka-internal",
+                    "port": BROKER_PORT,
+                    "protocol": "TCP",
+                    "targetPort": BROKER_PORT,
+                },
+                {
+                    "name": "controller",
+                    "port": CONTROLLER_PORT,
+                    "protocol": "TCP",
+                    "targetPort": CONTROLLER_PORT,
+                },
+            ],
         }
     }))?;
     Ok(svc)
@@ -324,6 +340,21 @@ pub(crate) fn render_configmap(
     // `tier-storage` pod volume) light up together.
     let tiered_storage = owner.spec.tiered_storage.as_ref();
     let inter_broker_kerberos = owner.spec.inter_broker_kerberos.as_ref();
+    // KRaft controller quorum voter set. Build the full cluster voter list
+    // ONCE (sorted by broker_id via the BTreeMap iteration order) and emit
+    // the identical complete list into every broker's TOML. Each voter is
+    // `<id>@<host>:9093`, where `host` is the broker's inter-broker
+    // advertised FQDN (the headless per-pod DNS name) paired with the
+    // controller port. A broker with no inter-broker advertised address is
+    // skipped (shouldn't happen in practice).
+    let controller_quorum_voters: Vec<String> = addresses_per_broker
+        .iter()
+        .filter_map(|(broker_id, addrs)| {
+            addrs
+                .get(inter_broker_listener_name)
+                .map(|adv| format!("{broker_id}@{}:{CONTROLLER_PORT}", adv.host))
+        })
+        .collect();
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -338,6 +369,7 @@ pub(crate) fn render_configmap(
             authorization,
             tiered_storage,
             inter_broker_kerberos,
+            &controller_quorum_voters,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -1234,5 +1266,120 @@ mod parse_quantity_tests {
         assert!(parse_quantity("0").is_err());
         assert!(parse_quantity("0Gi").is_err());
         assert!(parse_quantity("-10Gi").is_err());
+    }
+}
+
+#[cfg(test)]
+mod cluster_object_tests {
+    use super::*;
+    use crate::controller::listeners::AdvertisedAddress;
+    use crate::crd::{KafkaSpec, Listener, ListenerType};
+    use assert2::assert;
+
+    fn test_kafka() -> Kafka {
+        let mut k = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "0.1.1".into(),
+                metadata_version: None,
+                config: None,
+                listeners: vec![],
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
+                logging: None,
+                delegation_token: None,
+                authorization: None,
+                tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
+                tracing: None,
+            },
+        );
+        k.metadata.namespace = Some("default".into());
+        k.metadata.uid = Some("00000000-0000-0000-0000-000000000001".into());
+        k
+    }
+
+    #[test]
+    fn headless_service_publishes_not_ready_addresses_and_controller_port() {
+        let svc = render_service(&test_kafka()).expect("render_service");
+        let spec = svc.spec.expect("service spec");
+
+        // KRaft peers must resolve each other's DNS before readiness.
+        assert!(spec.publish_not_ready_addresses == Some(true));
+        // Still a headless Service.
+        assert!(spec.cluster_ip.as_deref() == Some("None"));
+
+        let ports = spec.ports.expect("service ports");
+        let controller = ports
+            .iter()
+            .find(|p| p.name.as_deref() == Some("controller"))
+            .expect("controller port must be present");
+        assert!(controller.port == CONTROLLER_PORT);
+        assert!(controller.port == 9093);
+        // Original broker port is preserved.
+        assert!(ports.iter().any(|p| p.port == BROKER_PORT));
+    }
+
+    fn internal_listener(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn configmap_emits_full_voter_set_into_every_broker_toml() {
+        let listeners = vec![internal_listener("PLAIN", 9092)];
+        // Three brokers, each with its own inter-broker advertised host.
+        let mut addresses_per_broker: BTreeMap<i32, BTreeMap<String, AdvertisedAddress>> =
+            BTreeMap::new();
+        for (id, host) in [(0, "host-a"), (1, "host-b"), (2, "host-c")] {
+            let mut per_listener = BTreeMap::new();
+            per_listener.insert(
+                "PLAIN".to_string(),
+                AdvertisedAddress {
+                    host: host.into(),
+                    port: 9092,
+                },
+            );
+            addresses_per_broker.insert(id, per_listener);
+        }
+
+        let cm = render_configmap(
+            &test_kafka(),
+            &listeners,
+            &addresses_per_broker,
+            "PLAIN",
+            None,
+            None,
+            None,
+        )
+        .expect("render_configmap");
+        let data = cm.data.expect("configmap data");
+
+        let expected =
+            "controller_quorum_voters = [\"0@host-a:9093\", \"1@host-b:9093\", \"2@host-c:9093\"]";
+        for id in 0..3 {
+            let toml = data
+                .get(&format!("broker-{id}.toml"))
+                .unwrap_or_else(|| panic!("broker-{id}.toml missing"));
+            assert!(
+                toml.contains(expected),
+                "broker-{id}.toml must carry the full voter set, got:\n{toml}"
+            );
+            // Voters must precede the first [[listeners]] header.
+            let key_pos = toml.find("controller_quorum_voters").unwrap();
+            let listeners_pos = toml.find("[[listeners]]").unwrap();
+            assert!(key_pos < listeners_pos);
+        }
     }
 }

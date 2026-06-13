@@ -166,6 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_addr: std::net::SocketAddr = {
         let mut a = args.listen_addr;
         a.set_port(9093);
+        // Under `--config-file` (operator/StatefulSet mode), `--listen-addr`
+        // conflicts_with the config file, so `args.listen_addr` keeps its
+        // 127.0.0.1:9092 default. Peers dial this broker's controller via its
+        // pod FQDN, so binding the controller listener to loopback would make
+        // it unreachable across pods — bind all interfaces (0.0.0.0) instead.
+        if args.config_file.is_some() {
+            a.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        }
         a
     };
     let node_id = u64::try_from(args.broker_id).unwrap_or_else(|_| {
