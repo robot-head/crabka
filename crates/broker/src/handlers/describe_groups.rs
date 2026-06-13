@@ -10,6 +10,7 @@
 //! the `i32::MIN` "not present" sentinel.
 
 use bytes::{Bytes, BytesMut};
+use tokio::sync::oneshot;
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
@@ -21,7 +22,9 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::classic_state::GroupState;
+use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
 use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
@@ -56,6 +59,35 @@ pub(crate) async fn handle(
                 ..Default::default()
             });
             continue;
+        }
+
+        // KIP-1071: a Streams-locked group's offset home is a drained classic
+        // actor; describing it via the classic projection would mislabel it.
+        // Report its streams identity (full task detail lives in
+        // StreamsGroupDescribe, api 89). Exact protocol_type/state is matched
+        // empirically (spec §7.4); the firm contract is "not classic/consumer".
+        if broker.group_coordinator.group_type(&gid) == Some(GroupType::Streams) {
+            if let Some(handle) = broker.group_coordinator.find_streams(&gid) {
+                let (tx, rx) = oneshot::channel();
+                if handle
+                    .tx
+                    .send(StreamsGroupActorMessage::Describe { reply: tx })
+                    .await
+                    .is_ok()
+                    && let Ok(view) = rx.await
+                {
+                    groups.push(DescribedGroup {
+                        group_id: gid,
+                        protocol_type: "streams".into(),
+                        group_state: view.group_state,
+                        error_code: codes::NONE,
+                        ..Default::default()
+                    });
+                    continue;
+                }
+            }
+            // Streams-locked but no live streams actor (e.g. just downgraded) →
+            // fall through to the classic describe path below.
         }
 
         let Some(snap) = broker.group_coordinator.describe_group(&gid).await else {
