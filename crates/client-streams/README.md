@@ -24,24 +24,24 @@ Build and run a simple source-to-sink topology using the KIP-1071 membership cli
 use std::sync::Arc;
 use crabka_client_streams::{StreamsEvent, StreamsMembership, Topology};
 
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let mut topo = Topology::new();
-let src = topo.add_source::<String, String>("src", ["input-topic"]);
-topo.add_sink("snk", "output-topic", [&src]);
-let built = topo.build("orders-stream")?;
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut topo = Topology::new();
+    let src = topo.add_source::<String, String>("src", ["input-topic"]);
+    topo.add_sink("snk", "output-topic", [&src]);
+    let built = topo.build("orders-stream")?;
 
-let mut membership = StreamsMembership::builder()
-    .bootstrap("127.0.0.1:9092")
-    .group_id("orders-stream")
-    .topology(Arc::new(built))
-    .build()
-    .await?;
+    let mut membership = StreamsMembership::builder()
+        .bootstrap("127.0.0.1:9092")
+        .group_id("orders-stream")
+        .topology(Arc::new(built))
+        .build()
+        .await?;
 
-if let StreamsEvent::Assigned(assignment) = membership.next_event().await? {
-    println!("active tasks: {:?}", assignment.active);
+    if let StreamsEvent::Assigned(assignment) = membership.next_event().await? {
+        println!("active tasks: {:?}", assignment.active);
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ## Schema-aware payloads (Avro / Protobuf / JSON)
@@ -72,25 +72,26 @@ impl DefaultSerde for Order {
     type Serde = SchemaSerde<Order, AvroSerde<Order>>;
 }
 
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let cache = SchemaCache::new(RegistryClient::new("http://127.0.0.1:8081"), CacheConfig::default());
-set_default_registry(cache.clone());
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cache = SchemaCache::new(RegistryClient::new("http://127.0.0.1:8081"), CacheConfig::default());
+    set_default_registry(cache.clone());
 
-let mut topo = Topology::new();
-let src = topo.add_source::<String, Order>("src", ["orders"]);
-topo.add_sink("snk", "orders-copy", [&src]);
-let built = topo.build("orders-avro")?;
+    let mut topo = Topology::new();
+    let src = topo.add_source::<String, Order>("src", ["orders"]);
+    topo.add_sink("snk", "orders-copy", [&src]);
+    let built = topo.build("orders-avro")?;
 
-// `schema_prewarm` resolves/registers schema ids once at membership start.
-let mut membership = StreamsMembership::builder()
-    .bootstrap("127.0.0.1:9092")
-    .group_id("orders-avro")
-    .topology(Arc::new(built))
-    .maybe_schema_prewarm(Some(cache as Arc<dyn SchemaPrewarm>))
-    .build()
-    .await?;
-# let _ = &mut membership;
-# Ok(()) }
+    // `schema_prewarm` resolves/registers schema ids once at membership start.
+    let mut membership = StreamsMembership::builder()
+        .bootstrap("127.0.0.1:9092")
+        .group_id("orders-avro")
+        .topology(Arc::new(built))
+        .maybe_schema_prewarm(Some(cache as Arc<dyn SchemaPrewarm>))
+        .build()
+        .await?;
+
+    Ok(())
+}
 ```
 
 For keys, per-topic subjects, or validation, construct the serde explicitly
