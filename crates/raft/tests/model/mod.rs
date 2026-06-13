@@ -2,8 +2,8 @@
 //! holds the REAL `QuorumStateMachine` per node plus an in-memory log and an
 //! unordered message network; `next_state` runs the production `on_event` and
 //! the checker explores every interleaving. The committed-log linearizability
-//! tester lives here too; message-loss/duplication and node crashes are layered
-//! in by a later task.
+//! tester lives here too, and message-loss/duplication and node crashes are
+//! modeled as explicit `ModelAction`s.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,8 +136,8 @@ pub struct Envelope {
 pub struct ModelState {
     pub nodes: BTreeMap<NodeId, NodeModel>,
     /// Unordered in-flight messages. `BTreeSet` => deterministic Hash/Eq and
-    /// identical duplicate envelopes collapse to one (message duplication is
-    /// modeled by an explicit action in a later task).
+    /// identical duplicate envelopes collapse to one; explicit `DuplicateDeliver`
+    /// actions model network duplication without accumulating copies in the set.
     pub network: BTreeSet<Envelope>,
     /// Linearizability auxiliary state, recomputed + fingerprinted per state.
     pub linz: LinearizabilityTester<ClientId, KraftLogSpec>,
@@ -151,9 +151,12 @@ pub struct ModelState {
     /// Total client appends issued so far (bounded by `ConsensusModel::max_appends`).
     pub appends_issued: u32,
     /// Crashed (unreachable) nodes. Omission model: a crashed node sends/receives
-    /// nothing and is offered no actions until `Recover`. Its `QuorumStateMachine`
-    /// retains its (durable) state — we do not reset volatile role state, as there
-    /// is no public API to do so (a later phase can model volatile loss).
+    /// nothing and is offered no actions until `Recover`; on `Crash` we also drop
+    /// its in-flight messages (conservative — a real crash-stop could still have
+    /// already-sent messages arrive, so a violation needing that delivery would be
+    /// missed; sound because it only removes interleavings). Its
+    /// `QuorumStateMachine` retains its (durable) state — modelling volatile-state
+    /// loss on restart is out of scope for this phase (no public reset API).
     pub crashed: BTreeSet<NodeId>,
 }
 
