@@ -2,7 +2,12 @@ name: publish-images
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags:
+      # release-plz tags every crate per release at the shared workspace
+      # version (e.g. crabka-broker-v0.3.5) — there is no bare `v0.3.5` tag.
+      # Anchor on the broker tag so the image set publishes exactly once per
+      # release rather than once per crate tag.
+      - "crabka-broker-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -41,8 +46,8 @@ jobs:
         run: |
           if [[ -n "${{ inputs.tag }}" ]]; then
             VERSION="${{ inputs.tag }}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ "${GITHUB_REF_NAME}" == crabka-broker-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#crabka-broker-v}"
           else
             VERSION="edge"
           fi
