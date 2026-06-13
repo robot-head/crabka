@@ -744,17 +744,6 @@ impl BrokerHandle {
             .cloned()
     }
 
-    /// Test-only: subscribe to the controller's metadata-image watch channel.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[must_use]
-    #[allow(clippy::used_underscore_binding)]
-    pub fn watch_image_for_test(
-        &self,
-    ) -> tokio::sync::watch::Receiver<std::sync::Arc<crabka_metadata::MetadataImage>> {
-        self._broker.controller.watch_image()
-    }
-
     /// Test-only: subscribe to the controller's leader watch channel.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
@@ -764,19 +753,6 @@ impl BrokerHandle {
         &self,
     ) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
         self._broker.controller.watch_leader()
-    }
-
-    /// Test-only: borrow the local `Partition` (for its `append_notify` / LEO).
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[must_use]
-    #[allow(clippy::used_underscore_binding)]
-    pub fn partition_for_test(
-        &self,
-        topic: &str,
-        partition: i32,
-    ) -> Option<std::sync::Arc<crate::partition::Partition>> {
-        self._broker.partitions.get(topic, partition)
     }
 
     /// Test-only: await until `pred` holds for the controller metadata image.
@@ -844,19 +820,6 @@ impl BrokerHandle {
     pub async fn wait_until_partition_present(&self, topic: &str, partition: i32) {
         self.wait_for_image(|img| img.partition(topic, partition).is_some())
             .await;
-    }
-
-    /// Test-only: await until `topic-partition`'s leader equals `leader` with a
-    /// non-zero leader epoch (i.e. a real election outcome).
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_until_partition_leader_is(&self, topic: &str, partition: i32, leader: u64) {
-        self.wait_for_image(|img| {
-            img.partition(topic, partition)
-                .is_some_and(|p| p.leader == leader && p.leader_epoch > 0)
-        })
-        .await;
     }
 
     /// Test-only: await until `topic-partition`'s leader is some non-`exclude`
