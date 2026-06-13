@@ -73,3 +73,11 @@ fn two_voters_linearizable() {
         "two_voters_linearizable",
     );
 }
+
+#[test]
+fn three_voters_faults() {
+    // Election + log-matching safety under an adversarial network: message
+    // loss, duplication, and a single crash/recover. 3 voters so a crash leaves
+    // a majority that can still make progress.
+    run(ConsensusModel::faults(&[1, 2, 3]), "three_voters_faults");
+}

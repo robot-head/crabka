@@ -150,6 +150,11 @@ pub struct ModelState {
     pub committed: Vec<u64>,
     /// Total client appends issued so far (bounded by `ConsensusModel::max_appends`).
     pub appends_issued: u32,
+    /// Crashed (unreachable) nodes. Omission model: a crashed node sends/receives
+    /// nothing and is offered no actions until `Recover`. Its `QuorumStateMachine`
+    /// retains its (durable) state — we do not reset volatile role state, as there
+    /// is no public API to do so (a later phase can model volatile loss).
+    pub crashed: BTreeSet<NodeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -158,6 +163,15 @@ pub enum ModelAction {
     Timeout(NodeId, TimerKind),
     /// A client appends `value` (as `client`) to the single current leader.
     ClientAppend(ClientId, u64),
+    /// Drop an in-flight message without delivering it (network loss).
+    DropMsg(Envelope),
+    /// Deliver a copy of an in-flight message but leave the original queued
+    /// (network duplication).
+    DuplicateDeliver(Envelope),
+    /// A node crashes (becomes unreachable). Omission model.
+    Crash(NodeId),
+    /// A crashed node recovers (becomes reachable again).
+    Recover(NodeId),
 }
 
 pub struct ConsensusModel {
@@ -169,6 +183,10 @@ pub struct ConsensusModel {
     pub max_inflight: usize,
     /// Cap on leader epoch (state-space bound).
     pub max_epoch: LeaderEpoch,
+    /// Enable message loss + duplication faults.
+    pub enable_loss_dup: bool,
+    /// Max concurrently-crashed nodes (`0` = no crashes).
+    pub max_crashes: usize,
 }
 
 impl ConsensusModel {
@@ -181,6 +199,8 @@ impl ConsensusModel {
             max_appends: 0,
             max_inflight: 3,
             max_epoch: 2,
+            enable_loss_dup: false,
+            max_crashes: 0,
         }
     }
 
@@ -193,6 +213,23 @@ impl ConsensusModel {
             max_appends,
             max_inflight: 3,
             max_epoch: 2,
+            enable_loss_dup: false,
+            max_crashes: 0,
+        }
+    }
+
+    /// Fault-injection focus: message loss + duplication + a single crash/recover,
+    /// over very tight bounds (faults multiply the action space). No client
+    /// appends — this exercises election + log-matching safety under an adversarial
+    /// network, which is where the bounded space stays exhaustible.
+    pub fn faults(voter_ids: &[NodeId]) -> Self {
+        Self {
+            voter_ids: voter_ids.to_vec(),
+            max_appends: 0,
+            max_inflight: 2,
+            max_epoch: 2,
+            enable_loss_dup: true,
+            max_crashes: 1,
         }
     }
 
@@ -344,12 +381,13 @@ impl ConsensusModel {
                 }
             }
             Action::TruncateTo(point) => {
-                state
-                    .nodes
-                    .get_mut(&id)
-                    .expect("truncator exists")
-                    .log
-                    .truncate_to(point.offset);
+                let node = state.nodes.get_mut(&id).expect("truncator exists");
+                node.log.truncate_to(point.offset);
+                // A node cannot retain a committed-prefix marker past what it
+                // now physically holds: clamp its high-watermark to the new log
+                // end (the eager HWM propagation in `AdvanceHighWatermark` may
+                // have set it higher before this divergence-driven truncation).
+                node.high_watermark = node.high_watermark.min(node.log.end_offset());
             }
             // Timer arming is modeled by the `Timeout` action set; durable-state
             // + role-transition signals have no cross-node effect in the model.
@@ -472,18 +510,29 @@ impl Model for ConsensusModel {
             pending: BTreeMap::new(),
             committed: Vec::new(),
             appends_issued: 0,
+            crashed: BTreeSet::new(),
         }]
     }
 
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         // Every in-flight message is independently deliverable (unordered net).
+        // Loss/duplication, when enabled, offer a drop and a duplicate-deliver
+        // for each in-flight message.
         for env in &state.network {
             actions.push(ModelAction::Deliver(env.clone()));
+            if self.enable_loss_dup {
+                actions.push(ModelAction::DropMsg(env.clone()));
+                actions.push(ModelAction::DuplicateDeliver(env.clone()));
+            }
         }
         // Any voter that is not currently leader may suffer an election timeout;
         // any follower/observer may suffer a fetch timeout. The core ignores
         // inapplicable ones, so over-offering is sound (it only adds interleavings).
+        // Crashed nodes are unreachable: offered no timeouts.
         for (&id, node) in &state.nodes {
+            if state.crashed.contains(&id) {
+                continue;
+            }
             match node.machine.role() {
                 Role::Leader { .. } => {}
                 Role::Follower { .. } | Role::Observer { .. } => {
@@ -493,13 +542,24 @@ impl Model for ConsensusModel {
                 _ => actions.push(ModelAction::Timeout(id, TimerKind::Election)),
             }
         }
-        // A client appends to the single current leader (only when the target is
-        // unambiguous and the append budget remains). A fresh client id per
-        // append keeps every linearizability "thread" single-op.
+        // Crash/recover, capped at `max_crashes` concurrently crashed.
+        if state.crashed.len() < self.max_crashes {
+            for &id in &self.voter_ids {
+                if !state.crashed.contains(&id) {
+                    actions.push(ModelAction::Crash(id));
+                }
+            }
+        }
+        for &id in &state.crashed {
+            actions.push(ModelAction::Recover(id));
+        }
+        // A client appends to the single current (live) leader (only when the
+        // target is unambiguous and the append budget remains). A fresh client id
+        // per append keeps every linearizability "thread" single-op.
         let leaders: Vec<NodeId> = state
             .nodes
             .iter()
-            .filter(|(_, n)| is_leader(n))
+            .filter(|(id, n)| is_leader(n) && !state.crashed.contains(*id))
             .map(|(&id, _)| id)
             .collect();
         if leaders.len() == 1 && state.appends_issued < self.max_appends {
@@ -516,7 +576,38 @@ impl Model for ConsensusModel {
                 if !state.network.remove(&env) {
                     return None;
                 }
-                self.step(&mut state, env.dst, env.event);
+                // A crashed destination is unreachable: the message is consumed
+                // (removed) but produces no transition.
+                if !state.crashed.contains(&env.dst) {
+                    self.step(&mut state, env.dst, env.event);
+                }
+            }
+            ModelAction::DropMsg(env) => {
+                // Network loss: remove without delivering. No-op if already gone.
+                if !state.network.remove(&env) {
+                    return None;
+                }
+            }
+            ModelAction::DuplicateDeliver(env) => {
+                // Network duplication: deliver a copy, leave the original queued.
+                if !state.network.contains(&env) {
+                    return None;
+                }
+                if !state.crashed.contains(&env.dst) {
+                    self.step(&mut state, env.dst, env.event.clone());
+                }
+            }
+            ModelAction::Crash(id) => {
+                if !state.crashed.insert(id) {
+                    return None;
+                }
+                // Omission model: drop all messages to/from the crashed node.
+                state.network.retain(|e| e.src != id && e.dst != id);
+            }
+            ModelAction::Recover(id) => {
+                if !state.crashed.remove(&id) {
+                    return None;
+                }
             }
             ModelAction::Timeout(id, kind) => {
                 let event = match kind {
@@ -529,7 +620,7 @@ impl Model for ConsensusModel {
                 let leader = state
                     .nodes
                     .iter()
-                    .find(|(_, n)| is_leader(n))
+                    .find(|(id, n)| is_leader(n) && !state.crashed.contains(*id))
                     .map(|(&id, _)| id)?;
                 let epoch = state.nodes[&leader].machine.quorum_state().leader_epoch;
                 let offset = state.nodes[&leader].log.end_offset();
@@ -592,6 +683,34 @@ impl Model for ConsensusModel {
                 // Only required when client appends are enabled; a no-append
                 // config (election focus) satisfies this trivially.
                 m.max_appends == 0 || !s.committed.is_empty()
+            }),
+            // Safety (Raft log matching): two logs may diverge only as an
+            // uncommitted suffix — if they disagree on the epoch at some offset
+            // `k`, they must not agree again at any later offset (equal entries
+            // imply equal prefixes). Re-agreement after disagreement is a true
+            // matching violation.
+            Property::always("log_matching", |_, s: &ModelState| {
+                let logs: Vec<&Vec<LeaderEpoch>> =
+                    s.nodes.values().map(|n| &n.log.epochs).collect();
+                for i in 0..logs.len() {
+                    for j in (i + 1)..logs.len() {
+                        let (a, b) = (logs[i], logs[j]);
+                        let common = a.len().min(b.len());
+                        for k in 0..common {
+                            if a[k] != b[k] && (k + 1..common).any(|m| a[m] == b[m]) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            }),
+            // Safety: no node's committed high-watermark exceeds its own log end
+            // (a node cannot have committed past what it physically holds).
+            Property::always("hwm_within_log", |_, s: &ModelState| {
+                s.nodes
+                    .values()
+                    .all(|n| node_high_watermark(n) <= n.log.end_offset())
             }),
         ]
     }
