@@ -601,6 +601,12 @@ impl GroupCoordinator {
     /// Drop a **classic** group from the registry. `NonEmpty` if it still has
     /// live members; `NotFound` if unknown / consumer.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        // KIP-1071: a Streams-locked group is deleted through the streams path —
+        // never fall through to the classic path, which would remove the offset-home
+        // `groups` entry out from under a live streams group.
+        if self.group_type(group_id) == Some(GroupType::Streams) {
+            return self.delete_streams_group(group_id).await;
+        }
         let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
         // `ClassicInspect` replies ONLY when the actor's LIVE group is classic;
         // a consumer-kind group drops the sender, so `rx.await` errors and we
@@ -619,6 +625,41 @@ impl GroupCoordinator {
             return Err(DeleteGroupError::NonEmpty);
         }
         self.groups.remove(group_id);
+        Ok(())
+    }
+
+    /// Delete a **streams** group (KIP-1071): `NonEmpty` if the streams actor still
+    /// has live members; `NotFound` if no streams actor exists for the id; else
+    /// tombstone its records (k15–21), drop the streams actor, and remove the
+    /// offset-home `groups` entry. `Internal` if the tombstone append fails.
+    async fn delete_streams_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        let handle = self
+            .find_streams(group_id)
+            .ok_or(DeleteGroupError::NotFound)?;
+        let (tx, rx) = oneshot::channel();
+        handle
+            .tx
+            .send(streams::actor::StreamsGroupActorMessage::Describe { reply: tx })
+            .await
+            .map_err(|_| DeleteGroupError::NotFound)?;
+        let view = rx.await.map_err(|_| DeleteGroupError::NotFound)?;
+        if !view.members.is_empty() {
+            return Err(DeleteGroupError::NonEmpty);
+        }
+        let member_ids: Vec<String> = view.members.into_iter().map(|m| m.member_id).collect();
+        let batch = streams::migration::streams_records_tombstone_batch(
+            group_id,
+            &member_ids,
+            crate::time_util::now_ms(),
+        );
+        self.offsets_log
+            .append(batch)
+            .await
+            .map_err(|_| DeleteGroupError::Internal)?;
+        self.streams_groups.remove(group_id);
+        self.groups.remove(group_id);
+        self.streams_seeds.remove(group_id);
+        self.streams_seeds_cache.remove(group_id);
         Ok(())
     }
 
