@@ -495,8 +495,8 @@ impl GroupCoordinator {
             return Ok(DowngradeOutcome::NotStreams);
         }
 
-        // Inspect the live streams actor (if any) for remaining members.
-        let mut member_ids: Vec<String> = Vec::new();
+        // Reject if the streams actor (if any) still has live members; a drained
+        // group falls through to convert. Mirrors slice 1's `ClassicInspect` check.
         if let Some(handle) = self.find_streams(group_id) {
             let (tx, rx) = tokio::sync::oneshot::channel();
             if handle
@@ -505,17 +505,18 @@ impl GroupCoordinator {
                 .await
                 .is_ok()
                 && let Ok(view) = rx.await
+                && !view.members.is_empty()
             {
-                if !view.members.is_empty() {
-                    return Ok(DowngradeOutcome::RejectLiveMembers);
-                }
-                member_ids = view.members.into_iter().map(|m| m.member_id).collect();
+                return Ok(DowngradeOutcome::RejectLiveMembers);
             }
         }
 
-        // Drained streams group → convert. Tombstone k15–21, flip the lock to
-        // Classic, drop the streams actor. The offset-home `groups` entry stays.
-        let batch = streams_records_tombstone_batch(group_id, &member_ids, now_ms);
+        // Drained streams group → convert. Tombstone the group-level streams keys
+        // (k15/k17/k18/k19), flip the lock to Classic, drop the streams actor. A
+        // drained group's per-member records (k16/k20/k21) were already tombstoned
+        // when those members left/expired, so no member ids are needed here. The
+        // offset-home `groups` entry stays.
+        let batch = streams_records_tombstone_batch(group_id, &[], now_ms);
         self.offsets_log.append(batch).await?;
         self.mark_classic_after_streams_downgrade(group_id);
         self.streams_groups.remove(group_id);
@@ -633,6 +634,10 @@ impl GroupCoordinator {
     /// tombstone its records (k15–21), drop the streams actor, and remove the
     /// offset-home `groups` entry. `Internal` if the tombstone append fails.
     async fn delete_streams_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        // A Streams-locked id with no live streams actor reports NotFound — the
+        // safe failure mode (never silently drop an offset home). In practice a
+        // live streams group always has an actor (respawned by finalize_bootstrap
+        // on replay), so this only guards a genuinely-absent group.
         let handle = self
             .find_streams(group_id)
             .ok_or(DeleteGroupError::NotFound)?;
@@ -646,10 +651,11 @@ impl GroupCoordinator {
         if !view.members.is_empty() {
             return Err(DeleteGroupError::NonEmpty);
         }
-        let member_ids: Vec<String> = view.members.into_iter().map(|m| m.member_id).collect();
+        // Drained group: per-member records (k16/k20/k21) were already tombstoned
+        // on member leave/expiry, so only the group-level keys remain.
         let batch = streams::migration::streams_records_tombstone_batch(
             group_id,
-            &member_ids,
+            &[],
             crate::time_util::now_ms(),
         );
         self.offsets_log
