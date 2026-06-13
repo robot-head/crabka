@@ -66,25 +66,25 @@ pub(crate) async fn handle(
         // Report its streams identity (full task detail lives in
         // StreamsGroupDescribe, api 89). Exact protocol_type/state is matched
         // empirically (spec §7.4); the firm contract is "not classic/consumer".
-        if broker.group_coordinator.group_type(&gid) == Some(GroupType::Streams) {
-            if let Some(handle) = broker.group_coordinator.find_streams(&gid) {
-                let (tx, rx) = oneshot::channel();
-                if handle
-                    .tx
-                    .send(StreamsGroupActorMessage::Describe { reply: tx })
-                    .await
-                    .is_ok()
-                    && let Ok(view) = rx.await
-                {
-                    groups.push(DescribedGroup {
-                        group_id: gid,
-                        protocol_type: "streams".into(),
-                        group_state: view.group_state,
-                        error_code: codes::NONE,
-                        ..Default::default()
-                    });
-                    continue;
-                }
+        if broker.group_coordinator.group_type(&gid) == Some(GroupType::Streams)
+            && let Some(handle) = broker.group_coordinator.find_streams(&gid)
+        {
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .tx
+                .send(StreamsGroupActorMessage::Describe { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+            {
+                groups.push(DescribedGroup {
+                    group_id: gid,
+                    protocol_type: "streams".into(),
+                    group_state: view.group_state,
+                    error_code: codes::NONE,
+                    ..Default::default()
+                });
+                continue;
             }
             // Streams-locked but no live streams actor (e.g. just downgraded) →
             // fall through to the classic describe path below.
