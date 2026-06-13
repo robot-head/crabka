@@ -34,17 +34,59 @@ import sys, re
 path, ns = sys.argv[1], sys.argv[2]
 with open(path) as f:
     text = f.read()
-# Strimzi sets STRIMZI_NAMESPACE on the operator Deployment via env.
-text = re.sub(
-    r'(- name: STRIMZI_NAMESPACE\n\s+value:\s*)\S+',
-    rf'\g<1>{ns}',
-    text,
-)
+# Strimzi sets STRIMZI_NAMESPACE on the operator Deployment via env valueFrom.
+# Replace it with a literal value to watch the target namespace.
+pattern = r'(-\s*name:\s*STRIMZI_NAMESPACE\s*\r?\n\s*)valueFrom:\s*\r?\n\s*fieldRef:\s*\r?\n\s*fieldPath:\s*metadata\.namespace'
+text = re.sub(pattern, rf'\g<1>value: "{ns}"', text)
 with open(path, 'w') as f:
     f.write(text)
 PY
 
-kubectl apply -f "$tmp/strimzi.yaml"
+kubectl apply -n strimzi-system -f "$tmp/strimzi.yaml"
+
+# Create the namespace-scoped RoleBindings in the watched namespace so that
+# the operator (running in strimzi-system) has permissions to reconcile
+# resources in the watched namespace.
+cat <<EOF | kubectl apply -n "$BENCH_NAMESPACE" -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: strimzi-cluster-operator
+subjects:
+  - kind: ServiceAccount
+    name: strimzi-cluster-operator
+    namespace: strimzi-system
+roleRef:
+  kind: ClusterRole
+  name: strimzi-cluster-operator-namespaced
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: strimzi-cluster-operator-entity-operator-delegation
+subjects:
+  - kind: ServiceAccount
+    name: strimzi-cluster-operator
+    namespace: strimzi-system
+roleRef:
+  kind: ClusterRole
+  name: strimzi-entity-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: strimzi-cluster-operator-watched
+subjects:
+  - kind: ServiceAccount
+    name: strimzi-cluster-operator
+    namespace: strimzi-system
+roleRef:
+  kind: ClusterRole
+  name: strimzi-cluster-operator-watched
+  apiGroup: rbac.authorization.k8s.io
+EOF
 
 # Apply the JMX-exporter ConfigMap our Kafka CR references for /metrics.
 kubectl apply -f "$SCRIPT_DIR/../manifests/strimzi/jmx-exporter-configmap.yaml"
