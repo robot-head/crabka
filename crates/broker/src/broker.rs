@@ -921,6 +921,52 @@ impl BrokerHandle {
         );
     }
 
+    /// Test-only: await until the LOCAL log end offset for `topic-partition` is
+    /// EXACTLY `target`. Unlike `wait_until_local_log_end_offset` (monotonic `>=`),
+    /// this is for non-monotonic convergence (e.g. a follower truncating a divergent
+    /// suffix then re-replicating to match the leader): the offset may pass through
+    /// `>= target` with wrong-epoch data before settling at `target`. Wakes on
+    /// `append_notify` (re-appends) with a short fallback tick to also observe a
+    /// truncation, which does not notify. Returns the instant LEO == target; this is
+    /// a condition wait on real state (not a fixed-duration sleep), so it cannot
+    /// flake on timing — only fail if the condition never holds within 30s.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_local_log_end_offset_eq(
+        &self,
+        topic: &str,
+        partition: i32,
+        target: i64,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                    let notified = part.append_notify.notified();
+                    if part.log_end_offset() == target {
+                        return;
+                    }
+                    // Truncation does not fire append_notify; fall back to a short
+                    // re-check tick so a truncate-to-target is still observed.
+                    tokio::select! {
+                        () = notified => {}
+                        () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+                    }
+                } else {
+                    let mut img = self._broker.controller.watch_image();
+                    if img.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "local log_end_offset({topic}-{partition}) did not settle at {target} within 30s"
+        );
+    }
+
     /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
     /// broker has served since startup. The KIP-320 proactive-validation
     /// integration test reads this before and after a `Consumer::poll` to

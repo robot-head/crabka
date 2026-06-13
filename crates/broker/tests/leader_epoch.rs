@@ -13,7 +13,6 @@
 )]
 
 use assert2::assert;
-use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tempfile::TempDir;
@@ -89,11 +88,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !broker.has_partition(name, 0).await {
-        assert!(Instant::now() <= deadline, "materialize timeout");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    broker.wait_until_partition_present(name, 0).await;
 }
 
 fn record(value: &str) -> RecordBatch {
@@ -461,23 +456,8 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the partition to materialize on every broker.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut all = true;
-        for (h, _, _) in &cluster {
-            if !h.has_partition("divtrunc", 0).await {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "topic didn't propagate in 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_partition_present("divtrunc", 0).await;
     }
 
     // Produce k = 8 records to the leader at epoch 0 (acks=-1 so it lands
@@ -511,20 +491,8 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
     }
 
     // Wait for all three brokers to converge to LEO k.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let mut offsets = Vec::with_capacity(cluster.len());
-        for (h, _, _) in &cluster {
-            offsets.push(h.local_log_end_offset("divtrunc", 0).await.unwrap_or(0));
-        }
-        if offsets.iter().all(|&o| o >= k) {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "initial replication to {k} stalled: {offsets:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for (h, _, _) in &cluster {
+        h.wait_until_local_log_end_offset("divtrunc", 0, k).await;
     }
 
     // Pick a follower: a broker that is not the partition leader.
@@ -559,28 +527,25 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
     // The leader stays at LEO k, so its epoch-0 boundary (8) is below the
     // follower's fetch offset (13): the next follower Fetch gets a
     // `diverging_epoch` and the replicator truncates in band back to k.
-    let deadline = Instant::now() + Duration::from_mins(2);
-    loop {
-        let f_leo = follower
-            .local_log_end_offset("divtrunc", 0)
-            .await
-            .unwrap_or(-1);
-        let l_leo = cluster[0]
-            .0
-            .local_log_end_offset("divtrunc", 0)
-            .await
-            .unwrap_or(-1);
-        // Converged: follower truncated its divergent suffix and matches the
-        // leader exactly.
-        if f_leo == l_leo && f_leo == k {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "follower did not truncate divergent suffix in 2 min (follower={f_leo}, leader={l_leo})"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Follower truncates its divergent suffix and re-replicates to match the
+    // leader exactly. Wait for the follower to settle at exactly k (it may
+    // transiently sit above k with divergent data before truncating).
+    follower
+        .wait_until_local_log_end_offset_eq("divtrunc", 0, k)
+        .await;
+    let f_leo = follower
+        .local_log_end_offset("divtrunc", 0)
+        .await
+        .unwrap_or(-1);
+    let l_leo = cluster[0]
+        .0
+        .local_log_end_offset("divtrunc", 0)
+        .await
+        .unwrap_or(-1);
+    assert!(
+        f_leo == l_leo && f_leo == k,
+        "follower did not converge to leader (follower={f_leo}, leader={l_leo}, k={k})"
+    );
 
     // Final cross-check: leader LEO and follower LEO agree.
     assert!(
