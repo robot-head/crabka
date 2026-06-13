@@ -30,7 +30,7 @@ pub struct ReplicaKey {
 }
 
 /// A log position: an offset together with the leader epoch that produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LogOffsetMetadata {
     pub offset: i64,
     pub epoch: LeaderEpoch,
