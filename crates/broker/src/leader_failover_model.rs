@@ -19,7 +19,7 @@ use crate::unclean_recovery::{ReplicaLogInfo, has_newer_leader, select_best_repl
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 80;
-const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 // ============================ FailoverModel ============================
 
