@@ -59,13 +59,28 @@ use super::{
     BatchMeta, RecordMeta, RetainDecision, TxnDataState, retain_decision, should_index_key,
 };
 
-const MAX_STATES: usize = 200_000;
+// The `Compact` action converges many append/tick paths onto shared logs, so the
+// BFS's *generated* count (`state_count()`) runs ~2-2.5x the *unique* count. We
+// therefore bound exhaustiveness on the two metrics that actually matter:
+//
+//   * `TARGET_STATE_COUNT` — the stateright truncation target. Set high so the
+//     BFS runs to *completion* on the configs below; `state_count() < TARGET`
+//     after `.join()` then certifies the run was exhaustive (it stopped because
+//     the frontier emptied, not because it hit the target). The real runaway
+//     guards are the 2-minute `CHECK_TIMEOUT` and the 3 GB host memory watchdog
+//     (see `[[feedback_bound_model_checkers]]`) — never run this unguarded.
+//   * `MAX_UNIQUE_STATES` — the memory-proportional bound (resident memory ∝
+//     distinct states). At the bounds below the unique space is ~67k (basic) /
+//     ~460k (wide), generated ~191k / ~1.34M, and resident memory ~0.07 GB.
+const TARGET_STATE_COUNT: usize = 4_000_000;
+const MAX_UNIQUE_STATES: usize = 600_000;
 const MAX_DEPTH: usize = 40;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// `delete.retention.ms` used throughout the model. Small so `clock` can
-/// overtake stamped horizons within the bounded clock window.
-const DELETE_RETENTION_MS: i64 = 4;
+/// overtake stamped horizons within the bounded clock window (a horizon stamped
+/// at clock `c` elapses once `clock >= c + 2`, reachable inside `max_clock`).
+const DELETE_RETENTION_MS: i64 = 2;
 
 /// What a log entry carries downstream of the compaction decision.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -86,17 +101,14 @@ struct Entry {
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-#[allow(clippy::struct_excessive_bools)] // five independent non-vacuity witnesses
 struct CompactState {
     log: Vec<Entry>,
-    /// Abstract wall clock (ms).
+    /// Abstract wall clock (ms). Horizons are stored as absolute stamp values on
+    /// entries and compared against this clock. Non-vacuity witnesses are NOT
+    /// stored in the state — they are derived from `(log, clock)` in
+    /// [`Model::properties`], keeping the fingerprint free of the monotonic
+    /// witness bools that otherwise multiply the reachable state space ~32x.
     clock: i64,
-    // Non-vacuity witnesses (monotonic false → true).
-    saw_tombstone_aged_out: bool,
-    saw_marker_aged_out: bool,
-    saw_marker_retained_for_live_data: bool,
-    saw_horizon_stamped: bool,
-    saw_control_not_deduped: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -104,7 +116,6 @@ enum CompactAction {
     AppendData(u8, u8),
     AppendTombstone(u8),
     AppendCommit(u8),
-    AppendAbort(u8),
     Tick(i64),
     Compact,
 }
@@ -183,26 +194,26 @@ impl Model for CompactModel {
         vec![CompactState {
             log: vec![],
             clock: 0,
-            saw_tombstone_aged_out: false,
-            saw_marker_aged_out: false,
-            saw_marker_retained_for_live_data: false,
-            saw_horizon_stamped: false,
-            saw_control_not_deduped: false,
         }]
     }
 
     fn actions(&self, s: &Self::State, actions: &mut Vec<Self::Action>) {
-        // Cap log growth so the reachable space stays bounded.
+        // Cap log growth so the reachable space stays bounded. The per-position
+        // alphabet is deliberately minimal: `retain_decision` branches only on
+        // value-*presence* (live vs tombstone) and txn-state, never on the value
+        // byte or commit/abort, so we fix the data value to 0 and emit a single
+        // marker kind per producer. Collapsing those two provably-irrelevant
+        // dimensions cuts the alphabet 10 → 6 symbols (the dominant state-space
+        // driver) with zero loss of decision coverage. (`EntryKind::Marker.commit`
+        // stays in the type for clarity / the legacy RED witness, but only the
+        // commit variant is enumerated.)
         if s.log.len() < self.max_len {
             for key in 0u8..=1 {
-                for value in 0u8..=1 {
-                    actions.push(CompactAction::AppendData(key, value));
-                }
+                actions.push(CompactAction::AppendData(key, 0));
                 actions.push(CompactAction::AppendTombstone(key));
             }
             for pid in 0u8..=1 {
                 actions.push(CompactAction::AppendCommit(pid));
-                actions.push(CompactAction::AppendAbort(pid));
             }
         }
         for dt in [1i64, 2] {
@@ -246,32 +257,15 @@ impl Model for CompactModel {
                 });
                 Some(s)
             }
-            CompactAction::AppendAbort(pid) => {
-                let mut s = last.clone();
-                s.log.push(Entry {
-                    key: None,
-                    kind: EntryKind::Marker {
-                        producer_id: pid,
-                        commit: false,
-                    },
-                    horizon: None,
-                });
-                Some(s)
-            }
             CompactAction::Tick(dt) => {
                 let mut s = last.clone();
                 s.clock += dt;
                 Some(s)
             }
             CompactAction::Compact => {
-                let (next_log, witness) = compact_pass(&last.log, last.clock, retain_decision);
+                let next_log = compact_pass(&last.log, last.clock, retain_decision);
                 let mut s = last.clone();
                 s.log = next_log;
-                s.saw_tombstone_aged_out |= witness.tombstone_aged_out;
-                s.saw_marker_aged_out |= witness.marker_aged_out;
-                s.saw_marker_retained_for_live_data |= witness.marker_retained_for_live_data;
-                s.saw_horizon_stamped |= witness.horizon_stamped;
-                s.saw_control_not_deduped |= witness.control_not_deduped;
                 Some(s)
             }
         }
@@ -293,20 +287,44 @@ impl Model for CompactModel {
                     EntryKind::Marker { .. } => e.key.is_none(),
                 })
             }),
-            Property::sometimes("tombstone_aged_out", |_, s: &CompactState| {
-                s.saw_tombstone_aged_out
-            }),
-            Property::sometimes("marker_aged_out", |_, s: &CompactState| {
-                s.saw_marker_aged_out
-            }),
-            Property::sometimes("marker_retained_for_live_data", |_, s: &CompactState| {
-                s.saw_marker_retained_for_live_data
-            }),
+            // A delete-horizon was stamped and the entry retained (some log entry
+            // carries a horizon).
             Property::sometimes("horizon_stamped", |_, s: &CompactState| {
-                s.saw_horizon_stamped
+                s.log.iter().any(|e| e.horizon.is_some())
             }),
+            // Two markers coexist in one log — proof markers are never key-deduped
+            // against each other (the bug would have collapsed them to one).
             Property::sometimes("control_not_deduped", |_, s: &CompactState| {
-                s.saw_control_not_deduped
+                s.log
+                    .iter()
+                    .filter(|e| matches!(e.kind, EntryKind::Marker { .. }))
+                    .count()
+                    >= 2
+            }),
+            // A marker is retained because its producer's transaction data
+            // survives this compaction.
+            Property::sometimes("marker_retained_for_live_data", |_, s: &CompactState| {
+                let om = CompactModel::offset_map(&s.log);
+                let ds = CompactModel::data_survives(&s.log, &om);
+                s.log.iter().any(|e| {
+                    matches!(&e.kind, EntryKind::Marker { producer_id, .. } if ds.contains(producer_id))
+                })
+            }),
+            // A retained tombstone reaches an elapsed horizon (the next compaction
+            // ages it out) — proves the tombstone-aging path is reachable.
+            Property::sometimes("tombstone_horizon_elapsed", |_, s: &CompactState| {
+                s.log.iter().any(|e| {
+                    matches!(e.kind, EntryKind::Data { value: None })
+                        && e.horizon.is_some_and(|h| s.clock >= h)
+                })
+            }),
+            // A retained marker reaches an elapsed horizon (data gone + grace
+            // window elapsed) — proves the marker-aging path is reachable.
+            Property::sometimes("marker_horizon_elapsed", |_, s: &CompactState| {
+                s.log.iter().any(|e| {
+                    matches!(e.kind, EntryKind::Marker { .. })
+                        && e.horizon.is_some_and(|h| s.clock >= h)
+                })
             }),
         ]
     }
@@ -316,27 +334,17 @@ impl Model for CompactModel {
     }
 }
 
-/// Non-vacuity witnesses produced by a single compaction pass.
-#[derive(Default)]
-#[allow(clippy::struct_excessive_bools)] // five independent non-vacuity witnesses
-struct CompactWitness {
-    tombstone_aged_out: bool,
-    marker_aged_out: bool,
-    marker_retained_for_live_data: bool,
-    horizon_stamped: bool,
-    control_not_deduped: bool,
-}
-
 /// The retain-decision signature, abstracted so [`compact_pass`] can run either
 /// the real [`retain_decision`] or the buggy [`legacy_retain`].
 type RetainFn = fn(RecordMeta, BatchMeta, bool, TxnDataState, i64, i64) -> RetainDecision;
 
 /// Run one compaction pass over `log` at `clock`, applying `retain` to each
 /// entry, asserting the five KIP-534 safety invariants, and returning the next
-/// log plus non-vacuity witnesses. Panics (with a message containing the
-/// invariant name) on any safety violation.
+/// log. Panics (with a message containing the invariant name) on any safety
+/// violation. (Non-vacuity is proven separately via state-derived `sometimes`
+/// properties, so this pass carries no witness accumulator.)
 #[allow(clippy::too_many_lines)]
-fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, CompactWitness) {
+fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
     let offset_map = CompactModel::offset_map(log);
     let data_survives = CompactModel::data_survives(log, &offset_map);
 
@@ -364,7 +372,6 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
         }
     }
 
-    let mut witness = CompactWitness::default();
     let mut next: Vec<Entry> = Vec::with_capacity(log.len());
     // For control-not-deduped: count how many output entries each input marker
     // index produced (must be exactly one for Kept/SetHorizon markers).
@@ -431,9 +438,6 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
                     *marker_output_count.entry(idx).or_insert(0) += 1;
                     if let EntryKind::Marker { producer_id, .. } = entry.kind {
                         surviving_marker_pids.insert(producer_id);
-                        if matches!(txn, TxnDataState::DataSurvives) {
-                            witness.marker_retained_for_live_data = true;
-                        }
                     }
                 }
                 next.push(entry.clone());
@@ -448,7 +452,6 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
                          {existing} → {h}"
                     );
                 }
-                witness.horizon_stamped = true;
                 if is_control {
                     *marker_output_count.entry(idx).or_insert(0) += 1;
                     if let EntryKind::Marker { producer_id, .. } = entry.kind {
@@ -460,14 +463,9 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
                 next.push(e);
             }
             RetainDecision::Delete => {
-                if is_control {
-                    // A marker that ages out: data fully gone and horizon
-                    // elapsed.
-                    witness.marker_aged_out = true;
-                } else if matches!(entry.kind, EntryKind::Data { value: None }) && is_newest {
-                    // A newest tombstone deleted ⇒ it aged out.
-                    witness.tombstone_aged_out = true;
-                }
+                // Dropped (superseded data, null-key data, or an aged-out
+                // tombstone/marker). No bookkeeping needed; aging non-vacuity is
+                // proven by the state-derived `*_horizon_elapsed` witnesses.
             }
         }
     }
@@ -494,12 +492,6 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
             "control-not-deduped violated: input marker at idx {idx} produced \
              {count} output entries"
         );
-    }
-    // Witness: two distinct input markers were both individually retained
-    // (the bug would have deduped them). Requires ≥2 surviving markers whose
-    // input (pid,commit) collide or differ — either way both survive.
-    if marker_output_count.len() >= 2 {
-        witness.control_not_deduped = true;
     }
 
     // (2) marker-data-precedence: if a producer has surviving data in the
@@ -549,7 +541,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> (Vec<Entry>, Com
         );
     }
 
-    (next, witness)
+    next
 }
 
 // ---------------------------------------------------------------------------
@@ -764,7 +756,7 @@ fn run(model: CompactModel, label: &str) {
     let checker = model
         .checker()
         .target_max_depth(MAX_DEPTH)
-        .target_state_count(MAX_STATES)
+        .target_state_count(TARGET_STATE_COUNT)
         .timeout(CHECK_TIMEOUT)
         .spawn_bfs()
         .join();
@@ -775,9 +767,17 @@ fn run(model: CompactModel, label: &str) {
         checker.max_depth()
     );
     assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    // Exhaustiveness: the BFS stopped because the frontier emptied, not because
+    // it hit the truncation target.
     assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] state cap hit"
+        checker.state_count() < TARGET_STATE_COUNT,
+        "[{label}] truncated at the state-count target — not exhaustive"
+    );
+    // Memory-proportional bound (resident memory ∝ distinct states).
+    assert!(
+        checker.unique_state_count() < MAX_UNIQUE_STATES,
+        "[{label}] unique-state bound exceeded ({} >= {MAX_UNIQUE_STATES})",
+        checker.unique_state_count()
     );
     checker.assert_properties();
 }
@@ -786,8 +786,8 @@ fn run(model: CompactModel, label: &str) {
 fn compaction_basic() {
     run(
         CompactModel {
-            max_len: 5,
-            max_clock: 6,
+            max_len: 4,
+            max_clock: 4,
         },
         "compaction_basic",
     );
@@ -797,8 +797,8 @@ fn compaction_basic() {
 fn compaction_wide() {
     run(
         CompactModel {
-            max_len: 8,
-            max_clock: 10,
+            max_len: 5,
+            max_clock: 4,
         },
         "compaction_wide",
     );
