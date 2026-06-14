@@ -27,7 +27,8 @@ spec:
   nodeIdStart: 0
   storage:
     type: PersistentClaim
-    size: 20Gi
+    class: premium-rwo
+    size: 200Gi
     deleteClaim: true
   resources:
     requests:
@@ -67,7 +68,8 @@ spec:
   nodeIdStart: 1
   storage:
     type: PersistentClaim
-    size: 20Gi
+    class: premium-rwo
+    size: 200Gi
     deleteClaim: true
   resources:
     requests:
@@ -107,7 +109,8 @@ spec:
   nodeIdStart: 2
   storage:
     type: PersistentClaim
-    size: 20Gi
+    class: premium-rwo
+    size: 200Gi
     deleteClaim: true
   resources:
     requests:

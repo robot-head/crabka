@@ -13,7 +13,8 @@ spec:
     - broker
   storage:
     type: persistent-claim
-    size: 20Gi
+    class: premium-rwo
+    size: 200Gi
     deleteClaim: true
   resources:
     requests:
