@@ -175,8 +175,9 @@ struct ShareModel {
 ```rust
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum ShareAction {
-    Produce,
-    Acquire { member: u8, max_records: i32 }, // max_records in {1, max_offset}
+    Produce,    // raise the produced high-watermark by one record
+    Materialize, // leader pulls produced-but-unmaterialized records into the window
+    Acquire { member: u8, max_records: i32 }, // max_records in {1, i32::MAX (= all available)}
     Acknowledge { member: u8, first: i64, last: i64, ack: AckType }, // ack in {Accept, Release, Reject}
     Renew { member: u8, first: i64, last: i64 },
     ExpireLocks,
@@ -185,11 +186,21 @@ enum ShareAction {
 }
 ```
 
+`Produce` and `Materialize` are kept separate (rather than producing-then-
+materializing in one step) so the high-watermark can run ahead of the
+materialized window — only then does a single `materialize` pull a *multi-record*
+batch (up to `max_inflight`), which is what exercises the in-flight cap and
+multi-record acquire/split paths. Folding them would only ever materialize one
+record at a time.
+
 `actions(state)` enumeration:
 
 - `Produce` — when `hwm < max_offset`.
-- `Acquire` — for each member, with `max_records in {1, max_offset}`, when at
-  least one `Available` batch exists.
+- `Materialize` — when `end_offset < hwm` and no `Available` batch remains (the
+  leader pulls lazily; `materialize` itself no-ops while Available records are
+  in flight).
+- `Acquire` — for each member, with `max_records in {1, i32::MAX}` (one record
+  vs all available), when at least one `Available` batch exists.
 - `Acknowledge` / `Renew` — **data-dependent**, like raft's fetch actions:
   enumerate the current `Acquired` runs *per owner*; for each maximal run offer
   the full range and one split (first half). `ack in {Accept, Release, Reject}`.
