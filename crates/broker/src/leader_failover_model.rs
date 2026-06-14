@@ -6,7 +6,7 @@
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
 use crabka_metadata::PartitionRecord;
@@ -15,6 +15,7 @@ use stateright::{Checker, Model, Property};
 
 use super::{FailoverDecision, failover_one};
 use crate::config_keys::RecoveryStrategy;
+use crate::unclean_recovery::{ReplicaLogInfo, has_newer_leader, select_best_replica};
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 80;
@@ -274,4 +275,201 @@ fn failover_recover() {
         FailoverModel::config(RecoveryStrategy::Balanced, false),
         "failover_recover",
     );
+}
+
+// ============================ RecoveryModel ============================
+
+/// One replica's reported log state (a hashable mirror of `ReplicaLogInfo`,
+/// which isn't `Hash`).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct ReplicaLog {
+    last_written_leader_epoch: i32,
+    log_end_offset: i64,
+    current_leader_epoch: i32,
+}
+
+/// Bounded config for the KIP-966 winner-selection model.
+struct RecoveryModel {
+    replicas: Vec<NodeId>,
+    max_epoch: i32,
+    max_leo: i64,
+    known_leader_epoch: i32,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct RecoveryState {
+    responses: BTreeMap<NodeId, ReplicaLog>,
+    known_leader_epoch: i32,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum RecoveryAction {
+    AddResponse {
+        node: NodeId,
+        last_written_epoch: i32,
+        leo: i64,
+        current_epoch: i32,
+    },
+}
+
+impl RecoveryModel {
+    fn offset_recovery() -> Self {
+        Self {
+            replicas: vec![1, 2, 3],
+            max_epoch: 1,
+            max_leo: 1,
+            known_leader_epoch: 1,
+        }
+    }
+}
+
+/// Project the gathered responses into the real wire-decoupled type.
+fn infos_of(s: &RecoveryState) -> Vec<ReplicaLogInfo> {
+    s.responses
+        .iter()
+        .map(|(id, l)| ReplicaLogInfo {
+            broker_id: *id,
+            last_written_leader_epoch: l.last_written_leader_epoch,
+            log_end_offset: l.log_end_offset,
+            current_leader_epoch: l.current_leader_epoch,
+        })
+        .collect()
+}
+
+impl Model for RecoveryModel {
+    type State = RecoveryState;
+    type Action = RecoveryAction;
+
+    fn init_states(&self) -> Vec<Self::State> {
+        vec![RecoveryState {
+            responses: BTreeMap::new(),
+            known_leader_epoch: self.known_leader_epoch,
+        }]
+    }
+
+    fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+        // Each replica reports at most one log state; fan out over the bounded
+        // (epoch, leo, current_epoch) domain. current_epoch ranges one past the
+        // known epoch so has_newer_leader is reachable both ways.
+        for &node in &self.replicas {
+            if state.responses.contains_key(&node) {
+                continue;
+            }
+            for last_written_epoch in 0..=self.max_epoch {
+                for leo in 0..=self.max_leo {
+                    for current_epoch in self.known_leader_epoch..=(self.known_leader_epoch + 1) {
+                        actions.push(RecoveryAction::AddResponse {
+                            node,
+                            last_written_epoch,
+                            leo,
+                            current_epoch,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
+        let mut state = last.clone();
+        match action {
+            RecoveryAction::AddResponse {
+                node,
+                last_written_epoch,
+                leo,
+                current_epoch,
+            } => {
+                if state.responses.contains_key(&node) {
+                    return None;
+                }
+                state.responses.insert(
+                    node,
+                    ReplicaLog {
+                        last_written_leader_epoch: last_written_epoch,
+                        log_end_offset: leo,
+                        current_leader_epoch: current_epoch,
+                    },
+                );
+            }
+        }
+        Some(state)
+    }
+
+    fn properties(&self) -> Vec<Property<Self>> {
+        vec![
+            // The real select_best_replica returns the true maximum by
+            // (last_written_leader_epoch, log_end_offset, then lowest broker_id).
+            Property::always("select_best_is_max", |_, s: &RecoveryState| {
+                let infos = infos_of(s);
+                match select_best_replica(&infos) {
+                    None => infos.is_empty(),
+                    Some(w) => {
+                        let win = infos
+                            .iter()
+                            .find(|i| i.broker_id == w)
+                            .expect("winner is among the inputs");
+                        infos.iter().all(|i| {
+                            (win.last_written_leader_epoch, win.log_end_offset)
+                                .cmp(&(i.last_written_leader_epoch, i.log_end_offset))
+                                .then(i.broker_id.cmp(&win.broker_id)) // lower id wins
+                                != std::cmp::Ordering::Less
+                        })
+                    }
+                }
+            }),
+            // The real has_newer_leader matches its specification.
+            Property::always("has_newer_leader_matches", |_, s: &RecoveryState| {
+                let infos = infos_of(s);
+                has_newer_leader(&infos, s.known_leader_epoch)
+                    == infos
+                        .iter()
+                        .any(|i| i.current_leader_epoch > s.known_leader_epoch)
+            }),
+            Property::sometimes("can_pick_winner", |_, s: &RecoveryState| {
+                !s.responses.is_empty()
+            }),
+            Property::sometimes("can_detect_newer", |_, s: &RecoveryState| {
+                s.responses
+                    .values()
+                    .any(|l| l.current_leader_epoch > s.known_leader_epoch)
+            }),
+        ]
+    }
+
+    fn within_boundary(&self, state: &Self::State) -> bool {
+        state.responses.len() <= self.replicas.len()
+            && state.responses.values().all(|l| {
+                l.last_written_leader_epoch <= self.max_epoch && l.log_end_offset <= self.max_leo
+            })
+    }
+}
+
+fn run_recovery(model: RecoveryModel, label: &str) {
+    let checker = model
+        .checker()
+        .target_max_depth(MAX_DEPTH)
+        .target_state_count(MAX_STATES)
+        .timeout(CHECK_TIMEOUT)
+        .spawn_bfs()
+        .join();
+    eprintln!(
+        "[{label}] unique_states={} generated={} max_depth={}",
+        checker.unique_state_count(),
+        checker.state_count(),
+        checker.max_depth()
+    );
+    assert!(
+        checker.max_depth() < MAX_DEPTH,
+        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
+    );
+    assert!(
+        checker.state_count() < MAX_STATES,
+        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
+    );
+    checker.assert_properties();
+}
+
+#[test]
+fn offset_recovery() {
+    run_recovery(RecoveryModel::offset_recovery(), "offset_recovery");
 }
