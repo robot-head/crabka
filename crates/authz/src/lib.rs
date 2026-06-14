@@ -40,6 +40,8 @@
 
 mod allow_all;
 pub mod cache;
+#[cfg(test)]
+mod precedence;
 mod simple;
 mod source;
 
