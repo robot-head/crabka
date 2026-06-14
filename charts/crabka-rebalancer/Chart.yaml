@@ -3,7 +3,10 @@ name: crabka-rebalancer
 description: Cruise-Control-equivalent partition rebalancer for Crabka clusters.
 type: application
 version: 0.1.1
-appVersion: "0.1.1"
+# appVersion tracks the crate release. CI (docs.yml) overrides both version and
+# appVersion from the workspace Cargo.toml at package time, so this is only the
+# local/dev default — no need to hand-edit it on release.
+appVersion: "0.3.6"
 home: https://github.com/robot-head/crabka
 sources:
   - https://github.com/robot-head/crabka/tree/main/crates/rebalancer

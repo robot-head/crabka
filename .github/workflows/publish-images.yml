@@ -94,6 +94,16 @@ jobs:
           restore-keys: |
             melange-${{ matrix.arch }}-
 
+      - name: Set melange package version from the workspace
+        run: |
+          set -euo pipefail
+          # Derive the APK package version from the workspace manifest so it
+          # tracks the crate release automatically — no hand-edited version in
+          # packaging/melange/crabka.yaml.
+          ver="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          sed -i -E "s/^(  version:).*/\1 ${ver}/" packaging/melange/crabka.yaml
+          echo "melange package version set to ${ver}"
+
       - name: Build APK packages (single compile for all images)
         run: |
           mkdir -p packages .melange-cache

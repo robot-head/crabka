@@ -10,8 +10,8 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 
 ## Install
 
-```toml
-crabka-remote-storage-topic = "0.3.2"
+```sh
+cargo add crabka-remote-storage-topic
 ```
 
 For workspace development, use the path dependency from this repository instead.

@@ -33,6 +33,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write # keyless cosign signing + Sigstore attestation (OIDC)
+      attestations: write # write chart provenance to GitHub's attestation store
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
@@ -52,14 +56,108 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v4.2.1
-      - name: Package Helm charts and generate repository index
+
+      - name: Install cosign
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: sigstore/cosign-installer@v3
+
+      - name: Package + sign Helm charts and generate repository index
+        env:
+          # Optional Helm-native PGP provenance (.prov). When HELM_GPG_KEY (a
+          # base64-encoded, ASCII-armored private key) is configured the charts
+          # get a .prov verifiable with `helm install --verify`; otherwise only
+          # the keyless cosign + SLSA attestation paths run.
+          HELM_GPG_KEY: ${{ secrets.HELM_GPG_KEY }}
+          HELM_GPG_KEY_ID: ${{ secrets.HELM_GPG_KEY_ID }}
+          HELM_GPG_PASSPHRASE: ${{ secrets.HELM_GPG_PASSPHRASE }}
+          # Keyless signing/attestation needs OIDC, which is unavailable on PRs.
+          SIGN: ${{ github.event_name != 'pull_request' }}
         run: |
-          mkdir -p website/static/charts
+          set -euo pipefail
+          out=website/static/charts
+          mkdir -p "$out"
+          # Publish the chart-signing public key so consumers can verify the
+          # PGP .prov provenance without leaving the repo.
+          cp charts/crabka-charts.pub.asc "$out/crabka-charts.pub.asc"
+
+          # Chart + app versions track the crate release — read them from the
+          # workspace manifest so there is nothing to hand-edit on release.
+          ver="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')"
+          echo "Packaging charts at version ${ver}"
+
+          # Optional Helm-native PGP provenance (.prov).
+          sign_args=()
+          if [[ -n "${HELM_GPG_KEY:-}" ]]; then
+            keydir="$(mktemp -d)"
+            chmod 700 "$keydir"
+            export GNUPGHOME="$keydir"
+            # Helm needs a binary secret keyring. Convert the armored private key
+            # straight to binary with `gpg --dearmor`: `gpg --import` +
+            # `--export-secret-keys` route through gpg-agent, which has no TTY in
+            # CI ("Inappropriate ioctl for device") and exports nothing for a
+            # passphrase-protected key. Helm decrypts it with --passphrase-file.
+            echo "${HELM_GPG_KEY}" | base64 -d | gpg --dearmor > "$keydir/secring.gpg"
+            printf '%s' "${HELM_GPG_PASSPHRASE:-}" > "$keydir/passphrase"
+            sign_args=(--sign --key "${HELM_GPG_KEY_ID}" \
+              --keyring "$keydir/secring.gpg" \
+              --passphrase-file "$keydir/passphrase")
+            echo "Helm PGP provenance (.prov) signing enabled"
+          else
+            echo "HELM_GPG_KEY not set — skipping Helm .prov signing"
+          fi
+
           for chart in charts/*/; do
-            helm package "$chart" -d website/static/charts/
+            helm package "$chart" --version "$ver" --app-version "$ver" \
+              "${sign_args[@]}" -d "$out"
           done
-          helm repo index website/static/charts/ \
-            --url https://robot-head.github.io/crabka/charts/
+
+          helm repo index "$out" --url https://robot-head.github.io/crabka/charts/
+
+          # Keyless cosign signature (Sigstore) for every chart tarball; the
+          # detached bundle is published alongside the .tgz.
+          if [[ "${SIGN}" == "true" ]]; then
+            for tgz in "$out"/*.tgz; do
+              cosign sign-blob --yes --bundle "${tgz}.cosign.bundle" "${tgz}"
+            done
+          fi
+
+          # GitHub Pages has no directory autoindex, so the bare /charts/ URL
+          # 404s without an index.html. Emit a small landing page documenting the
+          # repo and listing the published charts.
+          {
+            echo '<!doctype html><meta charset="utf-8">'
+            echo '<title>Crabka Helm charts</title>'
+            echo '<h1>Crabka Helm chart repository</h1>'
+            echo '<pre>helm repo add crabka https://robot-head.github.io/crabka/charts'
+            echo 'helm repo update</pre>'
+            echo '<p>Repository index: <a href="index.yaml">index.yaml</a></p>'
+            echo "<p>Charts (version ${ver}):</p><ul>"
+            for tgz in "$out"/*.tgz; do
+              n="$(basename "$tgz")"
+              echo "<li><a href=\"${n}\">${n}</a></li>"
+            done
+            echo '</ul>'
+            echo '<h2>Verify a chart</h2>'
+            echo '<p>Signing key: <a href="crabka-charts.pub.asc">crabka-charts.pub.asc</a></p>'
+            echo '<pre># PGP provenance (helm-native)'
+            echo 'curl -fsSL https://robot-head.github.io/crabka/charts/crabka-charts.pub.asc | gpg --dearmor > crabka-keyring.gpg'
+            echo 'helm install my-op crabka/crabka-operator --verify --keyring ./crabka-keyring.gpg'
+            echo ''
+            echo '# Keyless cosign signature'
+            echo 'cosign verify-blob --bundle crabka-operator-VERSION.tgz.cosign.bundle \'
+            echo '  --certificate-oidc-issuer https://token.actions.githubusercontent.com \'
+            echo "  --certificate-identity-regexp '^https://github.com/robot-head/crabka/' \\"
+            echo '  crabka-operator-VERSION.tgz'
+            echo ''
+            echo '# SLSA build provenance'
+            echo 'gh attestation verify crabka-operator-VERSION.tgz --repo robot-head/crabka</pre>'
+          } > "$out/index.html"
+
+      - name: Attest chart build provenance (SLSA)
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "website/static/charts/*.tgz"
       - name: Install Zola
         uses: taiki-e/install-action@v2
         with:
