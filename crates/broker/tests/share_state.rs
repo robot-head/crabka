@@ -376,7 +376,7 @@ async fn state_survives_restart() {
         let w = write_state(&client, "g1", tid, 0, 0, 0, 7, 3, vec![]).await;
         assert!(w == 0, "write error: {w}");
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        broker.wait_until_share_spso("g1", tid, 0, 7).await;
         broker.shutdown().await;
     }
 
@@ -387,16 +387,9 @@ async fn state_survives_restart() {
         let client = connect(&broker.listen_addr().to_string()).await;
 
         // Recovered coordinator may still be materializing the led partition;
-        // retry the summary until it reflects the persisted SPSO.
-        let mut start_offset = i64::MIN;
-        for _ in 0..40 {
-            let s = read_summary(&client, "g1", tid, 0).await;
-            if !not_ready(s.error_code) {
-                start_offset = s.start_offset;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // await until the persisted SPSO is visible, then assert the wire value.
+        broker.wait_until_share_spso("g1", tid, 0, 7).await;
+        let start_offset = read_summary(&client, "g1", tid, 0).await.start_offset;
         assert!(
             start_offset == 7,
             "recovered SPSO must be 7, got {start_offset}"
