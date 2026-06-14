@@ -439,7 +439,9 @@ impl Model for ShareModel {
             Property::always(
                 "delivery_count_bounded",
                 |m: &ShareModel, s: &ShareState| {
-                    s.sm.batches.iter().all(|b| b.delivery_count <= m.max_attempts)
+                    s.sm.batches
+                        .iter()
+                        .all(|b| b.delivery_count <= m.max_attempts)
                 },
             ),
             Property::always("spso_in_range", |m: &ShareModel, s: &ShareState| {
@@ -451,14 +453,12 @@ impl Model for ShareModel {
                 s.sm.start_offset > 0
             }),
             Property::sometimes("can_acknowledge", |_, s: &ShareState| {
-                s.sm
-                    .batches
+                s.sm.batches
                     .iter()
                     .any(|b| b.state == RecordState::Acknowledged)
             }),
             Property::sometimes("can_archive", |_, s: &ShareState| {
-                s.sm
-                    .batches
+                s.sm.batches
                     .iter()
                     .any(|b| b.state == RecordState::Archived)
             }),
@@ -511,7 +511,7 @@ fn run(model: ShareModel, label: &str) {
 fn share_concurrency_inflight_full() {
     // max_inflight large enough to pull the whole window in one materialize.
     run(
-        ShareModel::concurrency(2, 2),
+        ShareModel::concurrency(3, 3),
         "share_concurrency_inflight_full",
     );
 }
@@ -520,7 +520,7 @@ fn share_concurrency_inflight_full() {
 fn share_concurrency_inflight_one() {
     // max_inflight = 1: exercises drain-then-rematerialize across Produce steps.
     run(
-        ShareModel::concurrency(2, 1),
+        ShareModel::concurrency(3, 1),
         "share_concurrency_inflight_one",
     );
 }
