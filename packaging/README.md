@@ -6,8 +6,10 @@ packages) and [apko](https://github.com/chainguard-dev/apko) (assemble the OCI
 image). See [`melange/crabka.yaml`](melange/crabka.yaml) for the build and the
 per-image [`apko/`](apko) configs for the image contents.
 
-`.github/workflows/publish-images.yml` compiles the packages once and publishes
-each image to both registries on a `crabka-broker-v*` release tag:
+`.github/workflows/publish-images.yml` compiles the packages natively per
+architecture (`linux/amd64` + `linux/arm64`, no QEMU), assembles a single
+multi-arch image index per service with apko, and publishes each to both
+registries on a `crabka-broker-v*` release tag:
 
 | Image                    | Docker Hub                      | GHCR                                       |
 | ------------------------ | ------------------------------- | ------------------------------------------ |

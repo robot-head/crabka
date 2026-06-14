@@ -1,9 +1,14 @@
 name: publish-images
 
-# Publishes the Crabka container images and their supply-chain attestations.
+# Publishes the multi-arch Crabka container images and their supply-chain
+# attestations.
+#
+# Images are built for linux/amd64 (x86_64) and linux/arm64 (aarch64). Each
+# arch's APK packages are compiled natively on a matching runner (no QEMU), then
+# apko assembles a single multi-arch OCI image index per service.
 #
 # For every published image we generate, keylessly sign (Sigstore/Fulcio), and
-# publish two attestations:
+# publish two attestations against the image index digest:
 #   * SLSA build provenance (actions/attest-build-provenance)
 #   * SPDX SBOM produced by apko    (actions/attest-sbom)
 # Attestations are stored in GitHub's attestation API *and* pushed to GHCR as
@@ -37,24 +42,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Compile the APK packages once; every image is assembled from the same set.
-  build:
+  # Resolve the image tag once so the build/publish matrices agree on it.
+  version:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     outputs:
       version: ${{ steps.tags.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: stable
-
-      - name: Install melange
-        run: |
-          go install chainguard.dev/melange@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
-
       - name: Determine image tag
         id: tags
         run: |
@@ -67,13 +60,39 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+  # Compile the APK packages once per architecture, natively on a matching
+  # runner. Each leg signs its repo with its own ephemeral key and uploads only
+  # the public half — the private signing key never leaves the build runner.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange
+        run: |
+          go install chainguard.dev/melange@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
       - name: Cache melange/cargo build artifacts
         uses: actions/cache@v5
         with:
           path: .melange-cache
-          key: melange-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: melange-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            melange-${{ runner.os }}-
+            melange-${{ matrix.arch }}-
 
       - name: Build APK packages (single compile for all images)
         run: |
@@ -82,26 +101,25 @@ jobs:
           melange build packaging/melange/crabka.yaml \
             --source-dir . \
             --signing-key melange.rsa \
-            --arch x86_64 \
+            --arch ${{ matrix.arch }} \
             --runner docker \
             --cache-dir "$PWD/.melange-cache" \
             --out-dir packages/
 
-      # The signed APK repo (packages/) plus the public keyring are all the
-      # publish job needs — the private signing key never leaves this job.
       - name: Upload APK repository + keyring
         uses: actions/upload-artifact@v4
         with:
-          name: apk-repository
+          name: apk-repository-${{ matrix.arch }}
           path: |
             packages/
             melange.rsa.pub
           retention-days: 1
           if-no-files-found: error
 
-  # One leg per image: assemble + publish with apko, then attest the digest.
+  # One leg per image: assemble the multi-arch index with apko, then attest the
+  # index digest.
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -118,7 +136,7 @@ jobs:
           - crabka-schema-registry
           - bench-driver
     env:
-      VERSION: ${{ needs.build.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 
@@ -131,11 +149,26 @@ jobs:
           go install chainguard.dev/apko@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
-      - name: Download APK repository + keyring
+      - name: Download x86_64 APK repository
         uses: actions/download-artifact@v4
         with:
-          name: apk-repository
-          path: .
+          name: apk-repository-x86_64
+          path: dist/x86_64
+
+      - name: Download aarch64 APK repository
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-repository-aarch64
+          path: dist/aarch64
+
+      - name: Assemble multi-arch APK repository
+        run: |
+          set -euo pipefail
+          # Each arch lands under packages/<arch>/; merge both into one local
+          # repo so apko can resolve every arch the image config requests.
+          mkdir -p packages
+          cp -r dist/x86_64/packages/. packages/
+          cp -r dist/aarch64/packages/. packages/
 
       - name: Log in to DockerHub
         uses: docker/login-action@v4
@@ -172,14 +205,16 @@ jobs:
 
           mkdir -p sbom
           # apko prints the published image reference (with @sha256: digest) to
-          # stdout; build logs go to stderr. The digest is content-addressed and
-          # identical across every tag/registry it was pushed to.
+          # stdout; build logs go to stderr. The arch set comes from each apko
+          # config; both per-arch keyrings are trusted so every APKINDEX
+          # verifies. The digest is content-addressed and identical across every
+          # tag/registry it was pushed to.
           REF="$(apko publish "packaging/apko/${IMAGE}.yaml" \
             "${TAGS[@]}" \
-            --arch x86_64 \
             --sbom-path sbom \
             --repository-append "${PWD}/packages" \
-            --keyring-append "${PWD}/melange.rsa.pub")"
+            --keyring-append "${PWD}/dist/x86_64/melange.rsa.pub" \
+            --keyring-append "${PWD}/dist/aarch64/melange.rsa.pub")"
           echo "apko published: ${REF}"
 
           DIGEST="$(printf '%s\n' "${REF}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
@@ -189,8 +224,7 @@ jobs:
           fi
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
-          # Prefer the SBOM describing the published index; fall back to the
-          # single-arch SBOM if apko emitted a plain manifest.
+          # Prefer the SBOM describing the published index (covers all arches).
           SBOM="$(ls sbom/*index*.spdx.json 2>/dev/null | head -n1 || true)"
           [[ -z "${SBOM}" ]] && SBOM="$(ls sbom/*.spdx.json 2>/dev/null | head -n1 || true)"
           if [[ -z "${SBOM}" ]]; then
