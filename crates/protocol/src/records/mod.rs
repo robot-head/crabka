@@ -7,6 +7,7 @@
 pub(crate) mod borrowed;
 mod crc;
 mod error;
+mod file_region;
 pub mod header;
 pub mod metadata;
 pub(crate) mod owned;
@@ -19,6 +20,7 @@ pub use borrowed::{
     RecordHeader as RecordHeaderBorrowed, ValidatedBatch, validate_one_v2_batch,
 };
 pub use error::RecordsError;
+pub use file_region::FileRegion;
 pub use header::HEADER_LEN;
 pub use header::{
     Attributes, CRC_COVERAGE_START, RecordBatchHeader, TimestampType,

@@ -4,6 +4,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use crabka_protocol::records::{
@@ -60,7 +61,13 @@ pub struct Segment {
     #[allow(dead_code)] // used by later phases (Log retention, recovery).
     dir: PathBuf,
     base_offset: i64,
-    log_file: File,
+    /// The `.log` data file. Wrapped in `Arc` so the zero-copy fetch path
+    /// (Increment D) can hand a `FileRegion { file: Arc<File>, .. }` to the
+    /// connection's async `sendfile` loop; the `Arc` pins the inode through the
+    /// send even if retention rolls/removes this segment in the meantime (the
+    /// open fd keeps the inode alive on Unix). Writes go through `&*log_file`
+    /// (`std::fs::File` implements `Write`/`Seek` for `&File`).
+    log_file: Arc<File>,
     log_size: u64,
     offset_index: OffsetIndex,
     time_index: TimeIndex,
@@ -82,6 +89,46 @@ pub struct RawSegmentRead {
     pub last_offset: i64,
     /// Verbatim `.log` bytes — one or more complete v2 batches.
     pub bytes: Bytes,
+}
+
+/// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path
+/// (Increment D): the same offset/boundary metadata, but the records run is a
+/// [`FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead of an
+/// owned `Bytes` slice — so the broker can `sendfile(2)` it straight from the
+/// page cache without a userspace copy. Linux-only.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub struct RawSegmentDesc {
+    /// `base_offset` of the first included batch (≤ requested offset).
+    pub start_offset: i64,
+    /// Last absolute offset covered by the region (`start_offset - 1` if empty).
+    pub last_offset: i64,
+    /// The records run, as a file-backed descriptor. `None` when no complete
+    /// batch was found in range.
+    pub region: Option<crabka_protocol::records::FileRegion>,
+}
+
+#[cfg(target_os = "linux")]
+impl RawSegmentDesc {
+    fn empty() -> Self {
+        Self {
+            start_offset: 0,
+            last_offset: -1,
+            region: None,
+        }
+    }
+
+    /// Byte length of the region (0 when empty).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.region.as_ref().map_or(0, |r| r.len)
+    }
+
+    /// `true` when no batch bytes were described.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.region.is_none()
+    }
 }
 
 impl RawSegmentRead {
@@ -115,7 +162,7 @@ impl Segment {
         Ok(Self {
             dir: dir.to_path_buf(),
             base_offset,
-            log_file,
+            log_file: Arc::new(log_file),
             log_size: 0,
             offset_index,
             time_index,
@@ -190,7 +237,7 @@ impl Segment {
         Ok(Self {
             dir: dir.to_path_buf(),
             base_offset,
-            log_file,
+            log_file: Arc::new(log_file),
             log_size,
             offset_index,
             time_index,
@@ -466,6 +513,128 @@ impl Segment {
         }
     }
 
+    /// Descriptor variant of [`Segment::read_raw`] for the Linux zero-copy
+    /// (`sendfile`) fetch path: runs the **same** boundary walk — selecting the
+    /// identical `[start_pos+range_start, start_pos+range_end)` byte range that
+    /// `read_raw` would have sliced — but returns a [`FileRegion`] descriptor
+    /// instead of `pread`ing the payload into an owned `Bytes`.
+    ///
+    /// The walk is header-only: it `pread`s just the fixed v2 batch headers to
+    /// find batch boundaries (using the header's `batch_length`), never the
+    /// record payloads. The resulting region is byte-identical to `read_raw`'s
+    /// `bytes` for the same `(fetch_offset, limit_offset, max_bytes)`.
+    #[cfg(target_os = "linux")]
+    pub fn read_raw_desc(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawSegmentDesc, LogError> {
+        if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
+            return Ok(RawSegmentDesc::empty());
+        }
+        let target_rel = u32::try_from((fetch_offset - self.base_offset).max(0))
+            .map_err(|_| LogError::Corrupt("read_raw_desc target offset out of range".into()))?;
+        let start_pos = u64::from(self.offset_index.lookup(target_rel));
+
+        // Mirror `read_raw`'s windowing **exactly** so the chosen byte range is
+        // byte-identical. `read_raw` first reads `first_read = max_bytes.max(
+        // HEADER_LEN)` bytes (capped by the bytes available after `start_pos`)
+        // into a buffer, then only includes a batch whose end lands within that
+        // buffer. A batch that straddles the buffer end is included **only** as
+        // the single anti-stall batch when nothing has been included yet (it is
+        // then re-read in full if it's complete on disk). We reproduce that with
+        // a `window` instead of an actual payload read — the scan stays
+        // header-only.
+        let first_read = max_bytes.max(HEADER_LEN) as u64;
+        let available = self.log_size.saturating_sub(start_pos);
+        let window = first_read.min(available); // == read_raw's buf.len()
+
+        let mut pos: u64 = 0;
+        let mut range_start: Option<u64> = None;
+        let mut range_end: u64 = 0;
+        let mut start_offset = fetch_offset;
+        let mut last_offset = fetch_offset - 1;
+        let mut hdr_buf = [0u8; HEADER_LEN];
+
+        loop {
+            // `read_raw` breaks when the next header can't fit in the window.
+            if pos + HEADER_LEN as u64 > window {
+                break;
+            }
+            let n = read_full_at(&self.log_file, start_pos + pos, &mut hdr_buf)?;
+            if n < HEADER_LEN {
+                break;
+            }
+            let hdr = RecordBatchHeader::ref_from_bytes(&hdr_buf)
+                .map_err(|_| LogError::Corrupt("record batch header".into()))?;
+            let base = hdr.base_offset.get();
+            let batch_len = usize::try_from(hdr.batch_length.get().max(0)).unwrap_or(0);
+            let total = 12 + batch_len as u64;
+            let batch_last = base + i64::from(hdr.last_offset_delta.get());
+
+            if batch_last < fetch_offset {
+                pos += total;
+                continue;
+            }
+            if base >= limit_offset {
+                break;
+            }
+            // Batch straddles the window end. `read_raw` re-reads exactly one
+            // such batch when nothing is buffered yet (anti-stall: always return
+            // at least one complete batch), provided it's complete on disk.
+            if pos + total > window {
+                if range_start.is_none() {
+                    if start_pos + pos + total > self.log_size {
+                        // Not a complete batch on disk — `read_raw` breaks.
+                        break;
+                    }
+                    let len = usize::try_from(total)
+                        .map_err(|_| LogError::Corrupt("read_raw_desc batch too large".into()))?;
+                    return Ok(RawSegmentDesc {
+                        start_offset: base,
+                        last_offset: batch_last,
+                        region: Some(crabka_protocol::records::FileRegion {
+                            file: Arc::clone(&self.log_file),
+                            offset: start_pos + pos,
+                            len,
+                        }),
+                    });
+                }
+                break;
+            }
+
+            if range_start.is_none() {
+                range_start = Some(pos);
+                start_offset = base;
+            }
+            range_end = pos + total;
+            last_offset = batch_last;
+            pos += total;
+
+            if range_end - range_start.expect("set above") >= max_bytes as u64 {
+                break;
+            }
+        }
+
+        match range_start {
+            Some(s) => {
+                let len = usize::try_from(range_end - s)
+                    .map_err(|_| LogError::Corrupt("read_raw_desc region too large".into()))?;
+                Ok(RawSegmentDesc {
+                    start_offset,
+                    last_offset,
+                    region: Some(crabka_protocol::records::FileRegion {
+                        file: Arc::clone(&self.log_file),
+                        offset: start_pos + s,
+                        len,
+                    }),
+                })
+            }
+            None => Ok(RawSegmentDesc::empty()),
+        }
+    }
+
     fn read_log_range(
         &self,
         start_pos: u64,
@@ -505,8 +674,10 @@ impl Segment {
         let bytes = buf.freeze();
 
         let position = self.log_size;
-        self.log_file.seek(SeekFrom::End(0))?;
-        self.log_file.write_all(&bytes)?;
+        // `std::fs::File` implements `Write`/`Seek` for `&File`; go through the
+        // shared `Arc<File>` by reference so no `&mut File` is needed.
+        (&*self.log_file).seek(SeekFrom::End(0))?;
+        (&*self.log_file).write_all(&bytes)?;
         self.log_size += bytes.len() as u64;
 
         let last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
@@ -577,8 +748,8 @@ impl Segment {
         patch_base_offset_and_leader_epoch(&mut patched, base_offset, leader_epoch);
 
         let position = self.log_size;
-        self.log_file.seek(SeekFrom::End(0))?;
-        self.log_file.write_all(&patched)?;
+        (&*self.log_file).seek(SeekFrom::End(0))?;
+        (&*self.log_file).write_all(&patched)?;
         self.log_size += patched.len() as u64;
 
         let last_offset = base_offset + i64::from(last_offset_delta);
@@ -928,6 +1099,91 @@ mod tests {
         assert!(r.start_offset == 0);
         assert!(r.last_offset == 0);
         assert!(!r.bytes.is_empty());
+        drop(dir);
+    }
+
+    // ---- read_raw_desc (zero-copy descriptor) tests (Linux only) ----
+
+    /// `pread` a `FileRegion` into a fresh `Vec` (the bytes the broker's
+    /// sendfile would transmit / its TLS pread-fallback would copy).
+    #[cfg(target_os = "linux")]
+    fn region_bytes(region: &crabka_protocol::records::FileRegion) -> Vec<u8> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = vec![0u8; region.len];
+        let mut filled = 0;
+        let mut off = region.offset;
+        while filled < buf.len() {
+            let n = region.file.read_at(&mut buf[filled..], off).unwrap();
+            assert!(n > 0, "unexpected EOF reading FileRegion");
+            filled += n;
+            off += n as u64;
+        }
+        buf
+    }
+
+    /// The load-bearing Increment-D invariant: the `read_raw_desc` region maps
+    /// to exactly the bytes `read_raw` would have returned, for the same
+    /// `(fetch_offset, limit_offset, max_bytes)`. Covers single-batch,
+    /// multi-batch, mid-stream start offsets, the limit clamp, and the
+    /// one-batch-over-budget anti-stall rule.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_raw_desc_region_equals_read_raw_bytes() {
+        let (dir, mut seg) = test_segment();
+        for off in 0..5i64 {
+            seg.append(&test_batch_at(off), 0).unwrap();
+        }
+        let cases = [
+            (0i64, 5i64, 10 * 1024 * 1024usize), // all batches
+            (0, 3, 10 * 1024 * 1024),            // limit clamp
+            (2, 5, 10 * 1024 * 1024),            // mid-stream start
+            (0, 5, 1),                           // one-batch anti-stall
+            (4, 5, 10 * 1024 * 1024),            // last batch
+        ];
+        for (fo, lo, mb) in cases {
+            let raw = seg.read_raw(fo, lo, mb).unwrap();
+            let desc = seg.read_raw_desc(fo, lo, mb).unwrap();
+            assert!(
+                desc.start_offset == raw.start_offset,
+                "start_offset mismatch for case ({fo},{lo},{mb})"
+            );
+            assert!(
+                desc.last_offset == raw.last_offset,
+                "last_offset mismatch for case ({fo},{lo},{mb})"
+            );
+            match &desc.region {
+                Some(region) => {
+                    assert!(region.len == raw.bytes.len());
+                    assert!(
+                        region_bytes(region) == raw.bytes[..],
+                        "region bytes must equal read_raw bytes for ({fo},{lo},{mb})"
+                    );
+                }
+                None => assert!(raw.bytes.is_empty()),
+            }
+        }
+        drop(dir);
+    }
+
+    /// A truncated trailing batch (byte budget cuts mid-batch) must produce a
+    /// region whose bytes equal `read_raw`'s clipped output — sendfile of a
+    /// clipped range is wire-valid (the consumer drops the partial batch).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_raw_desc_matches_read_raw_when_budget_clips_run() {
+        let (dir, mut seg) = test_segment();
+        // Several batches; a mid-size budget will include some but not all.
+        for off in 0..6i64 {
+            seg.append(&test_batch_at(off), 0).unwrap();
+        }
+        // Budget that admits ~2-3 batches (each batch is small but > a few bytes).
+        let raw = seg.read_raw(0, 6, 80).unwrap();
+        let desc = seg.read_raw_desc(0, 6, 80).unwrap();
+        assert!(desc.start_offset == raw.start_offset);
+        assert!(desc.last_offset == raw.last_offset);
+        let region = desc.region.expect("non-empty");
+        assert!(region.len == raw.bytes.len());
+        assert!(region_bytes(&region) == raw.bytes[..]);
         drop(dir);
     }
 

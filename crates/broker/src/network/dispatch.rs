@@ -192,7 +192,7 @@ async fn serve_connection_stream<S>(
     peer: SocketAddr,
     mtls_principal: Option<crabka_security::Principal>,
 ) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static + crate::network::fetch_writer::SendfileSink,
 {
     let mut framed: Framed<S, _> = Framed::new(stream, codec::codec());
     let is_sasl_listener = spec.protocol.requires_sasl();
@@ -439,7 +439,15 @@ async fn serve_connection_stream<S>(
                 // the plan directly on the raw stream (vectored write / — in
                 // Increment D — sendfile). This bypasses `encode_response`'s
                 // whole-body copy and the `Framed` codec's internal copy.
-                match handle_fetch_frame(&broker, &frame, &auth, &peer)
+                //
+                // `sendfile_capable` is true only for a plaintext `TcpStream` on
+                // Linux (false for TLS / non-Linux); it gates whether the fetch
+                // handler emits file-backed records regions for sendfile.
+                let sendfile_capable =
+                    crate::network::fetch_writer::SendfileSink::is_sendfile_capable(
+                        framed.get_ref(),
+                    );
+                match handle_fetch_frame(&broker, &frame, &auth, &peer, sendfile_capable)
                     .instrument(req_span.clone())
                     .await
                 {
@@ -1091,6 +1099,8 @@ async fn handle_alter_user_scram_credentials_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
@@ -1133,6 +1143,8 @@ async fn handle_update_features_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp = crate::handlers::update_features::handle(broker, req, api_version, &ctx).await;
@@ -1168,6 +1180,8 @@ async fn handle_describe_cluster_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -1202,6 +1216,8 @@ async fn handle_describe_producers_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::describe_producers::handle(
@@ -1239,6 +1255,8 @@ async fn handle_describe_transactions_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::describe_transactions::handle(
@@ -1275,6 +1293,8 @@ async fn handle_list_transactions_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -1306,6 +1326,8 @@ async fn handle_unregister_broker_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -1336,6 +1358,8 @@ async fn handle_add_raft_voter_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::add_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1365,6 +1389,8 @@ async fn handle_remove_raft_voter_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::remove_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1394,6 +1420,8 @@ async fn handle_update_raft_voter_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::update_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1424,6 +1452,8 @@ async fn handle_alter_partition_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::alter_partition::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1454,6 +1484,8 @@ async fn handle_broker_heartbeat_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::broker_heartbeat::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1484,6 +1516,8 @@ async fn handle_get_replica_log_info_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body = crate::handlers::get_replica_log_info::handle(
         broker,
@@ -1518,6 +1552,8 @@ async fn handle_heartbeat_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::heartbeat::handle(broker, api_version, correlation_id, body, &ctx).await?;
@@ -1546,6 +1582,8 @@ async fn handle_sync_group_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::sync_group::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1575,6 +1613,8 @@ async fn handle_leave_group_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::leave_group::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1605,6 +1645,8 @@ async fn handle_consumer_group_heartbeat_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body = crate::handlers::consumer_group_heartbeat::handle(
         broker,
@@ -1640,6 +1682,8 @@ async fn handle_share_group_heartbeat_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body = crate::handlers::share_group_heartbeat::handle(
         broker,
@@ -1675,6 +1719,8 @@ async fn handle_streams_group_heartbeat_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body = crate::handlers::streams_group_heartbeat::handle(
         broker,
@@ -1710,6 +1756,8 @@ async fn handle_find_coordinator_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::find_coordinator::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1740,6 +1788,8 @@ async fn handle_list_offsets_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::list_offsets::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1770,6 +1820,8 @@ async fn handle_offset_for_leader_epoch_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body = crate::handlers::offset_for_leader_epoch::handle(
         broker,
@@ -1805,6 +1857,8 @@ async fn handle_describe_configs_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::describe_configs::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1835,6 +1889,8 @@ async fn handle_describe_log_dirs_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
     let resp_body =
         crate::handlers::describe_log_dirs::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1868,6 +1924,8 @@ async fn handle_describe_topic_partitions_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::describe_topic_partitions::handle(
@@ -1906,6 +1964,8 @@ async fn handle_list_config_resources_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::list_config_resources::handle(
@@ -1943,6 +2003,8 @@ async fn handle_describe_quorum_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -1980,6 +2042,8 @@ async fn handle_produce_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     // The produce hot path slices each partition's verbatim records bytes
@@ -2030,8 +2094,9 @@ async fn handle_fetch_frame(
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
+    sendfile_capable: bool,
 ) -> Result<Vec<crate::network::fetch_writer::WriteOp>, BrokerError> {
-    use crate::network::fetch_writer::{WriteOp, build_fetch_plan, resolve_records_inline};
+    use crate::network::fetch_writer::{WriteOp, build_fetch_plan};
 
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 1);
@@ -2043,6 +2108,9 @@ async fn handle_fetch_frame(
         principal,
         peer,
         client_id,
+        // Only the canonical v4+ plan path can sendfile; the v0–v3 legacy path
+        // copy-encodes (down-conversion). Gate the FileRegions emission on both.
+        sendfile_capable: sendfile_capable && api_version >= 4,
     };
 
     let (resp, version) =
@@ -2064,12 +2132,29 @@ async fn handle_fetch_frame(
         return Ok(vec![WriteOp::Inline(framed_with_len.freeze())]);
     }
 
+    // On Linux plaintext connections, drain file-backed records regions via
+    // sendfile; everywhere else (TLS, non-Linux) use the portable vectored
+    // resolver. `do_read` only ever emits `FileRegions` when `sendfile_capable`,
+    // so the resolver choice and the payload kind stay in lock-step.
+    #[cfg(target_os = "linux")]
+    {
+        if sendfile_capable && api_version >= 4 {
+            return build_fetch_plan(
+                &resp,
+                version,
+                correlation_id,
+                body_flexible,
+                crate::network::fetch_writer::resolve_records_sendfile,
+            );
+        }
+    }
+
     build_fetch_plan(
         &resp,
         version,
         correlation_id,
         body_flexible,
-        resolve_records_inline,
+        crate::network::fetch_writer::resolve_records_inline,
     )
 }
 
@@ -2098,6 +2183,8 @@ async fn handle_metadata_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2134,6 +2221,8 @@ async fn handle_create_topics_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2171,6 +2260,8 @@ async fn handle_delete_topics_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2216,6 +2307,8 @@ async fn handle_describe_acls_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::describe_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2256,6 +2349,8 @@ async fn handle_create_acls_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::create_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2296,6 +2391,8 @@ async fn handle_delete_acls_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::delete_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2336,6 +2433,8 @@ async fn handle_elect_leaders_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::elect_leaders::handle(broker, req, &ctx, api_version).await?;
@@ -2376,6 +2475,8 @@ async fn handle_alter_partition_reassignments_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2418,6 +2519,8 @@ async fn handle_list_partition_reassignments_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2461,6 +2564,8 @@ async fn handle_describe_client_quotas_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2504,6 +2609,8 @@ async fn handle_alter_client_quotas_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2546,6 +2653,8 @@ async fn handle_describe_user_scram_credentials_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2751,6 +2860,8 @@ async fn handle_alter_configs_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2786,6 +2897,8 @@ async fn handle_incremental_alter_configs_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::incremental_alter_configs::handle(
@@ -2826,6 +2939,8 @@ async fn handle_delete_records_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2861,6 +2976,8 @@ async fn handle_create_partitions_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2895,6 +3012,8 @@ async fn handle_describe_groups_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -2928,6 +3047,8 @@ async fn handle_share_group_describe_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::share_group_describe::handle(
@@ -2965,6 +3086,8 @@ async fn handle_describe_share_group_offsets_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::describe_share_group_offsets::handle(
@@ -3002,6 +3125,8 @@ async fn handle_alter_share_group_offsets_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::alter_share_group_offsets::handle(
@@ -3039,6 +3164,8 @@ async fn handle_delete_share_group_offsets_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::handlers::delete_share_group_offsets::handle(
@@ -3077,6 +3204,8 @@ async fn handle_share_fetch_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3109,6 +3238,8 @@ async fn handle_share_acknowledge_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3143,6 +3274,8 @@ async fn handle_list_groups_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3177,6 +3310,8 @@ async fn handle_delete_groups_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3211,6 +3346,8 @@ async fn handle_join_group_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3246,6 +3383,8 @@ async fn handle_offset_commit_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3282,6 +3421,8 @@ async fn handle_offset_fetch_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3317,6 +3458,8 @@ async fn handle_offset_delete_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3352,6 +3495,8 @@ async fn handle_init_producer_id_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3386,6 +3531,8 @@ async fn handle_add_partitions_to_txn_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::txn::handlers::add_partitions_to_txn::handle(
@@ -3424,6 +3571,8 @@ async fn handle_end_txn_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body =
@@ -3458,6 +3607,8 @@ async fn handle_txn_offset_commit_frame(
         principal,
         peer,
         client_id,
+        // Non-fetch handlers ignore sendfile.
+        sendfile_capable: false,
     };
 
     let resp_body = crate::txn::handlers::txn_offset_commit::handle(

@@ -16,6 +16,12 @@ pub(crate) struct RequestContext<'a> {
     /// `peek_client_id(frame).unwrap_or("")` convention used for the
     /// `request_percentage` quota in the dispatch loop.
     pub client_id: &'a str,
+    /// `true` when the connection can serve the fetch records region via
+    /// kernel `sendfile(2)` — i.e. a plaintext `TcpStream` on Linux. The fetch
+    /// handler uses this to emit `RecordsPayload::FileRegions` (zero-copy)
+    /// instead of `Raw` for large records runs (Increment D). `false` on TLS,
+    /// non-Linux, and every non-fetch handler (which ignore it).
+    pub sendfile_capable: bool,
 }
 
 /// Connection attributes a KIP-714 telemetry handler needs to match a

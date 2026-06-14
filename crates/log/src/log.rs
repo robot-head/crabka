@@ -98,6 +98,35 @@ impl RawRead {
     }
 }
 
+/// Descriptor form of [`Log::read_raw`] for the Linux zero-copy (`sendfile`)
+/// fetch path (Increment D): the records run is described by one
+/// [`FileRegion`] per contributing segment — so a multi-segment fetch is
+/// `sendfile`d as several regions with **no** coalescing copy (unlike
+/// `read_raw`, which concatenates cross-segment chunks into a fresh
+/// `BytesMut`). Linux-only.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub struct RawReadDesc {
+    /// Absolute offset of the first batch in the regions, or the requested
+    /// offset when no bytes were returned.
+    pub start_offset: i64,
+    /// One file-backed region per contributing segment, in wire order.
+    pub regions: Vec<crabka_protocol::records::FileRegion>,
+    /// Total byte length across all regions.
+    pub total: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl RawReadDesc {
+    fn empty(off: i64) -> Self {
+        Self {
+            start_offset: off,
+            regions: Vec::new(),
+            total: 0,
+        }
+    }
+}
+
 /// A producer batch to append **verbatim** (no decode/re-encode), used by
 /// the produce zero-copy passthrough path. Carries the producer's exact
 /// wire bytes plus the header fields the log needs for offset assignment,
@@ -762,6 +791,84 @@ impl Log {
         })
     }
 
+    /// Descriptor variant of [`Log::read_raw`] for the Linux zero-copy
+    /// (`sendfile`) fetch path: walks sealed segments then the active segment
+    /// exactly as `read_raw` does, but collects one [`FileRegion`] per
+    /// contributing segment (via [`Segment::read_raw_desc`]) instead of owned
+    /// `Bytes`. Crucially, multi-segment fetches are **not** coalesced — each
+    /// region is `sendfile`d separately, dropping the cross-segment copy.
+    ///
+    /// The selected byte ranges are byte-identical to what `read_raw` would
+    /// have returned for the same `(fetch_offset, limit_offset, max_bytes)`.
+    #[cfg(target_os = "linux")]
+    pub fn read_raw_desc(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawReadDesc, LogError> {
+        let log_start = self.log_start_offset();
+        if fetch_offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: fetch_offset,
+                log_start,
+            });
+        }
+        if fetch_offset >= limit_offset {
+            return Ok(RawReadDesc::empty(fetch_offset));
+        }
+
+        let mut regions: Vec<crabka_protocol::records::FileRegion> = Vec::new();
+        let mut start_offset = fetch_offset;
+        let mut current = fetch_offset;
+        let mut remaining = max_bytes;
+        let mut got_first = false;
+
+        for seg in &self.segments {
+            if seg.last_offset() < current {
+                continue;
+            }
+            let r = seg.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                    got_first = true;
+                }
+                remaining = remaining.saturating_sub(r.len());
+                current = r.last_offset + 1;
+                if let Some(region) = r.region {
+                    regions.push(region);
+                }
+                if remaining == 0 || current >= limit_offset {
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0 || !got_first)
+            && current < limit_offset
+            && let Some(active) = &self.active
+            && current <= active.last_offset()
+        {
+            let r = active.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                }
+                if let Some(region) = r.region {
+                    regions.push(region);
+                }
+            }
+        }
+
+        let total: usize = regions.iter().map(|r| r.len).sum();
+        Ok(RawReadDesc {
+            start_offset,
+            regions,
+            total,
+        })
+    }
+
     /// Truncate the log so no records at offset `>= offset` remain. Used
     /// by replication / leader election.
     pub fn truncate_to(&mut self, offset: i64) -> Result<(), LogError> {
@@ -1351,6 +1458,62 @@ mod tests {
             bases.push(b.base_offset);
         }
         assert!(bases == expected_bases);
+        drop(dir);
+    }
+
+    /// Increment D: `Log::read_raw_desc` across a segment seam must yield
+    /// regions whose **concatenation** is byte-identical to `read_raw`'s
+    /// coalesced bytes — but as multiple `FileRegion`s (one per contributing
+    /// segment), proving the cross-segment copy was dropped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn log_read_raw_desc_multi_segment_regions_equal_read_raw() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 100, // tiny: roll roughly each batch
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+
+        let n: i64 = 6;
+        for off in 0..n {
+            let mut b = test_batch_at(off);
+            log.append(&mut b).unwrap();
+        }
+        assert!(!log.segments.is_empty(), "expected a segment roll");
+
+        let log_end = log.log_end_offset();
+        let raw = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        let desc = log.read_raw_desc(0, log_end, 10 * 1024 * 1024).unwrap();
+
+        assert!(desc.start_offset == raw.start_offset);
+        assert!(desc.total == raw.total);
+        // Multi-segment ⇒ more than one region (no coalescing copy).
+        assert!(
+            desc.regions.len() >= 2,
+            "expected >=2 regions across the seam, got {}",
+            desc.regions.len()
+        );
+
+        // Concatenate the pread'd regions and compare to read_raw's bytes.
+        let mut assembled = Vec::with_capacity(desc.total);
+        for region in &desc.regions {
+            let mut buf = vec![0u8; region.len];
+            let mut filled = 0;
+            let mut off = region.offset;
+            while filled < buf.len() {
+                let r = region.file.read_at(&mut buf[filled..], off).unwrap();
+                assert!(r > 0);
+                filled += r;
+                off += r as u64;
+            }
+            assembled.extend_from_slice(&buf);
+        }
+        assert!(
+            assembled == raw.bytes[..],
+            "concatenated regions must equal read_raw bytes across the seam"
+        );
         drop(dir);
     }
 

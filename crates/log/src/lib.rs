@@ -72,6 +72,13 @@ mod txn_index;
 pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
+#[cfg(target_os = "linux")]
+pub use log::RawReadDesc;
 pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport, VerbatimBatch};
+#[cfg(target_os = "linux")]
+pub use segment::RawSegmentDesc;
 pub use segment::{RawSegmentRead, Segment};
 pub use txn_index::{AbortedTxn, TxnIndex};
+// Re-export the zero-copy fetch descriptor so broker code can name
+// `crabka_log::FileRegion` without depending on the protocol crate's path.
+pub use crabka_protocol::records::FileRegion;

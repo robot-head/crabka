@@ -788,9 +788,16 @@ fn decode_single_batch(
                 .and_then(|p| match p {
                     RecordsPayload::V2(mut v) => v.drain(..).next(),
                     RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => None,
+                    // `FileRegions` is a fetch-only payload; never produced here.
+                    #[cfg(target_os = "linux")]
+                    RecordsPayload::FileRegions(_) => None,
                 })
                 .ok_or(codes::INVALID_REQUEST)
         }
+        // `FileRegions` is a fetch-response-only payload — never reaches the
+        // produce decode path.
+        #[cfg(target_os = "linux")]
+        RecordsPayload::FileRegions(_) => Err(codes::INVALID_REQUEST),
         RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
             Ok(rb) => {
                 // Account this Produce-path up-conversion. Kept inside the
