@@ -92,13 +92,7 @@ async fn share_consumer_joins_and_closes() {
 /// Create `topic` (1 partition) and wait until this broker leads partition 0.
 async fn create_topic_led(broker: &crabka_broker::BrokerHandle, client: &Client, topic: &str) {
     create_topic(client, topic).await;
-    for _ in 0..200 {
-        if broker.has_partition(topic, 0).await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("partition {topic}:0 never materialized");
+    broker.wait_until_partition_present(topic, 0).await;
 }
 
 fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
@@ -129,21 +123,14 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         resp.coordinators[0].error_code == 0,
         "FindCoordinator(SHARE)"
     );
-    // ~30s budget: all SHARE_STATE_PARTITIONS must materialize a leader (subject
-    // to KIP-595 election jitter), which is slow under llvm-cov instrumentation.
-    for _ in 0..600 {
-        let mut have = 0;
-        for p in 0..SHARE_STATE_PARTITIONS {
-            if broker.has_partition(SHARE_STATE_TOPIC, p).await {
-                have += 1;
-            }
-        }
-        if have == SHARE_STATE_PARTITIONS {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // All SHARE_STATE_PARTITIONS must materialize a leader (subject to KIP-595
+    // election jitter) so SPSO writes land. `wait_until_partition_present` is
+    // internally bounded.
+    for p in 0..SHARE_STATE_PARTITIONS {
+        broker
+            .wait_until_partition_present(SHARE_STATE_TOPIC, p)
+            .await;
     }
-    panic!("__share_group_state never fully materialized");
 }
 
 /// Wait until the share coordinator has durably initialized state for
@@ -154,26 +141,25 @@ async fn wait_for_share_init(
     tid: uuid::Uuid,
     partition: i32,
 ) {
-    // ~30s budget (matching the other coordinator/leadership waits in the JVM
-    // suites): share-state init needs the `__share_group_state` partition's
-    // leader elected (subject to KIP-595 election jitter) plus a ShareFetch
-    // round-trip, which is slow under llvm-cov instrumentation in CI. 5s flaked.
-    for _ in 0..600 {
-        if broker
-            .share_state_summary_for_test(group, tid, partition)
-            .await
-            .is_some()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("share state for {group}:{tid}:{partition} never initialized");
+    // Share-state init needs the `__share_group_state` partition's leader elected
+    // (subject to KIP-595 election jitter) plus a ShareFetch round-trip. The
+    // awaiter is internally 30s-bounded and panics on timeout.
+    broker
+        .wait_for_share_state_summary(group, tid, partition)
+        .await;
 }
 
-/// Produce `n` records (values `v0..v{n-1}`) into `(topic, 0)`, retrying while
-/// the partition is still materializing.
-async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, n: i64) {
+/// Produce `n` records (values `v0..v{n-1}`) into `(topic, 0)`.
+async fn produce_n(
+    broker: &crabka_broker::BrokerHandle,
+    client: &Client,
+    topic: &str,
+    tid: uuid::Uuid,
+    n: i64,
+) {
+    // Deterministically wait for leadership before producing; the bounded retry
+    // below stays as a backstop against residual metadata/leadership race.
+    broker.wait_until_partition_present(topic, 0).await;
     for _ in 0..40 {
         let records: Vec<Record> = (0..n)
             .map(|i| Record {
@@ -230,30 +216,23 @@ async fn create_multi_partition_led(
     num_partitions: i32,
 ) {
     create_topic_with_partitions(client, topic, num_partitions).await;
-    for _ in 0..200 {
-        let mut have = 0;
-        for p in 0..num_partitions {
-            if broker.has_partition(topic, p).await {
-                have += 1;
-            }
-        }
-        if have == num_partitions {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for p in 0..num_partitions {
+        broker.wait_until_partition_present(topic, p).await;
     }
-    panic!("{topic} partitions never all materialized");
 }
 
-/// Produce one record with value `value` into `(topic, partition)`, retrying
-/// while the partition is still materializing.
+/// Produce one record with value `value` into `(topic, partition)`.
 async fn produce_one_to(
+    broker: &crabka_broker::BrokerHandle,
     client: &Client,
     topic: &str,
     tid: uuid::Uuid,
     partition: i32,
     value: &str,
 ) {
+    // Deterministically wait for leadership before producing; the bounded retry
+    // below stays as a backstop against residual metadata/leadership race.
+    broker.wait_until_partition_present(topic, partition).await;
     for _ in 0..40 {
         let resp = client
             .send(ProduceRequest {
@@ -339,7 +318,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
     create_topic_led(&broker, &admin, "t").await;
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &admin, &format!("g1:{tid}:0")).await;
-    produce_n(&admin, "t", tid, 3).await;
+    produce_n(&broker, &admin, "t", tid, 3).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -443,7 +422,7 @@ async fn explicit_release_redelivers() {
     create_topic_led(&broker, &admin, "rel").await;
     let tid = topic_id(&broker, "rel");
     bootstrap_share_state(&broker, &admin, &format!("relg:{tid}:0")).await;
-    produce_n(&admin, "rel", tid, 3).await;
+    produce_n(&broker, &admin, "rel", tid, 3).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -516,7 +495,7 @@ async fn explicit_reject_not_redelivered() {
     create_topic_led(&broker, &admin, "rej").await;
     let tid = topic_id(&broker, "rej");
     bootstrap_share_state(&broker, &admin, &format!("rejg:{tid}:0")).await;
-    produce_n(&admin, "rej", tid, 3).await;
+    produce_n(&broker, &admin, "rej", tid, 3).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -544,7 +523,7 @@ async fn explicit_reject_not_redelivered() {
 
     // Produce one more record; only it should be delivered — the rejected
     // offsets were archived and the SPSO advanced past them.
-    produce_one_to(&admin, "rej", tid, 0, "v3").await;
+    produce_one_to(&broker, &admin, "rej", tid, 0, "v3").await;
 
     let next = poll_until(&mut consumer, 1, Duration::from_secs(15)).await;
     assert!(
@@ -582,10 +561,10 @@ async fn two_consumers_share_topic() {
     create_multi_partition_led(&broker, &admin, "shared", 2).await;
     let tid = topic_id(&broker, "shared");
     bootstrap_share_state(&broker, &admin, &format!("shareg:{tid}:0")).await;
-    produce_one_to(&admin, "shared", tid, 0, "p0a").await;
-    produce_one_to(&admin, "shared", tid, 0, "p0b").await;
-    produce_one_to(&admin, "shared", tid, 1, "p1a").await;
-    produce_one_to(&admin, "shared", tid, 1, "p1b").await;
+    produce_one_to(&broker, &admin, "shared", tid, 0, "p0a").await;
+    produce_one_to(&broker, &admin, "shared", tid, 0, "p0b").await;
+    produce_one_to(&broker, &admin, "shared", tid, 1, "p1a").await;
+    produce_one_to(&broker, &admin, "shared", tid, 1, "p1b").await;
 
     let mut c1 = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -677,7 +656,7 @@ async fn close_leaves_group() {
     create_topic_led(&broker, &admin, "leave").await;
     let tid = topic_id(&broker, "leave");
     bootstrap_share_state(&broker, &admin, &format!("leaveg:{tid}:0")).await;
-    produce_n(&admin, "leave", tid, 1).await;
+    produce_n(&broker, &admin, "leave", tid, 1).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -698,25 +677,24 @@ async fn close_leaves_group() {
     consumer.close().await.expect("close");
 
     // The leave heartbeat (member_epoch = -1) sent on close evicts the member;
-    // give the coordinator a few hundred ms to apply it, then describe.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let g = describe_group(&admin, "leaveg").await;
-        let absent = match &g {
-            // Group retained but emptied, or the specific member gone.
-            Some(group) => group.members.iter().all(|m| m.member_id != member_id),
-            // Group row gone entirely.
-            None => true,
-        };
-        if absent {
-            break;
+    // poll the describe until the member is gone, bounded so it can't hang.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let g = describe_group(&admin, "leaveg").await;
+            let absent = match &g {
+                // Group retained but emptied, or the specific member gone.
+                Some(group) => group.members.iter().all(|m| m.member_id != member_id),
+                // Group row gone entirely.
+                None => true,
+            };
+            if absent {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "member {member_id} still present after close: {g:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await
+    .expect("member evicted from group within 30s");
 
     broker.shutdown().await;
 }
@@ -747,7 +725,7 @@ async fn explicit_renew_prevents_redelivery() {
     create_topic_led(&broker, &admin, "rn").await;
     let tid = topic_id(&broker, "rn");
     bootstrap_share_state(&broker, &admin, &format!("rng:{tid}:0")).await;
-    produce_n(&admin, "rn", tid, 1).await;
+    produce_n(&broker, &admin, "rn", tid, 1).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)
@@ -787,6 +765,9 @@ async fn explicit_renew_prevents_redelivery() {
     // Renew ~400ms after acquire, before the 1000ms lock expires → resets the
     // deadline to renew-time + 1000ms (≈ T_acq+1400ms).
     let renew_at = acquired_at + Duration::from_millis(400);
+    // Intentional real-time delay: this exercises share-lock renew-before-expiry
+    // (lock TTL is 1s); it tests time-based behavior and must not be replaced with
+    // state polling. See spec 2026-06-14-crabka-integration-tests-deflake-design.md.
     if let Some(rem) = renew_at.checked_duration_since(std::time::Instant::now()) {
         tokio::time::sleep(rem).await;
     }
@@ -799,6 +780,10 @@ async fn explicit_renew_prevents_redelivery() {
     // would already be swept + redelivered) but before the renewed ~1400ms
     // deadline. Keep the redelivery check short so it completes before 1400ms.
     let target = acquired_at + Duration::from_millis(1150);
+    // Intentional real-time delay: this exercises share-lock redelivery-after-expiry
+    // (waiting past the original 1s lock TTL); it tests time-based behavior and must
+    // not be replaced with state polling. See spec
+    // 2026-06-14-crabka-integration-tests-deflake-design.md.
     if let Some(rem) = target.checked_duration_since(std::time::Instant::now()) {
         tokio::time::sleep(rem).await;
     }
@@ -844,7 +829,7 @@ async fn renew_errors_in_implicit_mode() {
     create_topic_led(&broker, &admin, "imp").await;
     let tid = topic_id(&broker, "imp");
     bootstrap_share_state(&broker, &admin, &format!("impg:{tid}:0")).await;
-    produce_n(&admin, "imp", tid, 1).await;
+    produce_n(&broker, &admin, "imp", tid, 1).await;
 
     let mut consumer = ShareConsumer::builder()
         .bootstrap(&bootstrap)

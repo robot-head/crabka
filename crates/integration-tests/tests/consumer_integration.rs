@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tempfile::TempDir;
 
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -64,7 +64,12 @@ async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitive
         .unwrap_or_default()
 }
 
-async fn produce(client: &Client, topic: &str, values: &[&str]) {
+async fn produce(broker: &BrokerHandle, client: &Client, topic: &str, values: &[&str]) {
+    // Wait until partition 0 is materialized in the metadata image before
+    // producing, so the common case doesn't race CreateTopics propagation.
+    // The bounded retry loop below stays as a backstop for any residual
+    // openraft state-machine apply lag on slow CI runners (especially Windows).
+    broker.wait_until_partition_present(topic, 0).await;
     // Retry on UNKNOWN_TOPIC_OR_PARTITION (3) up to 5 times: the
     // openraft state-machine apply has occasionally-visible-late timing
     // on slow CI runners (especially Windows), and producers immediately
@@ -121,7 +126,16 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
 
 /// Produce records to a specific partition index (the plain `produce` helper
 /// hardcodes partition 0).
-async fn produce_to_partition(client: &Client, topic: &str, partition: i32, values: &[&str]) {
+async fn produce_to_partition(
+    broker: &BrokerHandle,
+    client: &Client,
+    topic: &str,
+    partition: i32,
+    values: &[&str],
+) {
+    // Wait until the target partition is materialized before producing; the
+    // bounded retry loop below remains as a backstop for residual apply lag.
+    broker.wait_until_partition_present(topic, partition).await;
     let topic_id = topic_id_for(client, topic).await;
     for attempt in 1..=5 {
         let resp = client
@@ -187,7 +201,7 @@ async fn rust_producer_to_rust_consumer_through_group() {
         .await
         .unwrap();
     create_topic(&producer, "rrtopic").await;
-    produce(&producer, "rrtopic", &["a", "b", "c"]).await;
+    produce(&broker, &producer, "rrtopic", &["a", "b", "c"]).await;
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -235,7 +249,7 @@ async fn offsets_survive_broker_restart() {
             .await
             .unwrap();
         create_topic(&producer, "persist").await;
-        produce(&producer, "persist", &["x", "y", "z"]).await;
+        produce(&broker, &producer, "persist", &["x", "y", "z"]).await;
 
         let mut consumer = Consumer::builder()
             .bootstrap(&bootstrap)
@@ -340,44 +354,52 @@ async fn eager_rebalance_reacquires_and_primes() {
     // member to an already-stable group on a tight rebalance window. They
     // split the two partitions 1/1.
     let (mut m1, m2) = tokio::join!(build("m1"), build("m2"));
-    let settle = Instant::now() + Duration::from_secs(30);
-    loop {
-        if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
-            break;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let settle = Instant::now() + Duration::from_secs(30);
+        loop {
+            if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < settle,
+                "group did not split 1+1 (m1={} m2={})",
+                m1.assignment().await.len(),
+                m2.assignment().await.len()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            Instant::now() < settle,
-            "group did not split 1+1 (m1={} m2={})",
-            m1.assignment().await.len(),
-            m2.assignment().await.len()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await
+    .expect("1/1 eager split within 30s");
 
     // m2 leaves → m1 becomes the sole member and re-acquires the freed
     // partition via the coordinator's *eager* rejoin path, priming its fetch
     // offset before the assignment is republished. m1 is its own leader here,
     // so there is no follower-wait to race.
     m2.close().await.unwrap();
-    let regain = Instant::now() + Duration::from_secs(30);
-    loop {
-        let _ = m1.poll(Duration::from_millis(200)).await;
-        if m1.assignment().await.len() == 2 {
-            break;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let regain = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = m1.poll(Duration::from_millis(200)).await;
+            if m1.assignment().await.len() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < regain,
+                "m1 did not re-acquire both partitions, last={}",
+                m1.assignment().await.len()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            Instant::now() < regain,
-            "m1 did not re-acquire both partitions, last={}",
-            m1.assignment().await.len()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await
+    .expect("m1 reacquired both partitions within 30s");
 
     // Produce a fresh record to each partition; m1 (sole owner again) must
     // deliver both — proving the re-acquired partition primed correctly and
     // poll() didn't get stuck on a missing next-offset entry.
-    produce_to_partition(&producer, "eagerrebal", 0, &["b0"]).await;
-    produce_to_partition(&producer, "eagerrebal", 1, &["b1"]).await;
+    produce_to_partition(&broker, &producer, "eagerrebal", 0, &["b0"]).await;
+    produce_to_partition(&broker, &producer, "eagerrebal", 1, &["b1"]).await;
     let mut second: HashSet<String> = HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     while second.len() < 2 && Instant::now() < deadline {
@@ -464,6 +486,7 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
         .unwrap();
     create_topic(&producer, "oor-latest").await;
     produce(
+        &broker,
         &producer,
         "oor-latest",
         &["a", "b", "c", "d", "e", "f", "g", "h"],
@@ -501,7 +524,7 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
 
     // Produce fresh records past the (resolved) log-end; the recovered
     // consumer must deliver exactly these.
-    produce(&producer, "oor-latest", &["NEW1", "NEW2", "NEW3"]).await;
+    produce(&broker, &producer, "oor-latest", &["NEW1", "NEW2", "NEW3"]).await;
     let mut seen: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && seen.len() < 3 {
@@ -556,6 +579,7 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
     create_topic(&producer, "oor-earliest").await;
     // Produce 8 records at offsets 0–7.
     produce(
+        &broker,
         &producer,
         "oor-earliest",
         &["a", "b", "c", "d", "e", "f", "g", "h"],
@@ -643,7 +667,13 @@ async fn consumer_none_policy_surfaces_log_truncation() {
         .await
         .unwrap();
     create_topic(&producer, "oor-none").await;
-    produce(&producer, "oor-none", &["a", "b", "c", "d", "e", "f"]).await;
+    produce(
+        &broker,
+        &producer,
+        "oor-none",
+        &["a", "b", "c", "d", "e", "f"],
+    )
+    .await;
 
     // Seed: commit offset 0 for the group BEFORE the trim. The Earliest
     // consumer primes its next_offset to 0 during assignment; we wait for
@@ -667,11 +697,15 @@ async fn consumer_none_policy_surfaces_log_truncation() {
         // prime_offsets (which seats next_offset = 0 for Earliest with no
         // existing commit). We check assignment() rather than poll()-ing so
         // that we don't consume records and advance the position.
-        let settle = Instant::now() + Duration::from_secs(10);
-        while seed.assignment().await.is_empty() {
-            assert!(Instant::now() < settle, "seed assignment did not settle");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let settle = Instant::now() + Duration::from_secs(10);
+            while seed.assignment().await.is_empty() {
+                assert!(Instant::now() < settle, "seed assignment did not settle");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("seed consumer assigned within 30s");
         // next_offsets is 0 (Earliest, primed during assignment, no records
         // fetched yet that would advance it). Committing 0 seats the group.
         seed.commit_sync().await.unwrap();
@@ -769,7 +803,7 @@ async fn committed_leader_epoch_survives_restart() {
             .unwrap();
         create_topic(&producer, "epoch-persist").await;
         topic_uuid = topic_id_for(&producer, "epoch-persist").await;
-        produce(&producer, "epoch-persist", &["e0", "e1", "e2"]).await;
+        produce(&broker, &producer, "epoch-persist", &["e0", "e1", "e2"]).await;
 
         let mut consumer = Consumer::builder()
             .bootstrap(&bootstrap)

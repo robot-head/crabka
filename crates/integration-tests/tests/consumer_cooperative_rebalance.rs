@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use tempfile::TempDir;
 
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{Assignor, AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -42,17 +42,24 @@ async fn cooperative_three_member_partial_revocation() {
     wait_for_assignment_count(&m1, 6).await;
     assert!(m1.assignment().await.len() == 6, "m1 alone owns all 6");
 
-    // m2 joins — triggers a rebalance. Phase-1 keeps m1's sticky retained
-    // partitions and lands m2 with 0; phase-2 places the freed half onto m2.
-    // Wait long enough for the full phase-1 + phase-2 cooperative round
-    // (~6s worst case for two 3s initial-rebalance-delay windows) to
-    // settle before adding m3, otherwise cascading rebalances can race
-    // partition placements.
+    // Intentional real-time pacing between membership changes: cooperative-sticky
+    // rebalances in two phases gated by `group.initial.rebalance.delay`, and
+    // introducing the next member *during* the prior round causes cascading
+    // rebalances that never converge to a clean snapshot. There is no
+    // client- or broker-observable "group fully stable" signal to await here
+    // (only member-count, which fires at JoinGroup before SyncGroup completes),
+    // so we pace the joins. This is a timing test, not a flaky guess — see spec
+    // 2026-06-14-crabka-integration-tests-deflake-design.md.
+    //
+    // m2 joins — phase-1 keeps m1's sticky retained partitions and lands m2 with
+    // 0; phase-2 places the freed half onto m2. `wait_for_total_assignment` then
+    // gates the full phase-1 + phase-2 round.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let m2 = build_cooperative_consumer(&bootstrap, "coop-grp-1", "m2", "coop6").await;
     wait_for_total_assignment(&[&m1, &m2], 6).await;
 
-    // m3 joins — triggers another rebalance.
+    // m3 joins — paced past the m1+m2 round (see note above) before triggering
+    // the final rebalance, which the 3-member settle loop below gates.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let m3 = build_cooperative_consumer(&bootstrap, "coop-grp-1", "m3", "coop6").await;
 
@@ -71,24 +78,28 @@ async fn cooperative_three_member_partial_revocation() {
     // scheduler). Folding the no-overlap + full-cover + all-≥-1
     // invariants into the loop condition lets the test ride out
     // those windows instead of failing on a transient skew.
-    let union = loop {
-        let a1 = m1.assignment().await;
-        let a2 = m2.assignment().await;
-        let a3 = m3.assignment().await;
+    let union = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let a1 = m1.assignment().await;
+            let a2 = m2.assignment().await;
+            let a3 = m3.assignment().await;
 
-        let mut union: HashSet<(String, i32)> = HashSet::new();
-        let mut overlap = false;
-        for tp in a1.iter().chain(a2.iter()).chain(a3.iter()) {
-            if !union.insert(tp.clone()) {
-                overlap = true;
+            let mut union: HashSet<(String, i32)> = HashSet::new();
+            let mut overlap = false;
+            for tp in a1.iter().chain(a2.iter()).chain(a3.iter()) {
+                if !union.insert(tp.clone()) {
+                    overlap = true;
+                }
             }
-        }
 
-        if union.len() == 6 && !overlap && !a1.is_empty() && !a2.is_empty() && !a3.is_empty() {
-            break union;
+            if union.len() == 6 && !overlap && !a1.is_empty() && !a2.is_empty() && !a3.is_empty() {
+                break union;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    };
+    })
+    .await
+    .expect("3-member cooperative assignment settled within 30s");
     for (t, _) in &union {
         assert!(t == "coop6", "all owned partitions are from coop6");
     }
@@ -122,7 +133,7 @@ async fn cooperative_transparent_to_poll() {
 
     // First wave: 4 messages, one per partition.
     for p in 0..4i32 {
-        produce_to_partition(&producer, "cooppoll", p, &[&format!("a{p}")]).await;
+        produce_to_partition(&broker, &producer, "cooppoll", p, &[&format!("a{p}")]).await;
     }
 
     // m1 starts alone; receives all 4 messages.
@@ -134,25 +145,29 @@ async fn cooperative_transparent_to_poll() {
     received.insert("m2".into(), HashSet::new());
     let mut values_seen: HashSet<String> = HashSet::new();
 
-    while values_seen.len() < 4 {
-        let recs = m1
-            .poll(Duration::from_millis(200))
-            .await
-            .expect("poll first wave");
-        for r in recs {
-            values_seen.insert(value_string(r.value.as_ref()));
-            received
-                .get_mut("m1")
-                .unwrap()
-                .insert((r.partition, r.offset));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while values_seen.len() < 4 {
+            let recs = m1
+                .poll(Duration::from_millis(200))
+                .await
+                .expect("poll first wave");
+            for r in recs {
+                values_seen.insert(value_string(r.value.as_ref()));
+                received
+                    .get_mut("m1")
+                    .unwrap()
+                    .insert((r.partition, r.offset));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .expect("drained 4 records within 30s");
     assert!(values_seen.len() == 4, "m1 received all 4 first-wave msgs");
 
     // Second wave: produce 4 more messages.
     for p in 0..4i32 {
-        produce_to_partition(&producer, "cooppoll", p, &[&format!("b{p}")]).await;
+        produce_to_partition(&broker, &producer, "cooppoll", p, &[&format!("b{p}")]).await;
     }
 
     // m1 (sole owner of all 4 partitions) consumes the entire second wave
@@ -160,20 +175,24 @@ async fn cooperative_transparent_to_poll() {
     // protects: m1 advances past `b0..b3`, so when a partition is later
     // handed to m2 the committed position must prevent re-delivery.
     let mut m1_second_wave: HashSet<String> = HashSet::new();
-    while m1_second_wave.len() < 4 {
-        let recs = m1.poll(Duration::from_millis(200)).await.expect("m1 poll");
-        for r in recs {
-            let v = value_string(r.value.as_ref());
-            if v.starts_with('b') {
-                m1_second_wave.insert(v);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while m1_second_wave.len() < 4 {
+            let recs = m1.poll(Duration::from_millis(200)).await.expect("m1 poll");
+            for r in recs {
+                let v = value_string(r.value.as_ref());
+                if v.starts_with('b') {
+                    m1_second_wave.insert(v);
+                }
+                received
+                    .get_mut("m1")
+                    .unwrap()
+                    .insert((r.partition, r.offset));
             }
-            received
-                .get_mut("m1")
-                .unwrap()
-                .insert((r.partition, r.offset));
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .expect("drained 4 records within 30s");
     assert!(
         m1_second_wave.len() == 4,
         "m1 consumed all 4 second-wave msgs"
@@ -193,54 +212,62 @@ async fn cooperative_transparent_to_poll() {
     // Once m2 owns its partitions the leader has completed phase 2, which
     // is sequenced *after* m1's revoke-time commit — so m2 primes from the
     // committed position rather than from zero.
-    loop {
-        // Keep m1 polling during the wait; ignore transient errors but
-        // still fail on rebalance-specific ones.
-        match m1.poll(Duration::from_millis(200)).await {
-            Ok(recs) => {
-                for r in recs {
-                    received
-                        .get_mut("m1")
-                        .unwrap()
-                        .insert((r.partition, r.offset));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            // Keep m1 polling during the wait; ignore transient errors but
+            // still fail on rebalance-specific ones.
+            match m1.poll(Duration::from_millis(200)).await {
+                Ok(recs) => {
+                    for r in recs {
+                        received
+                            .get_mut("m1")
+                            .unwrap()
+                            .insert((r.partition, r.offset));
+                    }
                 }
+                Err(
+                    crabka_client_consumer::ConsumerError::CommitInvalid
+                    | crabka_client_consumer::ConsumerError::RebalanceFailed(_),
+                ) => panic!("m1.poll surfaced a rebalance-specific error — KIP-429 violation"),
+                Err(_) => {}
             }
-            Err(
-                crabka_client_consumer::ConsumerError::CommitInvalid
-                | crabka_client_consumer::ConsumerError::RebalanceFailed(_),
-            ) => panic!("m1.poll surfaced a rebalance-specific error — KIP-429 violation"),
-            Err(_) => {}
+            let m1_n = m1.assignment().await.len();
+            let m2_n = m2.assignment().await.len();
+            if m1_n == 2 && m2_n == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let m1_n = m1.assignment().await.len();
-        let m2_n = m2.assignment().await.len();
-        if m1_n == 2 && m2_n == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    })
+    .await
+    .expect("2/2 split within 30s");
 
     // Drain m2 until the next poll is empty. With the revoke-time commit in place m2 primes
     // its two partitions at m1's committed offset (past `b*`), so it must
     // deliver *none* of the second-wave messages. Re-delivery here means the
     // commit was lost — a regression.
     let mut m2_second_wave: HashSet<String> = HashSet::new();
-    loop {
-        let recs = m2.poll(Duration::from_millis(200)).await.expect("m2 poll");
-        if recs.is_empty() {
-            break;
-        }
-        for r in recs {
-            let v = value_string(r.value.as_ref());
-            if v.starts_with('b') {
-                m2_second_wave.insert(v);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let recs = m2.poll(Duration::from_millis(200)).await.expect("m2 poll");
+            if recs.is_empty() {
+                break;
             }
-            received
-                .get_mut("m2")
-                .unwrap()
-                .insert((r.partition, r.offset));
+            for r in recs {
+                let v = value_string(r.value.as_ref());
+                if v.starts_with('b') {
+                    m2_second_wave.insert(v);
+                }
+                received
+                    .get_mut("m2")
+                    .unwrap()
+                    .insert((r.partition, r.offset));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .expect("drained m2 until empty within 30s");
 
     // No message loss: m1 delivered the whole second wave.
     assert!(
@@ -286,17 +313,21 @@ async fn cooperative_single_member_steady_state() {
     assert!(parts == vec![0, 1, 2]);
 
     for p in 0..3i32 {
-        produce_to_partition(&producer, "cooponly", p, &[&format!("v{p}")]).await;
+        produce_to_partition(&broker, &producer, "cooponly", p, &[&format!("v{p}")]).await;
     }
 
     let mut seen: HashSet<String> = HashSet::new();
-    while seen.len() < 3 {
-        let recs = consumer.poll(Duration::from_millis(250)).await.unwrap();
-        for r in recs {
-            seen.insert(value_string(r.value.as_ref()));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while seen.len() < 3 {
+            let recs = consumer.poll(Duration::from_millis(250)).await.unwrap();
+            for r in recs {
+                seen.insert(value_string(r.value.as_ref()));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .expect("drained 3 records within 30s");
     assert!(seen.len() == 3, "received all 3 messages: {seen:?}");
 
     consumer.close().await.unwrap();
@@ -364,7 +395,16 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
 
 /// Produce records to a specific partition index. Mirrors `integration.rs::produce`
 /// but lets the caller choose `partition`.
-async fn produce_to_partition(client: &Client, topic: &str, partition: i32, values: &[&str]) {
+async fn produce_to_partition(
+    broker: &BrokerHandle,
+    client: &Client,
+    topic: &str,
+    partition: i32,
+    values: &[&str],
+) {
+    // Wait until the target partition is materialized before producing; the
+    // bounded retry loop below remains as a backstop for residual apply lag.
+    broker.wait_until_partition_present(topic, partition).await;
     let topic_id = topic_id_for(client, topic).await;
     for attempt in 1..=5 {
         let resp = client
@@ -427,29 +467,36 @@ async fn build_cooperative_consumer(
 }
 
 async fn wait_for_assignment_count(consumer: &Consumer, expected: usize) {
-    loop {
-        let n = consumer.assignment().await.len();
-        if n == expected {
-            return;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if consumer.assignment().await.len() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("assignment count did not reach {expected} within 30s"));
 }
 
 /// Wait until the union of all consumers' assignments has `expected` unique
 /// `(topic, partition)` entries. Used to confirm a cooperative rebalance has
 /// settled before introducing the next membership change.
 async fn wait_for_total_assignment(consumers: &[&Consumer], expected: usize) {
-    loop {
-        let mut union: HashSet<(String, i32)> = HashSet::new();
-        for c in consumers {
-            for tp in c.assignment().await {
-                union.insert(tp);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let mut union: HashSet<(String, i32)> = HashSet::new();
+            for c in consumers {
+                for tp in c.assignment().await {
+                    union.insert(tp);
+                }
             }
+            if union.len() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        if union.len() == expected {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("total assignment did not reach {expected} within 30s"));
 }

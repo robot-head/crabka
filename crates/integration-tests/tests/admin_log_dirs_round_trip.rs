@@ -9,7 +9,7 @@
 
 use assert2::assert;
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
@@ -41,14 +41,8 @@ async fn admin_log_dirs_alter_then_describe_converges() {
         .expect("create_topics");
 
     // Wait until both partitions are physically materialized on disk.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if handle.has_partition("t", 0).await && handle.has_partition("t", 1).await {
-            break;
-        }
-        assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    handle.wait_until_partition_present("t", 0).await;
+    handle.wait_until_partition_present("t", 1).await;
 
     // Initial DescribeLogDirs reports both dirs, no future logs.
     let initial = admin.describe_log_dirs(None).await.expect("describe");
@@ -89,41 +83,40 @@ async fn admin_log_dirs_alter_then_describe_converges() {
     // Poll DescribeLogDirs through the admin client until both
     // partitions live in `extra` with `is_future_key=false`.
     let target_canon = std::fs::canonicalize(extra.path()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let resp = admin.describe_log_dirs(None).await.expect("describe poll");
-        let mut current_in_target: Vec<i32> = Vec::new();
-        let mut any_future = false;
-        for d in &resp {
-            let d_canon = std::fs::canonicalize(&d.log_dir)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&d.log_dir));
-            if d_canon != target_canon {
-                continue;
-            }
-            for t in &d.topics {
-                if t.name != "t" {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let resp = admin.describe_log_dirs(None).await.expect("describe poll");
+            let mut current_in_target: Vec<i32> = Vec::new();
+            let mut any_future = false;
+            for d in &resp {
+                let d_canon = std::fs::canonicalize(&d.log_dir)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&d.log_dir));
+                if d_canon != target_canon {
                     continue;
                 }
-                for p in &t.partitions {
-                    if p.is_future_key {
-                        any_future = true;
-                    } else {
-                        current_in_target.push(p.partition_index);
+                for t in &d.topics {
+                    if t.name != "t" {
+                        continue;
+                    }
+                    for p in &t.partitions {
+                        if p.is_future_key {
+                            any_future = true;
+                        } else {
+                            current_in_target.push(p.partition_index);
+                        }
                     }
                 }
             }
+            current_in_target.sort_unstable();
+            current_in_target.dedup();
+            if !any_future && current_in_target == vec![0, 1] {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        current_in_target.sort_unstable();
-        current_in_target.dedup();
-        if !any_future && current_in_target == vec![0, 1] {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "move never completed: in_target={current_in_target:?} any_future={any_future}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await
+    .expect("AlterReplicaLogDirs move completed within 30s");
 
     // Filtered describe — request only topic "t" — should still see
     // both partitions in the target dir.
