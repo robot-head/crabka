@@ -84,6 +84,8 @@ enum ShareAction {
     ExpireLocks,
     /// Advance the logical clock by one lock-duration.
     Tick,
+    /// Leader failover: persist + reload (drops Acquired → Available, locks lost).
+    Reload,
 }
 
 impl ShareModel {
@@ -98,6 +100,20 @@ impl ShareModel {
             max_attempts: 2,
             max_inflight,
             allow_reload: false,
+        }
+    }
+
+    /// Failover config: adds `Reload` over a small window; focuses the
+    /// `acknowledged_is_terminal` durability invariant across crash-recovery.
+    fn failover() -> Self {
+        Self {
+            t0: Instant::now(),
+            members: 2,
+            max_offset: 2,
+            max_tick: 2,
+            max_attempts: 2,
+            max_inflight: 2,
+            allow_reload: true,
         }
     }
 
@@ -328,6 +344,9 @@ impl Model for ShareModel {
         if state.clock < self.max_tick {
             actions.push(ShareAction::Tick);
         }
+        if self.allow_reload && state.sm.end_offset > state.sm.start_offset {
+            actions.push(ShareAction::Reload);
+        }
     }
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -388,6 +407,18 @@ impl Model for ShareModel {
                     return None;
                 }
                 state.clock += 1;
+            }
+            ShareAction::Reload => {
+                let (start, dcc, batches) = state.sm.to_persist_batches();
+                let mut fresh = AcquisitionState::new(start);
+                fresh.load_from(
+                    start,
+                    state.sm.state_epoch,
+                    state.sm.leader_epoch,
+                    dcc,
+                    &batches,
+                );
+                state.sm = fresh;
             }
         }
         assert_transition(&last.sm, &state.sm);
@@ -492,4 +523,10 @@ fn share_concurrency_inflight_one() {
         ShareModel::concurrency(2, 1),
         "share_concurrency_inflight_one",
     );
+}
+
+#[test]
+fn share_failover() {
+    // Adds leader-failover Reload; stresses acknowledged-is-terminal durability.
+    run(ShareModel::failover(), "share_failover");
 }
