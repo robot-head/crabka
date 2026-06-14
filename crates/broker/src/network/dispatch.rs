@@ -528,7 +528,7 @@ async fn serve_connection_stream<S>(
                 }
             }
             Some(3) => intercept!(
-                handle_metadata_frame(&broker, &frame, &auth, &peer),
+                handle_metadata_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "Metadata"
             ),
             Some(19) => intercept!(
@@ -608,7 +608,7 @@ async fn serve_connection_stream<S>(
                 "OffsetDelete"
             ),
             Some(60) => intercept!(
-                handle_describe_cluster_frame(&broker, &frame, &auth, &peer),
+                handle_describe_cluster_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "DescribeCluster"
             ),
             Some(61) => intercept!(
@@ -688,7 +688,7 @@ async fn serve_connection_stream<S>(
                 "StreamsGroupHeartbeat"
             ),
             Some(10) => intercept!(
-                handle_find_coordinator_frame(&broker, &frame, &auth, &peer),
+                handle_find_coordinator_frame(&broker, &frame, &auth, &peer, &spec.name),
                 "FindCoordinator"
             ),
             Some(2) => intercept!(
@@ -1155,6 +1155,9 @@ async fn handle_alter_user_scram_credentials_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, &ctx).await;
@@ -1199,6 +1202,9 @@ async fn handle_update_features_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp = crate::handlers::update_features::handle(broker, req, api_version, &ctx).await;
@@ -1223,6 +1229,7 @@ async fn handle_describe_cluster_frame(
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
+    listener_name: &str,
 ) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 60);
@@ -1236,6 +1243,9 @@ async fn handle_describe_cluster_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // DescribeCluster advertises each broker's endpoint for the listener
+        // this request arrived on.
+        connection_listener_name: listener_name,
     };
 
     let resp_body =
@@ -1272,6 +1282,9 @@ async fn handle_describe_producers_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::describe_producers::handle(
@@ -1311,6 +1324,9 @@ async fn handle_describe_transactions_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::describe_transactions::handle(
@@ -1349,6 +1365,9 @@ async fn handle_list_transactions_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -1382,6 +1401,9 @@ async fn handle_unregister_broker_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -1414,6 +1436,9 @@ async fn handle_add_raft_voter_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::add_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1445,6 +1470,9 @@ async fn handle_remove_raft_voter_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::remove_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1476,6 +1504,9 @@ async fn handle_update_raft_voter_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::update_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1508,6 +1539,9 @@ async fn handle_alter_partition_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::alter_partition::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1540,6 +1574,9 @@ async fn handle_broker_heartbeat_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::broker_heartbeat::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1572,6 +1609,9 @@ async fn handle_get_replica_log_info_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body = crate::handlers::get_replica_log_info::handle(
         broker,
@@ -1608,6 +1648,9 @@ async fn handle_heartbeat_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::heartbeat::handle(broker, api_version, correlation_id, body, &ctx).await?;
@@ -1638,6 +1681,9 @@ async fn handle_sync_group_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::sync_group::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1669,6 +1715,9 @@ async fn handle_leave_group_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::leave_group::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1701,6 +1750,9 @@ async fn handle_consumer_group_heartbeat_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body = crate::handlers::consumer_group_heartbeat::handle(
         broker,
@@ -1738,6 +1790,9 @@ async fn handle_share_group_heartbeat_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body = crate::handlers::share_group_heartbeat::handle(
         broker,
@@ -1775,6 +1830,9 @@ async fn handle_streams_group_heartbeat_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body = crate::handlers::streams_group_heartbeat::handle(
         broker,
@@ -1800,6 +1858,7 @@ async fn handle_find_coordinator_frame(
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
+    listener_name: &str,
 ) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 10);
@@ -1812,6 +1871,9 @@ async fn handle_find_coordinator_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // FindCoordinator advertises the coordinator's endpoint for the
+        // listener this request arrived on.
+        connection_listener_name: listener_name,
     };
     let resp_body =
         crate::handlers::find_coordinator::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1844,6 +1906,9 @@ async fn handle_list_offsets_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::list_offsets::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1876,6 +1941,9 @@ async fn handle_offset_for_leader_epoch_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body = crate::handlers::offset_for_leader_epoch::handle(
         broker,
@@ -1913,6 +1981,9 @@ async fn handle_describe_configs_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::describe_configs::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1945,6 +2016,9 @@ async fn handle_describe_log_dirs_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
     let resp_body =
         crate::handlers::describe_log_dirs::handle(broker, api_version, correlation_id, body, &ctx)
@@ -1980,6 +2054,9 @@ async fn handle_describe_topic_partitions_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::describe_topic_partitions::handle(
@@ -2020,6 +2097,9 @@ async fn handle_list_config_resources_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::list_config_resources::handle(
@@ -2059,6 +2139,9 @@ async fn handle_describe_quorum_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2098,6 +2181,9 @@ async fn handle_produce_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     // The produce hot path slices each partition's verbatim records bytes
@@ -2165,6 +2251,8 @@ async fn handle_fetch_frame(
         // Only the canonical v4+ plan path can sendfile; the v0–v3 legacy path
         // copy-encodes (down-conversion). Gate the FileRegions emission on both.
         sendfile_capable: sendfile_capable && api_version >= 4,
+        // Fetch doesn't project broker addresses.
+        connection_listener_name: "",
     };
 
     let (resp, version) =
@@ -2235,6 +2323,7 @@ async fn handle_metadata_frame(
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
+    listener_name: &str,
 ) -> Result<Bytes, BrokerError> {
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 3);
@@ -2248,6 +2337,10 @@ async fn handle_metadata_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Metadata advertises each broker's endpoint for the listener this
+        // request arrived on (Apache Kafka returns the connection listener's
+        // advertised address).
+        connection_listener_name: listener_name,
     };
 
     let resp_body =
@@ -2286,6 +2379,9 @@ async fn handle_create_topics_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2325,6 +2421,9 @@ async fn handle_delete_topics_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2372,6 +2471,9 @@ async fn handle_describe_acls_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::describe_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2414,6 +2516,9 @@ async fn handle_create_acls_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::create_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2456,6 +2561,9 @@ async fn handle_delete_acls_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::delete_acls::handle(broker, req, &ctx, api_version).await?;
@@ -2498,6 +2606,9 @@ async fn handle_elect_leaders_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::elect_leaders::handle(broker, req, &ctx, api_version).await?;
@@ -2540,6 +2651,9 @@ async fn handle_alter_partition_reassignments_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2584,6 +2698,9 @@ async fn handle_list_partition_reassignments_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2629,6 +2746,9 @@ async fn handle_describe_client_quotas_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2674,6 +2794,9 @@ async fn handle_alter_client_quotas_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2718,6 +2841,9 @@ async fn handle_describe_user_scram_credentials_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2925,6 +3051,9 @@ async fn handle_alter_configs_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -2962,6 +3091,9 @@ async fn handle_incremental_alter_configs_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::incremental_alter_configs::handle(
@@ -3004,6 +3136,9 @@ async fn handle_delete_records_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3041,6 +3176,9 @@ async fn handle_create_partitions_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3077,6 +3215,9 @@ async fn handle_describe_groups_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3112,6 +3253,9 @@ async fn handle_share_group_describe_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::share_group_describe::handle(
@@ -3151,6 +3295,9 @@ async fn handle_describe_share_group_offsets_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::describe_share_group_offsets::handle(
@@ -3190,6 +3337,9 @@ async fn handle_alter_share_group_offsets_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::alter_share_group_offsets::handle(
@@ -3229,6 +3379,9 @@ async fn handle_delete_share_group_offsets_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::handlers::delete_share_group_offsets::handle(
@@ -3269,6 +3422,9 @@ async fn handle_share_fetch_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3303,6 +3459,9 @@ async fn handle_share_acknowledge_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3339,6 +3498,9 @@ async fn handle_list_groups_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3375,6 +3537,9 @@ async fn handle_delete_groups_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3411,6 +3576,9 @@ async fn handle_join_group_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3448,6 +3616,9 @@ async fn handle_offset_commit_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3486,6 +3657,9 @@ async fn handle_offset_fetch_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3523,6 +3697,9 @@ async fn handle_offset_delete_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3560,6 +3737,9 @@ async fn handle_init_producer_id_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3596,6 +3776,9 @@ async fn handle_add_partitions_to_txn_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::txn::handlers::add_partitions_to_txn::handle(
@@ -3636,6 +3819,9 @@ async fn handle_end_txn_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body =
@@ -3672,6 +3858,9 @@ async fn handle_txn_offset_commit_frame(
         client_id,
         // Non-fetch handlers ignore sendfile.
         sendfile_capable: false,
+        // Only the address-projecting handlers (Metadata / FindCoordinator /
+        // DescribeCluster) read this; the rest leave it empty.
+        connection_listener_name: "",
     };
 
     let resp_body = crate::txn::handlers::txn_offset_commit::handle(

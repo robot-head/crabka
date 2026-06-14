@@ -23,6 +23,15 @@ pub(crate) struct RequestContext<'a> {
     /// large records runs (Increments D + E). `false` on TLS, on Windows, and
     /// for every non-fetch handler (which ignore it).
     pub sendfile_capable: bool,
+    /// Name of the [`crate::config::ListenerSpec`] serving this connection
+    /// (e.g. `"PLAINTEXT"` / `"SSL"` / a configured listener name). This is
+    /// the same string that self-registration writes as each
+    /// [`crabka_metadata::BrokerEndpoint::name`], so address-projecting
+    /// handlers (`Metadata`, `FindCoordinator`, `DescribeCluster`) advertise
+    /// the endpoint matching the listener the request arrived on — exactly as
+    /// Apache Kafka does. Handlers that don't project broker addresses ignore
+    /// this field.
+    pub connection_listener_name: &'a str,
 }
 
 /// Connection attributes a KIP-714 telemetry handler needs to match a

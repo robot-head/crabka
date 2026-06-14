@@ -67,14 +67,25 @@ pub(crate) async fn handle(
         .borrow()
         .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
 
+    // Advertise each broker's address for the listener this request arrived
+    // on (Kafka returns the connection listener's advertised address), with
+    // the same fallback chain as `Metadata` so the two RPCs agree.
+    let inter_broker_name = broker.config.inter_broker_listener_name.as_str();
     let brokers: Vec<DescribeClusterBroker> = image
         .brokers()
-        .map(|b| DescribeClusterBroker {
-            broker_id: i32::try_from(b.node_id).unwrap_or(-1),
-            host: b.host.clone(),
-            port: i32::from(b.port),
-            rack: b.rack.clone(),
-            ..Default::default()
+        .map(|b| {
+            let (host, port) = crate::handlers::metadata::pick_endpoint_host_port(
+                b,
+                ctx.connection_listener_name,
+                inter_broker_name,
+            );
+            DescribeClusterBroker {
+                broker_id: i32::try_from(b.node_id).unwrap_or(-1),
+                host,
+                port,
+                rack: b.rack.clone(),
+                ..Default::default()
+            }
         })
         .collect();
 
