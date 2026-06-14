@@ -316,7 +316,7 @@ impl TargetAssignmentMemberValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemberAssignmentState {
     Stable = 0,
     UnreleasedPartitions = 1,
