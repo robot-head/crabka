@@ -20,8 +20,12 @@ spec:
       port: 9092
       type: internal
       tls: false
+    # 9094, NOT 9093: crabka reserves 9093 for the KRaft controller listener
+    # (CONTROLLER_PORT in the operator), so a data listener on 9093 collides at
+    # bind time and SIGKILLs the broker. 9094 is free (9092 plaintext data,
+    # 9093 controller).
     - name: tls
-      port: 9093
+      port: 9094
       type: internal
       tls: true
   config:

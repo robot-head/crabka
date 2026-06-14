@@ -12,19 +12,23 @@ log() {
 
 # bootstrap_for STACK
 #   echo the in-cluster DNS:port for the Kafka bootstrap Service.
-#   When BENCH_TLS is set (non-empty), returns the TLS listener port (9093);
-#   otherwise the plaintext port (9092). The DNS host is identical either way
-#   (both listeners share the headless / bootstrap Service); only the port
-#   selects the listener.
+#   Plaintext: port 9092 on both stacks. TLS (BENCH_TLS set): the TLS data
+#   listener port, which DIFFERS per stack. crabka reserves 9093 for the KRaft
+#   controller listener (CONTROLLER_PORT), so its TLS data listener is on 9094;
+#   Strimzi follows its own convention (9093). The DNS host is identical to the
+#   plaintext case (both listeners share the headless / bootstrap Service); only
+#   the port selects the listener.
 bootstrap_for() {
   local stack="$1"
-  local port=9092
-  [[ -n "${BENCH_TLS:-}" ]] && port=9093
   case "$stack" in
     crabka)
+      local port=9092
+      [[ -n "${BENCH_TLS:-}" ]] && port=9094
       printf 'demo-broker-headless.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
       ;;
     kafka|strimzi)
+      local port=9092
+      [[ -n "${BENCH_TLS:-}" ]] && port=9093
       printf 'demo-kafka-bootstrap.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
       ;;
     *)
