@@ -192,3 +192,56 @@ mod tests {
         assert!(b.try_consume(2048) == 2048); // fresh capacity
     }
 }
+
+#[cfg(test)]
+#[path = "bucket_model.rs"]
+mod bucket_model;
+
+#[cfg(test)]
+mod plan_fuzz {
+    use proptest::prelude::*;
+
+    use super::plan_consume;
+
+    proptest! {
+        /// The pure arithmetic: grant within request + cap, new_available never
+        /// underflows and never exceeds the rate cap.
+        #[test]
+        fn plan_consume_invariants(
+            available in 0u64..=u64::MAX,
+            refill in 0u64..=u64::MAX,
+            rate in 0u64..1_000_000,
+            requested in 0u64..=u64::MAX,
+        ) {
+            let (grant, new) = plan_consume(available, refill, rate, requested);
+            let capped = available.saturating_add(refill).min(rate);
+            prop_assert!(grant <= requested);
+            prop_assert!(grant <= capped);
+            prop_assert_eq!(new, capped - grant);
+            prop_assert!(new <= rate, "burst cap");
+            // (new is u64 == capped - grant with grant <= capped, so no underflow.)
+        }
+
+        /// Sequential conservation: over a chain of consumes at a fixed rate with
+        /// per-step refills, the granted total never exceeds initial + the refill
+        /// actually absorbed (each step caps `available` at `rate`).
+        #[test]
+        fn sequential_conservation(
+            rate in 1u64..10_000,
+            ops in proptest::collection::vec((0u64..20_000, 0u64..20_000), 0..200usize),
+        ) {
+            let mut available = rate; // start full
+            let mut supplied = available;
+            let mut granted: u64 = 0;
+            for (refill, requested) in ops {
+                let capped = available.saturating_add(refill).min(rate);
+                supplied = supplied.saturating_add(capped - available); // tokens actually added this step
+                let (g, new) = plan_consume(available, refill, rate, requested);
+                granted = granted.saturating_add(g);
+                available = new;
+                prop_assert!(available <= rate);
+            }
+            prop_assert!(granted <= supplied, "granted {granted} exceeded supplied {supplied}");
+        }
+    }
+}
