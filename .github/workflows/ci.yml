@@ -259,6 +259,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -369,6 +370,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -408,6 +410,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -449,6 +452,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -491,6 +495,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -546,6 +551,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -589,6 +595,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -642,12 +649,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # llvm-cov profraw + two preloaded Kafka images + the cargo target dir
-      # exhaust the ~14 GB free on the default runner; reclaim ~25 GB of
-      # preinstalled SDKs we never use so the coverage run has headroom.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift /usr/local/.ghcup
-          df -h /
+      # exhaust the ~14 GB free on the default runner; reclaim ~25-30 GB of
+      # unused preinstalled SDKs (the shared action leaves the JDK + Docker
+      # images intact for the testcontainers acceptance suite).
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
@@ -716,13 +721,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
-      # profraw set on top of the cargo target dir, reliably exhausting the
-      # runner's ~14 GB free disk ("No space left on device"). Reclaim ~25 GB of
-      # preinstalled SDKs we never use.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift /usr/local/.ghcup
-          df -h /
+      # profraw set on top of the cargo target dir, which exhausted the runner's
+      # ~14 GB free disk ("No space left on device", then a SIGBUS in the
+      # linker). The shared action reclaims ~25-30 GB of unused preinstalled SDKs.
+      - uses: ./.github/actions/free-disk-space
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.96.0"
