@@ -303,10 +303,10 @@ fn run(model: IsrModel, label: &str) {
 
 #[test]
 fn isr_safety() {
-    run(IsrModel::safety(2), "isr_safety");
+    run(IsrModel::safety(3), "isr_safety");
 }
 
 #[test]
 fn isr_overshoot() {
-    run(IsrModel::overshoot(2), "isr_overshoot");
+    run(IsrModel::overshoot(3), "isr_overshoot");
 }
