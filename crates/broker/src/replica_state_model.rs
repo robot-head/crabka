@@ -233,11 +233,10 @@ impl Model for IsrModel {
             // violation (compute_hw skips entryless members).
             Property::always("no_data_loss", |m: &IsrModel, s: &IsrState| {
                 let leader = m.leader();
-                s.rs.isr.iter().filter(|&&f| f != leader).all(|f| {
-                    s.rs.per_follower
-                        .get(f)
-                        .is_some_and(|st| st.leo >= s.rs.hw)
-                })
+                s.rs.isr
+                    .iter()
+                    .filter(|&&f| f != leader)
+                    .all(|f| s.rs.per_follower.get(f).is_some_and(|st| st.leo >= s.rs.hw))
             }),
             Property::always("leo_clamped", |_, s: &IsrState| {
                 s.rs.per_follower.values().all(|st| st.leo <= s.leader_leo)
