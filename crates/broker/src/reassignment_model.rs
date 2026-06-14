@@ -23,7 +23,7 @@ use super::reassign_one;
 
 const MAX_STATES: usize = 200_000;
 const MAX_DEPTH: usize = 80;
-const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Bounded config for the reassignment model (held here, not in the state).
 struct ReassignModel {
