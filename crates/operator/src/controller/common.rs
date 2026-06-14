@@ -27,7 +27,7 @@ use crate::crd::{Kafka, KafkaCondition};
 pub(crate) const FIELD_MANAGER: &str = "crabka-operator";
 
 pub(crate) const BROKER_PORT: i32 = 9092;
-/// KRaft controller listener port. Every broker binds its controller
+/// `KRaft` controller listener port. Every broker binds its controller
 /// listener on `0.0.0.0:9093` and peers reach each other on this port
 /// via the headless Service's per-pod DNS A-records.
 pub(crate) const CONTROLLER_PORT: i32 = 9093;
