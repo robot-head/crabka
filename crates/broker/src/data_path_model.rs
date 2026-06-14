@@ -36,12 +36,12 @@ use crate::replica_state::ReplicaState;
 use crate::unclean_recovery::{ReplicaLogInfo, select_best_replica};
 
 const NB: usize = 3; // brokers 0,1,2
-const MAX_LEN: usize = 3; // max log length (offsets 0..3)
+const MAX_LEN: usize = 4; // max log length (offsets 0..4)
 const MAX_EPOCH: u8 = 3;
 
-const TARGET_STATE_COUNT: usize = 30_000_000;
-const MAX_UNIQUE_STATES: usize = 1_500_000;
-const MAX_DEPTH: usize = 40;
+const TARGET_STATE_COUNT: usize = 60_000_000;
+const MAX_UNIQUE_STATES: usize = 8_000_000;
+const MAX_DEPTH: usize = 70;
 const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 fn node(b: u8) -> u64 {
@@ -488,12 +488,6 @@ fn run(model: DpModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    if let Some(path) = checker.discovery("committed_durable") {
-        eprintln!("[{label}] committed_durable COUNTEREXAMPLE:");
-        for (st, ac) in path.into_actions().iter().enumerate() {
-            eprintln!("  step {st}: {ac:?}");
-        }
-    }
     assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
     assert!(
         checker.state_count() < TARGET_STATE_COUNT,
