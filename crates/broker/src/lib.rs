@@ -160,6 +160,11 @@ pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;
 pub mod coordinator;
+/// Compositional end-to-end data-path verification model (produce → replicate →
+/// commit → fetch across clean + unclean failover); wraps the real HWM/ISR,
+/// leader-epoch-truncation, failover-selection, and fetch-visibility cores.
+#[cfg(test)]
+mod data_path_model;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
