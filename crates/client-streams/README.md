@@ -10,8 +10,8 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 
 ## Install
 
-```toml
-crabka-client-streams = "0.3.3"
+```sh
+cargo add crabka-client-streams
 ```
 
 For workspace development, use the path dependency from this repository instead.

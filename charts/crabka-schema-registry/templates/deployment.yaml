@@ -20,7 +20,7 @@ spec:
       securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
       containers:
         - name: schema-registry
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --bootstrap-servers={{ required "bootstrapServers is required" .Values.bootstrapServers }}

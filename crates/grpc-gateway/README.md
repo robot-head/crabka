@@ -10,8 +10,8 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 
 ## Install
 
-```toml
-crabka-grpc-gateway = "0.3.2"
+```sh
+cargo add crabka-grpc-gateway
 ```
 
 For workspace development, use the path dependency from this repository instead.
