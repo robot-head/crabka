@@ -133,28 +133,38 @@ brokers at `:quorum-fix4`:
 * mTLS controller handshake succeeds (no more `UnknownCA`).
 * **RF-3 topic creates** — `bench-topic` 12p/RF3 `Ready=True`, no `INVALID_REPLICATION_FACTOR`.
 
-## 7. Open issues surfaced by the failover *workload* (deeper layer, separate from quorum)
+## 7. Produce-routing bug found & fixed (`a4f69518`) — client-side, not the broker
 
-Running `bench/scripts/run-scenario.sh crabka failover 3broker-rf3` exposed three
-bugs in the **bench-driver / client producer** (not the broker quorum):
+Running `bench/scripts/run-scenario.sh crabka failover 3broker-rf3` exposed a
+**client-side** routing bug (the broker, leadership, and replication are correct —
+JVM `kafka-console-producer` writes RF-3 to all 12 partitions fine, and
+`kafka-topics --describe` shows every partition with a valid leader + full ISR
+`[0,1,2]`).
 
-1. **Bench-driver pod prefix** — `crates/bench-driver/src/scenario.rs:26` hardcodes
-   `Stack::Crabka => "^demo-brokers-"`, but the multi-pool `3broker-rf3` topology
-   names pods `demo-broker-0-0` etc. `kill_first_broker` finds no match. Fix:
-   `^demo-broker` (a literal prefix valid for both the e2e single-pool `demo-brokers-0`
-   and the bench `demo-broker-0-0`; `failover.rs` uses it via `starts_with`, `prom.rs`
-   as a regex).
-2. **Client producer stack overflow** — `crates/client-producer/src/sender.rs:457`
-   reroutes on `NOT_LEADER` by `Box::pin(send_to_leaders(.., reroute_depth+1)).await`.
-   The bound is `reroute_depth >= cfg.retries`, but `retries` defaults to `i32::MAX`,
-   so persistent rerouting recurses until the tokio worker stack overflows (~67s in).
-   Fix: make the reroute loop iterative and/or cap routing retries independently of
-   the (huge) transport-retry budget.
-3. **Root cause — persistent `NOT_LEADER`** — #2 only fires because some partition
-   keeps returning `NOT_LEADER_OR_FOLLOWER`. The reroute path logs nothing, so it was
-   silent until the overflow. This points to a multi-broker partition-leadership /
-   metadata-routing issue (metadata advertises a leader that rejects the produce, or
-   leadership not fully established for some partitions). Needs broker-side diagnosis.
+**Root cause:** `BrokerPool::refresh_brokers` (`crates/client-core/src/pool.rs`)
+parsed each advertised broker address with `parse::<SocketAddr>()`, which only
+accepts a **literal IP**. Brokers advertise **DNS names** (pod FQDNs), so the parse
+failed silently, the `(id→addr)` registry was never populated, `knows_broker` stayed
+false, and `resolve_leader` routed every batch to the round-robin **bootstrap**
+connection → permanent `NOT_LEADER_OR_FOLLOWER` for any partition the bootstrap
+broker doesn't lead. The producer's recursive re-route (`sender.rs`, bounded by
+`cfg.retries` = `i32::MAX`) then recursed until the tokio worker **stack overflowed**
+(~67s in). Single-node never hit it (bootstrap == the only broker).
+
+**Fixes (3 crates):**
+1. **`client-core/pool.rs`** — `refresh_brokers` is async and resolves the host via
+   `tokio::net::lookup_host` (DNS names AND IPs); `client.rs` awaits it. *(root cause)*
+2. **`client-producer/sender.rs`** — force a metadata refresh when a `NOT_LEADER`
+   hint names a leader whose address the pool doesn't know yet; cap routing re-routes
+   at a constant (8), independent of the transport-retry budget, so a never-reachable
+   leader fails gracefully instead of overflowing the stack.
+3. **`bench-driver/scenario.rs`** — broker-pod prefix `^demo-broker` matches both the
+   single-pool e2e naming and the multi-pool bench naming, so the failover kill finds
+   the partition-0 leader pod.
+
+Verified at unit level (client-core 27 incl. hostname regression, client-producer 36,
+bench-driver prefix test). In-cluster re-run pending `quorum-fix5` (bench-driver image
+only — operator/broker stay at `quorum-fix4`).
 
 ## 8. Known follow-up
 
