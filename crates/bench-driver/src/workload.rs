@@ -370,10 +370,76 @@ async fn run_producer(
         }
     };
 
+    // Pipeline depth: how many records may be in flight (awaiting their ack)
+    // before the loop drains the oldest. Without this the loop sends one record
+    // and awaits its ack before the next, capping a task's throughput at 1/RTT
+    // regardless of cluster capacity — so the numbers measured the driver, not
+    // the cluster. A bounded window lets throughput track the cluster while
+    // keeping memory and back-pressure in hand.
+    const MAX_INFLIGHT: usize = 512;
+    let mut inflight = std::collections::VecDeque::new();
+
+    // Process one resolved ack. A macro (not a closure) so it can mutate the
+    // per-task accumulators in place without borrow-checker gymnastics.
+    macro_rules! process_ack {
+        ($res:expr, $t0:expr) => {
+            match $res {
+                Ok(Ok(_meta)) => {
+                    let us = $t0.elapsed().as_micros() as u64;
+                    let now_state = stop.load(Ordering::Relaxed);
+                    if now_state == STATE_MEASURING {
+                        hist::record_us(&mut meas_hist, us);
+                        meas_msgs += 1;
+                        meas_bytes += scenario.msg_size_bytes as u64;
+                        if kill_observed && recovery_unix_ms == 0 {
+                            recovery_unix_ms = Utc::now().timestamp_millis() as u64;
+                        }
+                        if kill_observed && us > latency_spike_max_us {
+                            latency_spike_max_us = us;
+                        }
+                    }
+                    if first_ack.load(Ordering::Relaxed) == 0 {
+                        let now_ms = Utc::now().timestamp_millis() as u64;
+                        let _ = first_ack.compare_exchange(
+                            0,
+                            now_ms,
+                            Ordering::SeqCst,
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    if stop.load(Ordering::Relaxed) == STATE_MEASURING {
+                        dropped += 1;
+                    }
+                    kill_observed = true;
+                    if dropped == 1 && error.is_empty() {
+                        error = format!("producer-{idx}-first-err: {e}");
+                    }
+                }
+                Err(e) => {
+                    if stop.load(Ordering::Relaxed) == STATE_MEASURING {
+                        dropped += 1;
+                    }
+                    kill_observed = true;
+                    if dropped == 1 && error.is_empty() {
+                        error = format!("producer-{idx}-rx-closed: {e}");
+                    }
+                }
+            }
+        };
+    }
+
     loop {
         let state = stop.load(Ordering::Relaxed);
         if state == STATE_STOP {
             break;
+        }
+        // Drain the oldest acks once the window is full — bounds memory and
+        // applies back-pressure at the cluster's completion rate.
+        while inflight.len() >= MAX_INFLIGHT {
+            let (rx, t0): (_, Instant) = inflight.pop_front().expect("len checked");
+            process_ack!(rx.await, t0);
         }
         if let Some(p) = pacer.as_mut() {
             p.await_token().await;
@@ -386,46 +452,12 @@ async fn run_producer(
         };
         let t0 = Instant::now();
         let rx = producer.send(rec).await;
-        match rx.await {
-            Ok(Ok(_meta)) => {
-                let us = t0.elapsed().as_micros() as u64;
-                let now_state = stop.load(Ordering::Relaxed);
-                if now_state == STATE_MEASURING {
-                    hist::record_us(&mut meas_hist, us);
-                    meas_msgs += 1;
-                    meas_bytes += scenario.msg_size_bytes as u64;
-                    if kill_observed && recovery_unix_ms == 0 {
-                        recovery_unix_ms = Utc::now().timestamp_millis() as u64;
-                    }
-                    if kill_observed && us > latency_spike_max_us {
-                        latency_spike_max_us = us;
-                    }
-                }
-                if first_ack.load(Ordering::Relaxed) == 0 {
-                    let now_ms = Utc::now().timestamp_millis() as u64;
-                    let _ =
-                        first_ack.compare_exchange(0, now_ms, Ordering::SeqCst, Ordering::Relaxed);
-                }
-            }
-            Ok(Err(e)) => {
-                if stop.load(Ordering::Relaxed) == STATE_MEASURING {
-                    dropped += 1;
-                }
-                kill_observed = true;
-                if dropped == 1 && error.is_empty() {
-                    error = format!("producer-{idx}-first-err: {e}");
-                }
-            }
-            Err(e) => {
-                if stop.load(Ordering::Relaxed) == STATE_MEASURING {
-                    dropped += 1;
-                }
-                kill_observed = true;
-                if dropped == 1 && error.is_empty() {
-                    error = format!("producer-{idx}-rx-closed: {e}");
-                }
-            }
-        }
+        inflight.push_back((rx, t0));
+    }
+
+    // Drain any acks still in flight when the measurement window closed.
+    while let Some((rx, t0)) = inflight.pop_front() {
+        process_ack!(rx.await, t0);
     }
 
     let _ = producer.flush().await;

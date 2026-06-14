@@ -36,6 +36,15 @@ spec:
                     operator: In
                     values:
                       - beefy-pool
+        # Spread the 3 Strimzi brokers across distinct nodes (parity with the
+        # crabka pool's anti-affinity) so the comparison is fair.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: demo
+                  strimzi.io/pool-name: kafka
+              topologyKey: kubernetes.io/hostname
 ---
 apiVersion: kafka.strimzi.io/v1beta2
 kind: Kafka

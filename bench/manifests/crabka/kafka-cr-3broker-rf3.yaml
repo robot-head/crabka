@@ -39,6 +39,17 @@ spec:
   template:
     nodeSelector:
       cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
     metadata:
       labels:
         bench-pool: beefy
@@ -68,6 +79,17 @@ spec:
   template:
     nodeSelector:
       cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
     metadata:
       labels:
         bench-pool: beefy
@@ -97,6 +119,17 @@ spec:
   template:
     nodeSelector:
       cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
     metadata:
       labels:
         bench-pool: beefy
