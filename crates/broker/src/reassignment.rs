@@ -89,6 +89,64 @@ pub(crate) async fn run(
     }
 }
 
+/// The pure per-partition reassignment decision: given a partition's current
+/// record and the alive set, return the next `PartitionRecord` (a leader
+/// handoff or a completion), or `None` to wait. No I/O. Extracted from
+/// `compute_reassignment_progress` so the policy is independently unit-testable
+/// and model-checkable.
+pub(crate) fn reassign_one(
+    pr: &PartitionRecord,
+    alive: &std::collections::HashSet<NodeId>,
+) -> Option<PartitionRecord> {
+    let target: Vec<NodeId> = pr
+        .replicas
+        .iter()
+        .filter(|r| !pr.removing_replicas.contains(r))
+        .copied()
+        .collect();
+    if !pr.adding_replicas.iter().all(|n| pr.isr.contains(n)) {
+        return None; // wait for replication
+    }
+    if pr.removing_replicas.contains(&pr.leader) {
+        // Leader-handoff phase: pick a new leader from target ∩ isr ∩ alive.
+        let new_leader = *target
+            .iter()
+            .find(|n| pr.isr.contains(n) && alive.contains(n))?;
+        return Some(PartitionRecord {
+            topic: pr.topic.clone(),
+            partition: pr.partition,
+            leader: new_leader,
+            leader_epoch: pr.leader_epoch + 1,
+            replicas: pr.replicas.clone(),
+            isr: pr.isr.clone(),
+            adding_replicas: pr.adding_replicas.clone(),
+            removing_replicas: pr.removing_replicas.clone(),
+            directories: pr.directories.clone(),
+            partition_epoch: pr.partition_epoch + 1,
+        });
+    }
+    // Completion phase: switch to the target replica set.
+    let new_isr: Vec<NodeId> = pr
+        .isr
+        .iter()
+        .filter(|n| target.contains(n))
+        .copied()
+        .collect();
+    let new_directories = remap_directories(&pr.replicas, &pr.directories, &target);
+    Some(PartitionRecord {
+        topic: pr.topic.clone(),
+        partition: pr.partition,
+        leader: pr.leader,
+        leader_epoch: pr.leader_epoch, // unchanged: leader stays, only replica set changes
+        replicas: target,
+        isr: new_isr,
+        adding_replicas: vec![],
+        removing_replicas: vec![],
+        directories: new_directories,
+        partition_epoch: pr.partition_epoch + 1,
+    })
+}
+
 /// Pure logic: scan every in-flight reassignment; produce completion
 /// or leader-handoff records for those ready to advance.
 pub(crate) async fn compute_reassignment_progress(
@@ -100,62 +158,9 @@ pub(crate) async fn compute_reassignment_progress(
     // liveness lock per target replica in the leader-handoff branch.
     let alive = liveness.alive_snapshot().await;
     for pr in image.reassignments_in_flight() {
-        let target: Vec<NodeId> = pr
-            .replicas
-            .iter()
-            .filter(|r| !pr.removing_replicas.contains(r))
-            .copied()
-            .collect();
-        let adding_caught_up = pr.adding_replicas.iter().all(|n| pr.isr.contains(n));
-        if !adding_caught_up {
-            continue; // wait for replication
+        if let Some(next) = reassign_one(pr, &alive) {
+            updates.push(MetadataRecord::V1Partition(next));
         }
-        if pr.removing_replicas.contains(&pr.leader) {
-            // Leader handoff phase. Find an eligible new leader in target ∩ isr that is alive.
-            let mut new_leader: Option<NodeId> = None;
-            for n in &target {
-                if pr.isr.contains(n) && alive.contains(n) {
-                    new_leader = Some(*n);
-                    break;
-                }
-            }
-            if let Some(leader) = new_leader {
-                updates.push(MetadataRecord::V1Partition(PartitionRecord {
-                    topic: pr.topic.clone(),
-                    partition: pr.partition,
-                    leader,
-                    leader_epoch: pr.leader_epoch + 1,
-                    replicas: pr.replicas.clone(),
-                    isr: pr.isr.clone(),
-                    adding_replicas: pr.adding_replicas.clone(),
-                    removing_replicas: pr.removing_replicas.clone(),
-                    directories: pr.directories.clone(),
-                    partition_epoch: pr.partition_epoch + 1,
-                }));
-            }
-            // Whether or not we found a leader, don't also try to complete this tick.
-            continue;
-        }
-        // Completion phase.
-        let new_isr: Vec<NodeId> = pr
-            .isr
-            .iter()
-            .filter(|n| target.contains(n))
-            .copied()
-            .collect();
-        let new_directories = remap_directories(&pr.replicas, &pr.directories, &target);
-        updates.push(MetadataRecord::V1Partition(PartitionRecord {
-            topic: pr.topic.clone(),
-            partition: pr.partition,
-            leader: pr.leader,
-            leader_epoch: pr.leader_epoch, // unchanged: leader stays, only replica set changes
-            replicas: target,
-            isr: new_isr,
-            adding_replicas: vec![],
-            removing_replicas: vec![],
-            directories: new_directories,
-            partition_epoch: pr.partition_epoch + 1,
-        }));
     }
     updates
 }
@@ -431,3 +436,7 @@ mod tests {
         assert!(pr.isr == vec![1, 3, 4]);
     }
 }
+
+#[cfg(test)]
+#[path = "reassignment_model.rs"]
+mod reassignment_model;
