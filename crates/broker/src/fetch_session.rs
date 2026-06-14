@@ -41,7 +41,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crabka_protocol::owned::fetch_request::FetchRequest;
+use crabka_protocol::owned::fetch_request::{FetchRequest, FetchTopic, ForgottenTopic};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
@@ -164,6 +164,59 @@ pub struct FetchSessionCache {
     num_partitions: AtomicUsize,
 }
 
+/// Pure core of the incremental-fetch session update (KIP-227): drop forgotten
+/// partitions, then merge the requested topics into a session's partition map.
+///
+/// - **forget**: a `ForgottenTopic` matches a cached key by either `topic_name`
+///   (Fetch v ≤ 12) **or** `topic_id` (v ≥ 13), plus partition.
+/// - **merge**: for each requested partition, find a cached key by either-half
+///   identity + partition and update its desired state in place; only insert a
+///   brand-new default-state key when the partition truly isn't cached (avoids
+///   shadowing a fully-resolved key with a partial-identity copy).
+///
+/// The asymmetry between the OR-match forget and the either-half-match merge is
+/// exercised exhaustively by `fetch_session_model`.
+pub(crate) fn apply_incremental(
+    partitions: &mut HashMap<FetchSessionKey, CachedPartitionState>,
+    forgotten: &[ForgottenTopic],
+    topics: &[FetchTopic],
+) {
+    for ft in forgotten {
+        partitions.retain(|k, _| {
+            let topic_match = (!ft.topic.is_empty() && k.topic_name == ft.topic)
+                || (ft.topic_id != WireUuid::ZERO && k.topic_id == ft.topic_id);
+            if !topic_match {
+                return true;
+            }
+            !ft.partitions.contains(&k.partition)
+        });
+    }
+
+    for t in topics {
+        for fp in &t.partitions {
+            let existing_key = partitions
+                .keys()
+                .find(|k| {
+                    k.partition == fp.partition
+                        && ((!t.topic.is_empty() && k.topic_name == t.topic)
+                            || (t.topic_id != WireUuid::ZERO && k.topic_id == t.topic_id))
+                })
+                .cloned();
+            let key = existing_key.unwrap_or_else(|| FetchSessionKey {
+                topic_name: t.topic.clone(),
+                topic_id: t.topic_id,
+                partition: fp.partition,
+            });
+            let entry = partitions.entry(key).or_default();
+            entry.fetch_offset = fp.fetch_offset;
+            entry.max_bytes = fp.partition_max_bytes;
+            entry.current_leader_epoch = fp.current_leader_epoch;
+            entry.last_fetched_epoch = fp.last_fetched_epoch;
+            entry.log_start_offset = fp.log_start_offset;
+        }
+    }
+}
+
 impl FetchSessionCache {
     #[must_use]
     pub fn new(max_slots: usize) -> Self {
@@ -266,56 +319,15 @@ impl FetchSessionCache {
         // (which backs the lock-free `total_partitions_cached()` gauge).
         let partitions_before = session.partitions.len();
 
-        // Drop forgotten partitions. A `ForgottenTopic` matches a cached
-        // key by either topic_name (v ≤ 12) or topic_id (v ≥ 13).
-        for ft in &req.forgotten_topics_data {
-            session.partitions.retain(|k, _| {
-                let topic_match = (!ft.topic.is_empty() && k.topic_name == ft.topic)
-                    || (ft.topic_id != WireUuid::ZERO && k.topic_id == ft.topic_id);
-                if !topic_match {
-                    return true;
-                }
-                !ft.partitions.contains(&k.partition)
-            });
-        }
-
-        // Merge request topics — updates existing entries' desired
-        // offset/max_bytes, adds new entries with default `last_*`.
-        //
-        // The cache key carries both `topic_name` and `topic_id`. After
-        // `try_allocate` (via the handler's resolution) both fields are
-        // populated. The wire request, however, only carries one of them:
-        // Fetch v ≤ 12 sends the name and leaves `topic_id` zero; v ≥ 13
-        // sends the id and leaves `topic` empty. A naive `entry((name, id, p))`
-        // lookup would treat the partial-key request as a *new* partition and
-        // shadow the cached entry with a default-state copy (max_bytes=0),
-        // which then breaks subsequent reads. Find the cached key by either
-        // half-identity first; only fall back to a brand-new key when the
-        // partition truly isn't in the cache.
-        for t in &req.topics {
-            for fp in &t.partitions {
-                let existing_key = session
-                    .partitions
-                    .keys()
-                    .find(|k| {
-                        k.partition == fp.partition
-                            && ((!t.topic.is_empty() && k.topic_name == t.topic)
-                                || (t.topic_id != WireUuid::ZERO && k.topic_id == t.topic_id))
-                    })
-                    .cloned();
-                let key = existing_key.unwrap_or_else(|| FetchSessionKey {
-                    topic_name: t.topic.clone(),
-                    topic_id: t.topic_id,
-                    partition: fp.partition,
-                });
-                let entry = session.partitions.entry(key).or_default();
-                entry.fetch_offset = fp.fetch_offset;
-                entry.max_bytes = fp.partition_max_bytes;
-                entry.current_leader_epoch = fp.current_leader_epoch;
-                entry.last_fetched_epoch = fp.last_fetched_epoch;
-                entry.log_start_offset = fp.log_start_offset;
-            }
-        }
+        // Drop forgotten partitions then merge request topics (KIP-227). The
+        // forget/merge logic — and the half-identity matching that prevents a
+        // partial-identity request from shadowing a fully-resolved cached key —
+        // lives in `apply_incremental`, verified by `fetch_session_model`.
+        apply_incremental(
+            &mut session.partitions,
+            &req.forgotten_topics_data,
+            &req.topics,
+        );
 
         let partitions_after = session.partitions.len();
         if partitions_after >= partitions_before {
@@ -462,6 +474,10 @@ impl FetchSessionCache {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fetch_session_model.rs"]
+mod fetch_session_model;
 
 #[cfg(test)]
 mod tests {
@@ -954,5 +970,103 @@ mod tests {
         cache.try_allocate(false, "b".into(), vec![mk(0)]);
         assert!(cache.len() == 1);
         assert!(cache.total_partitions_cached() == 1);
+    }
+}
+
+/// Large-N random fuzzing of `apply_incremental` (KIP-227 forget+merge),
+/// complementing the exhaustive `fetch_session_model`. Random sequences of
+/// incremental fetches over a tiny topic/id/partition universe (random identity
+/// halves) must preserve no-shadow, subscription fidelity, and no-orphan-default
+/// after every step.
+#[cfg(test)]
+mod fuzz {
+    use super::{CachedPartitionState, FetchSessionKey, apply_incremental};
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
+    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    // name index 0 = empty (id-only wire form), 1 = "A", 2 = "B".
+    fn name_of(i: u8) -> String {
+        ["", "A", "B"][i as usize].to_string()
+    }
+    // id index 0 = ZERO (name-only wire form), 1 = U, 2 = V.
+    fn id_of(i: u8) -> WireUuid {
+        [WireUuid::ZERO, WireUuid([1; 16]), WireUuid([2; 16])][i as usize]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+        #[test]
+        fn forget_merge_invariants(
+            ops in proptest::collection::vec(
+                // (forget name, forget id, forget partition,
+                //  do-subscribe, sub name, sub id, sub partition, sub max_bytes)
+                (0u8..3, 0u8..3, 0i32..2, any::<bool>(), 0u8..3, 0u8..3, 0i32..2, 1i32..4),
+                0..200,
+            )
+        ) {
+            let mut partitions: HashMap<FetchSessionKey, CachedPartitionState> = HashMap::new();
+            for (fname, fid, fp, do_sub, sname, sid, sp, mb) in ops {
+                // A forget with an all-empty identity matches nothing — skip it
+                // (the wire never carries a topic with neither name nor id).
+                let forgotten = if fname == 0 && fid == 0 {
+                    vec![]
+                } else {
+                    vec![ForgottenTopic {
+                        topic: name_of(fname),
+                        topic_id: id_of(fid),
+                        partitions: vec![fp],
+                        ..Default::default()
+                    }]
+                };
+                let subscribe = do_sub && !(sname == 0 && sid == 0);
+                let topics = if subscribe {
+                    vec![FetchTopic {
+                        topic: name_of(sname),
+                        topic_id: id_of(sid),
+                        partitions: vec![FetchPartition {
+                            partition: sp,
+                            partition_max_bytes: mb,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }]
+                } else {
+                    vec![]
+                };
+
+                apply_incremental(&mut partitions, &forgotten, &topics);
+
+                // No shadow: no two keys share a logical partition.
+                let keys: Vec<_> = partitions.keys().cloned().collect();
+                for (i, a) in keys.iter().enumerate() {
+                    for b in &keys[i + 1..] {
+                        let shadow = a.partition == b.partition
+                            && ((!a.topic_name.is_empty() && a.topic_name == b.topic_name)
+                                || (a.topic_id != WireUuid::ZERO && a.topic_id == b.topic_id));
+                        prop_assert!(!shadow, "shadow: {a:?} vs {b:?}");
+                    }
+                }
+
+                // No orphan default: every cached entry carries a subscribed
+                // max_bytes (merge always sets it; we only ever request >= 1).
+                prop_assert!(partitions.values().all(|v| v.max_bytes != 0));
+
+                // Subscription fidelity: a subscribed partition is reflected with
+                // the requested max_bytes by some key matching the request.
+                if subscribe {
+                    let name = name_of(sname);
+                    let id = id_of(sid);
+                    let present = partitions.iter().any(|(k, st)| {
+                        k.partition == sp
+                            && ((!name.is_empty() && k.topic_name == name)
+                                || (id != WireUuid::ZERO && k.topic_id == id))
+                            && st.max_bytes == mb
+                    });
+                    prop_assert!(present, "subscription not reflected");
+                }
+            }
+        }
     }
 }
