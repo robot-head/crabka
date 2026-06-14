@@ -230,18 +230,21 @@ impl QuorumStateMachine {
         let majority_offset = match_offsets[self.state.majority() - 1];
         // Leader-completeness gate: only commit once the current-epoch entry at
         // `epoch_start_offset` is itself majority-replicated. Until then, hold.
-        let new_hwm = if majority_offset > *epoch_start_offset {
+        let gated = if majority_offset > *epoch_start_offset {
             majority_offset
         } else {
             *high_watermark
         };
+        // Monotonicity is intrinsic: the HWM never regresses. The
+        // `majority()`-th offset can drop below the current HWM if a follower's
+        // recorded `fetch_offset` legitimately falls (e.g. it truncated a
+        // divergent suffix, or — in tests/models — a reordered stale fetch
+        // arrives). Clamping here keeps the contract a property of this function
+        // rather than of every caller's guard.
+        let new_hwm = gated.max(*high_watermark);
         debug_assert!(
             new_hwm <= log_end,
             "HWM {new_hwm} must not exceed leader log end {log_end}"
-        );
-        debug_assert!(
-            new_hwm >= *high_watermark,
-            "HWM {new_hwm} must not regress below {high_watermark}"
         );
         new_hwm
     }
@@ -1135,6 +1138,77 @@ mod tests {
             assert!(*high_watermark == 8);
         } else {
             panic!()
+        }
+    }
+
+    #[test]
+    fn leader_hwm_does_not_regress_on_reordered_stale_fetch() {
+        // A follower's recorded `fetch_offset` can fall (a reordered/stale fetch,
+        // or a legitimate post-truncation re-fetch), dropping the `majority()`-th
+        // match offset below the current HWM. `recompute_high_watermark` must
+        // clamp to the existing HWM (never regress) rather than return a lower
+        // value — historically a lower return tripped a debug-only assertion.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = CellLog {
+            end: std::cell::Cell::new(0),
+            last_epoch: 0,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 1,
+                vote_granted: true,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        // Leader log ends at 10; follower 2 fetches at 8 → HWM advances to 8.
+        log.end.set(10);
+        m.on_event(
+            Event::ReceiveFetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 8,
+            },
+            &log,
+            SimInstant(2100),
+        );
+        if let Role::Leader { high_watermark, .. } = m.role() {
+            assert!(*high_watermark == 8);
+        } else {
+            panic!("expected leader")
+        }
+        // Now follower 2 sends a STALE lower fetch (offset 2 < its prior 8).
+        // match offsets {self=10, 2=2, 3=0} → majority (2nd highest) = 2, which is
+        // below the current HWM 8. The HWM must hold at 8, and no spurious
+        // AdvanceHighWatermark may be emitted. (Pre-clamp this panicked.)
+        let a = m.on_event(
+            Event::ReceiveFetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 2,
+            },
+            &log,
+            SimInstant(2101),
+        );
+        assert!(
+            !a.iter()
+                .any(|x| matches!(x, Action::AdvanceHighWatermark(_)))
+        );
+        if let Role::Leader { high_watermark, .. } = m.role() {
+            assert!(*high_watermark == 8);
+        } else {
+            panic!("expected leader")
         }
     }
 
