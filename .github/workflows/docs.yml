@@ -76,6 +76,9 @@ jobs:
           set -euo pipefail
           out=website/static/charts
           mkdir -p "$out"
+          # Publish the chart-signing public key so consumers can verify the
+          # PGP .prov provenance without leaving the repo.
+          cp charts/crabka-charts.pub.asc "$out/crabka-charts.pub.asc"
 
           # Chart + app versions track the crate release — read them from the
           # workspace manifest so there is nothing to hand-edit on release.
@@ -130,6 +133,20 @@ jobs:
               echo "<li><a href=\"${n}\">${n}</a></li>"
             done
             echo '</ul>'
+            echo '<h2>Verify a chart</h2>'
+            echo '<p>Signing key: <a href="crabka-charts.pub.asc">crabka-charts.pub.asc</a></p>'
+            echo '<pre># PGP provenance (helm-native)'
+            echo 'curl -fsSL https://robot-head.github.io/crabka/charts/crabka-charts.pub.asc | gpg --dearmor > crabka-keyring.gpg'
+            echo 'helm install my-op crabka/crabka-operator --verify --keyring ./crabka-keyring.gpg'
+            echo ''
+            echo '# Keyless cosign signature'
+            echo 'cosign verify-blob --bundle crabka-operator-VERSION.tgz.cosign.bundle \'
+            echo '  --certificate-oidc-issuer https://token.actions.githubusercontent.com \'
+            echo "  --certificate-identity-regexp '^https://github.com/robot-head/crabka/' \\"
+            echo '  crabka-operator-VERSION.tgz'
+            echo ''
+            echo '# SLSA build provenance'
+            echo 'gh attestation verify crabka-operator-VERSION.tgz --repo robot-head/crabka</pre>'
           } > "$out/index.html"
 
       - name: Attest chart build provenance (SLSA)
