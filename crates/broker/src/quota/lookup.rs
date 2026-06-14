@@ -291,4 +291,159 @@ mod tests {
         let ip: std::net::IpAddr = "2001:db8::42".parse().unwrap();
         assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(5.0));
     }
+
+    // ── precedence verification: exhaustive enumeration + proptest ────────────
+    //
+    // The documented 8-priority (user/client) and 2-priority (IP) orders,
+    // declared HERE independently of production so a reordering in
+    // `lookup_quota_with_key`'s candidate array is caught. Index = priority
+    // (lower wins). Parameterized by the probe `(principal, client_id)`.
+    fn uc_candidates<'a>(
+        principal: &'a str,
+        client_id: &'a str,
+    ) -> [Vec<(&'a str, Option<&'a str>)>; 8] {
+        [
+            vec![("client-id", Some(client_id)), ("user", Some(principal))],
+            vec![("client-id", Some(client_id)), ("user", None)],
+            vec![("client-id", None), ("user", Some(principal))],
+            vec![("client-id", None), ("user", None)],
+            vec![("user", Some(principal))],
+            vec![("client-id", Some(client_id))],
+            vec![("user", None)],
+            vec![("client-id", None)],
+        ]
+    }
+
+    /// Distinct per-candidate sentinel values (index = priority) so the matched
+    /// candidate is identifiable by value, with no int→float cast.
+    const CAND_VALS: [f64; 8] = [
+        1000.0, 1001.0, 1002.0, 1003.0, 1004.0, 1005.0, 1006.0, 1007.0,
+    ];
+
+    /// Exhaustive: every one of the 2^8 presence configs of the 8 candidates
+    /// (fixed probe) resolves to the minimum-index present candidate, with the
+    /// matching value; empty config → `None`. Each candidate is configured with
+    /// a distinct value (`1000 + i`) so the matched candidate is identifiable.
+    #[test]
+    fn quota_precedence_exhaustive() {
+        let cands = uc_candidates("u", "c");
+        for mask in 0u16..256 {
+            let records: Vec<_> = cands
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(i, c)| rec(c.clone(), "k", CAND_VALS[i]))
+                .collect();
+            let img = img_with(records);
+            let got = lookup_quota_with_key(&img, "u", "c", "k");
+            match (0..8usize).find(|i| mask & (1 << i) != 0) {
+                None => assert!(
+                    got.is_none(),
+                    "mask {mask:#010b}: expected None, got {got:?}"
+                ),
+                Some(j) => {
+                    let (_key, val) = got.expect("a candidate is present");
+                    // Exact sentinel values, stored and retrieved verbatim —
+                    // compare bit patterns to sidestep float_cmp.
+                    assert!(
+                        val.to_bits() == CAND_VALS[j].to_bits(),
+                        "mask {mask:#010b}: expected candidate {j} (value {}), got {val}",
+                        CAND_VALS[j]
+                    );
+                }
+            }
+            // A quota_key no candidate carries never resolves.
+            assert!(lookup_quota_with_key(&img, "u", "c", "absent_key").is_none());
+        }
+    }
+
+    /// Exhaustive: the 2-priority IP order (specific beats default).
+    #[test]
+    fn ip_quota_precedence_exhaustive() {
+        let ip: std::net::IpAddr = "10.1.2.3".parse().unwrap();
+        let cands = [vec![("ip", Some("10.1.2.3"))], vec![("ip", None)]];
+        for mask in 0u8..4 {
+            let records: Vec<_> = cands
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(i, c)| rec(c.clone(), "connection_creation_rate", CAND_VALS[i]))
+                .collect();
+            let img = img_with(records);
+            let got = lookup_ip_quota_with_key(&img, ip, "connection_creation_rate");
+            match (0..2usize).find(|i| mask & (1 << i) != 0) {
+                None => assert!(got.is_none(), "mask {mask:#04b}: expected None"),
+                Some(j) => {
+                    assert!(got.expect("present").1.to_bits() == CAND_VALS[j].to_bits());
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        /// Random probes + random candidate subsets + a non-matching decoy:
+        /// the min-index present candidate wins, the decoy is never returned,
+        /// and the user/client path never returns an IP entity.
+        #[test]
+        fn quota_precedence_random(
+            principal in "[uv][12]",
+            client_id in "[cd][12]",
+            qkey_idx in 0usize..2,
+            present in proptest::collection::vec(proptest::bool::ANY, 8),
+            decoy in proptest::bool::ANY,
+        ) {
+            let qkey = ["producer_byte_rate", "consumer_byte_rate"][qkey_idx];
+            let cands = uc_candidates(&principal, &client_id);
+            let mut records: Vec<_> = cands
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| present[*i])
+                .map(|(i, c)| rec(c.clone(), qkey, CAND_VALS[i]))
+                .collect();
+            if decoy {
+                // Non-matching entity (never a candidate for a [uv][12]/[cd][12]
+                // probe) — must never be returned.
+                records.push(rec(
+                    vec![("client-id", Some("ZZZ")), ("user", Some("ZZZ"))],
+                    qkey,
+                    9999.0,
+                ));
+                records.push(rec(vec![("user", Some("ZZZ"))], qkey, 9998.0));
+            }
+            let img = img_with(records);
+            let got = lookup_quota_with_key(&img, &principal, &client_id, qkey);
+            match (0..8usize).find(|i| present[*i]) {
+                None => proptest::prop_assert!(got.is_none(), "no candidate present, got {got:?}"),
+                Some(j) => {
+                    let (_k, v) = got.expect("a candidate is present");
+                    proptest::prop_assert_eq!(v.to_bits(), CAND_VALS[j].to_bits());
+                }
+            }
+        }
+
+        /// Random IP precedence: specific beats default; the IP path never
+        /// returns a user/client entity.
+        #[test]
+        fn ip_precedence_random(specific in proptest::bool::ANY, default in proptest::bool::ANY) {
+            let ip: std::net::IpAddr = "10.9.8.7".parse().unwrap();
+            let mut records = vec![];
+            if specific {
+                records.push(rec(vec![("ip", Some("10.9.8.7"))], "connection_creation_rate", 1.0));
+            }
+            if default {
+                records.push(rec(vec![("ip", None)], "connection_creation_rate", 2.0));
+            }
+            // A user/client entry must not leak into the IP path.
+            records.push(rec(vec![("user", Some("u"))], "connection_creation_rate", 50.0));
+            let img = img_with(records);
+            let got = lookup_ip_quota_with_key(&img, ip, "connection_creation_rate");
+            if specific {
+                proptest::prop_assert_eq!(got.expect("specific present").1.to_bits(), 1.0_f64.to_bits());
+            } else if default {
+                proptest::prop_assert_eq!(got.expect("default present").1.to_bits(), 2.0_f64.to_bits());
+            } else {
+                proptest::prop_assert!(got.is_none());
+            }
+        }
+    }
 }
