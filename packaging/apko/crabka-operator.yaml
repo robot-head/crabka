@@ -26,3 +26,4 @@ cmd: run
 
 archs:
   - x86_64
+  - aarch64
