@@ -85,7 +85,7 @@
         <thead>
           <tr>
             <th scope="col"><span class="visually-hidden">Capability</span></th>
-            <th scope="col" class="col-kafka">Apache Kafka 4.3</th>
+            <th scope="col" class="col-kafka">Strimzi (Apache Kafka)</th>
             <th scope="col" class="col-crabka">
               <img class="th-mark logo-light" src="{{ get_url(path='crabka-mark.png') | safe }}" alt="" width="22" height="17" aria-hidden="true">
               <img class="th-mark logo-dark" src="{{ get_url(path='crabka-mark-dark.png') | safe }}" alt="" width="22" height="18" aria-hidden="true">
@@ -105,8 +105,8 @@
       </table>
     </div>
     <p class="compare-foot">
-      <span class="asterisk">*</span> Producer write path, single-box like-for-like.
-      <a href="{{ get_url(path='/benchmarks/crabka-vs-kafka/') | safe }}">See the full benchmark methodology →</a>
+      <span class="asterisk">*</span> Three-broker Kubernetes cluster, identical pod resources.
+      <a href="{{ get_url(path='/benchmarks/crabka-vs-strimzi/') | safe }}">See the full benchmark methodology →</a>
     </p>
   </div>
 </section>

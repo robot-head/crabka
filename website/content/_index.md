@@ -3,32 +3,32 @@ title = "Crabka"
 sort_by = "weight"
 
 [extra]
-lead = "A Rust reimplementation of Apache Kafka. Byte-for-byte wire compatible and KRaft-native — <strong>matching its throughput</strong> on <strong>~40× less memory</strong>, and no JVM to babysit."
+lead = "A Rust reimplementation of Apache Kafka. Byte-for-byte wire compatible and KRaft-native — <strong>matching its throughput</strong> on <strong>a fraction of the memory</strong>, and no JVM to babysit."
 url = "/guide/introduction/"
 url_button = "Get started"
-url2 = "/benchmarks/crabka-vs-kafka/"
+url2 = "/benchmarks/crabka-vs-strimzi/"
 url2_button = "See the benchmarks"
 repo_url = "https://github.com/robot-head/crabka"
 repo_license = "Apache 2.0"
 repo_version = "v0.3.0"
 
 # --- Headline numbers (rendered as the stat band under the hero). ---
-# Sourced from /benchmarks/crabka-vs-kafka/ — a single-box, like-for-like
-# comparison against Apache Kafka 4.3 over the Kafka wire protocol.
+# Sourced from /benchmarks/crabka-vs-strimzi/ — an operator-managed,
+# three-broker Kubernetes comparison against Strimzi (Apache Kafka).
 [[extra.list]]
 icon = "zap"
 title = "Kafka-class throughput"
-content = 'Matches <strong>Apache Kafka 4.3</strong>&apos;s produce-and-consume throughput within a few percent on identical hardware — ahead on the 1 KiB workloads — at 1.15–1.2× the messages per CPU-core and tighter tail latency.'
+content = 'Matches or beats a like-for-like <strong>Strimzi</strong> cluster on produce-and-consume — winning multi-producer fan-out — at <strong>1.6–3.0×</strong> the messages per CPU-core.'
 
 [[extra.list]]
 icon = "feather"
-title = "~40× less memory"
-content = "Broker resident in <strong>24–32 MiB</strong> versus Kafka's ~1 GiB JVM heap. No GC pauses, no heap to tune."
+title = "≈ a tenth of the memory"
+content = "A Crabka broker's working set sits in the <strong>low hundreds of MiB</strong> against Strimzi's <strong>2.5–5.5 GiB</strong> — 9–37× lighter. No GC pauses, no heap to tune."
 
 [[extra.list]]
 icon = "clock"
 title = "Ready in 1–2 seconds"
-content = "Cold start to first ack in <strong>1–2 s</strong>, versus 8–9 s for a Kafka broker on the same box."
+content = "Cold start to first ack in <strong>1–2 s</strong> — no JVM warmup, no GC ramp."
 
 [[extra.list]]
 icon = "check-circle"
@@ -43,8 +43,8 @@ crabka = "Native binary — no JVM, no GC"
 
 [[extra.compare]]
 feature = "Broker memory"
-kafka = "~1 GiB heap"
-crabka = "<strong>24–32 MiB</strong> RSS"
+kafka = "2.5–5.5 GiB"
+crabka = "<strong>114–622 MiB</strong>"
 
 [[extra.compare]]
 feature = "Cold start to ready"
@@ -54,7 +54,7 @@ crabka = "<strong>1–2 s</strong>"
 [[extra.compare]]
 feature = "Produce/consume throughput"
 kafka = "baseline"
-crabka = "<strong>≈ parity</strong> (0.9–1.0×)"
+crabka = "<strong>matches–beats</strong>"
 
 [[extra.compare]]
 feature = "Packaging"
