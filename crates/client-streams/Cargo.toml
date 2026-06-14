@@ -36,6 +36,18 @@ tracing = { workspace = true }
 turso = "0.6"
 pollster = "0.4"
 
+# Columnar / dataframe support (opt-in via the `arrow`, `columnar`, and
+# `polars` cargo features).
+polars = { workspace = true, optional = true }
+polars-arrow = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true }
+columnar = { workspace = true, optional = true }
+
+[features]
+arrow = ["dep:arrow"]
+columnar = ["dep:columnar"]
+polars = ["dep:polars", "dep:polars-arrow"]
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }

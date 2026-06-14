@@ -879,6 +879,7 @@
 //! and point-in-time reads are available via `get_as_of`.
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.6")]
 
+pub mod columnar;
 pub mod dsl;
 mod error;
 pub mod membership;
