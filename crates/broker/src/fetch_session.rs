@@ -41,7 +41,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crabka_protocol::owned::fetch_request::FetchRequest;
+use crabka_protocol::owned::fetch_request::{FetchRequest, FetchTopic, ForgottenTopic};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
@@ -164,6 +164,59 @@ pub struct FetchSessionCache {
     num_partitions: AtomicUsize,
 }
 
+/// Pure core of the incremental-fetch session update (KIP-227): drop forgotten
+/// partitions, then merge the requested topics into a session's partition map.
+///
+/// - **forget**: a `ForgottenTopic` matches a cached key by either `topic_name`
+///   (Fetch v ≤ 12) **or** `topic_id` (v ≥ 13), plus partition.
+/// - **merge**: for each requested partition, find a cached key by either-half
+///   identity + partition and update its desired state in place; only insert a
+///   brand-new default-state key when the partition truly isn't cached (avoids
+///   shadowing a fully-resolved key with a partial-identity copy).
+///
+/// The asymmetry between the OR-match forget and the either-half-match merge is
+/// exercised exhaustively by `fetch_session_model`.
+pub(crate) fn apply_incremental(
+    partitions: &mut HashMap<FetchSessionKey, CachedPartitionState>,
+    forgotten: &[ForgottenTopic],
+    topics: &[FetchTopic],
+) {
+    for ft in forgotten {
+        partitions.retain(|k, _| {
+            let topic_match = (!ft.topic.is_empty() && k.topic_name == ft.topic)
+                || (ft.topic_id != WireUuid::ZERO && k.topic_id == ft.topic_id);
+            if !topic_match {
+                return true;
+            }
+            !ft.partitions.contains(&k.partition)
+        });
+    }
+
+    for t in topics {
+        for fp in &t.partitions {
+            let existing_key = partitions
+                .keys()
+                .find(|k| {
+                    k.partition == fp.partition
+                        && ((!t.topic.is_empty() && k.topic_name == t.topic)
+                            || (t.topic_id != WireUuid::ZERO && k.topic_id == t.topic_id))
+                })
+                .cloned();
+            let key = existing_key.unwrap_or_else(|| FetchSessionKey {
+                topic_name: t.topic.clone(),
+                topic_id: t.topic_id,
+                partition: fp.partition,
+            });
+            let entry = partitions.entry(key).or_default();
+            entry.fetch_offset = fp.fetch_offset;
+            entry.max_bytes = fp.partition_max_bytes;
+            entry.current_leader_epoch = fp.current_leader_epoch;
+            entry.last_fetched_epoch = fp.last_fetched_epoch;
+            entry.log_start_offset = fp.log_start_offset;
+        }
+    }
+}
+
 impl FetchSessionCache {
     #[must_use]
     pub fn new(max_slots: usize) -> Self {
@@ -266,56 +319,15 @@ impl FetchSessionCache {
         // (which backs the lock-free `total_partitions_cached()` gauge).
         let partitions_before = session.partitions.len();
 
-        // Drop forgotten partitions. A `ForgottenTopic` matches a cached
-        // key by either topic_name (v ≤ 12) or topic_id (v ≥ 13).
-        for ft in &req.forgotten_topics_data {
-            session.partitions.retain(|k, _| {
-                let topic_match = (!ft.topic.is_empty() && k.topic_name == ft.topic)
-                    || (ft.topic_id != WireUuid::ZERO && k.topic_id == ft.topic_id);
-                if !topic_match {
-                    return true;
-                }
-                !ft.partitions.contains(&k.partition)
-            });
-        }
-
-        // Merge request topics — updates existing entries' desired
-        // offset/max_bytes, adds new entries with default `last_*`.
-        //
-        // The cache key carries both `topic_name` and `topic_id`. After
-        // `try_allocate` (via the handler's resolution) both fields are
-        // populated. The wire request, however, only carries one of them:
-        // Fetch v ≤ 12 sends the name and leaves `topic_id` zero; v ≥ 13
-        // sends the id and leaves `topic` empty. A naive `entry((name, id, p))`
-        // lookup would treat the partial-key request as a *new* partition and
-        // shadow the cached entry with a default-state copy (max_bytes=0),
-        // which then breaks subsequent reads. Find the cached key by either
-        // half-identity first; only fall back to a brand-new key when the
-        // partition truly isn't in the cache.
-        for t in &req.topics {
-            for fp in &t.partitions {
-                let existing_key = session
-                    .partitions
-                    .keys()
-                    .find(|k| {
-                        k.partition == fp.partition
-                            && ((!t.topic.is_empty() && k.topic_name == t.topic)
-                                || (t.topic_id != WireUuid::ZERO && k.topic_id == t.topic_id))
-                    })
-                    .cloned();
-                let key = existing_key.unwrap_or_else(|| FetchSessionKey {
-                    topic_name: t.topic.clone(),
-                    topic_id: t.topic_id,
-                    partition: fp.partition,
-                });
-                let entry = session.partitions.entry(key).or_default();
-                entry.fetch_offset = fp.fetch_offset;
-                entry.max_bytes = fp.partition_max_bytes;
-                entry.current_leader_epoch = fp.current_leader_epoch;
-                entry.last_fetched_epoch = fp.last_fetched_epoch;
-                entry.log_start_offset = fp.log_start_offset;
-            }
-        }
+        // Drop forgotten partitions then merge request topics (KIP-227). The
+        // forget/merge logic — and the half-identity matching that prevents a
+        // partial-identity request from shadowing a fully-resolved cached key —
+        // lives in `apply_incremental`, verified by `fetch_session_model`.
+        apply_incremental(
+            &mut session.partitions,
+            &req.forgotten_topics_data,
+            &req.topics,
+        );
 
         let partitions_after = session.partitions.len();
         if partitions_after >= partitions_before {
@@ -462,6 +474,10 @@ impl FetchSessionCache {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fetch_session_model.rs"]
+mod fetch_session_model;
 
 #[cfg(test)]
 mod tests {
