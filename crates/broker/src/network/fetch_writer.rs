@@ -469,17 +469,18 @@ fn sendfile_once(
     rustix::fs::sendfile(out_fd, in_fd, Some(&mut off), count).map_err(std::io::Error::from)
 }
 
-/// **Apple / FreeBSD / DragonFly** (`nix`): the BSD-family `sendfile` returns
+/// **Apple / FreeBSD / `DragonFly`** (`nix`): the BSD-family `sendfile` returns
 /// `(nix::Result<()>, off_t)` where the `off_t` is the bytes transferred this
 /// call — **valid even on `Err(EAGAIN)`**. This is the correctness landmine: on
 /// these platforms `EAGAIN` with `n > 0` is *forward progress*, not would-block.
 /// We therefore:
-///   * `Ok(())`                 → return `Ok(n)` (fully or partially sent; the
-///                                 loop advances by `n`),
-///   * `Err(EAGAIN)` with `n>0` → return `Ok(n)` (count the progress, the loop
-///                                 advances and re-arms readiness for the rest),
-///   * `Err(EAGAIN)` with `n==0`→ return `Err(WouldBlock)` (a real would-block),
-///   * any other `Err`          → propagate as a hard I/O error.
+///
+/// * `Ok(())` → return `Ok(n)` (fully or partially sent; the loop advances by
+///   `n`).
+/// * `Err(EAGAIN)` with `n>0` → return `Ok(n)` (count the progress, the loop
+///   advances and re-arms readiness for the rest).
+/// * `Err(EAGAIN)` with `n==0` → return `Err(WouldBlock)` (a real would-block).
+/// * any other `Err` → propagate as a hard I/O error.
 ///
 /// `count` is always `Some(region_remaining)` (never `None`/0 = "to EOF"), so we
 /// never overshoot into the next batch. Header/trailer `hdtr` slices are `None`:
@@ -505,8 +506,9 @@ fn sendfile_once(
     use nix::errno::Errno;
 
     // `off_t` is the kernel's signed file-offset type; the byte ranges we send
-    // are bounded by the segment size and always fit.
-    let off = offset as nix::libc::off_t;
+    // are bounded by the segment size and always fit. Saturate defensively
+    // rather than wrap if an offset ever exceeded `off_t::MAX`.
+    let off = nix::libc::off_t::try_from(offset).unwrap_or(nix::libc::off_t::MAX);
 
     // The `count` parameter's element type differs by platform: macOS/iOS take
     // `Option<off_t>`, FreeBSD/DragonFly take `Option<usize>`. The
@@ -539,8 +541,8 @@ fn sendfile_once(
 
 /// Platform shim over the per-OS BSD-family `nix::sys::sendfile::sendfile`
 /// signatures (macOS uses `Option<off_t>` for `count` and no flags; FreeBSD
-/// additionally takes `SfFlags` + a readahead hint; DragonFly takes neither but
-/// uses `Option<usize>`). Returns `(nix::Result<()>, off_t bytes_sent)`.
+/// additionally takes `SfFlags` + a readahead hint; `DragonFly` takes neither
+/// but uses `Option<usize>`). Returns `(nix::Result<()>, off_t bytes_sent)`.
 ///
 /// Compile-reasoned only (no macOS/BSD toolchain here); needs CI verification.
 #[cfg(any(
@@ -556,7 +558,7 @@ fn bsd_sendfile(
     count: usize,
 ) -> (nix::Result<()>, nix::libc::off_t) {
     // macOS/iOS: count is `Option<off_t>`; no header/trailer; no flags.
-    let count = Some(count as nix::libc::off_t);
+    let count = Some(nix::libc::off_t::try_from(count).unwrap_or(nix::libc::off_t::MAX));
     nix::sys::sendfile::sendfile(in_fd, out_sock, offset, count, None, None)
 }
 
