@@ -743,16 +743,24 @@ impl Segment {
             ));
         }
 
-        // Patch base_offset + partition_leader_epoch in a writable copy.
-        // Both fields are below the CRC-covered region (byte 21), so the
-        // producer's CRC remains valid — no recompute.
-        let mut patched = bytes.to_vec();
-        patch_base_offset_and_leader_epoch(&mut patched, base_offset, leader_epoch);
+        // Patch base_offset + partition_leader_epoch in a copy of *just* the
+        // fixed-size header — both fields live below byte 16, well under the
+        // CRC-covered region (byte 21), so the producer's CRC stays valid (no
+        // recompute). The batch BODY is written straight from the input slice
+        // with no copy: the previous `bytes.to_vec()` was a full-payload memcpy
+        // on the produce hot path (100 KiB+ per batch for large messages), the
+        // dominant remaining produce-side cost. Two `write_all`s (header, then
+        // body) cost one extra syscall per batch — negligible vs the avoided
+        // copy, and batches are never tiny (the producer coalesces records).
+        let mut header = [0u8; HEADER_LEN];
+        header.copy_from_slice(&bytes[..HEADER_LEN]);
+        patch_base_offset_and_leader_epoch(&mut header, base_offset, leader_epoch);
 
         let position = self.log_size;
         (&*self.log_file).seek(SeekFrom::End(0))?;
-        (&*self.log_file).write_all(&patched)?;
-        self.log_size += patched.len() as u64;
+        (&*self.log_file).write_all(&header)?;
+        (&*self.log_file).write_all(&bytes[HEADER_LEN..])?;
+        self.log_size += bytes.len() as u64;
 
         let last_offset = base_offset + i64::from(last_offset_delta);
         self.last_offset = last_offset;
