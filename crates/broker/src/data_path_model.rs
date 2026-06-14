@@ -33,6 +33,7 @@ use crate::config_keys::RecoveryStrategy;
 use crate::handlers::fetch::compute_visibility_window;
 use crate::leader_election::{FailoverDecision, failover_one};
 use crate::replica_state::ReplicaState;
+use crate::unclean_recovery::{ReplicaLogInfo, select_best_replica};
 
 const NB: usize = 3; // brokers 0,1,2
 const MAX_LEN: usize = 3; // max log length (offsets 0..3)
@@ -164,6 +165,93 @@ fn isr_eligible(s: &DpState, b: u8) -> bool {
     let f = &s.log[b as usize];
     let l = &s.log[s.leader as usize];
     (f.len() as i64) >= s.hwm && f.iter().enumerate().all(|(off, &e)| l.get(off) == Some(&e))
+}
+
+/// Apply a leader election: set leader/ISR, bump the epoch, and — for an UNCLEAN
+/// election — characterize any committed-data loss. The new (possibly less
+/// complete) leader keeps only the committed prefix it actually holds with the
+/// same epoch; any committed offset it lacks is LOST (flagged in `lost`, and the
+/// HWM clamped to the new leader's log). Clean elections (`unclean == false`)
+/// never lose committed data, so there is no truncation.
+fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
+    s.leader = new_leader;
+    s.isr = isr_mask;
+    s.leader_epoch += 1;
+    if unclean {
+        let nl = &s.log[new_leader as usize];
+        let kept = s
+            .committed
+            .iter()
+            .enumerate()
+            .take_while(|&(off, e)| nl.get(off) == Some(e))
+            .count();
+        if kept < s.committed.len() {
+            s.lost = true;
+            s.committed.truncate(kept);
+            s.hwm = s.hwm.min(nl.len() as i64);
+        }
+    }
+}
+
+/// The controller's failover reaction to broker `dead` being down: drive the
+/// real `failover_one`, applying its decision (clean elect / ISR shrink), and —
+/// in the unclean config — driving the real KIP-966 `select_best_replica` for
+/// the empty-ISR `Recover` path.
+fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
+    let isr_nodes: Vec<u64> = (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
+    let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
+    let pr = PartitionRecord {
+        leader: node(s.leader),
+        replicas: replica_nodes,
+        isr: isr_nodes,
+        leader_epoch: i32::from(s.leader_epoch),
+        ..Default::default()
+    };
+    let alive: HashSet<u64> = (0..NB as u8)
+        .filter(|&b| has(s.live, b))
+        .map(node)
+        .collect();
+    // Clean config: strategy None + unclean disabled → only ISR elections (else
+    // Unavailable). Unclean config: Balanced strategy defers an empty-ISR
+    // partition to KIP-966 offset-aware recovery.
+    let strategy = if unclean {
+        RecoveryStrategy::Balanced
+    } else {
+        RecoveryStrategy::None
+    };
+    match failover_one(&pr, node(dead), &alive, strategy, unclean) {
+        FailoverDecision::Elect {
+            leader,
+            isr,
+            unclean,
+        } => {
+            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
+            apply_elect(s, leader as u8, isr_mask, unclean);
+        }
+        FailoverDecision::Recover(_) => {
+            // KIP-966 unclean recovery: drive the REAL select_best_replica over
+            // the live replicas' log info; the winner becomes leader with a
+            // singleton ISR (may lose un-replicated committed data).
+            let infos: Vec<ReplicaLogInfo> = (0..NB as u8)
+                .filter(|&b| has(s.live, b))
+                .map(|b| ReplicaLogInfo {
+                    broker_id: node(b),
+                    last_written_leader_epoch: s.log[b as usize]
+                        .last()
+                        .map_or(0, |&e| i32::from(e)),
+                    log_end_offset: s.log[b as usize].len() as i64,
+                    current_leader_epoch: i32::from(s.leader_epoch),
+                })
+                .collect();
+            if let Some(winner) = select_best_replica(&infos) {
+                apply_elect(s, winner as u8, 1u8 << (winner as u8), true);
+            }
+        }
+        FailoverDecision::ShrinkIsr { isr } => {
+            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
+        }
+        FailoverDecision::Unavailable | FailoverDecision::NoChange => {}
+    }
 }
 
 // ----- model -----
@@ -320,55 +408,13 @@ impl Model for DpModel {
             Act::ExpandIsr(b) => {
                 s.isr |= 1 << b;
             }
-            Act::Failover(dead) => {
-                let isr_nodes: Vec<u64> =
-                    (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
-                let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
-                let pr = PartitionRecord {
-                    leader: node(s.leader),
-                    replicas: replica_nodes,
-                    isr: isr_nodes,
-                    leader_epoch: i32::from(s.leader_epoch),
-                    ..Default::default()
-                };
-                let alive: HashSet<u64> = (0..NB as u8)
-                    .filter(|&b| has(s.live, b))
-                    .map(node)
-                    .collect();
-                match failover_one(
-                    &pr,
-                    node(dead),
-                    &alive,
-                    RecoveryStrategy::None,
-                    self.unclean,
-                ) {
-                    FailoverDecision::Elect {
-                        leader,
-                        isr,
-                        unclean,
-                    } => {
-                        s.leader = leader as u8;
-                        s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
-                        s.leader_epoch += 1;
-                        let _ = unclean; // DPC-3 handles the unclean loss path
-                        // No-committed-loss (clean) is checked by the
-                        // `committed_durable` always-property (it must hold against
-                        // the new leader's log).
-                    }
-                    FailoverDecision::ShrinkIsr { isr } => {
-                        s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
-                    }
-                    FailoverDecision::Unavailable
-                    | FailoverDecision::Recover(_)
-                    | FailoverDecision::NoChange => {}
-                }
-            }
+            Act::Failover(dead) => do_failover(&mut s, dead, self.unclean),
         }
         Some(s)
     }
 
     fn properties(&self) -> Vec<Property<Self>> {
-        vec![
+        let mut props = vec![
             Property::always("committed_durable", |_, s: &DpState| {
                 let lg = &s.log[s.leader as usize];
                 s.committed
@@ -408,7 +454,19 @@ impl Model for DpModel {
                     false
                 })
             }),
-        ]
+        ];
+        if self.unclean {
+            // Loss characterization: an unclean-election data loss is reachable
+            // (and `committed_durable` above still holds — `committed` is the LIVE
+            // durability obligation, truncated when an unclean election drops it).
+            props.push(Property::sometimes("unclean_loss", |_, s: &DpState| s.lost));
+        } else {
+            // Clean config: NO committed-data loss ever occurs.
+            props.push(Property::always("no_loss_when_clean", |_, s: &DpState| {
+                !s.lost
+            }));
+        }
+        props
     }
 
     fn within_boundary(&self, s: &Self::State) -> bool {
@@ -457,5 +515,16 @@ fn data_clean() {
             unclean: false,
         },
         "data_clean",
+    );
+}
+
+#[test]
+fn data_unclean() {
+    run(
+        DpModel {
+            base: Instant::now(),
+            unclean: true,
+        },
+        "data_unclean",
     );
 }
