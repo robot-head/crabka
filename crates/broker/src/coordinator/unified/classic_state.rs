@@ -10,7 +10,7 @@ use bytes::Bytes;
 
 /// Five-state machine for a consumer group, matching the Apache Kafka
 /// classic protocol (KIP-62 / KIP-394).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GroupState {
     /// No members and no committed offsets.
     Empty,
@@ -163,7 +163,7 @@ pub struct OffsetEntry {
     pub commit_timestamp_ms: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(clippy::struct_field_names)]
 pub struct Group {
     pub group_id: String,
@@ -433,6 +433,10 @@ impl Group {
         dropped
     }
 }
+
+#[cfg(test)]
+#[path = "classic_state_model.rs"]
+mod classic_state_model;
 
 #[cfg(test)]
 mod tests {
