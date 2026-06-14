@@ -85,11 +85,21 @@ impl PromClient {
         let pod_re = stack.broker_pod_regex();
         let win = window_s.max(15); // PromQL needs at least one full scrape
 
+        // GKE's kubelet-cadvisor series carry `pod`/`namespace` but NO
+        // `container` label — so the old `container!=""` filter matched nothing
+        // and every resource number came back 0. Each pod instead has one
+        // pod-level cgroup series (cgroup `id` ends in `.slice`) plus a
+        // per-container series (`id` ends in `.scope`). Match only the pod-level
+        // rollup to get the pod's true total (all containers + pause) without
+        // double-counting. The matcher is fully anchored, so `.*slice` keeps the
+        // `…pod<uid>.slice` rollup and drops the `…/cri-…scope` children
+        // (verified: pod-level ≈ Σ containers, vs ~2× when summing everything).
+
         let cpu_query = format!(
-            "sum(rate(container_cpu_usage_seconds_total{{namespace=\"{namespace}\",pod=~\"{pod_re}\",container!=\"\"}}[{win}s]) * {win})"
+            "sum(rate(container_cpu_usage_seconds_total{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}}[{win}s]) * {win})"
         );
         let rss_query = format!(
-            "max_over_time(sum(container_memory_working_set_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",container!=\"\"}})[{win}s:15s])"
+            "max_over_time(sum(container_memory_working_set_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}})[{win}s:15s])"
         );
 
         let broker_cpu_seconds = self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0);
