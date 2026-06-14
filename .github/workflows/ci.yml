@@ -12,6 +12,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Coverage builds with full DWARF debuginfo (debug=2) produce enormous
+# `-C instrument-coverage` test binaries that exhaust the runner's disk ("No
+# space left on device", which then crashes the linker / runner). LLVM
+# source-based coverage maps regions via the embedded `__llvm_covmap` sections,
+# NOT DWARF, so dropping to line tables roughly halves the binaries without
+# changing coverage results. (`line-tables-only` keeps file:line in backtraces.)
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   changes:
     runs-on: ubuntu-latest
