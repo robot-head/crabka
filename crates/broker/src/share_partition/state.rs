@@ -25,7 +25,7 @@ pub const DS_ACQUIRED: i8 = 1;
 pub const DS_ACKNOWLEDGED: i8 = 2;
 pub const DS_ARCHIVED: i8 = 4;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordState {
     Available,
     Acquired,
@@ -33,7 +33,7 @@ pub enum RecordState {
     Archived,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AckType {
     Gap,
     Accept,
@@ -65,7 +65,7 @@ pub struct AcquiredRange {
 /// One contiguous run of offsets `[first_offset, last_offset]` sharing the same
 /// delivery state and delivery count. Lock fields are only meaningful while
 /// `state == RecordState::Acquired`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlightBatch {
     first_offset: i64,
     last_offset: i64,
@@ -82,7 +82,7 @@ impl InFlightBatch {
 }
 
 /// The in-memory acquisition state for one share partition.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AcquisitionState {
     /// Share-partition start offset (SPSO): the lowest offset not yet
     /// terminally acknowledged/archived.
@@ -775,3 +775,7 @@ mod tests {
         assert!(err2 == Err(crate::codes::INVALID_RECORD_STATE));
     }
 }
+
+#[cfg(test)]
+#[path = "state_model.rs"]
+mod state_model;

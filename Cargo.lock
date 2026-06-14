@@ -1393,6 +1393,7 @@ dependencies = [
  "serde-wincode",
  "serde_json",
  "sha2 0.11.0",
+ "stateright",
  "temp-env",
  "tempfile",
  "thiserror",
