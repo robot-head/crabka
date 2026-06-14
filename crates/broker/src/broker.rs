@@ -3009,6 +3009,59 @@ impl Broker {
         {
             config.advertised_listener = format!("{host}:{}", listen_addr.port());
         }
+
+        // Re-register with the REAL bound ports. The step-2 self-registration ran
+        // before binding, so for OS-assigned ports (`:0`, as test harnesses use)
+        // it recorded port `0` — `Metadata`/`DescribeCluster` would then hand
+        // clients an unusable `:0` broker address, and a consumer resolving its
+        // group coordinator by node id (`FindCoordinator` → metadata lookup)
+        // rejects it as unreachable (`CoordinatorUnavailable`). Now that every
+        // listener is bound we know the real ports, so re-submit the registration
+        // built from the bound endpoints. The metadata image upserts broker
+        // records by `node_id` (see `MetadataImage::apply`), so this overwrites
+        // the stale record before the broker begins accepting connections.
+        if config.is_broker() {
+            let endpoints: Vec<crabka_metadata::BrokerEndpoint> = bound
+                .iter()
+                .map(|(spec, _, actual)| {
+                    // Keep the configured advertised host:port — that's the
+                    // address clients must reach (e.g. a NAT/LB external port).
+                    // Only substitute the real bound port when the advertised
+                    // port is `0` (an OS-assigned dynamic port, as tests use).
+                    let (host, adv_port) = parse_advertised_host_port(&spec.advertised);
+                    crabka_metadata::BrokerEndpoint {
+                        name: spec.name.clone(),
+                        host,
+                        port: if adv_port == 0 {
+                            actual.port()
+                        } else {
+                            adv_port
+                        },
+                        protocol: spec.protocol,
+                    }
+                })
+                .collect();
+            let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                crabka_metadata::BrokerRegistrationRecord {
+                    node_id: config.node_id,
+                    broker_epoch: 0,
+                    incarnation_id: config.incarnation_id,
+                    host: config
+                        .advertised_listener
+                        .split(':')
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string(),
+                    port: listen_addr.port(),
+                    rack: config.rack.clone(),
+                    endpoints,
+                },
+            );
+            if let Err(e) = controller.submit_change(vec![self_reg]).await {
+                tracing::warn!(error = %e, "real-port self-registration failed; continuing");
+            }
+        }
+
         let future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>> =
             Arc::new(DashMap::new());
 
