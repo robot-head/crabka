@@ -94,6 +94,9 @@ prost = { workspace = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 stateright = { workspace = true }
+# Large-N randomized fuzz of the idempotent-producer dedup core (`check_pure`),
+# complementing the exhaustive stateright model (`producer_state_model.rs`).
+proptest = { workspace = true }
 crabka-broker-test-helpers = { path = "test-helpers" }
 crabka-client-consumer = { version = "0.3.6", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.6", path = "../client-producer" }

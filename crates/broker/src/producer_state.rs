@@ -402,3 +402,89 @@ mod tests {
         assert!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
     }
 }
+
+#[cfg(test)]
+mod fuzz {
+    use std::collections::HashMap;
+
+    use proptest::prelude::*;
+
+    use super::{Decision, ProducerEntry, check_pure};
+
+    proptest! {
+        /// Large-N randomized submit sequences over `check_pure`: the
+        /// accepted-append log per epoch is a contiguous, duplicate-free,
+        /// monotonic prefix; a lower epoch is fenced; a higher epoch resets the
+        /// baseline. Complements the exhaustive `producer_state_model` at a scale
+        /// the BFS can't reach (epoch 0..6, base_seq 0..200, up to 400 ops).
+        #[test]
+        fn idempotent_log_invariants(
+            ops in proptest::collection::vec(
+                (0i16..6, 0i32..200), // (producer_epoch, base_sequence)
+                0..400usize,
+            )
+        ) {
+            let mut entry: Option<ProducerEntry> = None;
+            let mut next_offset: i64 = 0;
+            // Reference: per-epoch highest accepted sequence (must stay contiguous).
+            let mut hi: HashMap<i16, i32> = HashMap::new();
+            for (epoch, base_seq) in ops {
+                let d = check_pure(entry.as_ref(), epoch, base_seq);
+                match d {
+                    Decision::Append => {
+                        if let Some(e) = &entry {
+                            if epoch == e.epoch {
+                                prop_assert_eq!(
+                                    base_seq,
+                                    e.last_sequence + 1,
+                                    "same-epoch Append must be contiguous"
+                                );
+                            } else {
+                                prop_assert!(epoch > e.epoch, "Append epoch must be fresh");
+                            }
+                        }
+                        // Per-epoch contiguity: an accepted seq for a fresh epoch
+                        // starts the prefix; a same-epoch accept extends it by 1.
+                        if let Some(p) = hi.get(&epoch).copied() {
+                            prop_assert_eq!(
+                                base_seq,
+                                p + 1,
+                                "accepted sequence must extend the per-epoch prefix"
+                            );
+                        }
+                        hi.insert(epoch, base_seq);
+                        entry = Some(ProducerEntry {
+                            epoch,
+                            last_sequence: base_seq,
+                            last_offset: next_offset,
+                            base_offset: next_offset,
+                            last_timestamp: 0,
+                            last_activity_ms: 0,
+                        });
+                        next_offset += 1;
+                    }
+                    Decision::Duplicate { .. } => {
+                        let e = entry.as_ref().expect("Duplicate implies an entry");
+                        prop_assert_eq!(epoch, e.epoch);
+                        prop_assert!(
+                            base_seq <= e.last_sequence,
+                            "Duplicate must be within committed range"
+                        );
+                    }
+                    Decision::OutOfOrder => {
+                        let e = entry.as_ref().expect("OutOfOrder implies an entry");
+                        prop_assert_eq!(epoch, e.epoch);
+                        prop_assert!(
+                            base_seq > e.last_sequence + 1,
+                            "OutOfOrder must be a real gap"
+                        );
+                    }
+                    Decision::Fenced => {
+                        let e = entry.as_ref().expect("Fenced implies an entry");
+                        prop_assert!(epoch < e.epoch, "Fenced must be a stale epoch");
+                    }
+                }
+            }
+        }
+    }
+}
