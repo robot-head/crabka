@@ -113,10 +113,10 @@ impl BrokerPool {
             // partition whose leader isn't the bootstrap broker gets a
             // permanent `NOT_LEADER_OR_FOLLOWER`. `lookup_host` resolves both
             // DNS names and literal IPs.
-            if let Ok(mut addrs) = tokio::net::lookup_host((b.host.as_str(), port)).await {
-                if let Some(addr) = addrs.next() {
-                    self.by_addr.insert(b.id, addr);
-                }
+            if let Ok(mut addrs) = tokio::net::lookup_host((b.host.as_str(), port)).await
+                && let Some(addr) = addrs.next()
+            {
+                self.by_addr.insert(b.id, addr);
             }
         }
     }
