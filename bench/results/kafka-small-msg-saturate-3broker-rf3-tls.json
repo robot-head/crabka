@@ -1,0 +1,68 @@
+{
+  "scenario": {
+    "name": "small-msg-saturate",
+    "mode_tag": "ci",
+    "msg_size_bytes": 100,
+    "key_size_bytes": 0,
+    "partitions": 6,
+    "replication_factor": 1,
+    "producers": 1,
+    "consumers": 1,
+    "mode": {
+      "kind": "saturate"
+    },
+    "acks": "leader",
+    "compression": "none",
+    "linger_ms": 5,
+    "batch_size": 16384,
+    "duration_s": 60,
+    "warmup_s": 10,
+    "failover": null
+  },
+  "stack": "kafka",
+  "topology": {
+    "partitions": 6,
+    "replication_factor": 1,
+    "broker_count": 3
+  },
+  "wallclock_start_unix_ms": 1781457978105,
+  "wallclock_end_unix_ms": 1781458048138,
+  "throughput": {
+    "msgs_produced": 4749200,
+    "msgs_consumed": 4685200,
+    "mb_in": 452.91900634765625,
+    "mb_out": 446.81549072265625,
+    "producer_msgs_per_sec": 79153.33333333333,
+    "consumer_msgs_per_sec": 78086.66666666667
+  },
+  "producer_latency_ms": {
+    "p50_ms": 6.083,
+    "p95_ms": 9.399,
+    "p99_ms": 12.423,
+    "p999_ms": 24.239,
+    "max_ms": 65.791,
+    "mean_ms": 6.3942729362839925,
+    "count": 4749200
+  },
+  "consumer_e2e_latency_ms": {
+    "p50_ms": 2357.247,
+    "p95_ms": 3012.607,
+    "p99_ms": 3184.639,
+    "p999_ms": 3235.839,
+    "max_ms": 3256.319,
+    "mean_ms": 2043.4924436369836,
+    "count": 4685200
+  },
+  "resource": {
+    "broker_cpu_seconds": 61.85148451079942,
+    "mem_cgroup_working_set_bytes": 5227671552,
+    "jvm_heap_used_bytes": 994177024,
+    "jvm_nonheap_used_bytes": 264193392,
+    "kafka_page_cache_approx_bytes": 3969301136,
+    "msgs_per_cpu_core": 76783.92907725243
+  },
+  "first_ack_ms": 126,
+  "errors": [],
+  "notes": [],
+  "startup_ms": 68560
+}

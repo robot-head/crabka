@@ -15,6 +15,12 @@ metadata:
   namespace: default
 spec:
   kafkaVersion: "3.7.0"
+  # Use the plaintext listener for inter-broker replication + the operator's
+  # admin/topic management. Required because we declare explicit listeners
+  # named "plain"/"tls": the topic reconciler matches the inter-broker listener
+  # by name and otherwise defaults to "PLAIN" (uppercase), which wouldn't match
+  # "plain" → "no internal listener" and the bench-topic never reconciles.
+  interBrokerListenerName: plain
   listeners:
     - name: plain
       port: 9092

@@ -46,6 +46,72 @@ Crabka's entire 3-broker working set is 53–266 MB. Full tables:
 
 ---
 
+## 1.5 Zero-copy fetch, produce passthrough, kTLS, and the TLS benchmark (2026-06-14)
+
+Driven by the large-message gap above (Strimzi's `sendfile`), we closed it in
+crabka and extended it through TLS. The gap was **root-caused empirically**:
+switching storage to **pd-SSD** did NOT help crabka's large-message throughput
+(it only helped the already-disk-efficient Strimzi), proving crabka was
+**copy-bound, not disk-bound** — the loss was userspace memcpy + the absence of
+`sendfile`, exactly as a code audit found (fetch copied the payload ~4× in
+userspace; produce decoded each batch into owned structs then re-encoded it).
+
+**Seven increments shipped** (all Kafka-wire byte-exact, golden-tested; the
+broker keeps `#![forbid(unsafe_code)]`):
+
+| | change | commit |
+|---|---|---|
+| A | `TCP_NODELAY` + 1 MiB socket buffers on accepted connections | `59eb8a2a` |
+| B | produce verbatim passthrough — append the producer's batch bytes, patch only `base_offset`/`leader_epoch` (both outside the CRC region → no CRC recompute), no decode/re-encode | `2e52ff05` |
+| C | fetch write-plan + vectored write — removes 3 of 4 fetch copies | `89da080d` |
+| D | zero-copy fetch via `sendfile(2)` (plaintext, Linux) — page-cache→NIC | `ff64e6eb` |
+| E | cross-platform sendfile (macOS/BSD via `nix`) behind a `SENDFILE` cfg alias; Windows `TransmitFile` deferred (needs `unsafe` vs the workspace `forbid`) | `1d9e38d1` |
+| F | **Linux kTLS** — `sendfile` *through* TLS via kernel-offloaded encryption (`ktls` crate + rustls secret extraction; startup probe gates per-connection) | `e0dd12fe` |
+| G | TLS data-path benchmark harness (driver `BENCH_TLS_*` → `ClientSecurity`, per-stack TLS CRs, CA mount) | `115c2a94` |
+
+io_uring was evaluated and **rejected**: no native tokio bridge (a side-ring or a
+thread-per-core runtime migration is disproportionate), and Kafka itself uses
+`sendfile` not io_uring. Classic `sendfile` reaches parity with the reference.
+
+**The TLS data path exposed three real multi-listener bugs** (never benchmarked
+before), all fixed: (1) the TLS data listener collided with the fixed `9093`
+KRaft controller port → moved to `9094` (`87f096f4`); (2) the topic reconciler
+matched the inter-broker listener by name and defaulted to `"PLAIN"`, not the
+declared `"plain"` → set `interBrokerListenerName`; (3) **metadata was not
+listener-aware** — `project_broker` always advertised the inter-broker
+(plaintext) endpoint, so a TLS client on `9094` got back `9092` addresses and
+couldn't route. Fixed to advertise the *connection's* listener endpoint, across
+Metadata/DescribeCluster/FindCoordinator (`1fefb478`).
+
+**Results (GKE, 3 brokers, pd-SSD, driver `quorum-fix16`, same-session):**
+
+*sendfile before→after (crabka large-msg, 100 KB):* fetch 230 → **296 MB/s**,
+produce 230 → 294, p50 190 → 131 ms — byte-exact (consumers read every byte).
+Crabka large-msg is ~80 % of Strimzi (still trails — the remaining gap is the
+produce path's one `to_vec` to patch the header, an open optimization).
+
+*TLS matrix (crabka kTLS vs Strimzi JVM-TLS):*
+
+| scenario | crabka plain | crabka **TLS(kTLS)** | kafka plain | kafka TLS |
+|---|---|---|---|---|
+| small-msg (100 B) | 79.8k/s | **87.3k/s** | 79.6k/s | 79.2k/s |
+| large-msg (100 KB, fetch) | 269 MB/s | **296 MB/s** | 341 MB/s | 375 MB/s |
+
+**kTLS works on GKE** (COS auto-loads the `tls` module; the broker logs *"Linux
+kTLS supported: TLS fetch connections will use kernel-offloaded sendfile"*) and
+is **byte-exact** (validated on WSL2 with a real `KtlsStream`: kernel encrypts,
+rustls client decrypts identical bytes; `errors: []` in every GKE cell).
+**TLS is essentially free on crabka** — TLS throughput equals plaintext (zero
+copy preserved through encryption). Honest caveat: at these scenarios Strimzi's
+JVM TLS *also* shows ~no penalty (AES-NI; the 100 KB single-producer workload is
+latency/inflight-bound, not encryption-bound), so this matrix validates that
+**kTLS adds zero overhead** but does not by itself separate kTLS from userspace
+TLS. Sharpening that would need (a) a kTLS-on/off toggle on the same binary and
+(b) a bandwidth-bound TLS scenario where the userspace copy+encrypt CPU is the
+limiter — a clean follow-up.
+
+---
+
 ## 2. Verified Cluster State (GKE `robot-head` / `test-crabka-cluster`, us-central1-b)
 
 * Operator: `operator-crabka-operator` Running, image `:v0.3.6` (Helm release `operator`).

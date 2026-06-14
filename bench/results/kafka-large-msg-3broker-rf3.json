@@ -25,44 +25,44 @@
     "replication_factor": 1,
     "broker_count": 3
   },
-  "wallclock_start_unix_ms": 1781419387803,
-  "wallclock_end_unix_ms": 1781419458316,
+  "wallclock_start_unix_ms": 1781458491269,
+  "wallclock_end_unix_ms": 1781458561612,
   "throughput": {
-    "msgs_produced": 261792,
-    "msgs_consumed": 279002,
-    "mb_in": 25565.625,
-    "mb_out": 27246.2890625,
-    "producer_msgs_per_sec": 4363.2,
-    "consumer_msgs_per_sec": 4650.033333333334
+    "msgs_produced": 237705,
+    "msgs_consumed": 245746,
+    "mb_in": 23213.37890625,
+    "mb_out": 23998.6328125,
+    "producer_msgs_per_sec": 3961.75,
+    "consumer_msgs_per_sec": 4095.766666666667
   },
   "producer_latency_ms": {
-    "p50_ms": 94.143,
-    "p95_ms": 203.007,
-    "p99_ms": 289.791,
-    "p999_ms": 357.631,
-    "max_ms": 360.191,
-    "mean_ms": 117.31403092531471,
-    "count": 261792
+    "p50_ms": 105.983,
+    "p95_ms": 211.455,
+    "p99_ms": 249.343,
+    "p999_ms": 344.575,
+    "max_ms": 448.255,
+    "mean_ms": 129.1919241749227,
+    "count": 237705
   },
   "consumer_e2e_latency_ms": {
-    "p50_ms": 454.911,
-    "p95_ms": 3917.823,
-    "p99_ms": 4624.383,
-    "p999_ms": 4780.031,
-    "max_ms": 4808.703,
-    "mean_ms": 1280.4790044515805,
-    "count": 279002
+    "p50_ms": 368.895,
+    "p95_ms": 1943.551,
+    "p99_ms": 3641.343,
+    "p999_ms": 4089.855,
+    "max_ms": 4139.007,
+    "mean_ms": 510.3455995051793,
+    "count": 245746
   },
   "resource": {
-    "broker_cpu_seconds": 43.50026867661737,
-    "mem_cgroup_working_set_bytes": 5401632768,
-    "jvm_heap_used_bytes": 1054995672,
-    "jvm_nonheap_used_bytes": 265698320,
-    "kafka_page_cache_approx_bytes": 4080938776,
-    "msgs_per_cpu_core": 6018.169725483113
+    "broker_cpu_seconds": 42.98229344206396,
+    "mem_cgroup_working_set_bytes": 2627231744,
+    "jvm_heap_used_bytes": 1139036448,
+    "jvm_nonheap_used_bytes": 264589104,
+    "kafka_page_cache_approx_bytes": 1223606192,
+    "msgs_per_cpu_core": 5530.300525271033
   },
-  "first_ack_ms": 122,
+  "first_ack_ms": 145,
   "errors": [],
   "notes": [],
-  "startup_ms": 66767
+  "startup_ms": 68522
 }
