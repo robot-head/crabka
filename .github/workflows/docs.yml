@@ -88,15 +88,19 @@ jobs:
           # Optional Helm-native PGP provenance (.prov).
           sign_args=()
           if [[ -n "${HELM_GPG_KEY:-}" ]]; then
-            export GNUPGHOME="$(mktemp -d)"
-            chmod 700 "$GNUPGHOME"
-            echo "${HELM_GPG_KEY}" | base64 -d | gpg --batch --import
-            # Helm reads a legacy keyring file; modern GnuPG must export one.
-            gpg --batch --export-secret-keys > "$GNUPGHOME/secring.gpg"
-            printf '%s' "${HELM_GPG_PASSPHRASE:-}" > "$GNUPGHOME/passphrase"
+            keydir="$(mktemp -d)"
+            chmod 700 "$keydir"
+            export GNUPGHOME="$keydir"
+            # Helm needs a binary secret keyring. Convert the armored private key
+            # straight to binary with `gpg --dearmor`: `gpg --import` +
+            # `--export-secret-keys` route through gpg-agent, which has no TTY in
+            # CI ("Inappropriate ioctl for device") and exports nothing for a
+            # passphrase-protected key. Helm decrypts it with --passphrase-file.
+            echo "${HELM_GPG_KEY}" | base64 -d | gpg --dearmor > "$keydir/secring.gpg"
+            printf '%s' "${HELM_GPG_PASSPHRASE:-}" > "$keydir/passphrase"
             sign_args=(--sign --key "${HELM_GPG_KEY_ID}" \
-              --keyring "$GNUPGHOME/secring.gpg" \
-              --passphrase-file "$GNUPGHOME/passphrase")
+              --keyring "$keydir/secring.gpg" \
+              --passphrase-file "$keydir/passphrase")
             echo "Helm PGP provenance (.prov) signing enabled"
           else
             echo "HELM_GPG_KEY not set — skipping Helm .prov signing"
