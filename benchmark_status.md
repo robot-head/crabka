@@ -166,32 +166,48 @@ Verified at unit level + **in-cluster (`quorum-fix5`)**: no stack overflow, prod
 flows across all 3 brokers, and the failover kill correctly deletes the partition-0
 leader pod (`demo-broker-0-0`).
 
-## 7b. Failover path: two further gaps (the failover *recovery* doesn't work yet)
+## 7b. Failover recovery: BUILT (`aae50b82`, `d377f410`) — `failover` now produces a result
 
-With steady-state produce fixed, the `failover` re-run surfaced two **distinct,
-substantial** gaps — both in the *recovery* after the leader is killed, neither in
-the quorum/steady-state path:
+The `failover` re-run had surfaced two recovery gaps; the **client** one is now
+fixed and the **broker** side already worked:
 
-1. **Client has no failover resilience.** After broker-0 (a partition leader) is
-   killed, the producer retried dead `leader=0` **4331×** ("connection closed") and
-   never recovered, hanging the driver (no result written). Two sub-bugs:
-   * `BrokerPool::get` returns the **cached, closed** connection to the dead broker
-     instead of evicting + reconnecting.
-   * The transport-retry loop (`sender.rs`) retries the *same* (dead) leader and only
-     refreshes the broker registry — it never re-resolves the partition leader, so it
-     never routes to the new leader the controller elected. JVM clients fast-failover
-     in seconds; this loops until the test ends.
-2. **Broker can't rejoin after a kill (IP-pinning, see §8).** The killed broker-0
-   restarts at a **new pod IP**; survivors have its old IP pinned, so it can't
-   re-establish quorum membership and crashloops (exit 137, liveness-killed) in
-   `Rejoin` mode. Cluster drops to a degraded 2/3.
+* **Broker re-elects leaders on death** — *already implemented*: a controller
+  liveness ticker ([`broker.rs:1967`](crates/broker/src/broker.rs:1967)) marks a
+  silent broker `AliveToDead` and calls `leader_election::on_broker_dead`, which
+  re-elects its partitions onto the surviving ISR. Verified in-cluster: after the
+  kill, `kafka-topics --describe` showed partition 0 `Leader: 1`, ISR `[1,2]`.
+* **Client failover resilience** — *built*: the producer previously retried the
+  dead leader 4331× over a cached closed socket and hung. Now `Client::evict_broker`
+  drops the dead connection, and the routing retry is **iterative** (no stack
+  growth): on a transport failure it evicts + re-resolves to the re-elected leader,
+  bounded by a 30s wall-clock budget.
 
-Neither is the broker produce path (JVM produce + describe are perfect) nor the
-quorum formation (Bootstrap + rolling-restart Rejoin both verified). They are
-failover-recovery features that need to be built out for a meaningful `failover`
-benchmark number. The 5 **non-failover** cluster scenarios (small-msg-saturate,
-fixed-rate-latency, large-msg, fan-out, mixed-acks) should run on the now-working
-steady-state path.
+**First in-cluster `failover` result (`quorum-fix6`):** the run COMPLETED (no hang)
+— 45,556 produced / 45,524 consumed, **4 dropped** across a partition-leader kill,
+p50 1.36 ms. The cluster + client failed over transparently.
+
+**Tuning for a representative number (`quorum-fix7`):** that first run detected the
+dead leader slowly (3 transport attempts × the 30s request timeout ≈ 90s), so
+in-flight records failed and producer tasks blocked, dropping throughput to 253/s.
+Fixed by re-routing after the first transport failure and using a 10s producer
+request timeout, so the measured recovery reflects the cluster's ~9s re-election.
+
+**Open observations (bench-methodology, not correctness):**
+* The driver's producer is **synchronous** (send→await per record), so it can't
+  approach the `fixed_rate` 10000/s target regardless of cluster speed — throughput
+  numbers are driver-bound, not cluster-bound.
+* `disturbance.recovery_at_ms` is computed as first-surfaced-failure→first-success;
+  a *transparent* failover (re-route succeeds, nothing surfaced) leaves it `0`. The
+  metric should instead measure the latency spike / throughput dip across the kill
+  window.
+
+## 7c. Still-open follow-up: broker rejoin after a kill (not needed for the result)
+
+The killed broker restarts at a **new pod IP**; survivors have its old IP pinned
+(see §8), so it crashloops in `Rejoin` (exit 137) and the cluster runs degraded at
+2/3. This does **not** block the failover measurement — RF-3 with `min.insync.replicas=2`
+still serves at 2/3 — but full self-heal needs per-dial hostname re-resolution in the
+raft layer.
 
 ## 8. Known follow-up
 
