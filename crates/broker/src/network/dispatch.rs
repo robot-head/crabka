@@ -134,6 +134,60 @@ pub async fn serve_connection_on_listener(
             // Snapshot per accept; an in-flight handshake keeps its captured config.
             tokio_rustls::TlsAcceptor::from(dynamic.current())
         };
+        // Linux kTLS (Increment F): when the startup probe confirmed kTLS
+        // support, terminate TLS through a `CorkStream` so `ktls` can cleanly
+        // drain the rustls buffer, then hand the socket to the kernel via
+        // `config_ktls_server`. The resulting `KtlsStream` is `SendfileSink`-
+        // capable, so the Fetch path emits file regions and `sendfile(2)`s
+        // them onto the socket — the kernel encrypts them into TLS records
+        // (zero-copy over TLS). The wire bytes a client decrypts are identical
+        // to the userspace path; only the encrypt locus moves kernel-side.
+        #[cfg(target_os = "linux")]
+        if broker.ktls_enabled {
+            match acceptor.accept(ktls::CorkStream::new(stream)).await {
+                Ok(tls_stream) => {
+                    // Derive the mTLS principal from the peer cert BEFORE the
+                    // kTLS transition consumes the stream by value. `get_ref()`
+                    // reaches the rustls `ServerConnection` through the
+                    // `CorkStream` wrapper exactly as for a plain `TlsStream`.
+                    let mtls_principal = peer_cert_principal(&tls_stream);
+                    // `config_ktls_server` consumes `tls_stream` by value; on
+                    // error the stream is gone, so we cannot fall back to
+                    // userspace TLS for THIS connection — we close it. This is
+                    // safe precisely because the startup probe already proved
+                    // kTLS works on this host, so an error here is an unexpected
+                    // per-connection anomaly, not the common case.
+                    match ktls::config_ktls_server(tls_stream).await {
+                        Ok(ktls_stream) => {
+                            // NB: any post-handshake app bytes rustls already
+                            // decrypted are carried INSIDE `ktls_stream` (the
+                            // `ktls` crate stores them and replays them on the
+                            // first `poll_read`), so the `Framed` reader in
+                            // `serve_connection_stream` sees them transparently
+                            // — no manual drain plumbing needed.
+                            serve_connection_stream(
+                                broker,
+                                ktls_stream,
+                                spec,
+                                peer,
+                                mtls_principal,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "kTLS configuration failed after handshake; closing connection \
+                                 (startup probe had reported kTLS supported)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!(error = %e, "TLS handshake failed"),
+            }
+            return;
+        }
+
         match acceptor.accept(stream).await {
             Ok(tls_stream) => {
                 // Derive a Principal from the peer cert

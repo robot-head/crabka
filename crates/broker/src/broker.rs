@@ -66,6 +66,15 @@ pub struct Broker {
     /// `current()` and wrap it in a fresh `TlsAcceptor`. The TLS
     /// hot-reload path swaps the inner config without restart.
     pub(crate) tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
+    /// Linux kTLS (Increment F): `true` when the startup probe confirmed the
+    /// kernel supports kTLS TX (kernel ≥ 4.13 + the `tls` module loadable) and
+    /// rustls is configured to export secrets. Set ONCE at startup —
+    /// `ktls::config_ktls_server` consumes the `TlsStream` by value, so a
+    /// per-connection failure is unrecoverable; routing through kTLS only when
+    /// this is `true` keeps the per-connection path infallible-by-construction.
+    /// When `false` (non-Linux, no `tls` module, or no TLS configured), TLS
+    /// listeners serve the exact userspace rustls path (byte-identical wire).
+    pub(crate) ktls_enabled: bool,
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
     /// is `None` and the listener is `PLAINTEXT` the dialer falls back
@@ -1590,6 +1599,33 @@ impl Broker {
             None => None,
         };
 
+        // 0c-bis. Probe Linux kTLS support ONCE. `ktls::config_ktls_server`
+        //         consumes the post-handshake `TlsStream` by value, so a
+        //         per-connection failure cannot fall back to userspace TLS on
+        //         that same stream. We therefore decide kTLS routing up front:
+        //         only when this probe succeeds does the per-connection path
+        //         attempt the kTLS transition. The probe runs a real loopback
+        //         TLS handshake and `config_ktls_server` on a throwaway socket
+        //         pair, exercising the exact kernel path (TCP_ULP="tls" +
+        //         crypto_info install) the data plane will use. No TLS config →
+        //         no kTLS (probe skipped, stays false).
+        let ktls_enabled = if tls_dynamic.is_some() {
+            crate::network::ktls_probe::probe_ktls_support().await
+        } else {
+            false
+        };
+        if ktls_enabled {
+            tracing::info!(
+                "Linux kTLS supported: TLS fetch connections will use kernel-offloaded \
+                 sendfile (zero-copy over TLS)"
+            );
+        } else if tls_dynamic.is_some() {
+            tracing::info!(
+                "Linux kTLS unavailable (kernel lacks `tls` module or non-Linux): TLS fetch \
+                 connections use the userspace rustls copy path"
+            );
+        }
+
         // 0d. Build the outbound `TlsConnector` and the shared
         //     `InterBrokerClient` once. Both the replicator-supervisor
         //     and the heartbeat client clone the resulting Arc; the
@@ -3032,6 +3068,7 @@ impl Broker {
             disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
+            ktls_enabled,
             inter_broker_client,
             inter_broker_listener_protocol: inter_listener_proto,
             unclean_recovery,
