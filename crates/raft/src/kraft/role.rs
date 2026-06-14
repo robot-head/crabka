@@ -5,13 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::kraft::types::{NodeId, SimInstant};
 
 /// Per-follower replication progress tracked by a leader (for HWM).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ReplicaProgress {
     /// Highest offset the follower has acknowledged fetching (its fetch offset).
     pub fetch_offset: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Role {
     /// Knows the epoch, no leader yet. May hold a non-binding pre-vote grant.
     Unattached { election_deadline: SimInstant },

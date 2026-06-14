@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::NodeId;
 
 /// A single listener endpoint advertised by a voter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VoterEndpoint {
     pub name: String,
     pub host: String,
@@ -15,7 +15,7 @@ pub struct VoterEndpoint {
 }
 
 /// Supported kraft.version range for a voter (inclusive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct KRaftVersionRange {
     pub min: u16,
     pub max: u16,
@@ -28,7 +28,7 @@ impl Default for KRaftVersionRange {
 }
 
 /// One voter's full identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Voter {
     pub id: NodeId,
     pub directory_id: Uuid,
@@ -37,7 +37,7 @@ pub struct Voter {
 }
 
 /// The authoritative voter set (ordered by node id).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct VoterSet {
     voters: BTreeMap<NodeId, Voter>,
 }

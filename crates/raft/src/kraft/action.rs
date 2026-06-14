@@ -3,13 +3,13 @@
 
 use crate::kraft::types::{LeaderEpoch, LogOffsetMetadata, NodeId, SimInstant};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TimerKind {
     Election,
     Fetch,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Action {
     /// Broadcast a Vote request to all other voters (pre- or real vote).
     SendVoteRequest { epoch: LeaderEpoch, pre_vote: bool },

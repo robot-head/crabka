@@ -23,17 +23,11 @@ async fn single_voter_create_topic_round_trip() {
     let controller = Controller::start(cfg).await.expect("controller start");
 
     // Wait until openraft elects this single voter as leader.
-    let deadline = std::time::Instant::now() + Duration::from_mins(2);
-    loop {
-        if controller.watch_leader().borrow().is_some() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "no leader elected within 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut rx = controller.watch_leader();
+    tokio::time::timeout(Duration::from_secs(30), rx.wait_for(Option::is_some))
+        .await
+        .expect("no leader elected within 30s")
+        .expect("leader watch channel closed");
 
     let topic = MetadataRecord::V1Topic(TopicRecord {
         name: "t".into(),
@@ -56,17 +50,11 @@ async fn single_voter_duplicate_topic_rejected() {
     cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
     let controller = Controller::start(cfg).await.unwrap();
 
-    let deadline = std::time::Instant::now() + Duration::from_mins(2);
-    loop {
-        if controller.watch_leader().borrow().is_some() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "no leader elected within 2 min"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let mut rx = controller.watch_leader();
+    tokio::time::timeout(Duration::from_secs(30), rx.wait_for(Option::is_some))
+        .await
+        .expect("no leader elected within 30s")
+        .expect("leader watch channel closed");
 
     let topic = MetadataRecord::V1Topic(TopicRecord {
         name: "t".into(),
