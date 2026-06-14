@@ -376,7 +376,7 @@ async fn run_producer(
     // throughput at 1/RTT regardless of cluster capacity — so the numbers
     // measured the driver, not the cluster. A bounded window lets throughput
     // track the cluster while keeping memory in hand.
-    const MAX_INFLIGHT: usize = 512;
+    let max_inflight: usize = 512;
     let mut inflight: std::collections::VecDeque<(
         tokio::sync::oneshot::Receiver<
             Result<crabka_client_producer::RecordMetadata, crabka_client_producer::ProducerError>,
@@ -459,11 +459,12 @@ async fn run_producer(
             }
         }
         // Back-pressure: at capacity, block on the oldest before sending more.
-        while inflight.len() >= MAX_INFLIGHT {
+        while inflight.len() >= max_inflight {
             let (rx, t0) = inflight.pop_front().expect("len checked");
-            match rx.await {
-                Ok(res) => handle_ack!(res, t0),
-                Err(_) => handle_dropped!(),
+            if let Ok(res) = rx.await {
+                handle_ack!(res, t0);
+            } else {
+                handle_dropped!();
             }
         }
         if let Some(p) = pacer.as_mut() {
@@ -482,9 +483,10 @@ async fn run_producer(
 
     // Drain anything still outstanding when the measurement window closed.
     while let Some((rx, t0)) = inflight.pop_front() {
-        match rx.await {
-            Ok(res) => handle_ack!(res, t0),
-            Err(_) => handle_dropped!(),
+        if let Ok(res) = rx.await {
+            handle_ack!(res, t0);
+        } else {
+            handle_dropped!();
         }
     }
 

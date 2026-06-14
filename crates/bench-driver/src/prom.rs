@@ -82,7 +82,16 @@ impl PromClient {
         window_s: u64,
         msgs_produced: u64,
     ) -> Result<Resource> {
-        let pod_re = stack.broker_pod_regex();
+        // `broker_pod_regex()` returns a `^`-anchored *prefix* (e.g.
+        // `^demo-broker`) shared with `failover.rs`, which strips the `^` and
+        // uses it via `starts_with`. PromQL `=~` matchers are *fully* anchored
+        // (`^demo-broker` is compiled as `^(?:^demo-broker)$`), so the bare
+        // prefix matches a pod named *exactly* `demo-broker` and never the real
+        // `demo-broker-0-0` — every series came back empty → all resource
+        // numbers 0. Rebuild it as an unanchored prefix-glob: drop the `^` and
+        // append `.*` so `demo-broker.*` matches the ordinal-suffixed pods.
+        let pod_re = format!("{}.*", stack.broker_pod_regex().trim_start_matches('^'));
+        let pod_re = pod_re.as_str();
         let win = window_s.max(15); // PromQL needs at least one full scrape
 
         // GKE's kubelet-cadvisor series carry `pod`/`namespace` but NO
@@ -119,12 +128,17 @@ impl PromClient {
         };
 
         if matches!(stack, Stack::Kafka) {
-            // JMX exporter publishes `jvm_memory_bytes_used{area="..."}`.
+            // Strimzi 0.46 ships the new Prometheus Java client (1.x), whose
+            // built-in JVM collector publishes `jvm_memory_used_bytes{area=...}`
+            // — note the `used_bytes` suffix order, NOT the legacy simpleclient
+            // `jvm_memory_bytes_used`. (Querying the old name returned empty, so
+            // the JVM heap/non-heap split was silently 0.) The `area` label is
+            // lowercase `heap`/`nonheap`, matching the selectors below.
             let heap_q = format!(
-                "max_over_time(sum(jvm_memory_bytes_used{{namespace=\"{namespace}\",pod=~\"{pod_re}\",area=\"heap\"}})[{win}s:15s])"
+                "max_over_time(sum(jvm_memory_used_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",area=\"heap\"}})[{win}s:15s])"
             );
             let nonheap_q = format!(
-                "max_over_time(sum(jvm_memory_bytes_used{{namespace=\"{namespace}\",pod=~\"{pod_re}\",area=\"nonheap\"}})[{win}s:15s])"
+                "max_over_time(sum(jvm_memory_used_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",area=\"nonheap\"}})[{win}s:15s])"
             );
             let heap = self.query_scalar_sum(&heap_q).await?.unwrap_or(0.0) as u64;
             let nonheap = self.query_scalar_sum(&nonheap_q).await?.unwrap_or(0.0) as u64;
