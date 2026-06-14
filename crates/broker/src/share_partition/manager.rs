@@ -200,6 +200,20 @@ impl SharePartitionLeaderManager {
         self.leaders.entry(key).or_insert(cell).value().clone()
     }
 
+    /// Test-only: borrow the live acquisition cell without loading from the
+    /// persister (returns `None` if not currently led/loaded on this node).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn peek_for_test(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<AcquisitionState>>> {
+        self.leaders
+            .get(&(group.to_string(), topic_id, partition))
+            .map(|c| c.value().clone())
+    }
+
     /// Drop the cached acquisition-state cell for `(group, topic_id, partition)`
     /// so the next `get_or_load` re-reads the durable SPSO. The admin offset
     /// RPCs call this after `AlterShareGroupOffsets`/`DeleteShareGroupOffsets`

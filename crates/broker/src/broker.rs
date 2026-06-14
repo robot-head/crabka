@@ -442,6 +442,131 @@ impl BrokerHandle {
             .await
     }
 
+    /// Test-only: await until the persisted share-state summary exists for
+    /// `(group, topic_id, partition)` (share-state initialized / recovered).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_for_share_state_summary(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    .is_some()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share-state summary for {group}:{topic_id}:{partition} not present within 30s"
+        );
+    }
+
+    /// Test-only: await until the share-partition SPSO (start_offset) >= `min`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_spso(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        min: i64,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some((_, _, spso, _)) = self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    && spso >= min
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share SPSO for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
+    }
+
+    /// Test-only: await until the share-partition delivery-complete count >= `min`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_delivery_complete(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        min: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some((_, _, _, dcc)) = self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    && dcc >= min
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share dcc for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
+    }
+
+    /// Test-only: await until the live share-partition has exactly `n` Acquired
+    /// in-flight batches (e.g. after a ShareFetch acquires, or after lock-timeout
+    /// redelivery returns records to Available — count drops back).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_acquired_count(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        n: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(cell) = self
+                    ._broker
+                    .share_partition_leaders
+                    .peek_for_test(group, topic_id, partition)
+                {
+                    let count = cell.lock().await.count_acquired_batches();
+                    if count == n {
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share acquired-batch count for {group}:{topic_id}:{partition} did not reach {n} within 30s"
+        );
+    }
+
     /// Test-only: return the `log_start_offset` of `(topic, partition)` as
     /// reported by its underlying [`crabka_log::Log`]. Returns `None` if the
     /// partition is not hosted on this broker.

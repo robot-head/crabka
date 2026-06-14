@@ -474,6 +474,19 @@ impl AcquisitionState {
         self.delivery_complete_count
     }
 
+    /// Number of in-flight batches currently in `Acquired` state. Test-only.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub(crate) fn count_acquired_batches(&self) -> i32 {
+        i32::try_from(
+            self.batches
+                .iter()
+                .filter(|b| b.state == RecordState::Acquired)
+                .count(),
+        )
+        .unwrap_or(i32::MAX)
+    }
+
     /// Rebuild the machine from persisted state. SPSO is restored to
     /// `start_offset`, the cumulative `delivery_complete_count` is restored
     /// (so the consumer-lag accounting survives a leader change), batches are
