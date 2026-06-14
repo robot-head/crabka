@@ -23,6 +23,7 @@ use crate::primitives::fixed::{get_i16, get_i32};
 use crate::primitives::string_bytes::{
     get_compact_nullable_string_owned, get_nullable_string_owned,
 };
+use crate::primitives::uuid::{Uuid, get_uuid};
 use crate::primitives::varint::get_uvarint;
 use crate::tagged_fields::read_tagged_fields;
 
@@ -38,9 +39,40 @@ pub struct PartitionRecordSlice {
     pub topic_index: usize,
     /// Index of the partition within the topic's `partition_data`.
     pub partition_index: usize,
+    /// The partition index (`PartitionProduceData.index`) on the wire.
+    pub partition: i32,
     /// The records field as a zero-copy slice of the frame, or `None` when
     /// the field was wire-null.
     pub records: Option<Bytes>,
+}
+
+/// The request-level + per-topic framing of a `ProduceRequest`, captured by
+/// [`produce_framing`] **without decoding (or decompressing) any record
+/// batch**. This is the header-only view the broker's produce hot path uses
+/// to decide verbatim-passthrough vs owned-decode per partition: every field
+/// here comes straight off the wire framing; the actual record bytes are kept
+/// as zero-copy [`Bytes`] slices in [`ProduceFramingTopic::partitions`].
+#[derive(Debug, Clone, Default)]
+pub struct ProduceFraming {
+    /// `transactional_id` (v≥3, nullable). Drives the txn ACL preamble.
+    pub transactional_id: Option<String>,
+    /// `acks` (-1 / 0 / 1).
+    pub acks: i16,
+    /// `timeout_ms`.
+    pub timeout_ms: i32,
+    /// Per-topic framing in wire order.
+    pub topics: Vec<ProduceFramingTopic>,
+}
+
+/// One topic's framing within a [`ProduceFraming`].
+#[derive(Debug, Clone, Default)]
+pub struct ProduceFramingTopic {
+    /// Topic name (STRING for v≤12; empty for v≥13 which is id-only).
+    pub name: String,
+    /// Topic id (16-byte UUID for v≥13; [`Uuid::ZERO`] for v≤12).
+    pub topic_id: Uuid,
+    /// Per-partition records slices in wire order.
+    pub partitions: Vec<PartitionRecordSlice>,
 }
 
 /// Walk a `ProduceRequest` body (already positioned at the start of the
@@ -93,12 +125,13 @@ pub fn produce_record_slices(
 
         let partition_count = get_array_len(buf, flex)?;
         for partition_index in 0..partition_count {
-            let _index = get_i32(buf)?;
+            let partition = get_i32(buf)?;
             // records: NULLABLE_BYTES (v<9) / COMPACT_NULLABLE_BYTES (v>=9).
             let records = read_nullable_bytes_slice(buf, flex)?;
             out.push(PartitionRecordSlice {
                 topic_index,
                 partition_index,
+                partition,
                 records,
             });
             // Per-partition tagged fields (flexible only).
@@ -118,6 +151,99 @@ pub fn produce_record_slices(
     }
 
     Ok(out)
+}
+
+/// Walk a `ProduceRequest` body (v≥3) and return the full request +
+/// per-topic framing **without decoding or decompressing any record
+/// batch**. Each partition's `records` field is captured as a zero-copy
+/// [`Bytes`] slice of `body`.
+///
+/// This is the header-only entry point for the produce hot path: it gives
+/// the handler everything it needs to run the ACL preamble, topic
+/// resolution, and the verbatim-vs-owned dispatch, while leaving the
+/// (potentially LZ4-compressed, 100×-expanding) record bodies untouched.
+/// The owned fallback re-decodes a single partition's slice only when the
+/// passthrough predicate fails.
+///
+/// The walk mirrors the generated `ProduceRequest::decode` field order
+/// byte-for-byte; it is exercised against the generated encoder in the
+/// tests below so the two cannot drift.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError`] if the bytes do not parse as a `ProduceRequest`
+/// of the given version (malformed/short frame).
+pub fn produce_framing(mut body: Bytes, version: i16) -> Result<ProduceFraming, ProtocolError> {
+    let flex = version >= FLEXIBLE_MIN;
+    let buf = &mut body;
+
+    // transactional_id (v>=3, present for every version we serve).
+    let transactional_id = if version >= 3 {
+        if flex {
+            get_compact_nullable_string_owned(buf)?
+        } else {
+            get_nullable_string_owned(buf)?
+        }
+    } else {
+        None
+    };
+    let acks = get_i16(buf)?;
+    let timeout_ms = get_i32(buf)?;
+
+    let topic_count = get_array_len(buf, flex)?;
+    let mut topics = Vec::with_capacity(topic_count);
+    for topic_index in 0..topic_count {
+        // name: STRING/COMPACT_STRING for v<=12; topic_id (16 bytes) for v>=13.
+        let mut name = String::new();
+        if version <= 12 {
+            name = if flex {
+                get_compact_nullable_string_owned(buf)?.unwrap_or_default()
+            } else {
+                get_nullable_string_owned(buf)?.unwrap_or_default()
+            };
+        }
+        let mut topic_id = Uuid::ZERO;
+        if version >= 13 {
+            topic_id = get_uuid(buf)?;
+        }
+
+        let partition_count = get_array_len(buf, flex)?;
+        let mut partitions = Vec::with_capacity(partition_count);
+        for partition_index in 0..partition_count {
+            let partition = get_i32(buf)?;
+            let records = read_nullable_bytes_slice(buf, flex)?;
+            partitions.push(PartitionRecordSlice {
+                topic_index,
+                partition_index,
+                partition,
+                records,
+            });
+            // Per-partition tagged fields (flexible only).
+            if flex {
+                read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+            }
+        }
+        // Per-topic tagged fields (flexible only).
+        if flex {
+            read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        topics.push(ProduceFramingTopic {
+            name,
+            topic_id,
+            partitions,
+        });
+    }
+    // Request-level tagged fields (flexible only).
+    if flex {
+        read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+    }
+
+    Ok(ProduceFraming {
+        transactional_id,
+        acks,
+        timeout_ms,
+        topics,
+    })
 }
 
 /// Read a `NULLABLE_BYTES` / `COMPACT_NULLABLE_BYTES` length prefix and
@@ -303,6 +429,76 @@ mod tests {
             ptr >= body_start && ptr < body_end,
             "captured slice must point into the request frame (zero-copy)"
         );
+    }
+
+    /// `produce_framing` must reproduce the request-level + per-topic +
+    /// per-partition framing that the full owned decoder produces, and
+    /// capture the same zero-copy records bytes — for every served version.
+    fn check_framing_roundtrip(req: &ProduceRequest, version: i16) {
+        let mut buf = BytesMut::new();
+        req.encode(&mut buf, version).unwrap();
+        let body = buf.freeze();
+
+        let framing = produce_framing(body.clone(), version).unwrap();
+
+        assert!(framing.transactional_id == req.transactional_id);
+        assert!(framing.acks == req.acks);
+        assert!(framing.timeout_ms == req.timeout_ms);
+        assert!(framing.topics.len() == req.topic_data.len());
+        for (ft, rt) in framing.topics.iter().zip(req.topic_data.iter()) {
+            assert!(ft.name == rt.name);
+            assert!(ft.topic_id.0 == rt.topic_id.0);
+            assert!(ft.partitions.len() == rt.partition_data.len());
+            for (fp, rp) in ft.partitions.iter().zip(rt.partition_data.iter()) {
+                assert!(fp.partition == rp.index);
+                let want = rp.records.as_ref().map(|rpld| {
+                    let mut b = BytesMut::new();
+                    <RecordsPayload as Encode>::encode(rpld, &mut b, version).unwrap();
+                    b.freeze()
+                });
+                match (&fp.records, &want) {
+                    (Some(g), Some(w)) => assert!(&g[..] == &w[..], "records bytes differ"),
+                    (None, None) => {}
+                    _ => panic!("nullability mismatch"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn framing_matches_decoder_all_versions() {
+        for version in 3..=13 {
+            check_framing_roundtrip(&multi_partition_request(version), version);
+        }
+    }
+
+    #[test]
+    fn framing_captures_transactional_id_and_acks() {
+        let version = 9;
+        let req = ProduceRequest {
+            transactional_id: Some("my-txn".to_string()),
+            acks: -1,
+            timeout_ms: 7777,
+            topic_data: vec![TopicProduceData {
+                name: "t".to_string(),
+                partition_data: vec![PartitionProduceData {
+                    index: 3,
+                    records: None,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        req.encode(&mut buf, version).unwrap();
+        let framing = produce_framing(buf.freeze(), version).unwrap();
+        assert!(framing.transactional_id.as_deref() == Some("my-txn"));
+        assert!(framing.acks == -1);
+        assert!(framing.timeout_ms == 7777);
+        assert!(framing.topics.len() == 1);
+        assert!(framing.topics[0].partitions[0].partition == 3);
+        assert!(framing.topics[0].partitions[0].records.is_none());
     }
 
     #[test]

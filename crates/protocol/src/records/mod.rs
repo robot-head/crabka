@@ -28,4 +28,7 @@ pub use header::{
 };
 pub use owned::{Record, RecordBatch, RecordHeader};
 pub use payload::{RecordsPayload, RecordsPayloadBorrowed};
-pub use produce_passthrough::{PartitionRecordSlice, produce_record_slices};
+pub use produce_passthrough::{
+    PartitionRecordSlice, ProduceFraming, ProduceFramingTopic, produce_framing,
+    produce_record_slices,
+};
