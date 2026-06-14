@@ -76,6 +76,17 @@ impl ReassignModel {
             max_epoch: 10,
         }
     }
+
+    fn wide() -> Self {
+        Self {
+            replicas: vec![1, 2, 3, 4, 5],
+            adding: vec![4, 5],
+            removing: vec![1, 2],
+            initial_isr: vec![1, 2, 3],
+            leader: 1, // in `removing` → handoff required
+            max_epoch: 10,
+        }
+    }
 }
 
 fn in_flight(s: &ReassignState) -> bool {
@@ -146,9 +157,15 @@ fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
             "handoff to a removing replica {}",
             next.leader
         );
-        assert!(next.replicas == pre.replicas, "handoff changed the replica set");
+        assert!(
+            next.replicas == pre.replicas,
+            "handoff changed the replica set"
+        );
         assert!(next.adding_replicas == pre.adding, "handoff changed adding");
-        assert!(next.removing_replicas == pre.removing, "handoff changed removing");
+        assert!(
+            next.removing_replicas == pre.removing,
+            "handoff changed removing"
+        );
         assert!(
             next.leader_epoch == pre.leader_epoch + 1,
             "handoff did not bump leader_epoch by exactly 1"
@@ -278,7 +295,9 @@ impl Model for ReassignModel {
             Property::always("leader_in_replicas", |_, s: &ReassignState| {
                 s.replicas.contains(&s.leader)
             }),
-            Property::always("leader_in_isr", |_, s: &ReassignState| s.isr.contains(&s.leader)),
+            Property::always("leader_in_isr", |_, s: &ReassignState| {
+                s.isr.contains(&s.leader)
+            }),
             Property::always("adding_subset_replicas", |_, s: &ReassignState| {
                 s.adding.iter().all(|n| s.replicas.contains(n))
             }),
@@ -339,4 +358,10 @@ fn reassign_basic() {
 fn reassign_leader_handoff() {
     // Leader in `removing`: catch-up, leader handoff, then completion.
     run(ReassignModel::leader_handoff(), "reassign_leader_handoff");
+}
+
+#[test]
+fn reassign_wide() {
+    // 5 replicas, add 2 + remove 2, leader removed → handoff then completion.
+    run(ReassignModel::wide(), "reassign_wide");
 }
