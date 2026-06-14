@@ -63,6 +63,17 @@ methodology, latency percentiles, and a JVM heap-floor sweep:
 [**Crabka vs Apache Kafka 4.3**](https://robot-head.github.io/crabka/benchmarks/crabka-vs-kafka/).
 Reproduce locally with [`bench/local/run-local-bench.sh`](bench/local).
 
+On Kubernetes, a three-broker Crabka cluster managed by the Crabka operator goes
+toe-to-toe with a like-for-like Strimzi (Apache Kafka) cluster under identical
+pod resources — winning multi-producer fan-out, level on small-record and
+`acks=all` workloads, and within ~6% on 100 KiB messages — while a Crabka
+broker's container working set sits in the low hundreds of MiB against Strimzi's
+**2.5–5.5 GiB** JVM-heap-dominated footprint (**9–37× lighter**), at **1.6–3.0×
+more messages per CPU-core**. Crabka serves `Fetch` responses zero-copy via
+`sendfile(2)`, and uses Linux **kTLS** to keep encrypted fetches zero-copy as
+well, so TLS throughput equals plaintext. Full tables:
+[**Crabka vs Strimzi on Kubernetes**](https://robot-head.github.io/crabka/benchmarks/crabka-vs-strimzi/).
+
 ## Project status
 
 Crabka is in **beta** (`v0.3.2`). The Kafka-parity surface — wire protocol,
