@@ -59,6 +59,13 @@ mod codes {
 /// bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
 
+/// Hard cap on routing re-routes per send cycle, independent of the (often
+/// `i32::MAX`) transport-retry budget `cfg.retries`. Routing converges in one
+/// or two re-routes after a metadata refresh learns the real leaders; this cap
+/// keeps a partition that *never* reaches its leader from recursing
+/// `Box::pin(send_to_leaders(..))` deep enough to overflow the worker stack.
+const MAX_ROUTING_REROUTES: i32 = 8;
+
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
 #[allow(clippy::type_complexity)] // accumulators map mirrors the Producer field; alias deferred.
@@ -404,6 +411,14 @@ async fn send_leader_group(
                 if hint >= 0 {
                     cfg.partition_leaders
                         .insert((pb.topic.clone(), pb.partition), hint);
+                    // Knowing the leader *id* isn't enough to route — we also
+                    // need its address. If the pool hasn't learned it, force a
+                    // metadata refresh below so the re-resolve can dial the
+                    // hinted leader instead of falling back to the bootstrap
+                    // connection, which would loop forever on NOT_LEADER.
+                    if !cfg.client.knows_broker(hint) {
+                        refresh_needed = true;
+                    }
                 } else {
                     refresh_needed = true;
                 }
@@ -424,7 +439,7 @@ async fn send_leader_group(
     // partition still isn't reaching its leader, give up rather than loop
     // forever. Fail the still-misrouted batches with the routing error code so
     // the caller sees a real Server error, and release their in-flight slots.
-    if reroute_depth >= cfg.retries {
+    if reroute_depth >= cfg.retries.min(MAX_ROUTING_REROUTES) {
         for pb in to_reroute {
             fail_batch(
                 pb.records,

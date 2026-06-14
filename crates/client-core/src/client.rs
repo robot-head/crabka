@@ -100,7 +100,7 @@ impl Client {
                 rack: b.rack.clone(),
             })
             .collect();
-        self.pool.refresh_brokers(&brokers);
+        self.pool.refresh_brokers(&brokers).await;
         Ok(resp)
     }
 
