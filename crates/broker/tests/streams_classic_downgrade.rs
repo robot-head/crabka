@@ -383,8 +383,9 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
 
     // Leave so the streams group is drained.
     streams_leave(&streams_client, "g", &member_id).await;
-    // Small pause for the leave to propagate through the actor.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for the leave to propagate through the streams actor before the
+    // classic JoinGroup triggers the streams→classic conversion.
+    broker.wait_until_streams_group_empty("g").await;
 
     // ── Phase 2: classic JoinGroup for the same id → downgrade to classic. ──
     let (_cm, _gen) = classic_join_sync(&classic_client, "g").await;
@@ -492,8 +493,8 @@ async fn converted_group_admin_views_respect_type_lock() {
         .await
         .expect("LeaveGroup");
 
-    // Small pause for leave to propagate before upgrading.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for the classic leave to propagate before upgrading to streams.
+    broker.wait_until_group_empty("g3").await;
 
     let (_sm, hb) = streams_join_and_converge(&streams_client, "g3", topology("in3"), 1, 15).await;
     assert!(hb.error_code == ERR_NONE);
@@ -562,7 +563,8 @@ async fn downgrade_survives_restart() {
 
         // Leave to drain.
         streams_leave(&sc, "g4", &mid).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the streams leave to propagate before the downgrade JoinGroup.
+        broker.wait_until_streams_group_empty("g4").await;
 
         // Downgrade: classic JoinGroup on drained streams group.
         let _ = classic_join_sync(&cc, "g4").await;
@@ -570,6 +572,8 @@ async fn downgrade_survives_restart() {
             broker.group_type_for_test("g4")
                 == Some(crabka_broker::coordinator::unified::GroupType::Classic)
         );
+        // Pre-shutdown flush: allow the raft log write for the classic
+        // group-type record to be flushed to disk before we shut down.
         tokio::time::sleep(Duration::from_millis(300)).await;
         broker.shutdown().await;
     }
