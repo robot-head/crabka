@@ -283,7 +283,12 @@ async fn serve_connection_stream<S>(
         };
 
         let frame = match frame_result {
-            Some(Ok(b)) => b,
+            // Freeze the codec's `BytesMut` to a refcounted `Bytes` once per
+            // frame (zero-copy). The produce hot path slices each partition's
+            // verbatim records bytes as a cheap refcount view of this `Bytes`
+            // (see `handle_produce_frame`); all other readers deref it as
+            // `&[u8]` exactly as before.
+            Some(Ok(b)) => b.freeze(),
             Some(Err(e)) => {
                 tracing::warn!(error = %e, "frame decode error, closing");
                 break;
@@ -1930,7 +1935,7 @@ async fn handle_describe_quorum_frame(
 /// fallback covers the defensive SASL pre-auth case.
 async fn handle_produce_frame(
     broker: &Broker,
-    frame: &[u8],
+    frame: &Bytes,
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
 ) -> Result<Bytes, BrokerError> {
@@ -1946,8 +1951,23 @@ async fn handle_produce_frame(
         client_id,
     };
 
-    let resp_body =
-        crate::handlers::produce::handle(broker, api_version, correlation_id, body, &ctx).await?;
+    // The produce hot path slices each partition's verbatim records bytes
+    // as a zero-copy view of `frame`. `body` is a sub-slice of `frame`;
+    // capture its start offset so the handler can re-slice the owning
+    // `Bytes` (a refcount bump, not a copy) rather than the borrowed
+    // `&[u8]`.
+    let body_offset = frame.len() - body.len();
+    let body_bytes = frame.slice(body_offset..);
+
+    let resp_body = crate::handlers::produce::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        body_bytes,
+        &ctx,
+    )
+    .await?;
     Ok(encode_response(
         api_key,
         correlation_id,

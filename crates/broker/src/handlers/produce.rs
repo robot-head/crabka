@@ -19,17 +19,20 @@ use crabka_protocol::owned::produce_response::{
     LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::RecordsPayload;
+use crabka_protocol::records::{
+    RecordsPayload, TimestampType, produce_record_slices, validate_one_v2_batch,
+};
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
-use crate::config_keys::MIN_INSYNC_REPLICAS;
+use crate::config_keys::{COMPRESSION_TYPE, MIN_INSYNC_REPLICAS, parse_compression_type};
 use crate::error::BrokerError;
-use crate::partition::{Partition, ProduceJob, WriterMessage};
+use crate::partition::{Partition, ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
+use crabka_log::VerbatimBatch;
 
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
 /// Defaults to `1` (Kafka's default — every cluster has at least the
@@ -51,6 +54,7 @@ pub(crate) async fn handle(
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
+    body_bytes: Bytes,
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     // KIP-124 request_percentage meters server-side handler time; capture the
@@ -72,6 +76,20 @@ pub(crate) async fn handle(
         ProduceRequest::decode(&mut cur, version)?
     };
     let timeout = Duration::from_millis(u64::try_from(req.timeout_ms.max(0)).unwrap_or(0));
+
+    // ── verbatim passthrough capture (zero-copy) ────────────────
+    // For v≥3 (native v2 payloads) re-slice each partition's records
+    // field as a refcounted `Bytes` view of the request frame, so the
+    // passthrough-safe batches can be appended without decode/re-encode.
+    // The walk mirrors the request wire format exactly and is keyed by
+    // (topic_index, partition_index) so it lines up with `req.topic_data`
+    // iteration order below. Legacy (v0-2) requests never take the
+    // passthrough path, so the capture is skipped for them.
+    let record_slices: RecordSliceMap = if version >= 3 {
+        build_record_slice_map(body_bytes, version)
+    } else {
+        RecordSliceMap::default()
+    };
 
     // ── ACL preamble ────────────────────────────────────────
     // For transactional Produce (request carries a non-empty
@@ -151,7 +169,7 @@ pub(crate) async fn handle(
         .map(|p| p.records.as_ref().map_or(0, |r| r.payload_len() as u64))
         .sum();
 
-    for topic in req.topic_data {
+    for (topic_index, topic) in req.topic_data.into_iter().enumerate() {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
         // we look it up in the metadata image. KIP-516: an explicit
         // non-zero id that is unknown returns UNKNOWN_TOPIC_ID (100) on
@@ -208,8 +226,21 @@ pub(crate) async fn handle(
         // Allow uniformly, so existing tests are unaffected.
         let topic_denied = denied_topics.contains(&topic_name);
 
-        for part_data in topic.partition_data {
+        // Resolve the topic's broker-side `compression.type` once. `None`
+        // means Kafka's `producer` pass-through (no recompression). A
+        // concrete codec forces recompression of any batch whose codec
+        // differs — those batches must take the owned path. Mirrors the
+        // writer's `config_snapshot().compression_type` gate so the
+        // handler's verbatim decision matches the writer's recompression
+        // decision exactly.
+        let topic_compression = resolve_topic_compression(&image, &topic_name);
+
+        for (partition_index, part_data) in topic.partition_data.into_iter().enumerate() {
             let idx = part_data.index;
+            // Pull the verbatim records slice captured for this exact
+            // (topic, partition) wire position. `None` for legacy requests
+            // or a null records field → forces the owned path.
+            let verbatim_slice = record_slices.get(topic_index, partition_index);
             // Time the per-partition handler work for the
             // rebalancer's CpuUsage / CpuCapacity goals via
             // tokio_metrics::TaskMonitor — only on-CPU poll duration is
@@ -219,6 +250,8 @@ pub(crate) async fn handle(
             let out = monitor
                 .instrument(process_partition(
                     part_data,
+                    verbatim_slice,
+                    topic_compression,
                     &topic_name,
                     topic_denied,
                     txn_id_denied,
@@ -315,6 +348,8 @@ pub(crate) async fn handle(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn process_partition(
     part_data: PartitionProduceData,
+    verbatim_slice: Option<Bytes>,
+    topic_compression: Option<crabka_compression::CompressionType>,
     topic_name: &str,
     topic_denied: bool,
     txn_id_denied: bool,
@@ -598,8 +633,14 @@ async fn process_partition(
         }
     }
 
+    // ── verbatim passthrough vs owned fallback ───────────────
+    // The leader epoch was just stamped onto the owned `batch` (above);
+    // reuse it for the verbatim meta so both paths assign the same epoch.
+    let leader_epoch = batch.partition_leader_epoch;
+    let data = build_produce_data(batch, verbatim_slice, topic_compression, leader_epoch);
+
     let (ack_tx, ack_rx) = oneshot::channel();
-    let job = WriterMessage::Produce(ProduceJob { batch, ack: ack_tx });
+    let job = WriterMessage::Produce(ProduceJob { data, ack: ack_tx });
 
     if part.writer_tx.send(job).await.is_err() {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
@@ -826,6 +867,128 @@ fn build_topic_error_response(
     }
 }
 
+/// Per-`(topic_index, partition_index)` verbatim records slices captured
+/// from the request frame, indexed in wire order so the handler's
+/// `req.topic_data` iteration can look them up positionally.
+#[derive(Default)]
+struct RecordSliceMap {
+    /// `slices[topic_index][partition_index]` = the records field bytes,
+    /// or `None` for a wire-null field.
+    slices: Vec<Vec<Option<Bytes>>>,
+}
+
+impl RecordSliceMap {
+    /// Look up and clone (refcount bump) the verbatim slice for a wire
+    /// position. Returns `None` when out of range (e.g. capture skipped /
+    /// failed) or the field was null.
+    fn get(&self, topic_index: usize, partition_index: usize) -> Option<Bytes> {
+        self.slices
+            .get(topic_index)
+            .and_then(|parts| parts.get(partition_index))
+            .and_then(Clone::clone)
+    }
+}
+
+/// Walk the produce request body and group the captured records slices by
+/// topic so they can be indexed `[topic_index][partition_index]`. A walk
+/// failure (malformed frame — already rejected by the real decoder, so
+/// unreachable in practice) yields an empty map, forcing every partition
+/// onto the owned path; correctness is never compromised.
+fn build_record_slice_map(body_bytes: Bytes, version: i16) -> RecordSliceMap {
+    let Ok(flat) = produce_record_slices(body_bytes, version) else {
+        return RecordSliceMap::default();
+    };
+    let mut slices: Vec<Vec<Option<Bytes>>> = Vec::new();
+    for s in flat {
+        if s.topic_index >= slices.len() {
+            slices.resize_with(s.topic_index + 1, Vec::new);
+        }
+        let parts = &mut slices[s.topic_index];
+        if s.partition_index >= parts.len() {
+            parts.resize_with(s.partition_index + 1, || None);
+        }
+        parts[s.partition_index] = s.records;
+    }
+    RecordSliceMap { slices }
+}
+
+/// Resolve a topic's broker-side `compression.type` from the metadata
+/// image. `None` means Kafka's `producer` pass-through (no recompression);
+/// `Some(codec)` forces recompression of batches whose codec differs.
+/// Mirrors the resolution the partition writer applies via its
+/// `LogConfig::compression_type`.
+fn resolve_topic_compression(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+) -> Option<crabka_compression::CompressionType> {
+    image
+        .topic_config(topic)
+        .and_then(|m| m.get(COMPRESSION_TYPE))
+        .and_then(|v| parse_compression_type(v).ok())
+        .flatten()
+}
+
+/// Decide the append shape for one batch: verbatim passthrough when ALL of
+/// the passthrough-safe conditions hold, else the owned decode/re-encode
+/// fallback.
+///
+/// Passthrough-safe predicate (ALL must hold):
+///   1. a verbatim records slice was captured (v≥3 native-v2 request);
+///   2. `timestamp_type == CreateTime` (no log-append-time rewrite, which
+///      would touch CRC-covered header bytes);
+///   3. the batch is **not** a control batch (its LSO bookkeeping needs
+///      the inner marker record, which the header-only path can't read);
+///   4. no broker-side recompression — the topic's `compression.type` is
+///      `producer` pass-through (`None`) OR equals the batch's own codec;
+///   5. the slice is exactly one complete, CRC-valid v2 batch (the modern
+///      single-batch-per-partition producer case).
+///
+/// On any miss the owned `RecordBatch` is used, preserving today's
+/// behavior exactly. The owned arm is a complete fallback, so reverting
+/// this whole feature is "always return `Owned`".
+fn build_produce_data(
+    batch: crabka_protocol::records::RecordBatch,
+    verbatim_slice: Option<Bytes>,
+    topic_compression: Option<crabka_compression::CompressionType>,
+    leader_epoch: i32,
+) -> ProduceData {
+    let Some(bytes) = verbatim_slice else {
+        return ProduceData::Owned(batch);
+    };
+
+    // (2) CreateTime only.
+    if batch.attributes.timestamp_type() != TimestampType::CreateTime {
+        return ProduceData::Owned(batch);
+    }
+    // (3) No control batches on the verbatim path.
+    if batch.attributes.is_control_batch() {
+        return ProduceData::Owned(batch);
+    }
+    // (4) No recompression: producer pass-through, or target == current.
+    let current_codec = batch.attributes.compression();
+    if let Some(target) = topic_compression
+        && target != current_codec
+    {
+        return ProduceData::Owned(batch);
+    }
+
+    // (5) The slice must be exactly one complete, CRC-valid v2 batch.
+    // Re-validates the producer's CRC over the verbatim bytes (header-only,
+    // no record materialization) and confirms the slice carries a single
+    // batch — multiple concatenated batches fall back to owned.
+    match validate_one_v2_batch(&bytes) {
+        Ok(v) if v.total_len == bytes.len() => ProduceData::Verbatim(VerbatimBatch {
+            last_offset_delta: v.header.last_offset_delta.get(),
+            max_timestamp: v.header.max_timestamp.get(),
+            leader_epoch,
+            producer_id: v.header.producer_id.get(),
+            is_transactional: batch.attributes.is_transactional(),
+            bytes,
+        }),
+        _ => ProduceData::Owned(batch),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MIN_INSYNC_REPLICAS, topic_min_insync_replicas};
@@ -951,5 +1114,136 @@ mod tests {
             delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
+    }
+
+    // ── verbatim passthrough predicate (build_produce_data) ────────────
+    mod verbatim {
+        use super::super::{ProduceData, build_produce_data};
+        use assert2::assert;
+        use bytes::{Bytes, BytesMut};
+        use crabka_compression::CompressionType;
+        use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
+
+        fn encode(b: &RecordBatch) -> Bytes {
+            let mut buf = BytesMut::new();
+            b.encode(&mut buf).unwrap();
+            buf.freeze()
+        }
+
+        fn plain_batch() -> RecordBatch {
+            RecordBatch {
+                base_offset: 999,
+                partition_leader_epoch: -1,
+                last_offset_delta: 0,
+                max_timestamp: 42,
+                producer_id: -1,
+                records: vec![Record {
+                    value: Some(Bytes::from_static(b"hello")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn passthrough_when_all_conditions_hold() {
+            let b = plain_batch();
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire.clone()), None, 7);
+            match data {
+                ProduceData::Verbatim(v) => {
+                    assert!(&v.bytes[..] == &wire[..]);
+                    assert!(v.leader_epoch == 7);
+                    assert!(v.max_timestamp == 42);
+                    assert!(v.last_offset_delta == 0);
+                }
+                ProduceData::Owned(_) => panic!("expected Verbatim"),
+            }
+        }
+
+        #[test]
+        fn passthrough_when_target_codec_equals_current() {
+            // Topic forces lz4; batch is already lz4 → no recompression needed.
+            let mut b = plain_batch();
+            b.attributes = b.attributes.with_compression(CompressionType::Lz4);
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire), Some(CompressionType::Lz4), 1);
+            assert!(matches!(data, ProduceData::Verbatim(_)));
+        }
+
+        #[test]
+        fn fallback_when_no_slice() {
+            let b = plain_batch();
+            let data = build_produce_data(b, None, None, 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn fallback_on_recompression_to_different_codec() {
+            // Batch uncompressed, topic forces zstd → must recompress (owned).
+            let b = plain_batch();
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire), Some(CompressionType::Zstd), 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn fallback_on_log_append_time() {
+            let mut b = plain_batch();
+            b.attributes = b
+                .attributes
+                .with_timestamp_type(TimestampType::LogAppendTime);
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire), None, 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn fallback_on_control_batch() {
+            let mut b = plain_batch();
+            b.attributes = Attributes::default().with_control(true);
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire), None, 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn fallback_on_corrupt_crc_slice() {
+            let b = plain_batch();
+            let mut wire = encode(&b).to_vec();
+            // Corrupt a body byte → CRC validation fails → owned fallback.
+            let hdr_len = crabka_protocol::records::HEADER_LEN;
+            wire[hdr_len] ^= 0xFF;
+            let data = build_produce_data(b, Some(Bytes::from(wire)), None, 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn fallback_on_multiple_batches_in_slice() {
+            // Two concatenated batches in one slice → not a single batch → owned.
+            let b = plain_batch();
+            let mut two = BytesMut::new();
+            b.encode(&mut two).unwrap();
+            b.encode(&mut two).unwrap();
+            let data = build_produce_data(b, Some(two.freeze()), None, 0);
+            assert!(matches!(data, ProduceData::Owned(_)));
+        }
+
+        #[test]
+        fn transactional_batch_can_pass_through() {
+            let mut b = plain_batch();
+            b.producer_id = 100;
+            b.producer_epoch = 0;
+            b.attributes = b.attributes.with_transactional(true);
+            let wire = encode(&b);
+            let data = build_produce_data(b, Some(wire), None, 0);
+            match data {
+                ProduceData::Verbatim(v) => {
+                    assert!(v.is_transactional);
+                    assert!(v.producer_id == 100);
+                }
+                ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
+            }
+        }
     }
 }

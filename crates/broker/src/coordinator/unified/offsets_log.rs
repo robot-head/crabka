@@ -6,7 +6,7 @@ use tokio::sync::oneshot;
 use crabka_protocol::records::RecordBatch;
 
 use crate::error::BrokerError;
-use crate::partition::{ProduceJob, WriterMessage};
+use crate::partition::{ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
@@ -44,7 +44,10 @@ impl OffsetsLog for ProductionOffsetsLog {
         let (ack_tx, ack_rx) = oneshot::channel();
         if partition
             .writer_tx
-            .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
+            .send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::Owned(batch),
+                ack: ack_tx,
+            }))
             .await
             .is_err()
         {

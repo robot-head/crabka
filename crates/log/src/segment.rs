@@ -6,7 +6,9 @@ use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use crabka_protocol::records::{HEADER_LEN, RecordBatch, RecordBatchHeader};
+use crabka_protocol::records::{
+    HEADER_LEN, RecordBatch, RecordBatchHeader, patch_base_offset_and_leader_epoch,
+};
 use zerocopy::FromBytes;
 
 use crate::error::LogError;
@@ -531,6 +533,78 @@ impl Segment {
         Ok(position)
     }
 
+    /// Append a batch **verbatim**, writing the producer's exact wire
+    /// bytes without decode/re-encode/recompress/CRC-recompute.
+    ///
+    /// `bytes` is the producer's verbatim v2 batch (already CRC-validated
+    /// by the caller via the borrowed header-only path). This patches only
+    /// `base_offset` (bytes 0..8) and `partition_leader_epoch`
+    /// (bytes 12..16) — both outside the CRC-covered region — into a
+    /// writable copy, then writes those bytes. The stored CRC stays
+    /// byte-identical to the producer's, because no CRC-covered byte
+    /// changes.
+    ///
+    /// `base_offset`, `last_offset_delta`, `max_timestamp`, and
+    /// `leader_epoch` come from the caller's borrowed header read; the
+    /// segment side effects (`log_size`, `last_offset`, `max_timestamp`,
+    /// sparse index) are updated identically to [`Segment::append`].
+    ///
+    /// Returns the byte position where the batch starts.
+    pub fn append_verbatim(
+        &mut self,
+        bytes: &[u8],
+        base_offset: i64,
+        last_offset_delta: i32,
+        max_timestamp: i64,
+        leader_epoch: i32,
+        index_interval_bytes: u32,
+    ) -> Result<u64, LogError> {
+        use std::io::Write;
+
+        if self.sealed {
+            return Err(LogError::Io(std::io::Error::other("segment is sealed")));
+        }
+        if bytes.len() < HEADER_LEN {
+            return Err(LogError::Corrupt(
+                "verbatim batch shorter than v2 header".into(),
+            ));
+        }
+
+        // Patch base_offset + partition_leader_epoch in a writable copy.
+        // Both fields are below the CRC-covered region (byte 21), so the
+        // producer's CRC remains valid — no recompute.
+        let mut patched = bytes.to_vec();
+        patch_base_offset_and_leader_epoch(&mut patched, base_offset, leader_epoch);
+
+        let position = self.log_size;
+        self.log_file.seek(SeekFrom::End(0))?;
+        self.log_file.write_all(&patched)?;
+        self.log_size += patched.len() as u64;
+
+        let last_offset = base_offset + i64::from(last_offset_delta);
+        self.last_offset = last_offset;
+        if max_timestamp > self.max_timestamp {
+            self.max_timestamp = max_timestamp;
+        }
+
+        let should_index = match self.offset_index.last_entry() {
+            None => true,
+            Some((_, last_pos)) => {
+                position.saturating_sub(u64::from(last_pos)) >= u64::from(index_interval_bytes)
+            }
+        };
+        if should_index {
+            let rel = u32::try_from(base_offset - self.base_offset)
+                .map_err(|_| LogError::BadSegmentName("offset overflow in segment".into()))?;
+            let pos_u32 = u32::try_from(position)
+                .map_err(|_| LogError::BadSegmentName("position overflow in segment".into()))?;
+            self.offset_index.append(rel, pos_u32)?;
+            self.time_index.append(self.max_timestamp, rel)?;
+        }
+
+        Ok(position)
+    }
+
     /// Mark this segment as sealed. No more appends.
     pub fn seal(&mut self) {
         self.sealed = true;
@@ -854,6 +928,90 @@ mod tests {
         assert!(r.start_offset == 0);
         assert!(r.last_offset == 0);
         assert!(!r.bytes.is_empty());
+        drop(dir);
+    }
+
+    // ---- append_verbatim (byte-exact passthrough) tests ----
+
+    #[test]
+    fn append_verbatim_is_byte_exact_except_offset_and_epoch() {
+        let (dir, mut seg) = test_segment();
+        // Build a batch as a "producer" would, with its own base_offset and
+        // leader epoch, then encode to verbatim wire bytes.
+        let mut producer = test_batch_at(0);
+        producer.base_offset = 999; // producer-supplied (to be overwritten)
+        producer.partition_leader_epoch = -1; // producer-supplied
+        producer.last_offset_delta = 0;
+        producer.max_timestamp = 1_000;
+        let mut wire = bytes::BytesMut::new();
+        producer.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+
+        // Append verbatim with an assigned base_offset and a stamped epoch.
+        let assigned_base = 0i64;
+        let stamped_epoch = 7i32;
+        seg.append_verbatim(&wire, assigned_base, 0, 1_000, stamped_epoch, 0)
+            .unwrap();
+        assert!(seg.last_offset() == 0);
+
+        // Read back the raw .log bytes.
+        let mut on_disk = Vec::new();
+        seg.read_log_range(0, &mut on_disk, usize::MAX).unwrap();
+        assert!(on_disk.len() == wire.len(), "size must be unchanged");
+
+        // base_offset (0..8) patched to the assigned value.
+        assert!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
+        // partition_leader_epoch (12..16) patched to the stamped epoch.
+        assert!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
+        // CRC field (17..21) byte-identical to the producer's.
+        assert!(
+            on_disk[17..21] == wire[17..21],
+            "CRC must NOT be recomputed"
+        );
+        // Everything from byte 21 (CRC-covered region) onward is identical.
+        assert!(
+            on_disk[21..] == wire[21..],
+            "CRC-covered region + body must be byte-for-byte verbatim"
+        );
+
+        // And it decodes (CRC still valid).
+        let mut cur: &[u8] = &on_disk;
+        let decoded = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
+        assert!(decoded.base_offset == assigned_base);
+        assert!(decoded.partition_leader_epoch == stamped_epoch);
+        drop(dir);
+    }
+
+    #[test]
+    fn append_verbatim_updates_index_and_last_offset() {
+        let (dir, mut seg) = test_segment();
+        let mut producer = test_batch_at(0);
+        producer.last_offset_delta = 2; // spans 3 offsets
+        producer.max_timestamp = 5_000;
+        let mut wire = bytes::BytesMut::new();
+        producer.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+
+        seg.append_verbatim(&wire, 0, 2, 5_000, 0, 0).unwrap();
+        assert!(seg.last_offset() == 2);
+        assert!(seg.max_timestamp() == 5_000);
+        // Reading at offset 2 (inside the batch) returns the batch.
+        let read = seg.read(2, usize::MAX).unwrap();
+        assert!(read.len() == 1);
+        assert!(read[0].base_offset == 0);
+        drop(dir);
+    }
+
+    #[test]
+    fn append_verbatim_to_sealed_segment_errors() {
+        let (dir, mut seg) = test_segment();
+        seg.seal();
+        let mut wire = bytes::BytesMut::new();
+        test_batch_at(0).encode(&mut wire).unwrap();
+        let err = seg
+            .append_verbatim(&wire.freeze(), 0, 0, 0, 0, 0)
+            .unwrap_err();
+        assert!(matches!(err, LogError::Io(_)));
         drop(dir);
     }
 }

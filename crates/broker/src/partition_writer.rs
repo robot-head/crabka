@@ -13,7 +13,7 @@ use crabka_log::Log;
 use tokio::sync::{Notify, mpsc};
 
 use crate::log_dir_status::LogDirRegistry;
-use crate::partition::{ProduceJob, SwapOutcome, WriterMessage};
+use crate::partition::{ProduceData, ProduceJob, SwapOutcome, WriterMessage};
 use crate::producer_state::ProducerState;
 use crate::replica_state::ReplicaState;
 
@@ -91,38 +91,54 @@ pub async fn run(
 ) {
     while let Some(msg) = rx.recv().await {
         match msg {
-            WriterMessage::Produce(ProduceJob { mut batch, ack }) => {
-                // Broker-side recompression. If the topic's
-                // `compression.type` is a concrete codec (i.e. not
-                // Kafka's `producer` pass-through), force the batch's
-                // attributes to that codec before append — the
-                // `RecordBatch::encode` path inside `Log::append`
-                // re-compresses the records body according to the
-                // attributes we set here.
-                let target = lock_log(&log).config_snapshot().compression_type;
-                if let Some(target) = target {
-                    let current = batch.attributes.compression();
-                    if current != target {
-                        batch.attributes = batch.attributes.with_compression(target);
-                    }
-                }
+            WriterMessage::Produce(ProduceJob { data, ack }) => {
                 // Run the blocking `write_all` + `fsync` off the reactor.
                 // The loop is a single serial task per partition, so the
                 // `.await` on the `JoinHandle` preserves append ordering.
                 // We fold the post-append LEO read into the same closure
                 // (it needs the lock anyway) and return it alongside the
                 // append result.
+                //
+                // Two append shapes:
+                //   * Verbatim — the produce handler proved passthrough is
+                //     safe (v≥3, magic==2, CreateTime, no recompression),
+                //     so the producer's exact bytes go straight to
+                //     `append_verbatim` (no decode/re-encode/CRC).
+                //   * Owned — the fallback path. Broker-side recompression
+                //     (topic `compression.type` is a concrete codec, not
+                //     Kafka's `producer` pass-through) is applied here by
+                //     forcing the batch's attributes, which the
+                //     `RecordBatch::encode` inside `Log::append` then honors.
                 let log_for_blocking = log.clone();
-                let join = tokio::task::spawn_blocking(move || {
-                    let mut guard = lock_log(&log_for_blocking);
-                    let result = guard
-                        .append(&mut batch)
-                        .map_err(crate::error::BrokerError::from);
-                    // LEO is only meaningful on success; read it under the
-                    // same lock so the HW recompute below sees this append.
-                    let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
-                    (result, leo)
-                });
+                let join = match data {
+                    ProduceData::Verbatim(batch) => tokio::task::spawn_blocking(move || {
+                        let mut guard = lock_log(&log_for_blocking);
+                        let result = guard
+                            .append_verbatim(&batch)
+                            .map_err(crate::error::BrokerError::from);
+                        let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
+                        (result, leo)
+                    }),
+                    ProduceData::Owned(mut batch) => {
+                        let target = lock_log(&log).config_snapshot().compression_type;
+                        if let Some(target) = target {
+                            let current = batch.attributes.compression();
+                            if current != target {
+                                batch.attributes = batch.attributes.with_compression(target);
+                            }
+                        }
+                        tokio::task::spawn_blocking(move || {
+                            let mut guard = lock_log(&log_for_blocking);
+                            let result = guard
+                                .append(&mut batch)
+                                .map_err(crate::error::BrokerError::from);
+                            // LEO is only meaningful on success; read it under the
+                            // same lock so the HW recompute below sees this append.
+                            let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
+                            (result, leo)
+                        })
+                    }
+                };
                 let (result, leo) = match join.await {
                     Ok(v) => v,
                     Err(join_err) => {
@@ -469,7 +485,7 @@ mod tests {
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
-            batch: sample_batch(3),
+            data: ProduceData::Owned(sample_batch(3)),
             ack,
         }))
         .await
@@ -481,12 +497,79 @@ mod tests {
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
-            batch: sample_batch(2),
+            data: ProduceData::Owned(sample_batch(2)),
             ack,
         }))
         .await
         .expect("send job 2");
         assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn writer_appends_verbatim_byte_exact() {
+        use crabka_log::VerbatimBatch;
+        use crabka_protocol::records::RecordBatch as ProtoBatch;
+
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+        ));
+
+        // "Producer" batch with a bogus base_offset + epoch the log overwrites.
+        let mut producer = sample_batch(1);
+        producer.base_offset = 555;
+        producer.partition_leader_epoch = -1;
+        producer.max_timestamp = 1_234;
+        let mut wire = bytes::BytesMut::new();
+        producer.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Verbatim(VerbatimBatch {
+                bytes: wire.clone(),
+                last_offset_delta: 0,
+                max_timestamp: 1_234,
+                leader_epoch: 5,
+                producer_id: -1,
+                is_transactional: false,
+            }),
+            ack,
+        }))
+        .await
+        .expect("send verbatim job");
+        let assigned = ack_rx.await.expect("ack").expect("append ok");
+        assert!(assigned == 0);
+
+        // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
+        let r = log
+            .lock()
+            .unwrap()
+            .read_raw(0, 1, 10 * 1024 * 1024)
+            .unwrap();
+        assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
+        assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
+        // Decodes with the assigned offset + stamped epoch.
+        let mut cur: &[u8] = &r.bytes;
+        let decoded = ProtoBatch::decode(&mut cur).unwrap();
+        assert!(decoded.base_offset == 0);
+        assert!(decoded.partition_leader_epoch == 5);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -521,7 +604,7 @@ mod tests {
 
         let (ack, _ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
-            batch: sample_batch(1),
+            data: ProduceData::Owned(sample_batch(1)),
             ack,
         }))
         .await
@@ -643,7 +726,7 @@ mod tests {
         for _ in 0..2 {
             let (ack, ack_rx) = oneshot::channel();
             tx.send(WriterMessage::Produce(ProduceJob {
-                batch: sample_batch(2),
+                data: ProduceData::Owned(sample_batch(2)),
                 ack,
             }))
             .await
@@ -697,7 +780,7 @@ mod tests {
 
         let (ack, _ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
-            batch: sample_batch(2),
+            data: ProduceData::Owned(sample_batch(2)),
             ack,
         }))
         .await
@@ -836,7 +919,7 @@ mod tests {
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Produce(ProduceJob {
-            batch: sample_batch(3),
+            data: ProduceData::Owned(sample_batch(3)),
             ack,
         }))
         .await

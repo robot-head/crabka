@@ -133,6 +133,73 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
     Ok(RecordBatch { header: hdr, body })
 }
 
+/// A single complete v2 batch located within a larger buffer, together
+/// with its already-validated header. Returned by
+/// [`validate_one_v2_batch`].
+#[derive(Debug)]
+pub struct ValidatedBatch<'a> {
+    /// The fixed 61-byte header, reinterpreted in place (zero-copy).
+    pub header: &'a RecordBatchHeader,
+    /// Total on-disk/wire length of this batch in bytes
+    /// (`12 + batch_length`), i.e. header + body.
+    pub total_len: usize,
+}
+
+/// Validate exactly one v2 record batch at the start of `buf` **without
+/// materializing any records or decompressing the body**.
+///
+/// This is the produce passthrough fast path: it reinterprets the fixed
+/// header in place (zero-copy), checks `magic == 2`, and verifies the
+/// producer's CRC over `header[21..61] ++ raw_body` (the compressed body
+/// bytes, exactly as stored). Nothing in the body is parsed or
+/// decompressed, so the cost is one CRC pass over the bytes already in
+/// cache — no allocation.
+///
+/// Returns the validated header (for offset stamping / idempotent &
+/// transactional gating) and the batch's total byte length so the caller
+/// can slice out the verbatim bytes.
+///
+/// # Errors
+///
+/// - [`RecordsError::HeaderTooShort`] / [`RecordsError::BodyTooShort`]
+///   when `buf` does not contain a whole batch.
+/// - [`RecordsError::UnsupportedMagic`] for a non-v2 batch.
+/// - [`RecordsError::CrcMismatch`] when the stored CRC does not match.
+pub fn validate_one_v2_batch(buf: &[u8]) -> Result<ValidatedBatch<'_>, RecordsError> {
+    if buf.len() < HEADER_LEN {
+        return Err(RecordsError::HeaderTooShort {
+            needed: HEADER_LEN - buf.len(),
+        });
+    }
+    let (hdr_slice, rest) = buf.split_at(HEADER_LEN);
+    let hdr: &RecordBatchHeader =
+        RecordBatchHeader::ref_from_bytes(hdr_slice).map_err(|_| RecordsError::ZerocopyFailure)?;
+    if hdr.magic != 2 {
+        return Err(RecordsError::UnsupportedMagic { found: hdr.magic });
+    }
+    let body_len = i32::checked_sub(hdr.batch_length.get(), HEADER_TAIL_LEN)
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or_else(|| RecordsError::RecordParse("negative or oversized batch_length".into()))?;
+    if rest.len() < body_len {
+        return Err(RecordsError::BodyTooShort {
+            needed: body_len - rest.len(),
+        });
+    }
+    let raw_body = &rest[..body_len];
+
+    let expected = hdr.crc.get();
+    let mut computed = crc32c(&hdr_slice[21..HEADER_LEN]);
+    computed = crc32c_append(computed, raw_body);
+    if computed != expected {
+        return Err(RecordsError::CrcMismatch { expected, computed });
+    }
+
+    Ok(ValidatedBatch {
+        header: hdr,
+        total_len: HEADER_LEN + body_len,
+    })
+}
+
 // ── Iteration ─────────────────────────────────────────────────────────────────
 
 impl RecordBatch<'_> {
@@ -469,6 +536,65 @@ mod tests {
             "value slice does not point into the input buffer: \
              input range [{encoded_start:#x}, {encoded_end:#x}), value ptr {v_ptr:#x}",
         );
+    }
+
+    #[test]
+    fn validate_one_v2_batch_reads_header_and_len() {
+        let mut owned = super::super::owned::RecordBatch {
+            base_offset: 7,
+            partition_leader_epoch: 3,
+            last_offset_delta: 0,
+            producer_id: 99,
+            producer_epoch: 1,
+            base_sequence: 5,
+            max_timestamp: 1_234,
+            ..Default::default()
+        };
+        owned.records.push(super::super::owned::Record {
+            value: Some(Bytes::from_static(b"payload")),
+            ..Default::default()
+        });
+        let encoded = encode_owned_then_borrow(&owned);
+
+        let v = validate_one_v2_batch(&encoded).unwrap();
+        assert!(v.total_len == encoded.len());
+        assert!(v.header.base_offset.get() == 7);
+        assert!(v.header.partition_leader_epoch.get() == 3);
+        assert!(v.header.producer_id.get() == 99);
+        assert!(v.header.producer_epoch.get() == 1);
+        assert!(v.header.base_sequence.get() == 5);
+        assert!(v.header.max_timestamp.get() == 1_234);
+        assert!(v.header.magic == 2);
+    }
+
+    #[test]
+    fn validate_one_v2_batch_rejects_corrupt_crc() {
+        let owned = super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record {
+                value: Some(Bytes::from_static(b"x")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut encoded = encode_owned_then_borrow(&owned);
+        // Flip a body byte (after the 61-byte header) → CRC mismatch.
+        encoded[HEADER_LEN] ^= 0xFF;
+        let err = validate_one_v2_batch(&encoded).unwrap_err();
+        assert!(matches!(err, RecordsError::CrcMismatch { .. }));
+    }
+
+    #[test]
+    fn validate_one_v2_batch_rejects_truncated() {
+        let owned = super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record {
+                value: Some(Bytes::from_static(b"value")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let encoded = encode_owned_then_borrow(&owned);
+        let err = validate_one_v2_batch(&encoded[..encoded.len() - 2]).unwrap_err();
+        assert!(matches!(err, RecordsError::BodyTooShort { .. }));
     }
 
     #[test]
