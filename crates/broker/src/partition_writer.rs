@@ -520,6 +520,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -529,6 +531,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         // "Producer" batch with a bogus base_offset + epoch the log overwrites.
