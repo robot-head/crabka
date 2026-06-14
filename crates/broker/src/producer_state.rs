@@ -48,6 +48,39 @@ pub enum Decision {
     Fenced,
 }
 
+/// Pure idempotent-producer dedup/ordering decision. The async `check` is a thin
+/// lock-acquiring wrapper over this; extracted so it is exhaustively and
+/// property-tested in isolation (see `producer_state_model.rs`).
+pub(crate) fn check_pure(
+    entry: Option<&ProducerEntry>,
+    producer_epoch: i16,
+    base_sequence: i32,
+) -> Decision {
+    match entry {
+        None => Decision::Append,
+        Some(entry) => {
+            if producer_epoch < entry.epoch {
+                return Decision::Fenced;
+            }
+            if producer_epoch > entry.epoch {
+                // A bumped epoch establishes a fresh sequence baseline (restart
+                // or KIP-890 per-EndTxn bump). Accept the first higher-epoch batch.
+                return Decision::Append;
+            }
+            if base_sequence <= entry.last_sequence {
+                return Decision::Duplicate {
+                    base_offset: entry.base_offset,
+                };
+            }
+            if base_sequence == entry.last_sequence + 1 {
+                Decision::Append
+            } else {
+                Decision::OutOfOrder
+            }
+        }
+    }
+}
+
 /// Per-partition idempotent-producer state, nested under the owning
 /// topic. Keyed by partition index (`i32`, `Copy`) so per-call lookups
 /// allocate nothing; the outer topic map is keyed by `String` but its
@@ -84,51 +117,8 @@ impl ProducerState {
     ) -> Decision {
         let handle = self.handle(topic, partition);
         let s = handle.lock().await;
-        match s.entries.get(&producer_id) {
-            None => Decision::Append,
-            Some(entry) => {
-                if producer_epoch < entry.epoch {
-                    return Decision::Fenced;
-                }
-                if producer_epoch > entry.epoch {
-                    // A bumped producer epoch establishes a FRESH sequence
-                    // baseline: the new epoch's `base_sequence` is authoritative
-                    // and must NOT be dedup-checked against the prior epoch's
-                    // `last_sequence`. Two distinct paths reach here, both legal:
-                    //
-                    //   * Restart with `InitProducerId` (same producer_id, bumped
-                    //     epoch) — the client resets its sequence to 0.
-                    //   * KIP-890 (TV_2) per-EndTxn epoch bump within the SAME
-                    //     producer session — the broker bumps the epoch on every
-                    //     commit/abort to fence zombies, and the client continues
-                    //     its sequence counter (so `base_sequence > 0`).
-                    //
-                    // Dedup-ing the new epoch against the old `last_sequence`
-                    // silently swallowed the first record on each partition (and,
-                    // under EOS, lost output while the offset commit still landed
-                    // → cross-restart data loss). Accept the first higher-epoch
-                    // batch as the new baseline; subsequent same-epoch checks
-                    // enforce ordering under it. `commit` records the new epoch +
-                    // sequence, so the next batch is validated against it.
-                    let _ = last_offset_delta;
-                    return Decision::Append;
-                }
-                // Same epoch: ordinary idempotent dedup / ordering checks.
-                if base_sequence <= entry.last_sequence {
-                    // Anywhere within (or before) the committed range counts
-                    // as duplicate. We echo the previously-committed base offset.
-                    return Decision::Duplicate {
-                        base_offset: entry.base_offset,
-                    };
-                }
-                if base_sequence == entry.last_sequence + 1 {
-                    let _ = last_offset_delta; // used by caller to compute last_sequence
-                    Decision::Append
-                } else {
-                    Decision::OutOfOrder
-                }
-            }
-        }
+        let _ = last_offset_delta; // used only by the caller to compute last_sequence on commit
+        check_pure(s.entries.get(&producer_id), producer_epoch, base_sequence)
     }
 
     /// Commit a successful append into the tracker.
@@ -264,6 +254,10 @@ impl ProducerState {
         evicted
     }
 }
+
+#[cfg(test)]
+#[path = "producer_state_model.rs"]
+mod producer_state_model;
 
 #[cfg(test)]
 mod tests {
