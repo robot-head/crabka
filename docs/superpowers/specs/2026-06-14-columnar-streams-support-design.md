@@ -1,16 +1,26 @@
 # Columnar / DataFrame support for `crabka-client-streams`
 
 **Date:** 2026-06-14
-**Status:** Approved design — ready for implementation planning
+**Status:** Approved design — in implementation
 **Crate:** `crates/client-streams`
+
+> **Implementation update (2026-06-14):** `minarrow` was dropped and **substituted
+> with the mainstream stable [`arrow`](https://crates.io/crates/arrow) (arrow-rs)
+> crate**. minarrow's transitive `vec64` dependency requires nightly Rust
+> (`#![feature(allocator_api)]`), which is incompatible with Crabka's pinned stable
+> toolchain (1.96.0) and `unsafe_code = "forbid"`. The Arrow-IPC serde is therefore
+> `ArrowIpcSerde : Serde<arrow::array::RecordBatch>` rather than
+> `MinarrowIpcSerde : Serde<minarrow::Table>`; everything else in this spec stands.
+> References to "minarrow" below should be read as "arrow-rs `RecordBatch`".
 
 ## Summary
 
 Add first-class support for three columnar/dataframe Rust libraries to the Kafka
 Streams client:
 
-- [`minarrow`](https://github.com/pbower/minarrow) — a minimal Apache Arrow array
-  implementation.
+- [`arrow`](https://crates.io/crates/arrow) (arrow-rs) — the mainstream Apache
+  Arrow implementation (substituted for the originally-requested `minarrow`, which
+  is nightly-only; see the implementation update above).
 - [`columnar`](https://github.com/frankmcsherry/columnar) — zero-copy
   struct-of-arrays serialization (no Arrow dependency).
 - [`polars`](https://github.com/pola-rs/polars) — a full DataFrame engine.
@@ -18,7 +28,7 @@ Streams client:
 Two deliverables:
 
 1. **Serde payloads (primary).** Library-native `Serde<T>` implementations so a
-   record key/value can be a polars `DataFrame`, a minarrow `Table`, or any
+   record key/value can be a polars `DataFrame`, an arrow-rs `RecordBatch`, or any
    `columnar::Columnar` type. Usable immediately in the existing row topology.
 2. **Native columnar topology (secondary, optional).** A polars-backed topology
    whose edges carry `DataFrame`s end-to-end, running on the existing KIP-1071 /
@@ -53,8 +63,8 @@ unchanged.
 | Question | Decision |
 |---|---|
 | Integration point | `Serde<T>` payloads (primary) + optional columnar batch-processing API (secondary) |
-| Feature gating | Three per-library opt-in features: `minarrow`, `columnar`, `polars` |
-| Serde wire format | Library-native each (polars IPC, minarrow Arrow IPC, columnar native bytes) |
+| Feature gating | Three per-library opt-in features: `arrow`, `columnar`, `polars` |
+| Serde wire format | Library-native each (polars IPC, arrow-rs Arrow IPC stream, columnar native bytes) |
 | Batch API shape | Native columnar topology (batches flow along edges end-to-end) |
 | Batch engine | polars `DataFrame` on the edges |
 | Columnar runtime | Same broker runtime (KIP-1071 membership + `KafkaStreams`) |
@@ -67,7 +77,7 @@ Three independent, off-by-default cargo features:
 
 ```toml
 [features]
-minarrow  = ["dep:minarrow"]
+arrow     = ["dep:arrow"]
 columnar  = ["dep:columnar"]
 polars    = ["dep:polars", "dep:polars-arrow"]   # also enables the columnar-topology engine
 ```
@@ -79,7 +89,7 @@ src/columnar/
   mod.rs           # feature-gated re-exports
   serde/
     polars.rs      # PolarsIpcSerde   : Serde<DataFrame>          (cfg: polars)
-    minarrow.rs    # MinarrowIpcSerde : Serde<minarrow::Table>    (cfg: minarrow)
+    arrow.rs       # ArrowIpcSerde    : Serde<RecordBatch>        (cfg: arrow)
     columnar.rs    # ColumnarSerde<T> : Serde<T> for T: Columnar  (cfg: columnar)
   topology/        # native columnar topology                     (cfg: polars)
     mod.rs
@@ -91,7 +101,7 @@ src/columnar/
 ```
 
 The columnar **topology** lives under the `polars` feature only (it is
-polars-backed). The `minarrow` and `columnar` features add only their respective
+polars-backed). The `arrow` and `columnar` features add only their respective
 serde. Enabling `polars` yields both `Serde<DataFrame>` and the batch engine.
 
 ## Section 2 — Serde payloads (primary deliverable)
@@ -102,13 +112,13 @@ existing boundary (`src/processor/serde.rs`) unchanged.
 | Serde | `Serde<T>` for | Wire bytes |
 |---|---|---|
 | `PolarsIpcSerde` | `polars::DataFrame` | Arrow IPC stream (polars `IpcWriter` / `IpcReader`) |
-| `MinarrowIpcSerde` | `minarrow::Table` | Arrow IPC (minarrow IPC; verified empirically — fall back to its native format if IPC is absent) |
+| `ArrowIpcSerde` | `arrow::array::RecordBatch` | Arrow IPC stream (arrow-rs `StreamWriter` / `StreamReader`) |
 | `ColumnarSerde<T>` | `T: columnar::Columnar` | columnar's native zero-copy byte layout |
 
 - All implement `Serde<T>` + `SerdeAssociate`.
-- The unit serdes (`PolarsIpcSerde`, `MinarrowIpcSerde`) also implement
-  `Default` + `Clone` and a `DefaultSerde` impl, so `DataFrame` / `Table` work
-  with the ergonomic `add_source` / `stream` path.
+- The unit serdes (`PolarsIpcSerde`, `ArrowIpcSerde`) also implement
+  `Default` + `Clone` and a `DefaultSerde` impl, so `DataFrame` / `RecordBatch`
+  work with the ergonomic `add_source` / `stream` path.
 - `ColumnarSerde<T>` is generic, so it is opt-in per type — no blanket
   `DefaultSerde` impl (coherence). Users wire it explicitly via
   `add_source_explicit` / `with_value_serde`.
@@ -116,15 +126,19 @@ existing boundary (`src/processor/serde.rs`) unchanged.
   library-native).
 
 These serdes are usable **today in the existing row topology**: a record's value
-can simply *be* a whole `DataFrame` / `Table` / `Columnar` value. They are
+can simply *be* a whole `DataFrame` / `RecordBatch` / `Columnar` value. They are
 independent of the native columnar topology.
 
-### Minarrow IPC verification note
+### Arrow-rs IPC entry points
 
-minarrow's Arrow IPC support must be confirmed against the published crate before
-implementation. If minarrow does not expose Arrow IPC read/write, `MinarrowIpcSerde`
-uses minarrow's native serialization instead; the trait surface is unchanged
-either way. This is the one empirical check to resolve during planning.
+`ArrowIpcSerde` uses arrow-rs's stream IPC format (schema embedded per message):
+write with `arrow::ipc::writer::StreamWriter::try_new(&mut buf, &schema)` →
+`.write(&batch)` → `.finish()`; read with
+`arrow::ipc::reader::StreamReader::try_new(&bytes[..], None)` (an iterator of
+`Result<RecordBatch, ArrowError>`). Map `arrow::error::ArrowError` into
+`SerdeError`. The public IPC API is entirely safe — no `unsafe` needed under
+`unsafe_code = "forbid"`. (Resolved: arrow-rs `54.x`; `53.x` fails to build
+against the workspace's chrono.)
 
 ## Section 3 — Native columnar topology (polars-backed)
 
@@ -210,7 +224,7 @@ follow-up, out of scope for this spec.
 ## Section 4 — Testing & verification
 
 - **Serde round-trip + golden bytes.** Each serde round-trips. For
-  `PolarsIpcSerde` / `MinarrowIpcSerde`, a golden test confirms the IPC bytes are
+  `PolarsIpcSerde` / `ArrowIpcSerde`, a golden test confirms the IPC bytes are
   readable by an independent Arrow reader (cross-library read), proving payloads
   are portable. `ColumnarSerde` golden-tests the native byte layout.
 - **`ColumnarTestDriver`.** A broker-free analog of `TopologyTestDriver`:
@@ -232,8 +246,8 @@ follow-up, out of scope for this spec.
 
 ## Open items to resolve during planning
 
-1. **minarrow IPC availability** — confirm Arrow IPC read/write in the published
-   crate; choose IPC vs native fallback for `MinarrowIpcSerde` (Section 2).
+1. **~~minarrow IPC availability~~** — resolved: minarrow is nightly-only and was
+   substituted with arrow-rs `54.x` using its stream IPC API (Section 2).
 2. **Row→Arrow bridge** — select the concrete mechanism for `RowCodec`
    (`serde_arrow` crate vs a hand-rolled bridge), and whether it targets
    `polars-arrow` directly.
@@ -243,7 +257,7 @@ follow-up, out of scope for this spec.
 ## Dependencies added (all optional)
 
 - `polars` (+ `polars-arrow`) — `polars` feature
-- `minarrow` — `minarrow` feature
+- `arrow` (arrow-rs) — `arrow` feature
 - `columnar` — `columnar` feature
 - `serde_arrow` (or equivalent), if chosen for the row→Arrow bridge — `polars`
   feature
@@ -252,7 +266,7 @@ follow-up, out of scope for this spec.
 
 Per `CLAUDE.md`, batches of non-overlapping file sets dispatched in parallel:
 
-1. **Serde features** (parallel — disjoint files): `polars.rs`, `minarrow.rs`,
+1. **Serde features** (parallel — disjoint files): `polars.rs`, `arrow.rs`,
    `columnar.rs`, each with its own golden/round-trip tests. Cargo feature wiring.
 2. **Columnar topology core**: `codec.rs` (`BatchCodec` + both codecs),
    `graph.rs`, `operator.rs`, `driver.rs`.
