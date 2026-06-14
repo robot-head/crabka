@@ -677,6 +677,62 @@ impl BrokerHandle {
         self.wait_until_group_member_count(group_id, 0).await;
     }
 
+    /// Test-only: describe a **classic**-protocol group via `ClassicInspect`.
+    /// Returns `None` when no actor exists or the actor is consumer-kind (not classic).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn classic_group_inspect_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::actor::ClassicView> {
+        let handle = self
+            ._broker
+            .group_coordinator
+            .groups
+            .get(group_id)?
+            .value()
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(
+                crate::coordinator::unified::actor::GroupActorMessage::ClassicInspect { reply: tx },
+            )
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Test-only: await until the classic group has exactly `n` live members
+    /// (i.e., they have been registered in the actor via `ClassicJoin`).
+    ///
+    /// Use this rather than `wait_until_group_member_count` for classic-protocol
+    /// groups, because the next-gen `Describe` message is a no-op on a
+    /// classic-kind actor.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_classic_group_member_count(&self, group_id: &str, n: usize) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let count = self
+                    .classic_group_inspect_for_test(group_id)
+                    .await
+                    .map_or(0, |v| v.members.len());
+                if count == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "classic group {group_id} did not settle at {n} members within 30s"
+        );
+    }
+
     /// Test-only: await until the group's assigned active-task partitions
     /// (summed across all members) >= `min`.
     #[doc(hidden)]
