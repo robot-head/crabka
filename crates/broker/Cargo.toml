@@ -102,6 +102,15 @@ ktls = { workspace = true }
 # crypto_info path). Linux-only, like the probe itself.
 rcgen = { workspace = true }
 
+# Cross-platform sendfile (Increment E): the BSD-family `sendfile(2)` wrapper for
+# the zero-copy fetch path on Apple + FreeBSD/DragonFly. Linux uses `rustix`
+# (already a direct dep); these targets use nix's SAFE `sys::sendfile::sendfile`
+# (AsFd-based, no raw FFI) so it satisfies `unsafe_code = "forbid"`. The
+# `zerocopy` feature gates the sendfile wrapper; 0.31 matches the version already
+# in Cargo.lock. NOT pulled on Linux or Windows.
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "freebsd", target_os = "dragonfly"))'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["zerocopy"] }
+
 [dev-dependencies]
 assert2 = { workspace = true }
 stateright = { workspace = true }

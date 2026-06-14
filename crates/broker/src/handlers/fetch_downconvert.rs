@@ -72,7 +72,15 @@ pub(crate) fn down_convert_payload_for_fetch(
         RecordsPayload::Legacy(_) => return Ok(Some(payload.clone())),
         // Unreachable: the zero-copy `FileRegions` payload is only emitted for
         // Fetch v4+, which never down-converts (down-conversion is a v0–v3 path).
-        #[cfg(target_os = "linux")]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+        ))]
         RecordsPayload::FileRegions(_) => return Err(crate::codes::CORRUPT_MESSAGE),
     };
 
@@ -84,7 +92,15 @@ pub(crate) fn down_convert_payload_for_fetch(
                 return Err(crate::codes::CORRUPT_MESSAGE);
             }
             // `down_convert_for_fetch` only ever yields Legacy/V2/Raw.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Some(RecordsPayload::FileRegions(_)) => {
                 return Err(crate::codes::CORRUPT_MESSAGE);
             }

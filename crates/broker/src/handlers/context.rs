@@ -17,10 +17,11 @@ pub(crate) struct RequestContext<'a> {
     /// `request_percentage` quota in the dispatch loop.
     pub client_id: &'a str,
     /// `true` when the connection can serve the fetch records region via
-    /// kernel `sendfile(2)` — i.e. a plaintext `TcpStream` on Linux. The fetch
-    /// handler uses this to emit `RecordsPayload::FileRegions` (zero-copy)
-    /// instead of `Raw` for large records runs (Increment D). `false` on TLS,
-    /// non-Linux, and every non-fetch handler (which ignore it).
+    /// kernel `sendfile(2)` — i.e. a plaintext `TcpStream` on a SENDFILE-alias
+    /// platform (Linux + Apple + FreeBSD/DragonFly). The fetch handler uses this
+    /// to emit `RecordsPayload::FileRegions` (zero-copy) instead of `Raw` for
+    /// large records runs (Increments D + E). `false` on TLS, on Windows, and
+    /// for every non-fetch handler (which ignore it).
     pub sendfile_capable: bool,
 }
 

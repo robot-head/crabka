@@ -91,43 +91,44 @@ pub struct RawSegmentRead {
     pub bytes: Bytes,
 }
 
-/// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path
-/// (Increment D): the same offset/boundary metadata, but the records run is a
-/// [`FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead of an
-/// owned `Bytes` slice — so the broker can `sendfile(2)` it straight from the
-/// page cache without a userspace copy. Linux-only.
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct RawSegmentDesc {
-    /// `base_offset` of the first included batch (≤ requested offset).
-    pub start_offset: i64,
-    /// Last absolute offset covered by the region (`start_offset - 1` if empty).
-    pub last_offset: i64,
-    /// The records run, as a file-backed descriptor. `None` when no complete
-    /// batch was found in range.
-    pub region: Option<crabka_protocol::records::FileRegion>,
-}
+crate::sendfile_cfg! {
+    /// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path
+    /// (Increments D + E): the same offset/boundary metadata, but the records
+    /// run is a [`FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead
+    /// of an owned `Bytes` slice — so the broker can `sendfile(2)` it straight
+    /// from the page cache without a userspace copy. Compiled on the SENDFILE
+    /// alias (Linux + Apple + FreeBSD/DragonFly).
+    #[derive(Debug, Clone)]
+    pub struct RawSegmentDesc {
+        /// `base_offset` of the first included batch (≤ requested offset).
+        pub start_offset: i64,
+        /// Last absolute offset covered by the region (`start_offset - 1` if empty).
+        pub last_offset: i64,
+        /// The records run, as a file-backed descriptor. `None` when no complete
+        /// batch was found in range.
+        pub region: Option<crabka_protocol::records::FileRegion>,
+    }
 
-#[cfg(target_os = "linux")]
-impl RawSegmentDesc {
-    fn empty() -> Self {
-        Self {
-            start_offset: 0,
-            last_offset: -1,
-            region: None,
+    impl RawSegmentDesc {
+        fn empty() -> Self {
+            Self {
+                start_offset: 0,
+                last_offset: -1,
+                region: None,
+            }
         }
-    }
 
-    /// Byte length of the region (0 when empty).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.region.as_ref().map_or(0, |r| r.len)
-    }
+        /// Byte length of the region (0 when empty).
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.region.as_ref().map_or(0, |r| r.len)
+        }
 
-    /// `true` when no batch bytes were described.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.region.is_none()
+        /// `true` when no batch bytes were described.
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.region.is_none()
+        }
     }
 }
 
@@ -513,7 +514,8 @@ impl Segment {
         }
     }
 
-    /// Descriptor variant of [`Segment::read_raw`] for the Linux zero-copy
+    crate::sendfile_cfg! {
+    /// Descriptor variant of [`Segment::read_raw`] for the zero-copy
     /// (`sendfile`) fetch path: runs the **same** boundary walk — selecting the
     /// identical `[start_pos+range_start, start_pos+range_end)` byte range that
     /// `read_raw` would have sliced — but returns a [`FileRegion`] descriptor
@@ -523,7 +525,6 @@ impl Segment {
     /// find batch boundaries (using the header's `batch_length`), never the
     /// record payloads. The resulting region is byte-identical to `read_raw`'s
     /// `bytes` for the same `(fetch_offset, limit_offset, max_bytes)`.
-    #[cfg(target_os = "linux")]
     pub fn read_raw_desc(
         &self,
         fetch_offset: i64,
@@ -633,6 +634,7 @@ impl Segment {
             }
             None => Ok(RawSegmentDesc::empty()),
         }
+    }
     }
 
     fn read_log_range(
@@ -1102,11 +1104,11 @@ mod tests {
         drop(dir);
     }
 
-    // ---- read_raw_desc (zero-copy descriptor) tests (Linux only) ----
+    // ---- read_raw_desc (zero-copy descriptor) tests (SENDFILE-alias only) ----
 
+    crate::sendfile_cfg! {
     /// `pread` a `FileRegion` into a fresh `Vec` (the bytes the broker's
     /// sendfile would transmit / its TLS pread-fallback would copy).
-    #[cfg(target_os = "linux")]
     fn region_bytes(region: &crabka_protocol::records::FileRegion) -> Vec<u8> {
         use std::os::unix::fs::FileExt;
         let mut buf = vec![0u8; region.len];
@@ -1121,12 +1123,11 @@ mod tests {
         buf
     }
 
-    /// The load-bearing Increment-D invariant: the `read_raw_desc` region maps
+    /// The load-bearing Increment-D/E invariant: the `read_raw_desc` region maps
     /// to exactly the bytes `read_raw` would have returned, for the same
     /// `(fetch_offset, limit_offset, max_bytes)`. Covers single-batch,
     /// multi-batch, mid-stream start offsets, the limit clamp, and the
     /// one-batch-over-budget anti-stall rule.
-    #[cfg(target_os = "linux")]
     #[test]
     fn read_raw_desc_region_equals_read_raw_bytes() {
         let (dir, mut seg) = test_segment();
@@ -1168,7 +1169,6 @@ mod tests {
     /// A truncated trailing batch (byte budget cuts mid-batch) must produce a
     /// region whose bytes equal `read_raw`'s clipped output — sendfile of a
     /// clipped range is wire-valid (the consumer drops the partial batch).
-    #[cfg(target_os = "linux")]
     #[test]
     fn read_raw_desc_matches_read_raw_when_budget_clips_run() {
         let (dir, mut seg) = test_segment();
@@ -1186,6 +1186,7 @@ mod tests {
         assert!(region_bytes(&region) == raw.bytes[..]);
         drop(dir);
     }
+    } // sendfile_cfg!
 
     // ---- append_verbatim (byte-exact passthrough) tests ----
 

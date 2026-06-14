@@ -2186,11 +2186,20 @@ async fn handle_fetch_frame(
         return Ok(vec![WriteOp::Inline(framed_with_len.freeze())]);
     }
 
-    // On Linux plaintext connections, drain file-backed records regions via
-    // sendfile; everywhere else (TLS, non-Linux) use the portable vectored
-    // resolver. `do_read` only ever emits `FileRegions` when `sendfile_capable`,
-    // so the resolver choice and the payload kind stay in lock-step.
-    #[cfg(target_os = "linux")]
+    // On plaintext connections (SENDFILE alias: Linux + Apple + FreeBSD/
+    // DragonFly), drain file-backed records regions via sendfile; everywhere
+    // else (TLS, Windows) use the portable vectored resolver. `do_read` only
+    // ever emits `FileRegions` when `sendfile_capable`, so the resolver choice
+    // and the payload kind stay in lock-step.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+    ))]
     {
         if sendfile_capable && api_version >= 4 {
             return build_fetch_plan(

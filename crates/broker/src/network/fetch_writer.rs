@@ -38,12 +38,14 @@ use crabka_protocol::records::RecordsPayload;
 use crate::error::BrokerError;
 use crate::network::codec::MAX_FRAME_BYTES;
 
-/// Records runs at or above this size on a Linux plaintext connection take the
-/// `sendfile` path; smaller/fragmented runs stay on C's vectored write (the
-/// sendfile syscall + scatter-gather setup overhead can lose to a single
-/// `write_all` for tiny payloads). 32 KiB matches the design's lower bound.
-#[cfg(target_os = "linux")]
-pub const SENDFILE_MIN_BYTES: usize = 32 * 1024;
+crate::sendfile_cfg! {
+    /// Records runs at or above this size on a plaintext connection take the
+    /// `sendfile` path; smaller/fragmented runs stay on C's vectored write (the
+    /// sendfile syscall + scatter-gather setup overhead can lose to a single
+    /// `write_all` for tiny payloads). 32 KiB matches the design's lower bound.
+    /// Compiled on the SENDFILE alias (Linux + Apple + FreeBSD/DragonFly).
+    pub const SENDFILE_MIN_BYTES: usize = 32 * 1024;
+}
 
 /// One ordered segment of the fetch response wire frame.
 #[derive(Debug)]
@@ -52,10 +54,18 @@ pub enum WriteOp {
     /// metadata, records length prefixes, tagged-field trailers, and — on the
     /// vectored (Increment C) path — the resolved records bytes.
     Inline(Bytes),
-    /// A records region backed by a segment `.log` file (Increment D). Drained
-    /// by `sendfile(2)` on a Linux plaintext `TcpStream`, else a buffered
-    /// `pread` + `write_all` fallback.
-    #[cfg(target_os = "linux")]
+    /// A records region backed by a segment `.log` file (Increments D + E).
+    /// Drained by `sendfile(2)` on a plaintext `TcpStream` (Linux + Apple +
+    /// FreeBSD/DragonFly), else a buffered `pread` + `write_all` fallback.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+    ))]
     File(crabka_protocol::records::FileRegion),
 }
 
@@ -67,7 +77,15 @@ impl WriteOp {
     pub fn len(&self) -> usize {
         match self {
             Self::Inline(b) => b.len(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Self::File(r) => r.len,
         }
     }
@@ -157,9 +175,17 @@ pub fn resolve_records_inline(payload: &RecordsPayload) -> Result<Vec<WriteOp>, 
                 .map_err(|e| BrokerError::Io(std::io::Error::other(e.to_string())))?;
             buf.freeze()
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+        ))]
         RecordsPayload::FileRegions(_) => {
-            // TLS/non-Linux fallback for a FileRegions payload: pread into a
+            // TLS / non-sendfile fallback for a FileRegions payload: pread into a
             // buffer (byte-identical to the sendfile'd region).
             let mut buf = BytesMut::with_capacity(payload.payload_len());
             payload
@@ -171,50 +197,65 @@ pub fn resolve_records_inline(payload: &RecordsPayload) -> Result<Vec<WriteOp>, 
     Ok(vec![WriteOp::Inline(bytes)])
 }
 
-/// Linux-plaintext (Increment D) records resolver: emit each `FileRegion` of a
-/// `FileRegions` payload as its own [`WriteOp::File`] (one per contributing
-/// segment) for the kernel `sendfile` drain. Every other payload kind (and a
-/// `FileRegions` payload that somehow arrives here on a non-sendfile path)
-/// defers to [`resolve_records_inline`].
-#[cfg(target_os = "linux")]
-pub fn resolve_records_sendfile(payload: &RecordsPayload) -> Result<Vec<WriteOp>, BrokerError> {
-    match payload {
-        RecordsPayload::FileRegions(regions) => {
-            Ok(regions.iter().cloned().map(WriteOp::File).collect())
+crate::sendfile_cfg! {
+    /// Plaintext-sendfile (Increments D + E) records resolver: emit each
+    /// `FileRegion` of a `FileRegions` payload as its own [`WriteOp::File`] (one
+    /// per contributing segment) for the kernel `sendfile` drain. Every other
+    /// payload kind (and a `FileRegions` payload that somehow arrives here on a
+    /// non-sendfile path) defers to [`resolve_records_inline`]. Compiled on the
+    /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly).
+    pub fn resolve_records_sendfile(payload: &RecordsPayload) -> Result<Vec<WriteOp>, BrokerError> {
+        match payload {
+            RecordsPayload::FileRegions(regions) => {
+                Ok(regions.iter().cloned().map(WriteOp::File).collect())
+            }
+            _ => resolve_records_inline(payload),
         }
-        _ => resolve_records_inline(payload),
     }
 }
 
 /// A byte sink that can additionally drain a segment-file-backed records region
 /// with the most efficient mechanism available to it.
 ///
-/// On Linux a plaintext `TcpStream` exposes its underlying socket for the
-/// readiness-driven `sendfile` loop; every other stream (TLS — which encrypts
-/// in userspace) returns `None`, and the drainer falls back to a buffered
-/// `pread` + `write_all` that produces identical wire bytes. On non-Linux the
-/// trait carries no methods (sendfile is never used).
+/// On a SENDFILE-alias platform (Linux + Apple + FreeBSD/DragonFly) a plaintext
+/// `TcpStream` exposes its underlying socket for the readiness-driven `sendfile`
+/// loop; every other stream (TLS — which encrypts in userspace) returns `None`,
+/// and the drainer falls back to a buffered `pread` + `write_all` that produces
+/// identical wire bytes. On Windows (no safe `sendfile`/`TransmitFile`) the
+/// `tcp_for_sendfile` method is compiled out and sendfile is never used.
 pub trait SendfileSink {
     /// `true` when this stream can serve a records region via kernel
-    /// `sendfile(2)` — i.e. a plaintext `TcpStream` on Linux. Always `false`
-    /// on TLS and on non-Linux platforms. The fetch handler uses this to decide
-    /// whether to emit `RecordsPayload::FileRegions` at all.
+    /// `sendfile(2)` — i.e. a plaintext `TcpStream` on a SENDFILE-alias
+    /// platform. Always `false` on TLS and on Windows. The fetch handler uses
+    /// this to decide whether to emit `RecordsPayload::FileRegions` at all.
     fn is_sendfile_capable(&self) -> bool;
 
-    /// Borrow the underlying `TcpStream` for readiness-driven `sendfile`, when
-    /// this stream *is* a plaintext `TcpStream`. `None` for TLS. Linux-only:
-    /// no other platform has a compatible `sendfile`.
-    #[cfg(target_os = "linux")]
-    fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream>;
+    crate::sendfile_cfg! {
+        /// Borrow the underlying `TcpStream` for readiness-driven `sendfile`,
+        /// when this stream *is* a plaintext `TcpStream`. `None` for TLS.
+        /// Present only on SENDFILE-alias platforms (Linux + Apple +
+        /// FreeBSD/DragonFly); Windows has no compatible safe `sendfile`.
+        fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream>;
+    }
 }
 
 impl SendfileSink for tokio::net::TcpStream {
     fn is_sendfile_capable(&self) -> bool {
-        cfg!(target_os = "linux")
+        // True on every SENDFILE-alias platform; false on Windows.
+        cfg!(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+        ))
     }
-    #[cfg(target_os = "linux")]
-    fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream> {
-        Some(self)
+    crate::sendfile_cfg! {
+        fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream> {
+            Some(self)
+        }
     }
 }
 
@@ -227,9 +268,10 @@ impl SendfileSink for tokio_rustls::server::TlsStream<tokio::net::TcpStream> {
     fn is_sendfile_capable(&self) -> bool {
         false
     }
-    #[cfg(target_os = "linux")]
-    fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream> {
-        None
+    crate::sendfile_cfg! {
+        fn tcp_for_sendfile(&self) -> Option<&tokio::net::TcpStream> {
+            None
+        }
     }
 }
 
@@ -265,7 +307,15 @@ where
             WriteOp::Inline(b) => {
                 stream.write_all(&b).await.map_err(BrokerError::Io)?;
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             WriteOp::File(region) => {
                 drain_file_region(stream, &region).await?;
             }
@@ -275,128 +325,270 @@ where
     Ok(())
 }
 
-/// Positioned, full read of a `FileRegion` into `dst` (which must be exactly
-/// `region.len` bytes), looping over short reads. The TLS/non-sendfile
-/// fallback for `WriteOp::File`.
-#[cfg(target_os = "linux")]
-fn read_region_exact(
-    region: &crabka_protocol::records::FileRegion,
-    dst: &mut [u8],
-) -> Result<(), BrokerError> {
-    use std::os::unix::fs::FileExt;
-    debug_assert_eq!(dst.len(), region.len);
-    let mut filled = 0usize;
-    let mut offset = region.offset;
-    while filled < dst.len() {
-        match region.file.read_at(&mut dst[filled..], offset) {
-            Ok(0) => {
-                return Err(BrokerError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "FileRegion read hit EOF before len bytes",
-                )));
+crate::sendfile_cfg! {
+    /// Positioned, full read of a `FileRegion` into `dst` (which must be exactly
+    /// `region.len` bytes), looping over short reads. The TLS/non-sendfile
+    /// fallback for `WriteOp::File`. `read_at` (`FileExt`) is portable across
+    /// every SENDFILE-alias unix.
+    fn read_region_exact(
+        region: &crabka_protocol::records::FileRegion,
+        dst: &mut [u8],
+    ) -> Result<(), BrokerError> {
+        use std::os::unix::fs::FileExt;
+        debug_assert_eq!(dst.len(), region.len);
+        let mut filled = 0usize;
+        let mut offset = region.offset;
+        while filled < dst.len() {
+            match region.file.read_at(&mut dst[filled..], offset) {
+                Ok(0) => {
+                    return Err(BrokerError::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "FileRegion read hit EOF before len bytes",
+                    )));
+                }
+                Ok(n) => {
+                    filled += n;
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(BrokerError::Io(e)),
             }
-            Ok(n) => {
-                filled += n;
-                offset += n as u64;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(BrokerError::Io(e)),
+        }
+        Ok(())
+    }
+
+    /// Drain one `FileRegion` to the socket. Uses kernel `sendfile(2)` when the
+    /// stream is a plaintext `TcpStream` on a SENDFILE-alias platform; otherwise
+    /// (TLS) falls back to a buffered `pread` + `write_all` producing identical
+    /// wire bytes.
+    async fn drain_file_region<S>(
+        stream: &mut S,
+        region: &crabka_protocol::records::FileRegion,
+    ) -> Result<(), BrokerError>
+    where
+        S: AsyncWrite + SendfileSink + Unpin,
+    {
+        if stream.tcp_for_sendfile().is_some() {
+            // Re-borrow immutably for the readiness loop. `writable()`/`try_io()`
+            // take `&self`, so this never conflicts with the (released) `&mut`.
+            let tcp = stream
+                .tcp_for_sendfile()
+                .expect("checked Some on the line above");
+            sendfile_region(tcp, region).await
+        } else {
+            // TLS fallback: pread the region into a buffer and write it.
+            let mut buf = BytesMut::zeroed(region.len);
+            read_region_exact(region, &mut buf)?;
+            stream.write_all(&buf).await.map_err(BrokerError::Io)?;
+            Ok(())
         }
     }
-    Ok(())
 }
 
-/// Drain one `FileRegion` to the socket. Uses kernel `sendfile(2)` when the
-/// stream is a plaintext `TcpStream` on Linux; otherwise (TLS) falls back to a
-/// buffered `pread` + `write_all` producing identical wire bytes.
-#[cfg(target_os = "linux")]
-async fn drain_file_region<S>(
-    stream: &mut S,
-    region: &crabka_protocol::records::FileRegion,
-) -> Result<(), BrokerError>
-where
-    S: AsyncWrite + SendfileSink + Unpin,
-{
-    if stream.tcp_for_sendfile().is_some() {
-        // Re-borrow immutably for the readiness loop. `writable()`/`try_io()`
-        // take `&self`, so this never conflicts with the (released) `&mut`.
-        let tcp = stream
-            .tcp_for_sendfile()
-            .expect("checked Some on the line above");
-        sendfile_region(tcp, region).await
-    } else {
-        // TLS fallback: pread the region into a buffer and write it.
-        let mut buf = BytesMut::zeroed(region.len);
-        read_region_exact(region, &mut buf)?;
-        stream.write_all(&buf).await.map_err(BrokerError::Io)?;
+crate::sendfile_cfg! {
+    /// `sendfile(2)` a `FileRegion` to a plaintext `TcpStream`, looping over
+    /// partial writes and `EAGAIN`.
+    ///
+    /// The readiness loop is **shared** across every SENDFILE-alias platform:
+    /// the socket is non-blocking under tokio, so on a full socket buffer the
+    /// syscall reports `EAGAIN`/`WouldBlock`; we `await tcp.writable()` and
+    /// retry. `TcpStream::try_io` clears the readiness flag correctly on
+    /// `WouldBlock` — no `spawn_blocking`, no second `AsyncFd` over the fd.
+    ///
+    /// We track our own `sent_total` cursor and compute the absolute file offset
+    /// for each attempt as `region.offset + sent_total`, so the file's own cursor
+    /// is never touched and concurrent reads of the same `Arc<File>` are
+    /// unaffected. Only the single per-OS syscall attempt ([`sendfile_once`]) is
+    /// cfg-selected; everything around it is identical on Linux and Apple/BSD.
+    async fn sendfile_region(
+        tcp: &tokio::net::TcpStream,
+        region: &crabka_protocol::records::FileRegion,
+    ) -> Result<(), BrokerError> {
+        use std::io::ErrorKind;
+        use std::os::fd::{AsFd, BorrowedFd};
+
+        let in_fd: BorrowedFd<'_> = region.file.as_fd();
+        // `TcpStream: AsFd` — borrow the socket fd safely (no `unsafe`/`borrow_raw`).
+        let out_fd: BorrowedFd<'_> = tcp.as_fd();
+
+        let mut sent_total: usize = 0;
+
+        while sent_total < region.len {
+            // Wait for the socket to be writable, then attempt one sendfile. If
+            // the kernel reports it would block (with no forward progress),
+            // `try_io` returns WouldBlock and we loop back to `writable()`.
+            tcp.writable().await.map_err(BrokerError::Io)?;
+            let offset = region.offset + sent_total as u64;
+            let remaining = region.len - sent_total;
+            let res = tcp.try_io(tokio::io::Interest::WRITABLE, || {
+                sendfile_once(out_fd, in_fd, offset, remaining)
+            });
+            match res {
+                Ok(0) => {
+                    // The syscall reported success with zero bytes while bytes
+                    // still remain: the source file is shorter than expected
+                    // (truncated mid-send). The `Arc<File>` should prevent this;
+                    // treat as an I/O error so the connection closes rather than
+                    // emitting a short frame.
+                    return Err(BrokerError::Io(std::io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "sendfile returned 0 before region fully sent",
+                    )));
+                }
+                Ok(n) => {
+                    sent_total += n;
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    // Not writable yet (true would-block: zero bytes moved); loop
+                    // and re-await readiness.
+                }
+                Err(e) => return Err(BrokerError::Io(e)),
+            }
+        }
         Ok(())
     }
 }
 
-/// `sendfile(2)` a `FileRegion` to a plaintext `TcpStream`, looping over
-/// partial writes and `EAGAIN`.
+/// One non-blocking `sendfile(2)` attempt, returning the bytes transferred this
+/// call. A true would-block (zero forward progress) surfaces as
+/// `ErrorKind::WouldBlock` so the shared readiness loop re-arms; any positive
+/// transfer returns `Ok(n)` even if the kernel also signalled `EAGAIN`.
 ///
-/// Mechanics:
-///   * `rustix::fs::sendfile(out_fd, in_fd, Some(&mut offset), count)` copies
-///     up to `count` bytes from the file (at `offset`) to the socket inside the
-///     kernel (page cache → NIC, no userspace copy), advancing `offset` by the
-///     transferred count and returning it.
-///   * The socket is non-blocking under tokio. On a full socket buffer
-///     `sendfile` returns `EAGAIN`/`WouldBlock`; we `await tcp.writable()` and
-///     retry. `TcpStream::try_io` clears the readiness flag correctly on
-///     `WouldBlock` — no `spawn_blocking`, no second `AsyncFd` over the fd.
-///   * We advance our own `remaining` cursor on every partial write until
-///     `region.len` bytes have been sent. `offset` is advanced by `sendfile`
-///     itself (we pass `Some(&mut offset)`), so the file's own cursor is never
-///     touched and concurrent reads of the same `Arc<File>` are unaffected.
+/// **Linux** (`rustix`): `sendfile(out, in, Some(&mut offset), count)` returns
+/// the count and mutates `offset` in place. On `EAGAIN` it returns `Err`; the
+/// kernel does not report a partial count via `errno`, so `Err(EAGAIN)` always
+/// means zero bytes this call — we map it straight to `WouldBlock`.
 #[cfg(target_os = "linux")]
-async fn sendfile_region(
-    tcp: &tokio::net::TcpStream,
-    region: &crabka_protocol::records::FileRegion,
-) -> Result<(), BrokerError> {
-    use std::io::ErrorKind;
-    use std::os::fd::{AsFd, BorrowedFd};
+fn sendfile_once(
+    out_fd: std::os::fd::BorrowedFd<'_>,
+    in_fd: std::os::fd::BorrowedFd<'_>,
+    offset: u64,
+    count: usize,
+) -> std::io::Result<usize> {
+    let mut off = offset;
+    rustix::fs::sendfile(out_fd, in_fd, Some(&mut off), count).map_err(std::io::Error::from)
+}
 
-    let in_fd: BorrowedFd<'_> = region.file.as_fd();
-    // `TcpStream: AsFd` — borrow the socket fd safely (no `unsafe`/`borrow_raw`).
-    let out_fd: BorrowedFd<'_> = tcp.as_fd();
+/// **Apple / FreeBSD / DragonFly** (`nix`): the BSD-family `sendfile` returns
+/// `(nix::Result<()>, off_t)` where the `off_t` is the bytes transferred this
+/// call — **valid even on `Err(EAGAIN)`**. This is the correctness landmine: on
+/// these platforms `EAGAIN` with `n > 0` is *forward progress*, not would-block.
+/// We therefore:
+///   * `Ok(())`                 → return `Ok(n)` (fully or partially sent; the
+///                                 loop advances by `n`),
+///   * `Err(EAGAIN)` with `n>0` → return `Ok(n)` (count the progress, the loop
+///                                 advances and re-arms readiness for the rest),
+///   * `Err(EAGAIN)` with `n==0`→ return `Err(WouldBlock)` (a real would-block),
+///   * any other `Err`          → propagate as a hard I/O error.
+///
+/// `count` is always `Some(region_remaining)` (never `None`/0 = "to EOF"), so we
+/// never overshoot into the next batch. Header/trailer `hdtr` slices are `None`:
+/// our frame metadata is a separate `WriteOp::Inline`, exactly as on Linux.
+///
+/// NOTE: this arm is compile-reasoned only — it is not built or run on the
+/// Windows/WSL toolchains used here. It needs a macOS / FreeBSD CI runner to
+/// verify the syscall semantics and the byte-exact wire output.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+))]
+fn sendfile_once(
+    out_sock: std::os::fd::BorrowedFd<'_>,
+    in_fd: std::os::fd::BorrowedFd<'_>,
+    offset: u64,
+    count: usize,
+) -> std::io::Result<usize> {
+    use nix::errno::Errno;
 
-    let mut offset: u64 = region.offset;
-    let mut remaining: usize = region.len;
+    // `off_t` is the kernel's signed file-offset type; the byte ranges we send
+    // are bounded by the segment size and always fit.
+    let off = offset as nix::libc::off_t;
 
-    while remaining > 0 {
-        // Wait for the socket to be writable, then attempt one sendfile. If the
-        // kernel reports it would block, `try_io` returns WouldBlock and we
-        // loop back to `writable()`.
-        tcp.writable().await.map_err(BrokerError::Io)?;
-        let res = tcp.try_io(tokio::io::Interest::WRITABLE, || {
-            let before = offset;
-            let sent = rustix::fs::sendfile(out_fd, in_fd, Some(&mut offset), remaining)
-                .map_err(std::io::Error::from)?;
-            debug_assert_eq!(offset - before, sent as u64);
-            Ok(sent)
-        });
-        match res {
-            Ok(0) => {
-                // sendfile returned 0 with bytes still remaining: the source
-                // file is shorter than expected (truncated mid-send). The
-                // `Arc<File>` should prevent this; treat as an I/O error so the
-                // connection closes rather than emitting a short frame.
-                return Err(BrokerError::Io(std::io::Error::new(
-                    ErrorKind::UnexpectedEof,
-                    "sendfile returned 0 before region fully sent",
-                )));
+    // The `count` parameter's element type differs by platform: macOS/iOS take
+    // `Option<off_t>`, FreeBSD/DragonFly take `Option<usize>`. The
+    // `count_arg` shim normalizes our `usize remaining` to the right type. We
+    // never pass `None` (which would mean "send to EOF" and could overshoot the
+    // current batch into the next one in the same `.log` file).
+    let (result, sent) = bsd_sendfile(in_fd, out_sock, off, count);
+
+    let n = usize::try_from(sent).unwrap_or(0);
+    match result {
+        // Fully/partially transferred without error.
+        Ok(()) => Ok(n),
+        // EAGAIN/EWOULDBLOCK: on BSD-family this can accompany real forward
+        // progress (n > 0). Count the progress; only a zero-progress EAGAIN is a
+        // true would-block that the readiness loop must wait on.
+        Err(Errno::EAGAIN) => {
+            if n > 0 {
+                Ok(n)
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
             }
-            Ok(n) => {
-                remaining -= n;
-            }
-            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                // Not writable yet; loop and re-await readiness.
-            }
-            Err(e) => return Err(BrokerError::Io(e)),
         }
+        // EINTR with progress is also forward progress; without progress, retry
+        // is harmless — surface as WouldBlock so the loop re-arms and re-issues.
+        Err(Errno::EINTR) if n > 0 => Ok(n),
+        Err(Errno::EINTR) => Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+        Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
     }
-    Ok(())
+}
+
+/// Platform shim over the per-OS BSD-family `nix::sys::sendfile::sendfile`
+/// signatures (macOS uses `Option<off_t>` for `count` and no flags; FreeBSD
+/// additionally takes `SfFlags` + a readahead hint; DragonFly takes neither but
+/// uses `Option<usize>`). Returns `(nix::Result<()>, off_t bytes_sent)`.
+///
+/// Compile-reasoned only (no macOS/BSD toolchain here); needs CI verification.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos"
+))]
+fn bsd_sendfile(
+    in_fd: std::os::fd::BorrowedFd<'_>,
+    out_sock: std::os::fd::BorrowedFd<'_>,
+    offset: nix::libc::off_t,
+    count: usize,
+) -> (nix::Result<()>, nix::libc::off_t) {
+    // macOS/iOS: count is `Option<off_t>`; no header/trailer; no flags.
+    let count = Some(count as nix::libc::off_t);
+    nix::sys::sendfile::sendfile(in_fd, out_sock, offset, count, None, None)
+}
+
+#[cfg(target_os = "freebsd")]
+fn bsd_sendfile(
+    in_fd: std::os::fd::BorrowedFd<'_>,
+    out_sock: std::os::fd::BorrowedFd<'_>,
+    offset: nix::libc::off_t,
+    count: usize,
+) -> (nix::Result<()>, nix::libc::off_t) {
+    // FreeBSD: count is `Option<usize>`; additional `SfFlags` + readahead args.
+    nix::sys::sendfile::sendfile(
+        in_fd,
+        out_sock,
+        offset,
+        Some(count),
+        None,
+        None,
+        nix::sys::sendfile::SfFlags::empty(),
+        0,
+    )
+}
+
+#[cfg(target_os = "dragonfly")]
+fn bsd_sendfile(
+    in_fd: std::os::fd::BorrowedFd<'_>,
+    out_sock: std::os::fd::BorrowedFd<'_>,
+    offset: nix::libc::off_t,
+    count: usize,
+) -> (nix::Result<()>, nix::libc::off_t) {
+    // DragonFly: count is `Option<usize>`; no flags/readahead.
+    nix::sys::sendfile::sendfile(in_fd, out_sock, offset, Some(count), None, None)
 }
 
 #[cfg(test)]
@@ -422,12 +614,21 @@ mod tests {
     }
 
     /// Extract the bytes of an `Inline` op (panics on a `File` op). Avoids a
-    /// `match`/`let-else` that is infallible on non-Linux (one variant) but
-    /// refutable on Linux (two variants), keeping clippy happy on both.
+    /// `match`/`let-else` that is infallible on Windows (one variant) but
+    /// refutable on SENDFILE-alias platforms (two variants), keeping clippy happy
+    /// on both.
     fn inline_bytes(op: &WriteOp) -> &Bytes {
         match op {
             WriteOp::Inline(b) => b,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             WriteOp::File(_) => panic!("expected an inline op"),
         }
     }
@@ -494,7 +695,15 @@ mod tests {
             for op in &ops {
                 match op {
                     WriteOp::Inline(b) => new_bytes.extend_from_slice(b),
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "tvos",
+                        target_os = "watchos",
+                        target_os = "freebsd",
+                        target_os = "dragonfly",
+                    ))]
                     WriteOp::File(_) => unreachable!("inline resolver emits no File ops"),
                 }
             }
@@ -539,8 +748,21 @@ mod tests {
         }
     }
 
-    // ─── Increment D (Linux sendfile) tests ───────────────────────────────
-    #[cfg(target_os = "linux")]
+    // ─── Increment D/E (cross-platform sendfile) tests ────────────────────
+    // Compiled on every SENDFILE-alias platform (Linux + Apple + FreeBSD/
+    // DragonFly). The plan-shape + pread-fallback tests are pure userspace and
+    // portable; the loopback-TCP roundtrip exercises the real readiness +
+    // partial-write loop. The kTLS roundtrip below stays Linux-only (kTLS is a
+    // Linux-only dependency).
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+    ))]
     mod sendfile_tests {
         use super::*;
         use crabka_protocol::records::FileRegion;
@@ -729,6 +951,10 @@ mod tests {
         /// `tls` module isn't loaded / `CONFIG_TLS` absent. The startup probe
         /// gates this exact condition in production, so a skip here mirrors the
         /// fallback path being taken.
+        ///
+        /// Linux-only: `ktls` is a Linux-only dependency, so this test is not
+        /// compiled on the Apple/BSD members of the SENDFILE alias.
+        #[cfg(target_os = "linux")]
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn ktls_sendfile_over_tls_is_byte_exact() {
             use std::sync::Arc;

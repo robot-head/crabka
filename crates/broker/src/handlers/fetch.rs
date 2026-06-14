@@ -1128,17 +1128,25 @@ async fn do_read(
             let join = tokio::task::spawn_blocking(move || {
                 let log = log.lock().expect("log mutex poisoned");
 
-                // Zero-copy (Increment D): on a Linux plaintext connection,
-                // describe the records run with a cheap header-only walk
-                // (`read_raw_desc`) instead of `pread`ing the payload. If the
-                // run is large enough to amortize the sendfile syscall, return
-                // file-backed regions for the `sendfile` drain; otherwise fall
-                // back to the byte-copy `read_raw` path (small/fragmented
-                // fetches stay on the vectored path). The descriptor is captured
-                // here under the log lock so retention can't truncate the
-                // region out from under the later async send (the `Arc<File>`
-                // pins the inode).
-                #[cfg(target_os = "linux")]
+                // Zero-copy (Increments D + E): on a plaintext connection
+                // (SENDFILE alias: Linux + Apple + FreeBSD/DragonFly), describe
+                // the records run with a cheap header-only walk (`read_raw_desc`)
+                // instead of `pread`ing the payload. If the run is large enough
+                // to amortize the sendfile syscall, return file-backed regions
+                // for the `sendfile` drain; otherwise fall back to the byte-copy
+                // `read_raw` path (small/fragmented fetches stay on the vectored
+                // path). The descriptor is captured here under the log lock so
+                // retention can't truncate the region out from under the later
+                // async send (the `Arc<File>` pins the inode).
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                ))]
                 let records: RecordsPayload = {
                     let mut chosen: Option<RecordsPayload> = None;
                     if sendfile_capable {
@@ -1156,7 +1164,17 @@ async fn do_read(
                         ),
                     }
                 };
-                #[cfg(not(target_os = "linux"))]
+                // Windows fallback: no safe `sendfile`/`TransmitFile`, so always
+                // `read_raw` + copy (the Increment C vectored path drains it).
+                #[cfg(not(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                )))]
                 let records: RecordsPayload = {
                     let _ = sendfile_capable;
                     RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)

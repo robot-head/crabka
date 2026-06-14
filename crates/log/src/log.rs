@@ -98,31 +98,32 @@ impl RawRead {
     }
 }
 
-/// Descriptor form of [`Log::read_raw`] for the Linux zero-copy (`sendfile`)
-/// fetch path (Increment D): the records run is described by one
-/// [`FileRegion`] per contributing segment — so a multi-segment fetch is
-/// `sendfile`d as several regions with **no** coalescing copy (unlike
-/// `read_raw`, which concatenates cross-segment chunks into a fresh
-/// `BytesMut`). Linux-only.
-#[cfg(target_os = "linux")]
-#[derive(Debug, Clone)]
-pub struct RawReadDesc {
-    /// Absolute offset of the first batch in the regions, or the requested
-    /// offset when no bytes were returned.
-    pub start_offset: i64,
-    /// One file-backed region per contributing segment, in wire order.
-    pub regions: Vec<crabka_protocol::records::FileRegion>,
-    /// Total byte length across all regions.
-    pub total: usize,
-}
+crate::sendfile_cfg! {
+    /// Descriptor form of [`Log::read_raw`] for the zero-copy (`sendfile`) fetch
+    /// path (Increments D + E): the records run is described by one
+    /// [`FileRegion`] per contributing segment — so a multi-segment fetch is
+    /// `sendfile`d as several regions with **no** coalescing copy (unlike
+    /// `read_raw`, which concatenates cross-segment chunks into a fresh
+    /// `BytesMut`). Compiled on the SENDFILE alias (Linux + Apple +
+    /// FreeBSD/DragonFly).
+    #[derive(Debug, Clone)]
+    pub struct RawReadDesc {
+        /// Absolute offset of the first batch in the regions, or the requested
+        /// offset when no bytes were returned.
+        pub start_offset: i64,
+        /// One file-backed region per contributing segment, in wire order.
+        pub regions: Vec<crabka_protocol::records::FileRegion>,
+        /// Total byte length across all regions.
+        pub total: usize,
+    }
 
-#[cfg(target_os = "linux")]
-impl RawReadDesc {
-    fn empty(off: i64) -> Self {
-        Self {
-            start_offset: off,
-            regions: Vec::new(),
-            total: 0,
+    impl RawReadDesc {
+        fn empty(off: i64) -> Self {
+            Self {
+                start_offset: off,
+                regions: Vec::new(),
+                total: 0,
+            }
         }
     }
 }
@@ -791,16 +792,16 @@ impl Log {
         })
     }
 
-    /// Descriptor variant of [`Log::read_raw`] for the Linux zero-copy
-    /// (`sendfile`) fetch path: walks sealed segments then the active segment
-    /// exactly as `read_raw` does, but collects one [`FileRegion`] per
-    /// contributing segment (via [`Segment::read_raw_desc`]) instead of owned
-    /// `Bytes`. Crucially, multi-segment fetches are **not** coalesced — each
-    /// region is `sendfile`d separately, dropping the cross-segment copy.
+    crate::sendfile_cfg! {
+    /// Descriptor variant of [`Log::read_raw`] for the zero-copy (`sendfile`)
+    /// fetch path: walks sealed segments then the active segment exactly as
+    /// `read_raw` does, but collects one [`FileRegion`] per contributing segment
+    /// (via [`Segment::read_raw_desc`]) instead of owned `Bytes`. Crucially,
+    /// multi-segment fetches are **not** coalesced — each region is `sendfile`d
+    /// separately, dropping the cross-segment copy.
     ///
     /// The selected byte ranges are byte-identical to what `read_raw` would
     /// have returned for the same `(fetch_offset, limit_offset, max_bytes)`.
-    #[cfg(target_os = "linux")]
     pub fn read_raw_desc(
         &self,
         fetch_offset: i64,
@@ -867,6 +868,7 @@ impl Log {
             regions,
             total,
         })
+    }
     }
 
     /// Truncate the log so no records at offset `>= offset` remain. Used
@@ -1461,11 +1463,11 @@ mod tests {
         drop(dir);
     }
 
-    /// Increment D: `Log::read_raw_desc` across a segment seam must yield
+    crate::sendfile_cfg! {
+    /// Increment D/E: `Log::read_raw_desc` across a segment seam must yield
     /// regions whose **concatenation** is byte-identical to `read_raw`'s
     /// coalesced bytes — but as multiple `FileRegion`s (one per contributing
     /// segment), proving the cross-segment copy was dropped.
-    #[cfg(target_os = "linux")]
     #[test]
     fn log_read_raw_desc_multi_segment_regions_equal_read_raw() {
         use std::os::unix::fs::FileExt;
@@ -1516,6 +1518,7 @@ mod tests {
         );
         drop(dir);
     }
+    } // sendfile_cfg!
 
     /// Encode a "producer" batch (with a producer-chosen `base_offset` and
     /// leader epoch) and return both the wire bytes and a `VerbatimBatch`.

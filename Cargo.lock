@@ -1379,6 +1379,7 @@ dependencies = [
  "jsonpath-rust",
  "ktls",
  "lru 0.18.0",
+ "nix 0.31.3",
  "opentelemetry-proto",
  "pbkdf2 0.13.0-rc.10",
  "prometheus-client",

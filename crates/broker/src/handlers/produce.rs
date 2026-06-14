@@ -789,14 +789,30 @@ fn decode_single_batch(
                     RecordsPayload::V2(mut v) => v.drain(..).next(),
                     RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => None,
                     // `FileRegions` is a fetch-only payload; never produced here.
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "tvos",
+                        target_os = "watchos",
+                        target_os = "freebsd",
+                        target_os = "dragonfly",
+                    ))]
                     RecordsPayload::FileRegions(_) => None,
                 })
                 .ok_or(codes::INVALID_REQUEST)
         }
         // `FileRegions` is a fetch-response-only payload — never reaches the
         // produce decode path.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+        ))]
         RecordsPayload::FileRegions(_) => Err(codes::INVALID_REQUEST),
         RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
             Ok(rb) => {

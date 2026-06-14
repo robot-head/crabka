@@ -33,13 +33,22 @@ pub enum RecordsPayload {
     /// Opaque pre-v2 bytes (v0/v1 `MessageSet`). Decode with
     /// `crabka_records_legacy::decode_message_set`.
     Legacy(Bytes),
-    /// Zero-copy fetch (Increment D): the records run lives in segment `.log`
-    /// files and is `sendfile(2)`d straight to a plaintext socket — never
-    /// materialized in userspace. One [`FileRegion`] per contributing segment.
-    /// `encode_to` falls back to `pread` + `put_slice` (used on TLS/non-Linux
-    /// and for `encoded_len` agreement). Linux-only because it only exists to
-    /// feed the Linux `sendfile` drainer.
-    #[cfg(target_os = "linux")]
+    /// Zero-copy fetch (Increments D + E): the records run lives in segment
+    /// `.log` files and is `sendfile(2)`d straight to a plaintext socket —
+    /// never materialized in userspace. One [`FileRegion`] per contributing
+    /// segment. `encode_to` falls back to `pread` + `put_slice` (used on TLS /
+    /// non-sendfile platforms and for `encoded_len` agreement). Gated on the
+    /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly) because it only exists
+    /// to feed the `sendfile` drainer; on Windows the fallback `pread` path runs.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+    ))]
     FileRegions(Vec<crate::records::FileRegion>),
 }
 
@@ -65,7 +74,15 @@ impl RecordsPayload {
         match self {
             Self::V2(batches) => batches.iter().map(RecordBatch::encoded_len).sum(),
             Self::Raw(b) | Self::Legacy(b) => b.len(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Self::FileRegions(regions) => regions.iter().map(|r| r.len).sum(),
         }
     }
@@ -88,7 +105,15 @@ impl RecordsPayload {
                 buf.put_slice(b);
                 Ok(())
             }
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Self::FileRegions(regions) => {
                 use std::os::unix::fs::FileExt;
                 let mut scratch = vec![0u8; 0];
@@ -129,7 +154,15 @@ impl RecordsPayload {
     pub fn as_v2(&self) -> Option<&[RecordBatch]> {
         match self {
             Self::V2(batches) => Some(batches),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Self::FileRegions(_) => None,
             Self::Raw(_) | Self::Legacy(_) => None,
         }
@@ -140,7 +173,15 @@ impl RecordsPayload {
     pub fn as_legacy(&self) -> Option<&Bytes> {
         match self {
             Self::Legacy(b) => Some(b),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
             Self::FileRegions(_) => None,
             Self::V2(_) | Self::Raw(_) => None,
         }
