@@ -85,6 +85,26 @@ pub(super) fn handle_join(
         });
     }
 
+    // 2b. KIP-345 fence: a known member_id must keep a consistent
+    // group.instance.id. A join that reuses an existing member's id with a
+    // different instance nature — e.g. a dynamic rejoin of a static member, or a
+    // switch between instances — would otherwise overwrite the member in
+    // `add_member` and orphan its `static_members` index entry, permanently
+    // pinning the old instance id (a non-conforming client could lock a slot
+    // forever). Apache Kafka validates the registered instance against the
+    // request and fences the mismatch.
+    if let Some(existing) = state.members.get(&req.member_id)
+        && existing.group_instance_id.as_deref() != req.group_instance_id.as_deref()
+    {
+        return JoinAction::Immediate(JoinResult {
+            error_code: codes::FENCED_INSTANCE_ID,
+            member_id: req.member_id.clone(),
+            protocol_type: state.protocol_type.clone(),
+            protocol_name: state.protocol_name.clone(),
+            ..JoinResult::default()
+        });
+    }
+
     // 3. KIP-345 fence: instance id pinned to a different live member id.
     if let Some(instance_id) = req.group_instance_id.as_deref()
         && let Some(pinned) = state.current_member_id_for_instance(instance_id)
