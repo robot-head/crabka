@@ -66,11 +66,25 @@ controller listener binds `0.0.0.0:9093`.
 
 | # | File | Change | Status |
 |---|------|--------|--------|
-| 1 | `crates/operator/src/controller/common.rs` (`render_service`) | `publishNotReadyAddresses: true` + controller port 9093 on the headless Service | ☐ |
-| 2 | `crates/operator/src/controller/listeners.rs` (`render_broker_toml`) | emit `controller_quorum_voters` (all brokers, `id@fqdn:9093`) | ☐ |
-| 3 | `crates/operator/src/controller/common.rs` (`render_configmap`) | build the voter list from `addresses_per_broker`, pass to render | ☐ |
-| 4 | `crates/broker/src/file_config.rs` | add `controller_quorum_voters`, parse + DNS-resolve (retry for startup race) into `BrokerConfig` | ☐ |
-| 5 | `crates/broker/src/bin/broker.rs` | bind controller `0.0.0.0:9093` under `--config-file` | ☐ |
+| 1 | `crates/operator/src/controller/common.rs` (`render_service`) | `publishNotReadyAddresses: true` + controller port 9093 on the headless Service | ✅ |
+| 2 | `crates/operator/src/controller/listeners.rs` (`render_broker_toml`) | emit `controller_quorum_voters` (all brokers, `id@fqdn:9093`) | ✅ |
+| 3 | `crates/operator/src/controller/common.rs` (`render_configmap`) | build the voter list from `addresses_per_broker`, pass to render | ✅ |
+| 4 | `crates/broker/src/file_config.rs` | add `controller_quorum_voters`, parse + DNS-resolve (retry for startup race) into `BrokerConfig` | ✅ |
+| 5 | `crates/broker/src/bin/broker.rs` | bind controller `0.0.0.0:9093` under `--config-file` | ✅ |
+
+Changes 1–5 committed in `607d3efc`. A second cold-start bug surfaced on first
+multi-node deploy and was fixed in `7cf5ec18`:
+
+| # | File | Change | Status |
+|---|------|--------|--------|
+| 6 | `crates/broker/src/bin/broker.rs` + `crates/raft/src/{controller,lib}.rs` | `detect_bootstrap_mode` now uses the controller's own `metadata_log_nonempty` (durable `quorum-state`) instead of "segment dir exists". A node killed mid-election (segment dir created by `KraftController::open`, but no committed `quorum-state`) re-Bootstraps instead of dying in a `Rejoin` crashloop. | ✅ |
+
+**Why #6 was needed:** on the first 3-broker deploy, all brokers crashlooped with
+`Rejoin mode requires non-empty raft log`. `KraftController::open` creates
+`__cluster_metadata/@metadata-0` *before* the election commits; the old detection
+keyed Rejoin on that dir existing, disagreeing with the controller's `quorum-state`
+check. Single-node never hit it (self-election commits instantly). The operator-side
+voter rendering (changes 1–3) was verified working in-cluster before this surfaced.
 
 ---
 
