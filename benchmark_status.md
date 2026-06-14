@@ -87,8 +87,19 @@ Metadata/DescribeCluster/FindCoordinator (`1fefb478`).
 
 *sendfile before→after (crabka large-msg, 100 KB):* fetch 230 → **296 MB/s**,
 produce 230 → 294, p50 190 → 131 ms — byte-exact (consumers read every byte).
-Crabka large-msg is ~80 % of Strimzi (still trails — the remaining gap is the
-produce path's one `to_vec` to patch the header, an open optimization).
+
+*The remaining large-msg gap is NOT the copy.* Crabka large-msg runs ~60–80 %
+of Strimzi (run-to-run variance ~40 %: crabka swings 210–296 MB/s, Strimzi
+340–470). The produce-path `to_vec` (a full per-batch memcpy to patch two
+header fields) was eliminated in `b10d24ce` — copy only the 61-byte header,
+write the body straight from the input slice; byte-exact, all round-trip tests
+pass. But it did **not** measurably move large-msg throughput: this workload is
+**service-rate / latency-bound** (saturate, 512 in-flight → throughput = broker
+service rate; crabka p50 ~160 ms vs Strimzi ~90 ms), not memory-bandwidth-bound,
+so the ~20 µs/batch saved is far below the GKE noise floor. The real gap is
+**per-batch service rate** — crabka services large produces ~1.7× slower than
+Kafka. Closing it needs profiling *where* the per-batch time goes (100 KiB CRC
+validation, network receive, log append + ack), a deeper target than the copy.
 
 *TLS matrix (crabka kTLS vs Strimzi JVM-TLS):*
 
