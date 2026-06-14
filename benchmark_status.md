@@ -162,9 +162,36 @@ broker doesn't lead. The producer's recursive re-route (`sender.rs`, bounded by
    single-pool e2e naming and the multi-pool bench naming, so the failover kill finds
    the partition-0 leader pod.
 
-Verified at unit level (client-core 27 incl. hostname regression, client-producer 36,
-bench-driver prefix test). In-cluster re-run pending `quorum-fix5` (bench-driver image
-only — operator/broker stay at `quorum-fix4`).
+Verified at unit level + **in-cluster (`quorum-fix5`)**: no stack overflow, produce
+flows across all 3 brokers, and the failover kill correctly deletes the partition-0
+leader pod (`demo-broker-0-0`).
+
+## 7b. Failover path: two further gaps (the failover *recovery* doesn't work yet)
+
+With steady-state produce fixed, the `failover` re-run surfaced two **distinct,
+substantial** gaps — both in the *recovery* after the leader is killed, neither in
+the quorum/steady-state path:
+
+1. **Client has no failover resilience.** After broker-0 (a partition leader) is
+   killed, the producer retried dead `leader=0` **4331×** ("connection closed") and
+   never recovered, hanging the driver (no result written). Two sub-bugs:
+   * `BrokerPool::get` returns the **cached, closed** connection to the dead broker
+     instead of evicting + reconnecting.
+   * The transport-retry loop (`sender.rs`) retries the *same* (dead) leader and only
+     refreshes the broker registry — it never re-resolves the partition leader, so it
+     never routes to the new leader the controller elected. JVM clients fast-failover
+     in seconds; this loops until the test ends.
+2. **Broker can't rejoin after a kill (IP-pinning, see §8).** The killed broker-0
+   restarts at a **new pod IP**; survivors have its old IP pinned, so it can't
+   re-establish quorum membership and crashloops (exit 137, liveness-killed) in
+   `Rejoin` mode. Cluster drops to a degraded 2/3.
+
+Neither is the broker produce path (JVM produce + describe are perfect) nor the
+quorum formation (Bootstrap + rolling-restart Rejoin both verified). They are
+failover-recovery features that need to be built out for a meaningful `failover`
+benchmark number. The 5 **non-failover** cluster scenarios (small-msg-saturate,
+fixed-rate-latency, large-msg, fan-out, mixed-acks) should run on the now-working
+steady-state path.
 
 ## 8. Known follow-up
 
