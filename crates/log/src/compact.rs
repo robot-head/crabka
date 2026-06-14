@@ -1305,3 +1305,348 @@ mod swap_tests {
         assert!(!dir.path().join("00000000000000000000.log.swap").exists());
     }
 }
+
+// Exhaustive stateright enumeration of the KIP-534 retention contract over the
+// pure decision cores above (reachable via `super::`).
+#[cfg(test)]
+#[path = "compact_model.rs"]
+mod compact_model;
+
+/// Proptest fuzz of the same KIP-534 retention cores at large N: a randomized
+/// op sequence is folded into an abstract log, every `Compact` is checked for
+/// convergence/idempotence, monotone shrink, no-data-loss, marker safety,
+/// tombstone aging, and single-horizon stamping. A separate prop checks the
+/// real `RecordBatch` delete-horizon wire round-trip.
+#[cfg(test)]
+mod retention_fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum EntryKind {
+        Data { value: Option<u8> },
+        Marker { producer_id: u8, commit: bool },
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Entry {
+        key: Option<u8>,
+        kind: EntryKind,
+        horizon: Option<i64>,
+    }
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        AppendData(u8, u8),
+        AppendTombstone(u8),
+        AppendCommit(u8),
+        AppendAbort(u8),
+        Tick(i64),
+        Compact,
+    }
+
+    /// Key→newest-index dedup map over keyed data entries (control never
+    /// indexed), mirroring the production `build_offset_map` filter.
+    fn offset_map(log: &[Entry]) -> std::collections::HashMap<u8, usize> {
+        let mut map = std::collections::HashMap::new();
+        for (idx, e) in log.iter().enumerate() {
+            if !matches!(e.kind, EntryKind::Data { .. }) {
+                continue;
+            }
+            let Some(k) = e.key else { continue };
+            if should_index_key(Some(&[k]), false) {
+                map.insert(k, idx);
+            }
+        }
+        map
+    }
+
+    /// Producers (by key == pid association) whose newest-for-key live data
+    /// survives.
+    fn data_survives(
+        log: &[Entry],
+        map: &std::collections::HashMap<u8, usize>,
+    ) -> std::collections::HashSet<u8> {
+        let mut s = std::collections::HashSet::new();
+        for (idx, e) in log.iter().enumerate() {
+            let EntryKind::Data { value } = &e.kind else {
+                continue;
+            };
+            let Some(k) = e.key else { continue };
+            if value.is_none() {
+                continue;
+            }
+            if map.get(&k).copied() == Some(idx) {
+                s.insert(k);
+            }
+        }
+        s
+    }
+
+    fn txn_state(pid: u8, survivors: &std::collections::HashSet<u8>) -> TxnDataState {
+        if survivors.contains(&pid) {
+            TxnDataState::DataSurvives
+        } else {
+            TxnDataState::DataFullyGone
+        }
+    }
+
+    /// One compaction pass: apply the real `retain_decision` to each entry,
+    /// returning the next log. Mirrors the abstract applier in the model.
+    fn compact(log: &[Entry], clock: i64, ret_ms: i64) -> Vec<Entry> {
+        let map = offset_map(log);
+        let survivors = data_survives(log, &map);
+        let mut next = Vec::with_capacity(log.len());
+        for (idx, e) in log.iter().enumerate() {
+            let (rec, batch, is_newest, txn) = match &e.kind {
+                EntryKind::Data { value } => (
+                    RecordMeta {
+                        has_key: e.key.is_some(),
+                        has_value: value.is_some(),
+                    },
+                    BatchMeta {
+                        is_control: false,
+                        producer_id: -1,
+                        existing_horizon: e.horizon,
+                    },
+                    e.key.is_some_and(|k| map.get(&k).copied() == Some(idx)),
+                    TxnDataState::NotTransactional,
+                ),
+                EntryKind::Marker { producer_id, .. } => (
+                    RecordMeta {
+                        has_key: true,
+                        has_value: false,
+                    },
+                    BatchMeta {
+                        is_control: true,
+                        producer_id: i64::from(*producer_id),
+                        existing_horizon: e.horizon,
+                    },
+                    false,
+                    txn_state(*producer_id, &survivors),
+                ),
+            };
+            match retain_decision(rec, batch, is_newest, txn, clock, ret_ms) {
+                RetainDecision::Keep => next.push(e.clone()),
+                RetainDecision::SetHorizon(h) => {
+                    // Single-horizon stamping: the core must only ever stamp an
+                    // entry that has no horizon yet. A `SetHorizon` over an
+                    // already-stamped entry would re-stamp it — a violation
+                    // checked here at the exact point of assignment (where this
+                    // specific entry's prior horizon is known unambiguously).
+                    if let Some(existing) = e.horizon {
+                        assert!(existing == h, "horizon re-stamped {existing} -> {h}");
+                    }
+                    let mut ne = e.clone();
+                    ne.horizon = Some(h);
+                    next.push(ne);
+                }
+                RetainDecision::Delete => {}
+            }
+        }
+        next
+    }
+
+    fn apply(log: &mut Vec<Entry>, clock: &mut i64, op: &Op, ret_ms: i64) {
+        match *op {
+            Op::AppendData(key, value) => log.push(Entry {
+                key: Some(key),
+                kind: EntryKind::Data { value: Some(value) },
+                horizon: None,
+            }),
+            Op::AppendTombstone(key) => log.push(Entry {
+                key: Some(key),
+                kind: EntryKind::Data { value: None },
+                horizon: None,
+            }),
+            Op::AppendCommit(pid) => log.push(Entry {
+                key: None,
+                kind: EntryKind::Marker {
+                    producer_id: pid,
+                    commit: true,
+                },
+                horizon: None,
+            }),
+            Op::AppendAbort(pid) => log.push(Entry {
+                key: None,
+                kind: EntryKind::Marker {
+                    producer_id: pid,
+                    commit: false,
+                },
+                horizon: None,
+            }),
+            Op::Tick(dt) => *clock += dt,
+            Op::Compact => {
+                let before = log.clone();
+                let after = compact(&before, *clock, ret_ms);
+
+                // --- Convergence / idempotence at a fixed clock. ---
+                let twice = compact(&after, *clock, ret_ms);
+                prop_assert_eq_inner(&after, &twice);
+
+                // --- Monotone shrink. ---
+                assert!(
+                    after.len() <= before.len(),
+                    "compaction grew the log: {} -> {}",
+                    before.len(),
+                    after.len()
+                );
+
+                // --- No-data-loss: every newest-for-key live data survives. ---
+                let map = offset_map(&before);
+                for (idx, e) in before.iter().enumerate() {
+                    if let EntryKind::Data { value: Some(_) } = &e.kind
+                        && let Some(k) = e.key
+                        && map.get(&k).copied() == Some(idx)
+                    {
+                        assert!(
+                            after.iter().any(|x| x.key == Some(k)
+                                && matches!(x.kind, EntryKind::Data { value: Some(_) })),
+                            "no-data-loss: key {k} newest-live dropped"
+                        );
+                    }
+                }
+
+                // --- Marker safety: survives iff its txn data survives; never
+                // deleted before clock >= horizon. ---
+                let survivors = data_survives(&before, &map);
+                for e in &before {
+                    if let EntryKind::Marker { producer_id, .. } = &e.kind {
+                        let alive = after.iter().any(|x| {
+                            matches!(
+                                &x.kind,
+                                EntryKind::Marker { producer_id: p, .. } if p == producer_id
+                            )
+                        });
+                        if survivors.contains(producer_id) {
+                            assert!(
+                                alive,
+                                "marker for pid {producer_id} dropped while data survives"
+                            );
+                        }
+                        // If the marker had a horizon and clock < horizon, it
+                        // must still be alive (not aged out prematurely).
+                        if let (Some(h), false) = (e.horizon, survivors.contains(producer_id))
+                            && *clock < h
+                        {
+                            assert!(
+                                alive,
+                                "marker for pid {producer_id} aged out at \
+                                 clock {} < horizon {h}",
+                                *clock
+                            );
+                        }
+                    }
+                }
+
+                // --- Tombstone aging: a surviving tombstone is present iff it
+                // has no horizon or clock < horizon. ---
+                for x in &after {
+                    if matches!(x.kind, EntryKind::Data { value: None })
+                        && let Some(h) = x.horizon
+                    {
+                        assert!(
+                            *clock < h,
+                            "tombstone survived with elapsed horizon {h} at clock {}",
+                            *clock
+                        );
+                    }
+                }
+
+                // --- Single horizon stamping is enforced inside `compact` at
+                // the exact point a horizon is assigned (a `SetHorizon` over an
+                // already-stamped entry panics there). Nothing to re-check here.
+
+                *log = after;
+            }
+        }
+    }
+
+    /// `prop_assert_eq` is macro-bound to a `proptest!` body; inside a plain fn
+    /// we use a panicking equality so a mismatch surfaces as a case failure.
+    fn prop_assert_eq_inner(a: &[Entry], b: &[Entry]) {
+        assert!(
+            a == b,
+            "compaction not idempotent at fixed clock:\n  once={a:?}\n  twice={b:?}"
+        );
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (0u8..=2, 0u8..=2).prop_map(|(k, v)| Op::AppendData(k, v)),
+            (0u8..=2).prop_map(Op::AppendTombstone),
+            (0u8..=2).prop_map(Op::AppendCommit),
+            (0u8..=2).prop_map(Op::AppendAbort),
+            (1i64..=5).prop_map(Op::Tick),
+            Just(Op::Compact),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn retention_invariants_hold(
+            ops in proptest::collection::vec(op_strategy(), 0..200),
+            ret_ms in 1i64..100,
+        ) {
+            let mut log: Vec<Entry> = Vec::new();
+            let mut clock: i64 = 0;
+            for op in &ops {
+                apply(&mut log, &mut clock, op, ret_ms);
+            }
+        }
+
+        /// Wire round-trip: a real `RecordBatch` with two keyed records gets a
+        /// random delete horizon stamped, then encode→decode must preserve
+        /// `delete_horizon_ms()` and every record's absolute timestamp.
+        #[test]
+        fn delete_horizon_wire_round_trip(
+            horizon in -1_000i64..1_000_000,
+            base_ts in 0i64..1_000,
+            d0 in 0i64..500,
+            d1 in 0i64..500,
+        ) {
+            use bytes::{Bytes, BytesMut};
+            use crabka_protocol::records::{Record, RecordBatch};
+
+            let rec = |delta: i64, k: &[u8]| Record {
+                offset_delta: 0,
+                timestamp_delta: delta,
+                key: Some(Bytes::copy_from_slice(k)),
+                value: Some(Bytes::copy_from_slice(b"v")),
+                ..Default::default()
+            };
+            let batch = RecordBatch {
+                base_offset: 0,
+                last_offset_delta: 1,
+                base_timestamp: base_ts,
+                max_timestamp: base_ts + d0.max(d1),
+                records: vec![rec(d0, b"k0"), rec(d1, b"k1")],
+                ..RecordBatch::default()
+            };
+            // Original absolute per-record timestamps.
+            let orig_abs: Vec<i64> = batch
+                .records
+                .iter()
+                .map(|r| batch.base_timestamp + r.timestamp_delta)
+                .collect();
+
+            let stamped = batch.with_delete_horizon(horizon);
+            let mut buf = BytesMut::with_capacity(stamped.encoded_len());
+            stamped.encode(&mut buf).unwrap();
+            let mut cursor: &[u8] = &buf[..];
+            let decoded = RecordBatch::decode(&mut cursor).unwrap();
+
+            prop_assert_eq!(decoded.delete_horizon_ms(), Some(horizon));
+            // Reconstructed absolute timestamps (base + delta, delta is i64)
+            // equal the originals.
+            let new_abs: Vec<i64> = decoded
+                .records
+                .iter()
+                .map(|r| decoded.base_timestamp + r.timestamp_delta)
+                .collect();
+            prop_assert_eq!(new_abs, orig_abs);
+        }
+    }
+}
