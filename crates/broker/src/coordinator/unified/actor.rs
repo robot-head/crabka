@@ -1012,21 +1012,29 @@ async fn classic_join_hosted(
     Ok(())
 }
 
-async fn handle_heartbeat(
+/// Outcome of the pure heartbeat decision phase: the response to return to the
+/// client and the records the async caller must append to the offsets log.
+pub(crate) struct HeartbeatStep {
+    pub response: ConsumerGroupHeartbeatResponse,
+    pub pending: PendingRecords,
+}
+
+/// The pure, synchronous heartbeat decision core: assignor-selection and epoch
+/// validation, member upsert / leave, `update_member_state`, `run_reconcile`,
+/// `advance_member_epoch`, and response build. Contains no `.await` and performs
+/// no I/O — `handle_heartbeat` calls this, then flushes `pending` to the log.
+/// Extracted so the reconciliation policy is independently model-checkable.
+pub(crate) fn step_heartbeat(
     state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
-    offsets_log: &dyn OffsetsLog,
-    coordinator: &super::GroupCoordinator,
     req: &ConsumerGroupHeartbeatRequest,
     client_host: &str,
-) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
-    let now = Instant::now();
-    let now_ms = chrono_now_ms();
-
+    now: Instant,
+) -> HeartbeatStep {
     // ─── Leave path ──────────────────────────────────────────────
     if req.member_epoch == -1 {
-        return handle_leave(state, config, offsets_log, coordinator, req, now_ms).await;
+        return leave_step(state, config, req);
     }
 
     // ─── Validate assignor selection ─────────────────────────────
@@ -1035,7 +1043,10 @@ async fn handle_heartbeat(
         .as_deref()
         .is_some_and(|name| !config.assignor_enabled(name))
     {
-        return Ok(error_resp(codes::UNSUPPORTED_ASSIGNOR, config));
+        return HeartbeatStep {
+            response: error_resp(codes::UNSUPPORTED_ASSIGNOR, config),
+            pending: PendingRecords::default(),
+        };
     }
 
     // ─── First-join path ─────────────────────────────────────────
@@ -1056,15 +1067,18 @@ async fn handle_heartbeat(
                 .and_then(|existing| state.members.get(existing))
                 .is_some_and(|m| m.member_epoch != 0)
         {
-            return Ok(error_resp(codes::UNRELEASED_INSTANCE_ID, config));
+            return HeartbeatStep {
+                response: error_resp(codes::UNRELEASED_INSTANCE_ID, config),
+                pending: PendingRecords::default(),
+            };
         }
         let m = build_member(&new_member_id, req, client_host, now);
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id));
-        flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
-        return Ok(build_assignment_resp(state, &new_member_id, config));
+        let response = build_assignment_resp(state, &new_member_id, config);
+        return HeartbeatStep { response, pending };
     }
 
     // ─── Existing-member: validate epoch ─────────────────────────
@@ -1073,22 +1087,78 @@ async fn handle_heartbeat(
         .get(&req.member_id)
         .map_or(-2, |m| m.member_epoch);
     if cur_epoch == -2 {
-        return Ok(error_resp(codes::UNKNOWN_MEMBER_ID, config));
+        return HeartbeatStep {
+            response: error_resp(codes::UNKNOWN_MEMBER_ID, config),
+            pending: PendingRecords::default(),
+        };
     }
     if req.member_epoch < cur_epoch {
-        return Ok(error_resp(codes::STALE_MEMBER_EPOCH, config));
+        return HeartbeatStep {
+            response: error_resp(codes::STALE_MEMBER_EPOCH, config),
+            pending: PendingRecords::default(),
+        };
     }
     if req.member_epoch > cur_epoch {
-        return Ok(error_resp(codes::FENCED_MEMBER_EPOCH, config));
+        return HeartbeatStep {
+            response: error_resp(codes::FENCED_MEMBER_EPOCH, config),
+            pending: PendingRecords::default(),
+        };
     }
 
     // ─── Steady-state: update last_seen / subscription / owned ───
     let any_change = update_member_state(state, config, metadata, req, now, cur_epoch);
-    if any_change {
-        let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
-        flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
+    let pending = if any_change {
+        snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id))
+    } else {
+        PendingRecords::default()
+    };
+    let response = build_assignment_resp(state, &req.member_id, config);
+    HeartbeatStep { response, pending }
+}
+
+/// Pure form of the leave path (`member_epoch == -1`): remove the member, bump
+/// the group epoch, and build the tombstone + group-epoch records. The async
+/// caller flushes the returned `pending`.
+fn leave_step(
+    state: &mut super::consumer_state::GroupState,
+    config: &NextGenConfig,
+    req: &ConsumerGroupHeartbeatRequest,
+) -> HeartbeatStep {
+    let mut pending = PendingRecords::default();
+    if state.members.contains_key(&req.member_id) {
+        pending.member_metadata.push((req.member_id.clone(), None));
+        pending
+            .target_per_member
+            .push((req.member_id.clone(), None));
+        pending
+            .current_per_member
+            .push((req.member_id.clone(), None));
     }
-    Ok(build_assignment_resp(state, &req.member_id, config))
+    state.remove_member(&req.member_id);
+    state.bump_epoch();
+    pending.group_metadata = Some(GroupMetadataValue {
+        epoch: state.group_epoch,
+    });
+    HeartbeatStep {
+        response: base_resp(0, req.member_epoch, config),
+        pending,
+    }
+}
+
+async fn handle_heartbeat(
+    state: &mut super::consumer_state::GroupState,
+    config: &NextGenConfig,
+    metadata: &dyn MetadataProvider,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::GroupCoordinator,
+    req: &ConsumerGroupHeartbeatRequest,
+    client_host: &str,
+) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
+    let now = Instant::now();
+    let now_ms = chrono_now_ms();
+    let step = step_heartbeat(state, config, metadata, req, client_host, now);
+    flush_pending(state, step.pending, offsets_log, coordinator, now_ms).await?;
+    Ok(step.response)
 }
 
 /// Apply steady-state member updates and run reconciliation.
@@ -1145,34 +1215,6 @@ fn update_member_state(
         state.advance_member_epoch(&req.member_id);
     }
     subscription_changed || was_dirty || epoch_advanced
-}
-
-/// Handle a leave-group heartbeat (`member_epoch == -1`).
-async fn handle_leave(
-    state: &mut super::consumer_state::GroupState,
-    config: &NextGenConfig,
-    offsets_log: &dyn OffsetsLog,
-    coordinator: &super::GroupCoordinator,
-    req: &ConsumerGroupHeartbeatRequest,
-    now_ms: i64,
-) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
-    let mut pending = PendingRecords::default();
-    if state.members.contains_key(&req.member_id) {
-        pending.member_metadata.push((req.member_id.clone(), None));
-        pending
-            .target_per_member
-            .push((req.member_id.clone(), None));
-        pending
-            .current_per_member
-            .push((req.member_id.clone(), None));
-    }
-    state.remove_member(&req.member_id);
-    state.bump_epoch();
-    pending.group_metadata = Some(GroupMetadataValue {
-        epoch: state.group_epoch,
-    });
-    flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
-    Ok(base_resp(0, req.member_epoch, config))
 }
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
@@ -1757,6 +1799,10 @@ pub(crate) async fn validate_group_commit(
         Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
     }
 }
+
+#[cfg(test)]
+#[path = "reconciler_model.rs"]
+mod reconciler_model;
 
 #[cfg(test)]
 mod tests {
@@ -3584,5 +3630,36 @@ mod tests {
             ok == Ok(()),
             "the current epoch must be accepted; got {ok:?}"
         );
+    }
+
+    #[test]
+    fn step_heartbeat_first_join_targets_all_partitions() {
+        use crate::coordinator::unified::consumer_state::GroupState;
+        let topic_id = Uuid([7; 16]);
+        let metadata = StaticMetadata {
+            input: ReconcileInput {
+                topic_id_by_name: [("t".to_string(), topic_id)].into(),
+                partitions_per_topic: [(topic_id, 2)].into(),
+                ..Default::default()
+            },
+        };
+        let config = NextGenConfig::default();
+        let mut group = GroupState::new("g");
+        let req = ConsumerGroupHeartbeatRequest {
+            group_id: "g".into(),
+            member_id: "m1".into(),
+            member_epoch: 0,
+            subscribed_topic_names: Some(vec!["t".into()]),
+            rebalance_timeout_ms: 60_000,
+            ..Default::default()
+        };
+        let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
+        assert!(step.response.error_code == 0);
+        assert!(
+            step.response.member_epoch == 1,
+            "first join advances to group epoch 1"
+        );
+        assert!(group.target.per_member["m1"][&topic_id] == vec![0, 1]);
+        assert!(!step.pending.is_empty(), "first join must persist records");
     }
 }
