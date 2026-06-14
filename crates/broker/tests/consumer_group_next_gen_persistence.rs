@@ -4,7 +4,6 @@
 
 use assert2::assert;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -72,7 +71,10 @@ async fn replay_preserves_group_epoch_and_members() {
         assert!(resp.error_code == 0);
         member_id = resp.member_id.unwrap();
         initial_epoch = resp.member_epoch;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The heartbeat RPC awaits flush_pending→offsets_log.append synchronously,
+        // so durability is guaranteed before the RPC returns. Wait for the actor's
+        // in-memory state to reflect the member (epoch ≥ 1) as a clean shutdown gate.
+        broker.wait_until_group_member_count("gp", 1).await;
         broker.shutdown().await;
     }
 
@@ -138,7 +140,10 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
             ..Default::default()
         };
         let _ = client.send(leave).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The leave RPC awaits flush_pending→offsets_log.append synchronously,
+        // so tombstones are durable before the RPC returns. Wait for actor's
+        // in-memory view to confirm zero members before shutdown.
+        broker.wait_until_group_empty("gpx").await;
         broker.shutdown().await;
     }
 

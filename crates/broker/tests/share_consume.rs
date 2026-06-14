@@ -97,13 +97,7 @@ async fn create_topic(
         resp.topics[0].error_code == 0,
         "topic create failed: {resp:?}"
     );
-    for _ in 0..200 {
-        if broker.has_partition(topic, 0).await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("partition {topic}:0 never materialized");
+    broker.wait_until_partition_present(topic, 0).await;
 }
 
 /// Resolve a created topic's id from this broker's metadata image.
@@ -145,45 +139,58 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
     );
     // Wait until every state partition this single broker should lead is local,
     // so the share-state writes land durably.
-    for _ in 0..200 {
-        let mut have = 0;
-        for p in 0..SHARE_STATE_PARTITIONS {
-            if broker.has_partition(SHARE_STATE_TOPIC, p).await {
-                have += 1;
-            }
-        }
-        if have == SHARE_STATE_PARTITIONS {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    for p in 0..SHARE_STATE_PARTITIONS {
+        broker
+            .wait_until_partition_present(SHARE_STATE_TOPIC, p)
+            .await;
     }
-    panic!("__share_group_state never fully materialized");
 }
 
 /// Wait until the group-coordinator lifecycle hook has durably initialized the
 /// share state for `(group, topic, partition)` (the persister summary becomes
 /// present). Until this lands the share coordinator is not yet write-ready and a
 /// consume's SPSO advance would not persist.
+///
+/// The lifecycle hook fires on each heartbeat, so this drives steady-state
+/// heartbeats inside the wait loop (mirroring `share_groups.rs`'s
+/// `lifecycle_initializes_share_state` pattern) rather than sleeping.
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_share_init(
     broker: &crabka_broker::BrokerHandle,
+    client: &Client,
     group: &str,
+    topic: &str,
+    member_id: &str,
+    member_epoch: i32,
     tid: uuid::Uuid,
     partition: i32,
 ) {
-    // ~30s budget: share-state init needs the `__share_group_state` partition's
-    // leader elected (subject to KIP-595 election jitter) plus a ShareFetch
-    // round-trip, which is slow under llvm-cov instrumentation in CI. 5s flaked.
-    for _ in 0..600 {
-        if broker
-            .share_state_summary_for_test(group, tid, partition)
-            .await
-            .is_some()
-        {
-            return;
+    let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            // Send a steady-state heartbeat to trigger the lifecycle hook.
+            let _ = client
+                .send(ShareGroupHeartbeatRequest {
+                    group_id: group.into(),
+                    member_id: member_id.into(),
+                    member_epoch,
+                    subscribed_topic_names: Some(vec![topic.into()]),
+                    ..Default::default()
+                })
+                .await;
+            if broker
+                .share_state_summary_for_test(group, tid, partition)
+                .await
+                .is_some()
+            {
+                return;
+            }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("share state for {group}:{tid}:{partition} never initialized");
+    })
+    .await;
+    assert!(
+        res.is_ok(),
+        "share state for {group}:{tid}:{partition} never initialized within 30s"
+    );
 }
 
 /// Produce `n` records into `(topic, partition)` in a single batch. Each record
@@ -243,13 +250,11 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
     panic!("partition never became produceable for {topic}:{partition}");
 }
 
-/// Join `group` as a fresh member subscribed to `topic` so the share actor knows
-/// the member (the `ShareFetch` membership check needs this), then drive a few
-/// steady-state heartbeats so the group-coordinator lifecycle hook initializes
-/// the subscribed partitions' share state (mirrors
-/// `share_groups.rs::lifecycle_initializes_share_state`). Returns the minted
-/// member id.
-async fn join(client: &Client, group: &str, topic: &str) -> String {
+/// Join `group` as a fresh member subscribed to `topic` so the share actor
+/// knows the member (the `ShareFetch` membership check needs this). Returns
+/// `(member_id, member_epoch)` so the caller can drive heartbeats inside the
+/// `wait_for_share_init` lifecycle loop.
+async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
     let resp = client
         .send(ShareGroupHeartbeatRequest {
             group_id: group.into(),
@@ -262,23 +267,8 @@ async fn join(client: &Client, group: &str, topic: &str) -> String {
         .expect("ShareGroupHeartbeat");
     assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
     let member_id = resp.member_id.expect("broker must mint a member id");
-
-    // Steady-state heartbeats: the lifecycle hook initializes the assigned
-    // partitions best-effort after reconcile.
-    for _ in 0..3 {
-        let _ = client
-            .send(ShareGroupHeartbeatRequest {
-                group_id: group.into(),
-                member_id: member_id.clone(),
-                member_epoch: resp.member_epoch,
-                subscribed_topic_names: Some(vec![topic.into()]),
-                ..Default::default()
-            })
-            .await
-            .expect("ShareGroupHeartbeat steady-state");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    member_id
+    let member_epoch = resp.member_epoch;
+    (member_id, member_epoch)
 }
 
 /// Build a `ShareFetchRequest` for a single `(topic_id, partition)` at the given
@@ -481,10 +471,10 @@ async fn consume_accept_restart() {
         tid = topic_id(&broker, "t");
         bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
         produce_n(&client, "t", tid, 0, 3).await;
-        let member = join(&client, "g1", "t").await;
+        let (member, member_epoch) = join(&client, "g1", "t").await;
         // The group lifecycle initializes share state asynchronously; wait until
         // it is durable so the SPSO advance from the Accept below also persists.
-        wait_for_share_init(&broker, "g1", tid, 0).await;
+        wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
         // First fetch (epoch 0 opens the session): acquire offsets 0..2.
         let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
@@ -519,8 +509,10 @@ async fn consume_accept_restart() {
             row2.acquired_records
         );
 
-        // Let the persister land the advanced SPSO in __share_group_state.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Wait until the persister has landed the advanced SPSO (>= 3, past
+        // offset 2) in __share_group_state before shutting down, so the
+        // restart below sees the durable SPSO.
+        broker.wait_until_share_spso("g1", tid, 0, 3).await;
         broker.shutdown().await;
     }
 
@@ -532,18 +524,13 @@ async fn consume_accept_restart() {
         bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
 
         // A fresh member rejoins the recovered group; a fresh-session fetch
-        // must observe the recovered SPSO (past offset 2) — zero acquired,
-        // even after retries (we never want it to spuriously re-acquire).
-        let member = join(&client, "g1", "t").await;
-        let mut acquired = -1;
-        for _ in 0..15 {
-            let row = share_fetch(&client, "g1", &member, tid, 0, 0, 0).await;
-            acquired = acquired_count(&row);
-            if acquired > 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // must observe the recovered SPSO (past offset 2) — zero acquired.
+        // Wait until the share state is recovered on the new broker, then
+        // assert in a single fetch (no timing guess needed).
+        let (member, _) = join(&client, "g1", "t").await;
+        broker.wait_for_share_state_summary("g1", tid, 0).await;
+        let row = share_fetch(&client, "g1", &member, tid, 0, 0, 0).await;
+        let acquired = acquired_count(&row);
         assert!(
             acquired == 0,
             "recovered SPSO must skip the accepted records; re-acquired {acquired}"
@@ -563,8 +550,8 @@ async fn release_redelivers() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 2).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
     assert!(acquired_count(&row) == 2, "acquire both offsets");
@@ -601,8 +588,8 @@ async fn reject_archives() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 2).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
     assert!(acquired_count(&row) == 2, "acquire both offsets");
@@ -664,8 +651,8 @@ async fn acquire_past_leading_batch_returns_bytes() {
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     // One 3-record batch at offsets 0..2.
     produce_n(&client, "t", tid, 0, 3).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Acquire 0..2 and Reject them → archived, SPSO advances to 3.
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
@@ -726,16 +713,19 @@ async fn lock_timeout_redelivers() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 1).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Fetch but DO NOT acknowledge.
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
     assert!(acquired_count(&row) == 1, "acquire the single offset");
     assert!(row.acquired_records[0].delivery_count == 1);
 
-    // Let the lock expire and the background sweeper revert it to Available.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait until the lock expires and the background sweeper reverts the
+    // record to Available (acquired-batch count drops to 0).
+    broker
+        .wait_until_share_acquired_count("g1", tid, 0, 0)
+        .await;
 
     // Next fetch (epoch 1) re-acquires the same offset at delivery_count 2.
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
@@ -765,15 +755,18 @@ async fn delivery_limit_archives() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 1).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Delivery 1 (no ack).
     let row1 = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
     assert!(row1.acquired_records[0].delivery_count == 1);
 
-    // Let the lock expire (sweeper reverts to Available).
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Wait until the lock expires and the sweeper reverts the record to Available
+    // (acquired-batch count drops to 0), then re-fetch for delivery 2.
+    broker
+        .wait_until_share_acquired_count("g1", tid, 0, 0)
+        .await;
 
     // Delivery 2 (no ack).
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
@@ -783,11 +776,16 @@ async fn delivery_limit_archives() {
         row2.acquired_records
     );
 
-    // Let that lock expire too. The record has now been delivered
-    // max_delivery_attempts(=2) times without acceptance → poison pill.
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    // Wait until that lock expires too — the sweeper reverts the record back to
+    // Available (delivery_count=2, which equals max_delivery_attempts). The
+    // archiving (dcc increment) happens during the next acquire call when the
+    // broker detects the poison pill.
+    broker
+        .wait_until_share_acquired_count("g1", tid, 0, 0)
+        .await;
 
-    // Subsequent fetch: the record is archived, SPSO advances, nothing acquired.
+    // Subsequent fetch: the acquire path detects delivery_count >= max_attempts
+    // and archives the record — SPSO advances, nothing is returned.
     let row3 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
     assert!(
         acquired_count(&row3) == 0,
@@ -808,8 +806,8 @@ async fn session_epoch_validation() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 1).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Open (epoch 0) succeeds: top-level error_code 0.
     let opened: ShareFetchResponse = client
@@ -836,7 +834,7 @@ async fn session_epoch_validation() {
 
     // A member with no live session sending a non-zero epoch →
     // SHARE_SESSION_NOT_FOUND (122).
-    let ghost = join(&client, "g1", "t").await;
+    let (ghost, _) = join(&client, "g1", "t").await;
     let not_found: ShareFetchResponse = client
         .send(share_fetch_req("g1", &ghost, tid, 0, 5, 0, vec![]))
         .await
@@ -872,8 +870,8 @@ async fn renew_extends_lock_not_redelivered() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 1).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Acquire offset 0 (lock 500ms, delivery_count 1). Epoch is now 1.
     let acquire_at = std::time::Instant::now();
@@ -881,8 +879,9 @@ async fn renew_extends_lock_not_redelivered() {
     assert!(acquired_count(&row) == 1, "acquire the single offset");
     assert!(row.acquired_records[0].delivery_count == 1);
 
-    // Renew ~200ms in (before the 500ms lock expires): resets the deadline to
-    // renew-time + 500ms ≈ T0+700ms. Epoch is now 2.
+    // Intentional calibrated timing: renew ~200ms in (before the 500ms lock
+    // expires) to reset the deadline to renew-time + 500ms ≈ T0+700ms. Epoch
+    // is now 2. This sleep proves renew timing; it is NOT a flaky state-guess.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let renew = share_renew(&client, "g1", &member, tid, 0, 1, 0, 0).await;
     assert!(
@@ -891,10 +890,12 @@ async fn renew_extends_lock_not_redelivered() {
         renew.error_code
     );
 
-    // Wait until ~600ms after the ORIGINAL acquire: past the original 500ms
-    // deadline (so an un-renewed lock would have been swept) but before the
-    // renewed ~700ms deadline. Compute the remaining sleep from the real
-    // acquire instant so scheduling jitter doesn't overshoot the renewed window.
+    // Intentional calibrated timing: wait until ~600ms after the ORIGINAL
+    // acquire — past the original 500ms deadline (un-renewed lock would have
+    // been swept) but before the renewed ~700ms deadline. The remaining sleep
+    // is computed from the real acquire instant so scheduling jitter doesn't
+    // overshoot the renewed window. This proves the renew suppressed redelivery;
+    // it is NOT a flaky state-guess.
     let target = acquire_at + Duration::from_millis(600);
     if let Some(rem) = target.checked_duration_since(std::time::Instant::now()) {
         tokio::time::sleep(rem).await;
@@ -921,15 +922,17 @@ async fn no_renew_redelivers_after_lock_expiry() {
     let tid = topic_id(&broker, "t");
     bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
     produce_n(&client, "t", tid, 0, 1).await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
     assert!(acquired_count(&row) == 1, "acquire the single offset");
     assert!(row.acquired_records[0].delivery_count == 1);
 
-    // No renew — wait well past the 500ms lock + a sweeper tick so the record is
-    // reverted to Available and re-delivered.
+    // Intentional calibrated timing: no renew — wait 800ms (well past the 500ms
+    // lock + a sweeper tick) so the record is reverted to Available and
+    // re-delivered. This sleep mirrors the renew test's timing to prove that
+    // WITHOUT a renew the lock IS swept; it is NOT a flaky state-guess.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
     assert!(
@@ -991,8 +994,8 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
     // Flush the records to the log (advances HWM) but keep the txn OPEN (LSO=0).
     producer.flush().await.unwrap();
 
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // A read_committed share fetch must acquire NOTHING: every record is past
     // the LSO (still 0). Poll a few times to be sure it never spuriously acquires.
@@ -1117,8 +1120,8 @@ async fn fragmented_window_records_match_acquired_offsets() {
     produce_one(&client, "t", tid, 0, "v0").await;
     produce_one(&client, "t", tid, 0, "v1").await;
     produce_one(&client, "t", tid, 0, "v2").await;
-    let member = join(&client, "g1", "t").await;
-    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let (member, member_epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     // Acquire 0..2 (epoch 0 opens; stored epoch is now 1).
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;

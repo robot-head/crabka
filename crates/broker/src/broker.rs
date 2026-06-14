@@ -442,6 +442,317 @@ impl BrokerHandle {
             .await
     }
 
+    /// Test-only: await until the persisted share-state summary exists for
+    /// `(group, topic_id, partition)` (share-state initialized / recovered).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_for_share_state_summary(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    .is_some()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share-state summary for {group}:{topic_id}:{partition} not present within 30s"
+        );
+    }
+
+    /// Test-only: await until the share-partition SPSO (start_offset) >= `min`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_spso(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        min: i64,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some((_, _, spso, _)) = self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    && spso >= min
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share SPSO for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
+    }
+
+    /// Test-only: await until the share-partition delivery-complete count >= `min`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_delivery_complete(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        min: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some((_, _, _, dcc)) = self
+                    .share_state_summary_for_test(group, topic_id, partition)
+                    .await
+                    && dcc >= min
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share dcc for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
+    }
+
+    /// Test-only: await until the live share-partition has exactly `n` Acquired
+    /// in-flight batches (e.g. after a ShareFetch acquires, or after lock-timeout
+    /// redelivery returns records to Available — count drops back).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_share_acquired_count(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        n: i32,
+    ) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Some(cell) = self
+                    ._broker
+                    .share_partition_leaders
+                    .peek_for_test(group, topic_id, partition)
+                {
+                    let count = cell.lock().await.count_acquired_batches();
+                    if count == n {
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "share acquired-batch count for {group}:{topic_id}:{partition} did not reach {n} within 30s"
+        );
+    }
+
+    // ── consumer/streams/share group awaiters ─────────────────────────────────
+
+    /// Test-only: describe a consumer/share/streams group via its actor.
+    /// `None` if the group has no live actor.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn group_describe_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::actor::DescribeView> {
+        let handle = self
+            ._broker
+            .group_coordinator
+            .groups
+            .get(group_id)?
+            .value()
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(crate::coordinator::unified::actor::GroupActorMessage::Describe { reply: tx })
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Test-only: await until the group has exactly `n` members.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_group_member_count(&self, group_id: &str, n: usize) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let count = self
+                    .group_describe_for_test(group_id)
+                    .await
+                    .map_or(0, |v| v.members.len());
+                if count == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "group {group_id} did not settle at {n} members within 30s"
+        );
+    }
+
+    /// Test-only: await until the group is empty/drained (no members).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_group_empty(&self, group_id: &str) {
+        self.wait_until_group_member_count(group_id, 0).await;
+    }
+
+    /// Test-only: describe a **classic**-protocol group via `ClassicInspect`.
+    /// Returns `None` when no actor exists or the actor is consumer-kind (not classic).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn classic_group_inspect_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::actor::ClassicView> {
+        let handle = self
+            ._broker
+            .group_coordinator
+            .groups
+            .get(group_id)?
+            .value()
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(
+                crate::coordinator::unified::actor::GroupActorMessage::ClassicInspect { reply: tx },
+            )
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Test-only: await until the classic group has exactly `n` live members
+    /// (i.e., they have been registered in the actor via `ClassicJoin`).
+    ///
+    /// Use this rather than `wait_until_group_member_count` for classic-protocol
+    /// groups, because the next-gen `Describe` message is a no-op on a
+    /// classic-kind actor.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_classic_group_member_count(&self, group_id: &str, n: usize) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let count = self
+                    .classic_group_inspect_for_test(group_id)
+                    .await
+                    .map_or(0, |v| v.members.len());
+                if count == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "classic group {group_id} did not settle at {n} members within 30s"
+        );
+    }
+
+    // ── streams-group awaiters ────────────────────────────────────────────────
+
+    /// Test-only: describe a streams group via its actor.
+    /// `None` if the group has no live streams actor.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn streams_group_describe_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::streams::actor::StreamsDescribeView> {
+        let handle = self
+            ._broker
+            .group_coordinator
+            .streams_groups
+            .get(group_id)?
+            .value()
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(
+                crate::coordinator::unified::streams::actor::StreamsGroupActorMessage::Describe {
+                    reply: tx,
+                },
+            )
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Test-only: await until the streams group has exactly `n` members.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_streams_group_member_count(&self, group_id: &str, n: usize) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let count = self
+                    .streams_group_describe_for_test(group_id)
+                    .await
+                    .map_or(0, |v| v.members.len());
+                if count == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "streams group {group_id} did not settle at {n} members within 30s"
+        );
+    }
+
+    /// Test-only: await until the streams group is empty/drained (no members).
+    ///
+    /// Replaces the fixed-duration `tokio::time::sleep` calls that follow a
+    /// `streams_leave()` heartbeat in the downgrade integration tests, where the
+    /// test must ensure the leave has propagated through the streams actor before
+    /// issuing the classic `JoinGroup` that triggers the streams→classic conversion.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_streams_group_empty(&self, group_id: &str) {
+        self.wait_until_streams_group_member_count(group_id, 0)
+            .await;
+    }
+
+    // ── partition log helpers ──────────────────────────────────────────────────
+
     /// Test-only: return the `log_start_offset` of `(topic, partition)` as
     /// reported by its underlying [`crabka_log::Log`]. Returns `None` if the
     /// partition is not hosted on this broker.

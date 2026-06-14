@@ -11,7 +11,6 @@
 
 use assert2::assert;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -221,8 +220,9 @@ async fn state_survives_restart() {
         assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
         member_id = r.member_id.clone().unwrap();
 
-        // Give the actor's async log-flush time to land in __consumer_offsets.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // flush_pending inside the share actor awaits offsets_log.append before
+        // returning the heartbeat response, so the join record is durable on
+        // disk by the time the client receives the response above.
         broker.shutdown().await;
     }
 
@@ -281,20 +281,43 @@ async fn lifecycle_initializes_share_state() {
     assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
     let mid = r.member_id.clone().unwrap();
 
-    // The lifecycle hook initializes the assigned partitions best-effort after
-    // reconcile; a steady-state heartbeat (and a brief settle) lets every
-    // partition get persisted.
-    for _ in 0..3 {
-        let mut hb = heartbeat("g5", &mid, r.member_epoch);
-        hb.subscribed_topic_names = Some(vec!["t5".into()]);
-        let _ = client.send(hb).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // The lifecycle hook initializes assigned partitions best-effort on each
+    // heartbeat (first heartbeat may fail if __share_group_state isn't ready
+    // yet; the hook retries on the next). We interleave heartbeats with a
+    // condition check — no fixed count, no fixed sleep — exiting as soon as
+    // all three partitions have summaries.
+    let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let mut hb = heartbeat("g5", &mid, r.member_epoch);
+            hb.subscribed_topic_names = Some(vec!["t5".into()]);
+            let _ = client.send(hb).await.unwrap();
+            let mut all_done = true;
+            for p in 0..3 {
+                if broker
+                    .share_state_summary_for_test("g5", tid, p)
+                    .await
+                    .is_none()
+                {
+                    all_done = false;
+                    break;
+                }
+            }
+            if all_done {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        res.is_ok(),
+        "lifecycle did not initialize all 3 partitions within 30s"
+    );
 
     for p in 0..3 {
-        let summary = broker.share_state_summary_for_test("g5", tid, p).await;
-        let (_se, _le, start_offset, _dcc) =
-            summary.unwrap_or_else(|| panic!("partition {p} must be initialized"));
+        let (_se, _le, start_offset, _dcc) = broker
+            .share_state_summary_for_test("g5", tid, p)
+            .await
+            .unwrap();
         assert!(
             start_offset == 0,
             "partition {p} initialized at start_offset 0, got {start_offset}"
@@ -327,12 +350,34 @@ async fn lifecycle_metadata_survives_restart() {
         assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
         let mid = r.member_id.clone().unwrap();
 
-        for _ in 0..3 {
-            let mut hb = heartbeat("g6", &mid, r.member_epoch);
-            hb.subscribed_topic_names = Some(vec!["t6".into()]);
-            let _ = client.send(hb).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // Interleave heartbeats with condition check — no fixed count, no
+        // fixed sleep — exiting as soon as both partitions have summaries.
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let mut hb = heartbeat("g6", &mid, r.member_epoch);
+                hb.subscribed_topic_names = Some(vec!["t6".into()]);
+                let _ = client.send(hb).await.unwrap();
+                let mut all_done = true;
+                for p in 0..2 {
+                    if broker
+                        .share_state_summary_for_test("g6", tid, p)
+                        .await
+                        .is_none()
+                    {
+                        all_done = false;
+                        break;
+                    }
+                }
+                if all_done {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "lifecycle did not initialize both partitions within 30s"
+        );
         // Both partitions are initialized before restart.
         for p in 0..2 {
             assert!(
@@ -343,7 +388,6 @@ async fn lifecycle_metadata_survives_restart() {
                 "partition {p} initialized pre-restart"
             );
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
         broker.shutdown().await;
     }
 
@@ -376,9 +420,12 @@ async fn lifecycle_metadata_survives_restart() {
         let mut hb = heartbeat("g6", &mid, desc.groups[0].group_epoch);
         hb.subscribed_topic_names = Some(vec!["t6".into()]);
         let _ = client.send(hb).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
 
+        // Await rather than sleep: confirm the recovered summaries are still
+        // present (the coordinator must NOT re-initialize already-initialized
+        // partitions after restart).
         for p in 0..2 {
+            broker.wait_for_share_state_summary("g6", tid, p).await;
             assert!(
                 broker
                     .share_state_summary_for_test("g6", tid, p)

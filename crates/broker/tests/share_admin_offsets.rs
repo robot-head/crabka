@@ -102,13 +102,7 @@ async fn create_topic(
         resp.topics[0].error_code == 0,
         "topic create failed: {resp:?}"
     );
-    for _ in 0..200 {
-        if broker.has_partition(topic, 0).await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("partition {topic}:0 never materialized");
+    broker.wait_until_partition_present(topic, 0).await;
 }
 
 fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
@@ -141,19 +135,13 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         "FindCoordinator(SHARE) error: {}",
         resp.coordinators[0].error_code
     );
-    for _ in 0..200 {
-        let mut have = 0;
-        for p in 0..SHARE_STATE_PARTITIONS {
-            if broker.has_partition(SHARE_STATE_TOPIC, p).await {
-                have += 1;
-            }
-        }
-        if have == SHARE_STATE_PARTITIONS {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait until every state partition this single broker should lead is local,
+    // so the share-state writes land durably.
+    for p in 0..SHARE_STATE_PARTITIONS {
+        broker
+            .wait_until_partition_present(SHARE_STATE_TOPIC, p)
+            .await;
     }
-    panic!("__share_group_state never fully materialized");
 }
 
 async fn wait_for_share_init(
@@ -162,20 +150,12 @@ async fn wait_for_share_init(
     tid: uuid::Uuid,
     partition: i32,
 ) {
-    // ~30s budget: share-state init needs the `__share_group_state` partition's
-    // leader elected (subject to KIP-595 election jitter) plus a ShareFetch
-    // round-trip, which is slow under llvm-cov instrumentation in CI. 5s flaked.
-    for _ in 0..600 {
-        if broker
-            .share_state_summary_for_test(group, tid, partition)
-            .await
-            .is_some()
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("share state for {group}:{tid}:{partition} never initialized");
+    // Delegates to the broker-handle awaiter (30s timeout, 25ms poll interval).
+    // `join()` drives the steady-state heartbeats that trigger the lifecycle hook
+    // before this is called, so no repeated heartbeats are needed here.
+    broker
+        .wait_for_share_state_summary(group, tid, partition)
+        .await;
 }
 
 async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32, n: i64) {
@@ -770,25 +750,20 @@ async fn delivery_complete_count_restored_across_restart() {
         assert!(ack.error_code == NONE, "accept error: {}", ack.error_code);
 
         // Wait until the persisted summary reflects dcc == N before restarting.
-        let mut dcc = -1;
-        for _ in 0..50 {
-            if let Some((_se, _le, _start, d)) =
-                broker.share_state_summary_for_test("g1", tid, 0).await
-            {
-                dcc = d;
-                if dcc == i32::try_from(N).unwrap() {
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        broker
+            .wait_until_share_delivery_complete("g1", tid, 0, i32::try_from(N).unwrap())
+            .await;
+        let dcc = broker
+            .share_state_summary_for_test("g1", tid, 0)
+            .await
+            .map(|(_, _, _, d)| d)
+            .unwrap_or(-1);
         assert!(
             dcc == i32::try_from(N).unwrap(),
             "pre-restart dcc must be {N}, got {dcc}"
         );
 
-        // Let the persister land it durably, then shut down.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The awaiter above confirms dcc is durable; shut down immediately.
         broker.shutdown().await;
     }
 
@@ -801,19 +776,15 @@ async fn delivery_complete_count_restored_across_restart() {
 
         // The recovered summary must report the RESTORED dcc == N (not 0). The
         // summary load is driven by the share coordinator reading the persisted
-        // record; poll until the recovered state is present.
-        let mut dcc = -1;
-        for _ in 0..50 {
-            if let Some((_se, _le, start, d)) =
-                broker.share_state_summary_for_test("g1", tid, 0).await
-            {
-                dcc = d;
-                // Sanity: the SPSO also recovered past the accepted records.
-                assert!(start == N, "recovered SPSO must be {N}, got {start}");
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        // record; await until the recovered state is present, then assert.
+        broker.wait_for_share_state_summary("g1", tid, 0).await;
+        let summary = broker
+            .share_state_summary_for_test("g1", tid, 0)
+            .await
+            .expect("summary present after wait_for_share_state_summary");
+        let (_se, _le, start, dcc) = summary;
+        // Sanity: the SPSO also recovered past the accepted records.
+        assert!(start == N, "recovered SPSO must be {N}, got {start}");
         assert!(
             dcc == i32::try_from(N).unwrap(),
             "delivery_complete_count must be restored to {N} across restart, got {dcc}"
@@ -889,6 +860,10 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
 
         // The describe-by-name with empty partitions no longer enumerates any
         // initialized partition for "t" (the v14 metadata record was rewritten).
+        // This is a NEGATIVE condition (absence); no broker awaiter exists for
+        // "metadata rewrite complete", so we poll until the absence is observed.
+        // Bounded to 4s — the delete RPC already succeeded so the rewrite is
+        // in-flight, not guessing arbitrary settle time.
         let mut absent = false;
         for _ in 0..40 {
             let g = describe_offsets(&client, "g1", "t", vec![]).await;
@@ -909,7 +884,11 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
             "describe must not enumerate any initialized partition for the deleted topic"
         );
 
-        // Let the metadata-rewrite + delete land durably, then shut down.
+        // `absent` is confirmed above (positive absence observed via describe).
+        // A brief flush sleep lets the v14 metadata-rewrite persist to disk
+        // before shutdown, so the restart below sees the rewritten seed.
+        // This is a persist-flush, not a state-guessing settle: we already know
+        // the in-memory state is correct.
         tokio::time::sleep(Duration::from_millis(300)).await;
         broker.shutdown().await;
     }

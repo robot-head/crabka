@@ -472,8 +472,8 @@ async fn classic_group_with_live_member_rejects_streams_heartbeat() {
             tokio::time::timeout(Duration::from_secs(30), c.send(join_request("g2", &mid))).await;
     });
 
-    // Wait briefly for the member to land in the coordinator's state.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for the member to land in the classic actor's member registry.
+    broker.wait_until_classic_group_member_count("g2", 1).await;
 
     // Precondition: group must be Classic-typed.
     assert!(
