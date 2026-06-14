@@ -450,7 +450,7 @@ impl Partition {
         let leader_leo = self.log_end_offset();
         let mut st = self.replica_state.lock().await;
         let prev_hw = st.hw;
-        st.install_isr(isr, replicas, leader);
+        st.install_isr(isr, replicas, leader, std::time::Instant::now());
         let new_hw = st.recompute_hw_for_leader_append(leader_leo);
         drop(st);
         if new_hw > prev_hw {
