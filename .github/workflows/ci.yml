@@ -222,9 +222,14 @@ jobs:
       - name: Doctests
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --workspace --doc
+      # The cross-platform matrix runs UNIT tests (--lib --bins) for portability;
+      # the heavy `tests/*.rs` integration tests (in-process broker + streams,
+      # testcontainers) run only in the dedicated Linux integration jobs, where
+      # they aren't slow/flaky. Running them on the slow macOS runner timed out
+      # (e.g. dsl_count_restart_restore_emit_on_update's 30s output wait).
       - name: Run tests
         if: matrix.os == 'macos-latest'
-        run: cargo nextest run --workspace --profile ci --filter-expr 'not test(topic_rlmm_sasl_loopback_copy_then_fetch_round_trip)'
+        run: cargo nextest run --workspace --profile ci --lib --bins
       - name: Run tests
         if: matrix.os == 'windows-latest'
         run: cargo nextest run --workspace --profile ci --lib --bins
