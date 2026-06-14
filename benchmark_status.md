@@ -86,6 +86,27 @@ keyed Rejoin on that dir existing, disagreeing with the controller's `quorum-sta
 check. Single-node never hit it (self-election commits instantly). The operator-side
 voter rendering (changes 1–3) was verified working in-cluster before this surfaced.
 
+After #6, brokers reached `Bootstrap` mode and started the controller on
+`0.0.0.0:9093`, but leader election never completed — a third bug, fixed in
+`3aeceec2`:
+
+| # | File | Change | Status |
+|---|------|--------|--------|
+| 7 | `crates/broker/src/{file_config,config,broker}.rs` + `crates/operator/src/controller/{listeners,common,kafka}.rs` | Wire controller-quorum **mTLS**. Broker: parse `controller_server_name` + `trust_roots_path`; build the inter-broker connector with `build_client_config_with_identity` (trusts the cluster CA + presents this broker's cert); raft dialer uses the shared headless FQDN as SNI. Operator: render `trust_roots_path = cluster-ca` and `controller_server_name = <kafka>-broker-headless.<ns>.svc.cluster.local`. | ✅ |
+
+**Why #7 was needed:** debug logs showed `tls: received fatal alert: UnknownCA` on
+every controller peer handshake. The broker's outbound TLS client config had empty
+trust roots (`trust_roots_path: None`) and no client identity, and used SNI
+`"localhost"` — not a DNS SAN on the broker certs (which carry IP `127.0.0.1`, the
+pod FQDN/name, and the shared headless FQDN). This mTLS peer path had never been
+exercised because single-node clusters have no peers.
+
+**Deploy iterations:** `quorum-fix` (initial) → `quorum-fix2` (+#6 detect fix) →
+`quorum-fix3` (rebased onto `origin/main`: picks up #512 high-watermark, #504 ext4,
+#511 stateright) → `quorum-fix4` (+#7 mTLS). All built via `publish-images.yml`
+`workflow_dispatch`. (Commit hashes above are pre-rebase; the branch was rebased at
+`quorum-fix3`.)
+
 ---
 
 ## 5. Deploy & Benchmark Path
@@ -102,7 +123,40 @@ voter rendering (changes 1–3) was verified working in-cluster before this surf
 
 ---
 
-## 6. Known follow-up
+## 6. Current Status (verified in-cluster, `quorum-fix4`)
+
+**The original blocker is RESOLVED.** On GKE `test-crabka-cluster` with operator +
+brokers at `:quorum-fix4`:
+* 3-broker KRaft quorum forms — `Kafka/demo` status: `3/3 brokers ready across 3 pool(s)`.
+* Both cold-start paths verified: **Bootstrap** (initial, 0 restarts, ready in ~30s)
+  and **Rejoin** (rolling restart recovers from committed `quorum-state`).
+* mTLS controller handshake succeeds (no more `UnknownCA`).
+* **RF-3 topic creates** — `bench-topic` 12p/RF3 `Ready=True`, no `INVALID_REPLICATION_FACTOR`.
+
+## 7. Open issues surfaced by the failover *workload* (deeper layer, separate from quorum)
+
+Running `bench/scripts/run-scenario.sh crabka failover 3broker-rf3` exposed three
+bugs in the **bench-driver / client producer** (not the broker quorum):
+
+1. **Bench-driver pod prefix** — `crates/bench-driver/src/scenario.rs:26` hardcodes
+   `Stack::Crabka => "^demo-brokers-"`, but the multi-pool `3broker-rf3` topology
+   names pods `demo-broker-0-0` etc. `kill_first_broker` finds no match. Fix:
+   `^demo-broker` (a literal prefix valid for both the e2e single-pool `demo-brokers-0`
+   and the bench `demo-broker-0-0`; `failover.rs` uses it via `starts_with`, `prom.rs`
+   as a regex).
+2. **Client producer stack overflow** — `crates/client-producer/src/sender.rs:457`
+   reroutes on `NOT_LEADER` by `Box::pin(send_to_leaders(.., reroute_depth+1)).await`.
+   The bound is `reroute_depth >= cfg.retries`, but `retries` defaults to `i32::MAX`,
+   so persistent rerouting recurses until the tokio worker stack overflows (~67s in).
+   Fix: make the reroute loop iterative and/or cap routing retries independently of
+   the (huge) transport-retry budget.
+3. **Root cause — persistent `NOT_LEADER`** — #2 only fires because some partition
+   keeps returning `NOT_LEADER_OR_FOLLOWER`. The reroute path logs nothing, so it was
+   silent until the overflow. This points to a multi-broker partition-leadership /
+   metadata-routing issue (metadata advertises a leader that rejects the produce, or
+   leadership not fully established for some partitions). Needs broker-side diagnosis.
+
+## 8. Known follow-up
 
 Peer controller addresses are resolved to IPs at broker boot and pinned (the raft
 dialer parses `SocketAddr`, [`network.rs:62`](crates/raft/src/network.rs:62)). A
