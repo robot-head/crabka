@@ -33,7 +33,7 @@ const MAX_STATES: usize = 200_000;
 /// search is depth-truncated (incomplete) and the `run` harness fails loudly.
 const MAX_DEPTH: usize = 80;
 /// Wall-clock backstop.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Bounded model config (held here, not in the fingerprinted state).
 struct ShareModel {
