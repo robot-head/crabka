@@ -63,7 +63,9 @@ mod types;
 mod wire;
 
 pub use config::{BootstrapMode, ControllerConfig};
-pub use controller::{Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice};
+pub use controller::{
+    Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice, metadata_log_nonempty,
+};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use kraft::MetadataFetchSlice;
