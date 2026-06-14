@@ -1331,6 +1331,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-security",
  "hdrhistogram",
  "k8s-openapi",
  "kube",

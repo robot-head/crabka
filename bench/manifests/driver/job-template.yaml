@@ -4,13 +4,21 @@
 # Required env vars:
 #   BENCH_STACK            crabka | kafka
 #   BENCH_SCENARIO_NAME    short scenario id (matches a file under bench/scenarios/)
-#   BENCH_BOOTSTRAP        <service-dns>:9092
+#   BENCH_BOOTSTRAP        <service-dns>:9092 (plaintext) or :9093 (TLS)
 #   BENCH_BROKER_COUNT     1 or 3
 #   BENCH_DRIVER_IMAGE     crabka-bench-driver:e2e (or :0.1.1)
+#
+# TLS data-path env vars (run-scenario.sh exports these; default to the
+# plaintext path when BENCH_TLS is unset):
+#   BENCH_TLS_ENABLED      "true" to dial the broker TLS listener; else "false"
+#   BENCH_TLS_SERVER_NAME  SNI / cert-SAN name (empty for plaintext)
+#   BENCH_CA_SECRET        cluster-CA Secret holding ca.crt (mounted read-only)
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: bench-driver-${BENCH_STACK}-${BENCH_SCENARIO_NAME}
+  # BENCH_RUN_SUFFIX is "" for plaintext, "-tls" for the TLS cell, so the two
+  # cells get distinct Job names and never collide.
+  name: bench-driver-${BENCH_STACK}-${BENCH_SCENARIO_NAME}${BENCH_RUN_SUFFIX}
   namespace: default
   labels:
     app.kubernetes.io/name: bench-driver
@@ -61,11 +69,28 @@ spec:
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH
               value: /results/run.json
+            # TLS data path. When BENCH_TLS_ENABLED=true the driver builds an
+            # `Ssl` ClientSecurity from the mounted CA + the SAN-matching SNI,
+            # and both producers and consumers dial the broker TLS listener.
+            # When "false" (the default plaintext path) these are inert.
+            - name: BENCH_TLS_ENABLED
+              value: "${BENCH_TLS_ENABLED}"
+            - name: BENCH_TLS_CA_PATH
+              value: /etc/bench-ca/ca.crt
+            - name: BENCH_TLS_SERVER_NAME
+              value: "${BENCH_TLS_SERVER_NAME}"
             - name: RUST_LOG
               value: info
           volumeMounts:
             - name: results
               mountPath: /results
+            # Cluster CA bundle (ca.crt) the driver trusts to verify the broker
+            # serving cert. The PEM is world-readable so the runAsNonRoot
+            # (uid 65532) container reads it with the default mode. `optional`
+            # on the volume keeps plaintext runs working if the Secret is absent.
+            - name: bench-ca
+              mountPath: /etc/bench-ca
+              readOnly: true
           resources:
             requests:
               cpu: "500m"
@@ -81,3 +106,13 @@ spec:
       volumes:
         - name: results
           emptyDir: {}
+        # Cluster-CA Secret published by the operator (crabka & Strimzi both
+        # name it demo-cluster-ca-cert with key ca.crt). `optional: true` so a
+        # plaintext run with no CA Secret still schedules the pod.
+        - name: bench-ca
+          secret:
+            secretName: ${BENCH_CA_SECRET}
+            optional: true
+            items:
+              - key: ca.crt
+                path: ca.crt

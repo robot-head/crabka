@@ -3,6 +3,7 @@
 //! phases, optionally triggers a failover mid-measurement, and merges
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
@@ -15,7 +16,9 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
+use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
 use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_security::ListenerProtocol;
 
 use crate::hist;
 use crate::payload;
@@ -36,6 +39,49 @@ pub struct DriverConfig {
     pub prometheus_url: Option<String>,
     pub broker_count: u32,
     pub scenario_id: u64,
+    /// TLS data-path config. `None` → plaintext (the default benchmark path).
+    pub tls: Option<TlsParams>,
+}
+
+/// TLS knobs for the producer/consumer data path. When present, both clients
+/// dial the broker's TLS listener and the produce/fetch byte stream is
+/// encrypted — the path crabka can serve via kTLS sendfile and Strimzi serves
+/// via JVM SSL.
+#[derive(Debug, Clone)]
+pub struct TlsParams {
+    /// Mounted CA bundle (`ca.crt`) the client trusts to verify the broker
+    /// serving cert. Sourced from the per-stack cluster-CA Secret.
+    pub ca_path: PathBuf,
+    /// SNI / server-name presented in the TLS `ClientHello`, matched against a
+    /// SAN on the broker serving cert. LOAD-BEARING: the bootstrap is
+    /// DNS-resolved to a pod IP and dialed by IP, so the SNI is NOT derived
+    /// from the bootstrap host — it must be set to a cert-SAN name
+    /// (crabka: `demo-broker-headless.<ns>.svc.cluster.local`;
+    /// Strimzi: `demo-kafka-bootstrap`).
+    pub server_name: String,
+    /// Optional mTLS client identity `(cert_pem, key_pem)`. One-way TLS
+    /// (`None`) is sufficient for the benchmark; present only if the listener
+    /// is configured to require client auth.
+    pub client_identity: Option<(PathBuf, PathBuf)>,
+}
+
+impl TlsParams {
+    /// Build the [`ClientSecurity`] for an `Ssl` listener: one-way TLS by
+    /// default (server-authenticated, trust-roots from the mounted CA), or
+    /// mutual TLS when [`Self::client_identity`] is set.
+    #[must_use]
+    pub fn to_security(&self) -> ClientSecurity {
+        ClientSecurity {
+            protocol: ListenerProtocol::Ssl,
+            tls: Some(TlsConnectorConfig {
+                trust_roots_pem: Some(self.ca_path.clone()),
+                server_name: self.server_name.clone(),
+                client_identity: self.client_identity.clone(),
+            }),
+            sasl: None,
+            sasl_host: None,
+        }
+    }
 }
 
 /// Top-level entrypoint called by `main`. Returns the populated
@@ -71,6 +117,17 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         ));
     }
 
+    // Client security policy for the data path. `None` → plaintext (the
+    // default). When `Some`, both producers and consumers dial the broker's
+    // TLS listener so the produce/fetch byte stream is encrypted.
+    let security: Option<ClientSecurity> = cfg.tls.as_ref().map(TlsParams::to_security);
+    if let Some(sec) = &security {
+        info!(
+            server_name = sec.tls.as_ref().map_or("", |t| t.server_name.as_str()),
+            "TLS data path enabled (protocol=Ssl)"
+        );
+    }
+
     // ── Producer workloads ──────────────────────────────────────────────────
     let mut prod_set: JoinSet<ProducerOut> = JoinSet::new();
     let stop = Arc::new(AtomicU8::new(STATE_RUN));
@@ -83,8 +140,10 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let stop = stop.clone();
         let first_ack = first_ack_unix_ms.clone();
         let sid = cfg.scenario_id;
-        prod_set
-            .spawn(async move { run_producer(i, s, bootstrap, topic, sid, stop, first_ack).await });
+        let sec = security.clone();
+        prod_set.spawn(async move {
+            run_producer(i, s, bootstrap, topic, sid, stop, first_ack, sec).await
+        });
     }
 
     // ── Consumer workloads ──────────────────────────────────────────────────
@@ -95,7 +154,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let topic = cfg.topic.clone();
         let stop = stop.clone();
         let sid = cfg.scenario_id;
-        cons_set.spawn(async move { run_consumer(i, s, bootstrap, topic, sid, stop).await });
+        let sec = security.clone();
+        cons_set.spawn(async move { run_consumer(i, s, bootstrap, topic, sid, stop, sec).await });
     }
 
     // ── Failover orchestrator task ──────────────────────────────────────────
@@ -308,6 +368,7 @@ fn empty_output(
 
 // ── Producer task ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // bench task fan-out: each arg is an independent per-task input
 async fn run_producer(
     idx: usize,
     scenario: Scenario,
@@ -316,6 +377,7 @@ async fn run_producer(
     scenario_id: u64,
     stop: Arc<AtomicU8>,
     first_ack: Arc<AtomicU64>,
+    security: Option<ClientSecurity>,
 ) -> ProducerOut {
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
@@ -334,6 +396,9 @@ async fn run_producer(
         // measured failover recovery reflects the cluster's leader re-election
         // (single-digit seconds) rather than the 30s default request timeout.
         .request_timeout(Duration::from_secs(10))
+        // `None` → plaintext (default). `Some` → all produce traffic for this
+        // task goes over the broker's TLS listener.
+        .maybe_security(security)
         .build()
         .await
         .context("build producer")
@@ -513,6 +578,7 @@ async fn run_consumer(
     topic: String,
     scenario_id: u64,
     stop: Arc<AtomicU8>,
+    security: Option<ClientSecurity>,
 ) -> ConsumerOut {
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match Consumer::builder()
@@ -521,6 +587,9 @@ async fn run_consumer(
         .group_id(group_id)
         .subscribe(vec![topic.clone()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
+        // `None` → plaintext (default). `Some` → all fetch traffic for this
+        // task goes over the broker's TLS listener (kTLS sendfile on crabka).
+        .maybe_security(security)
         .build()
         .await
         .context("build consumer")
@@ -599,6 +668,7 @@ mod tests {
             prometheus_url: None,
             broker_count,
             scenario_id: 0,
+            tls: None,
         }
     }
 
@@ -627,6 +697,56 @@ mod tests {
     fn bytes_to_mb_is_proper_mebibyte() {
         assert!((bytes_to_mb(1_048_576) - 1.0).abs() < 1e-9);
         assert!(bytes_to_mb(0).abs() < 1e-9);
+    }
+
+    // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose
+    // protocol is `Ssl`, whose TLS config carries the mounted CA as trust roots
+    // and the explicit SNI, and (one-way TLS) no client identity. This is the
+    // exact shape passed to `.maybe_security(...)` on both clients.
+    #[test]
+    fn tls_params_build_ssl_security_with_server_name() {
+        let params = TlsParams {
+            ca_path: "/etc/bench-ca/ca.crt".into(),
+            server_name: "demo-broker-headless.default.svc.cluster.local".into(),
+            client_identity: None,
+        };
+        let sec = params.to_security();
+        assert!(sec.protocol == ListenerProtocol::Ssl);
+        assert!(sec.protocol.requires_tls());
+        assert!(sec.sasl.is_none());
+        let tls = sec.tls.expect("Ssl security carries a TLS config");
+        assert!(tls.server_name == "demo-broker-headless.default.svc.cluster.local");
+        assert!(tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")));
+        assert!(tls.client_identity.is_none());
+    }
+
+    // mTLS variant: a client identity threads through to the TLS config.
+    #[test]
+    fn tls_params_carry_client_identity_for_mtls() {
+        let params = TlsParams {
+            ca_path: "/etc/bench-ca/ca.crt".into(),
+            server_name: "demo-kafka-bootstrap".into(),
+            client_identity: Some(("/c/tls.crt".into(), "/c/tls.key".into())),
+        };
+        let sec = params.to_security();
+        let tls = sec.tls.expect("TLS config present");
+        assert!(
+            tls.client_identity
+                == Some((
+                    std::path::PathBuf::from("/c/tls.crt"),
+                    std::path::PathBuf::from("/c/tls.key"),
+                ))
+        );
+    }
+
+    // Disabled: when `DriverConfig.tls` is `None`, the derived security is
+    // `None` (plaintext) — the unchanged default benchmark path.
+    #[test]
+    fn no_tls_params_means_plaintext_security_is_none() {
+        let c = cfg(1);
+        assert!(c.tls.is_none());
+        let security: Option<ClientSecurity> = c.tls.as_ref().map(TlsParams::to_security);
+        assert!(security.is_none());
     }
 
     #[test]

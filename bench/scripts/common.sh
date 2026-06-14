@@ -12,14 +12,43 @@ log() {
 
 # bootstrap_for STACK
 #   echo the in-cluster DNS:port for the Kafka bootstrap Service.
+#   When BENCH_TLS is set (non-empty), returns the TLS listener port (9093);
+#   otherwise the plaintext port (9092). The DNS host is identical either way
+#   (both listeners share the headless / bootstrap Service); only the port
+#   selects the listener.
 bootstrap_for() {
+  local stack="$1"
+  local port=9092
+  [[ -n "${BENCH_TLS:-}" ]] && port=9093
+  case "$stack" in
+    crabka)
+      printf 'demo-broker-headless.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
+      ;;
+    kafka|strimzi)
+      printf 'demo-kafka-bootstrap.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
+      ;;
+    *)
+      log "unknown stack '$stack' (want crabka|kafka)"
+      return 2
+      ;;
+  esac
+}
+
+# tls_server_name_for STACK
+#   echo the SNI / cert-SAN name the driver must present for one-way TLS.
+#   LOAD-BEARING: the bootstrap DNS resolves to a pod IP and is dialed by IP,
+#   so the SNI is NOT the bootstrap host — it is a name that appears as a SAN
+#   on the broker serving cert:
+#     crabka : the shared headless-Service FQDN (a SAN on every broker cert)
+#     strimzi: the short bootstrap-Service name (a SAN on Strimzi broker certs)
+tls_server_name_for() {
   local stack="$1"
   case "$stack" in
     crabka)
-      printf 'demo-broker-headless.%s.svc.cluster.local:9092' "$BENCH_NAMESPACE"
+      printf 'demo-broker-headless.%s.svc.cluster.local' "$BENCH_NAMESPACE"
       ;;
     kafka|strimzi)
-      printf 'demo-kafka-bootstrap.%s.svc.cluster.local:9092' "$BENCH_NAMESPACE"
+      printf 'demo-kafka-bootstrap'
       ;;
     *)
       log "unknown stack '$stack' (want crabka|kafka)"

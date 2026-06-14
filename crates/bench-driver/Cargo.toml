@@ -33,6 +33,7 @@ crabka-client-admin = { version = "0.3.6", path = "../client-admin" }
 crabka-client-consumer = { version = "0.3.6", path = "../client-consumer" }
 crabka-client-core = { version = "0.3.6", path = "../client-core" }
 crabka-client-producer = { version = "0.3.6", path = "../client-producer" }
+crabka-security = { version = "0.3.6", path = "../security" }
 hdrhistogram = { version = "7.5", default-features = false }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }

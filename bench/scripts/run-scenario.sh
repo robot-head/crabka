@@ -3,15 +3,18 @@
 # apply the Job from the template, collect the result JSON, augment it
 # with operator-latency, teardown.
 #
-# Usage: run-scenario.sh STACK SCENARIO TOPOLOGY
+# Usage: run-scenario.sh STACK SCENARIO TOPOLOGY [TLS]
 #   STACK     crabka|kafka
 #   SCENARIO  scenario file basename (without .yaml), under bench/scenarios/
 #   TOPOLOGY  1broker-rf1 | 3broker-rf3
+#   TLS       tls  → run the TLS-encrypted data path (4th positional arg, or
+#                    set BENCH_TLS=1 in the env). Omitted = plaintext (default).
 #
 # Env vars:
 #   BENCH_DRIVER_IMAGE   image ref for the driver Job (default crabka-bench-driver:e2e)
 #   BENCH_NAMESPACE      target namespace for the Kafka CR (default 'default')
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
+#   BENCH_TLS            non-empty → TLS data path (equivalent to TLS=tls arg)
 
 set -euo pipefail
 
@@ -23,6 +26,11 @@ source "$SCRIPT_DIR/common.sh"
 STACK="${1:?stack: crabka|kafka}"
 SCENARIO="${2:?scenario name}"
 TOPOLOGY="${3:-1broker-rf1}"
+# TLS dimension: 4th positional arg `tls`, or BENCH_TLS already set in env.
+if [[ "${4:-}" == "tls" ]]; then
+  BENCH_TLS=1
+fi
+: "${BENCH_TLS:=}"
 
 : "${BENCH_DRIVER_IMAGE:=crabka-bench-driver:e2e}"
 : "${BENCH_RESULTS_DIR:=$REPO_ROOT/bench/results}"
@@ -53,7 +61,11 @@ if [[ "$manifest_stack" == "kafka" ]]; then
   manifest_stack="strimzi"
 fi
 
-KAFKA_CR_PATH="$REPO_ROOT/bench/manifests/$manifest_stack/kafka-cr-${TOPOLOGY}.yaml"
+# TLS runs use the `-tls` CR variant (adds an Ssl listener on :9093 alongside
+# the existing plaintext :9092). Plaintext runs use the base CR unchanged.
+CR_SUFFIX=""
+[[ -n "$BENCH_TLS" ]] && CR_SUFFIX="-tls"
+KAFKA_CR_PATH="$REPO_ROOT/bench/manifests/$manifest_stack/kafka-cr-${TOPOLOGY}${CR_SUFFIX}.yaml"
 TOPIC_PATH="$REPO_ROOT/bench/manifests/$manifest_stack/kafkatopic-bench.yaml"
 JOB_TEMPLATE="$REPO_ROOT/bench/manifests/driver/job-template.yaml"
 RBAC_PATH="$REPO_ROOT/bench/manifests/driver/rbac.yaml"
@@ -77,7 +89,13 @@ envsubst < "$TOPIC_PATH" | kubectl apply -f -
 wait_kafka_topic_ready "$STACK" bench-topic 180
 
 BENCH_BOOTSTRAP=$(bootstrap_for "$STACK")
-JOB_NAME="bench-driver-${STACK}-${SCENARIO}"
+# Suffix the Job + result file on the TLS dimension so a TLS cell does not
+# clobber / collide with the plaintext cell for the same stack+scenario.
+# BENCH_RUN_SUFFIX is consumed by the job-template Job name via envsubst.
+BENCH_RUN_SUFFIX=""
+[[ -n "$BENCH_TLS" ]] && BENCH_RUN_SUFFIX="-tls"
+export BENCH_RUN_SUFFIX
+JOB_NAME="bench-driver-${STACK}-${SCENARIO}${BENCH_RUN_SUFFIX}"
 
 # Pre-emptively delete any stale Job from a prior run (Job names are
 # unique per stack+scenario; ttlSecondsAfterFinished may not have fired
@@ -90,7 +108,21 @@ export BENCH_BOOTSTRAP
 export BENCH_BROKER_COUNT
 export BENCH_DRIVER_IMAGE
 
-log "[$STACK/$SCENARIO/$TOPOLOGY] launching driver Job $JOB_NAME"
+# TLS data-path knobs consumed by the job-template envsubst. All three are
+# always exported (with inert defaults on the plaintext path) so envsubst never
+# blanks the volume's secretName / the driver env. The cluster-CA Secret is
+# named demo-cluster-ca-cert (key ca.crt) for BOTH crabka and Strimzi.
+if [[ -n "$BENCH_TLS" ]]; then
+  BENCH_TLS_ENABLED=true
+  BENCH_TLS_SERVER_NAME=$(tls_server_name_for "$STACK")
+else
+  BENCH_TLS_ENABLED=false
+  BENCH_TLS_SERVER_NAME=""
+fi
+: "${BENCH_CA_SECRET:=demo-cluster-ca-cert}"
+export BENCH_TLS_ENABLED BENCH_TLS_SERVER_NAME BENCH_CA_SECRET
+
+log "[$STACK/$SCENARIO/$TOPOLOGY] launching driver Job $JOB_NAME (tls=${BENCH_TLS:-0} server_name=${BENCH_TLS_SERVER_NAME:-none})"
 envsubst < "$JOB_TEMPLATE" | kubectl apply -f -
 
 # duration + warmup + 5 min buffer for image-pull + producer build
@@ -99,7 +131,7 @@ wait_job_complete "$JOB_NAME" "$job_timeout"
 
 # Pull the result JSON out of the (now-completed) driver pod logs.
 pod=$(kubectl get pod -n "$BENCH_NAMESPACE" -l "job-name=$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
-out_json="bench/results/${STACK}-${SCENARIO}-${TOPOLOGY}.json"
+out_json="bench/results/${STACK}-${SCENARIO}-${TOPOLOGY}${BENCH_RUN_SUFFIX}.json"
 log "[$STACK/$SCENARIO/$TOPOLOGY] extracting results from logs of pod $pod → $out_json"
 
 kubectl logs -n "$BENCH_NAMESPACE" "$pod" -c driver | awk '/===RESULT_START===/{flag=1;next} /===RESULT_END===/{flag=0} flag' > "$out_json"
