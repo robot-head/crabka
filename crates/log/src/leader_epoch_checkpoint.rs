@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use crate::error::LogError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EpochEntry {
     pub epoch: i32,
     pub start_offset: i64,
@@ -84,21 +84,17 @@ impl LeaderEpochCheckpoint {
     /// with the same epoch is a no-op (keeps the earliest recorded
     /// `start_offset`). Rewrites the file atomically.
     pub fn append(&mut self, epoch: i32, start_offset: i64) -> Result<(), LogError> {
-        if self.entries.iter().any(|e| e.epoch == epoch) {
-            return Ok(());
+        if append_to(&mut self.entries, epoch, start_offset) {
+            self.flush()?;
         }
-        self.entries.push(EpochEntry {
-            epoch,
-            start_offset,
-        });
-        self.flush()
+        Ok(())
     }
 
     /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
     /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
     pub fn truncate_from_end(&mut self, end_offset: i64) -> Result<(), LogError> {
         let before = self.entries.len();
-        self.entries.retain(|e| e.start_offset < end_offset);
+        truncate_to(&mut self.entries, end_offset);
         if self.entries.len() != before {
             self.flush()?;
         }
@@ -179,36 +175,7 @@ impl LeaderEpochCheckpoint {
     /// `end_offset` is always a valid truncation target (`>= 0`).
     #[must_use]
     pub fn epoch_and_offset_for(&self, requested_epoch: i32, log_end_offset: i64) -> (i32, i64) {
-        if requested_epoch == UNDEFINED_EPOCH {
-            return (UNDEFINED_EPOCH, log_end_offset);
-        }
-        if self.latest_epoch() == Some(requested_epoch) {
-            return (requested_epoch, log_end_offset);
-        }
-        // Smallest recorded epoch strictly greater than `requested`.
-        let higher = self
-            .entries
-            .iter()
-            .filter(|e| e.epoch > requested_epoch)
-            .min_by_key(|e| e.epoch);
-        match higher {
-            // `requested` is in the future relative to this log.
-            None => (UNDEFINED_EPOCH, log_end_offset),
-            Some(next) => {
-                // Largest recorded epoch <= requested (the floor).
-                let floor = self
-                    .entries
-                    .iter()
-                    .filter(|e| e.epoch <= requested_epoch)
-                    .map(|e| e.epoch)
-                    .max();
-                match floor {
-                    Some(f) => (f, next.start_offset),
-                    // `requested` is below the first recorded epoch.
-                    None => (requested_epoch, next.start_offset),
-                }
-            }
-        }
+        epoch_and_offset_for_entries(&self.entries, requested_epoch, log_end_offset)
     }
 
     #[must_use]
@@ -221,6 +188,67 @@ impl LeaderEpochCheckpoint {
         &self.entries
     }
 }
+
+/// Pure core of [`LeaderEpochCheckpoint::epoch_and_offset_for`] over a raw slice,
+/// so it can be exhaustively + property-tested without a file. The method
+/// delegates to this. See `leader_epoch_model.rs` for the divergence-safety model.
+pub(crate) fn epoch_and_offset_for_entries(
+    entries: &[EpochEntry],
+    requested_epoch: i32,
+    log_end_offset: i64,
+) -> (i32, i64) {
+    if requested_epoch == UNDEFINED_EPOCH {
+        return (UNDEFINED_EPOCH, log_end_offset);
+    }
+    if entries.iter().map(|e| e.epoch).max() == Some(requested_epoch) {
+        return (requested_epoch, log_end_offset);
+    }
+    // Smallest recorded epoch strictly greater than `requested`.
+    let higher = entries
+        .iter()
+        .filter(|e| e.epoch > requested_epoch)
+        .min_by_key(|e| e.epoch);
+    match higher {
+        // `requested` is in the future relative to this log.
+        None => (UNDEFINED_EPOCH, log_end_offset),
+        Some(next) => {
+            // Largest recorded epoch <= requested (the floor).
+            let floor = entries
+                .iter()
+                .filter(|e| e.epoch <= requested_epoch)
+                .map(|e| e.epoch)
+                .max();
+            match floor {
+                Some(f) => (f, next.start_offset),
+                // `requested` is below the first recorded epoch.
+                None => (requested_epoch, next.start_offset),
+            }
+        }
+    }
+}
+
+/// Pure core of [`LeaderEpochCheckpoint::append`]: idempotent push-if-absent.
+/// Returns `true` if a new entry was added (so the caller knows to flush).
+pub(crate) fn append_to(entries: &mut Vec<EpochEntry>, epoch: i32, start_offset: i64) -> bool {
+    if entries.iter().any(|e| e.epoch == epoch) {
+        return false;
+    }
+    entries.push(EpochEntry {
+        epoch,
+        start_offset,
+    });
+    true
+}
+
+/// Pure core of [`LeaderEpochCheckpoint::truncate_from_end`]: drop entries that
+/// begin at or after `end_offset`.
+pub(crate) fn truncate_to(entries: &mut Vec<EpochEntry>, end_offset: i64) {
+    entries.retain(|e| e.start_offset < end_offset);
+}
+
+#[cfg(test)]
+#[path = "leader_epoch_model.rs"]
+mod leader_epoch_model;
 
 #[cfg(test)]
 mod tests {

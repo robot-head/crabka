@@ -35,6 +35,9 @@ zerocopy = { workspace = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 proptest = { workspace = true }
+# Exhaustive enumeration of the leader-epoch truncation core
+# (`epoch_and_offset_for_entries`) in `leader_epoch_model.rs`.
+stateright = { workspace = true }
 tempfile = { workspace = true }
 hex = { workspace = true }
 testcontainers = { workspace = true }
