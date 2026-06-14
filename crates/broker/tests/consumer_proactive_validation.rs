@@ -72,7 +72,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use tempfile::TempDir;
 
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError};
 use crabka_client_core::Client;
 use crabka_metadata::{MetadataRecord, PartitionRecord};
@@ -170,27 +170,6 @@ async fn create_topic(client: &Client, name: &str) {
     assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
 }
 
-/// Poll the broker's metadata image until partition `(topic, 0)` reports
-/// `leader_epoch == want`.
-async fn wait_for_metadata_leader_epoch(handle: &BrokerHandle, topic: &str, want: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Some(pr) = handle.partition_record_for_test(topic, 0)
-            && pr.leader_epoch == want
-        {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "metadata leader_epoch for {topic}-0 never reached {want} within 15s; current={:?}",
-            handle
-                .partition_record_for_test(topic, 0)
-                .map(|p| p.leader_epoch)
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 /// PROACTIVE KIP-320 truncation detection.
 ///
 /// See the module docs for the full rationale. The discriminating assertions:
@@ -225,19 +204,10 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     produce(&producer, topic, &["v0", "v1", "v2", "v3"]).await;
 
     // The partition's natural leader epoch is 0 on a fresh single-broker topic.
-    let pr0 = {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            if let Some(pr) = broker.partition_record_for_test(topic, 0) {
-                break pr;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "partition record never appeared within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    };
+    broker.wait_until_partition_present(topic, 0).await;
+    let pr0 = broker
+        .partition_record_for_test(topic, 0)
+        .expect("partition record must be present after wait_until_partition_present");
     assert!(
         pr0.leader_epoch == 0,
         "fresh topic should start at leader_epoch 0, got {}",
@@ -320,7 +290,9 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .submit_metadata_record_for_test(forged)
         .await
         .expect("advance metadata leader epoch");
-    wait_for_metadata_leader_epoch(&broker, topic, 1).await;
+    broker
+        .wait_for_image(|img| img.partition(topic, 0).is_some_and(|p| p.leader_epoch >= 1))
+        .await;
 
     // The `None`-policy consumer under test. It inherits the group's committed
     // position (offset 4, epoch 0): `next_offset = 4`, `offset_epoch = 0`. With
@@ -340,19 +312,29 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .await
         .unwrap();
 
-    // Wait for the background coordinator to publish the assignment, which
-    // happens only AFTER `prime_offsets` seeds `next_offset = 4` and
-    // `offset_epoch = 0` from the committed position. Polling before the prime
-    // would let `refresh_leader_epochs` see `offset_epoch = -1` and skip the
-    // flag (nothing to validate below a never-consumed offset), so we gate on a
-    // settled assignment to make the proactive trigger deterministic.
-    let settle = Instant::now() + Duration::from_secs(15);
-    while consumer.assignment().await.is_empty() {
+    // Wait for the coordinator to publish the assignment. This consumer uses the
+    // classic JoinGroup/SyncGroup protocol. We first gate on the broker having
+    // processed the JoinGroup (member count → 1), then spin-yield until the
+    // client-side coordinator task completes SyncGroup + prime_offsets and sets
+    // the assignment. Polling before prime_offsets finishes would let
+    // `refresh_leader_epochs` see `offset_epoch = -1` and skip the validation
+    // flag — so this gate makes the proactive trigger deterministic.
+    broker
+        .wait_until_classic_group_member_count("proactive-grp", 1)
+        .await;
+    // Spin without sleeping until the SyncGroup response and prime_offsets have
+    // propagated back to the client coordinator (a few async hops after the
+    // broker-side member-count gate fires).
+    let settle = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !consumer.assignment().await.is_empty() {
+            break;
+        }
         assert!(
             Instant::now() < settle,
-            "consumer assignment did not settle within 15s"
+            "consumer assignment did not propagate within 10s after member-count gate"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
     }
 
     // Snapshot the OFLE counter immediately before the truncating poll.
