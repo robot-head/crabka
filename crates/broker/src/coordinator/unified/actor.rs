@@ -271,6 +271,7 @@ pub struct DescribeMember {
     /// `ClassicMemberFacade` is set). Distinguishes a classic-protocol member
     /// served through the next-gen machinery from a native consumer member.
     pub is_classic: bool,
+    pub assignment_state: MemberAssignmentState,
 }
 
 #[derive(Debug)]
@@ -1323,6 +1324,7 @@ fn build_describe(state: &GroupState) -> DescribeView {
                 subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
                 assigned_partitions: m.assigned_partitions.clone(),
                 is_classic: m.is_classic(),
+                assignment_state: m.assignment_state,
             })
             .collect(),
     }
