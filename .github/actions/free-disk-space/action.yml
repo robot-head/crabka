@@ -1,12 +1,12 @@
 name: Free disk space
 description: >
-  Reclaim ~25-30 GB of preinstalled SDKs the Rust coverage build never uses, so
-  the `-C instrument-coverage` build + profraw set + cargo target dir don't
-  exhaust the default ubuntu runner's ~14 GB free disk ("No space left on
-  device", which then crashes the linker with SIGBUS). Removes only dirs that no
-  coverage/integration job depends on — it deliberately leaves the JDK
-  (`/usr/lib/jvm`) and Docker images alone, so it is safe for the JVM-acceptance
-  and testcontainers jobs too.
+  Reclaim ~30-40 GB of preinstalled SDKs + preloaded Docker images the Rust
+  coverage build never uses, so the `-C instrument-coverage` build + profraw set
+  + cargo target dir don't exhaust the default ubuntu runner's ~14 GB free disk
+  ("No space left on device", which then crashes the linker / runner). It leaves
+  the JDK (`/usr/lib/jvm`) intact for the JVM jobs; pruning preloaded Docker
+  images is safe for the testcontainers jobs because they pull the images they
+  need at test time.
 runs:
   using: composite
   steps:
@@ -24,5 +24,12 @@ runs:
           /usr/local/graalvm \
           /usr/local/share/powershell \
           /usr/local/share/chromium \
+          /opt/microsoft \
+          /usr/local/lib/node_modules \
+          /usr/share/miniconda \
+          /opt/az \
           /usr/lib/google-cloud-sdk || true
+        # broker-integration et al. use no Docker; the testcontainers jobs
+        # re-pull what they need, so pruning the preloaded images is safe.
+        sudo docker image prune --all --force || true
         echo "Disk after:"; df -h /
