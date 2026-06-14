@@ -334,7 +334,9 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
             Instant::now() < settle,
             "consumer assignment did not propagate within 10s after member-count gate"
         );
-        tokio::task::yield_now().await;
+        // Brief re-check tick (the background coordinator task publishes the
+        // assignment); avoids a tight `yield_now` busy-spin on loaded runners.
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     // Snapshot the OFLE counter immediately before the truncating poll.
