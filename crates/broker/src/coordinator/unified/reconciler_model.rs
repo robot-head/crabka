@@ -6,6 +6,13 @@
 //! simultaneously own the same partition. Design:
 //! `docs/superpowers/specs/2026-06-14-crabka-kip848-reconciliation-model-design.md`.
 //!
+//! The faithful client adds/revokes partitions strictly according to the
+//! **advertised** assignment the coordinator returned in that member's last
+//! heartbeat response (`ReconState::advertised`) — never the raw target — with
+//! no cross-member check. That is exactly how a real consumer behaves: it
+//! trusts the coordinator's assignment. The safety guarantee must therefore come
+//! entirely from the coordinator's withholding (`GroupState::reconcile_member`).
+//!
 //! Memory safety: stateright BFS keeps every visited unique state resident, so
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
@@ -23,7 +30,7 @@ use super::super::config::NextGenConfig;
 use super::super::consumer_state::{GroupState, MemberState};
 use super::super::persistence_next_gen::MemberAssignmentState;
 use super::super::reconciler::ReconcileInput;
-use super::{MetadataProvider, step_heartbeat};
+use super::{HeartbeatStep, MetadataProvider, step_heartbeat};
 
 const TOPIC: Uuid = Uuid([7; 16]);
 const TOPIC_NAME: &str = "t";
@@ -46,7 +53,7 @@ struct MemberProj {
     id: String,
     member_epoch: i32,
     assignment_state: MemberAssignmentState,
-    assigned: Vec<i32>,           // coordinator view (sorted)
+    assigned: Vec<i32>,           // coordinator's authoritative current assignment
     pending_revocation: Vec<i32>, // sorted
     target: Vec<i32>,             // group.target.per_member (sorted)
 }
@@ -60,6 +67,11 @@ struct ReconState {
     /// Ground-truth ledger: what each member actually consumes. Sorted by id;
     /// partitions sorted. This is the observable the headline invariant checks.
     client_owned: Vec<(String, Vec<i32>)>,
+    /// The assignment the coordinator last advertised to each member (its last
+    /// heartbeat response). The faithful client adds/revokes against THIS, not
+    /// the raw target — a member only learns its new assignment when it
+    /// heartbeats. Sorted by id; partitions sorted.
+    advertised: Vec<(String, Vec<i32>)>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -88,6 +100,14 @@ impl ReconModel {
             pool: vec!["a", "b"],
             partitions: 2,
             max_epoch: 8,
+        }
+    }
+
+    fn wide() -> Self {
+        Self {
+            pool: vec!["a", "b", "c"],
+            partitions: 2,
+            max_epoch: 6,
         }
     }
 
@@ -162,8 +182,13 @@ fn rebuild_group(s: &ReconState) -> GroupState {
     g
 }
 
-/// Project a real `GroupState` + the client ledger back into the hashable state.
-fn project(g: &GroupState, owned: &BTreeMap<String, BTreeSet<i32>>) -> ReconState {
+/// Project a real `GroupState` + the client ledger + advertised map back into
+/// the hashable state.
+fn project(
+    g: &GroupState,
+    owned: &BTreeMap<String, BTreeSet<i32>>,
+    advertised: &BTreeMap<String, Vec<i32>>,
+) -> ReconState {
     let mut members: Vec<MemberProj> = g
         .members
         .values()
@@ -181,12 +206,17 @@ fn project(g: &GroupState, owned: &BTreeMap<String, BTreeSet<i32>>) -> ReconStat
         .iter()
         .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
         .collect();
+    let advertised: Vec<(String, Vec<i32>)> = advertised
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     ReconState {
         group_epoch: g.group_epoch,
         dirty: g.dirty,
         target_epoch: g.target.epoch,
         members,
         client_owned,
+        advertised,
     }
 }
 
@@ -194,6 +224,13 @@ fn owned_map(s: &ReconState) -> BTreeMap<String, BTreeSet<i32>> {
     s.client_owned
         .iter()
         .map(|(k, v)| (k.clone(), v.iter().copied().collect()))
+        .collect()
+}
+
+fn advertised_map(s: &ReconState) -> BTreeMap<String, Vec<i32>> {
+    s.advertised
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
 
@@ -206,6 +243,14 @@ fn owned_to_vec(owned: &BTreeMap<String, BTreeSet<i32>>) -> Vec<(String, Vec<i32
 
 fn member<'a>(s: &'a ReconState, id: &str) -> Option<&'a MemberProj> {
     s.members.iter().find(|m| m.id == id)
+}
+
+fn advertised_for(s: &ReconState, id: &str) -> Vec<i32> {
+    s.advertised
+        .iter()
+        .find(|(k, _)| k == id)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
 }
 
 fn hb_request(
@@ -226,6 +271,24 @@ fn hb_request(
         }]),
         ..Default::default()
     }
+}
+
+/// The partitions the coordinator advertised to a member in `step`'s response.
+fn advertised_of(step: &HeartbeatStep) -> Vec<i32> {
+    let mut v: Vec<i32> = step
+        .response
+        .assignment
+        .as_ref()
+        .map(|a| {
+            a.topic_partitions
+                .iter()
+                .filter(|tp| tp.topic_id == TOPIC)
+                .flat_map(|tp| tp.partitions.iter().copied())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_unstable();
+    v
 }
 
 /// Per-member epoch must never regress across a real step.
@@ -254,6 +317,7 @@ impl Model for ReconModel {
             target_epoch: 0,
             members: vec![],
             client_owned: vec![],
+            advertised: vec![],
         }]
     }
 
@@ -273,20 +337,22 @@ impl Model for ReconModel {
                 actions.push(ReconAction::Leave(m.id.clone()));
                 actions.push(ReconAction::Heartbeat(m.id.clone()));
             }
-            // Faithful-client moves don't bump the group epoch → always allowed.
+            // Faithful-client moves gate on the ADVERTISED assignment (what the
+            // member was last told), not the raw target. No cross-member check.
+            let advertised = advertised_for(state, &m.id);
             let owned: BTreeSet<i32> = state
                 .client_owned
                 .iter()
                 .find(|(k, _)| k == &m.id)
                 .map(|(_, v)| v.iter().copied().collect())
                 .unwrap_or_default();
-            for &tp in &m.target {
+            for &tp in &advertised {
                 if !owned.contains(&tp) {
                     actions.push(ReconAction::ClientAdd(m.id.clone(), tp));
                 }
             }
             for &tp in &owned {
-                if !m.target.contains(&tp) {
+                if !advertised.contains(&tp) {
                     actions.push(ReconAction::ClientRevoke(m.id.clone(), tp));
                 }
             }
@@ -295,11 +361,12 @@ impl Model for ReconModel {
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut owned = owned_map(last);
+        let mut adv = advertised_map(last);
         match action {
             ReconAction::ClientAdd(id, tp) => {
-                let target_has = member(last, &id).is_some_and(|m| m.target.contains(&tp));
+                let advertised_has = advertised_for(last, &id).contains(&tp);
                 let entry = owned.entry(id).or_default();
-                if !target_has || entry.contains(&tp) {
+                if !advertised_has || entry.contains(&tp) {
                     return None;
                 }
                 entry.insert(tp);
@@ -308,9 +375,9 @@ impl Model for ReconModel {
                 Some(next)
             }
             ReconAction::ClientRevoke(id, tp) => {
-                let target_has = member(last, &id).is_some_and(|m| m.target.contains(&tp));
+                let advertised_has = advertised_for(last, &id).contains(&tp);
                 let entry = owned.entry(id).or_default();
-                if target_has || !entry.contains(&tp) {
+                if advertised_has || !entry.contains(&tp) {
                     return None;
                 }
                 entry.remove(&tp);
@@ -324,7 +391,7 @@ impl Model for ReconModel {
                 }
                 let mut g = rebuild_group(last);
                 let req = hb_request(&id, 0, &BTreeSet::new());
-                let _ = step_heartbeat(
+                let step = step_heartbeat(
                     &mut g,
                     &config(),
                     &self.metadata(),
@@ -333,8 +400,9 @@ impl Model for ReconModel {
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
-                owned.entry(id).or_default(); // new member owns nothing yet
-                Some(project(&g, &owned))
+                owned.entry(id.clone()).or_default(); // new member owns nothing yet
+                adv.insert(id, advertised_of(&step));
+                Some(project(&g, &owned, &adv))
             }
             ReconAction::Leave(id) => {
                 member(last, &id)?;
@@ -350,14 +418,15 @@ impl Model for ReconModel {
                 );
                 assert_epoch_monotonic(last, &g);
                 owned.remove(&id);
-                Some(project(&g, &owned))
+                adv.remove(&id);
+                Some(project(&g, &owned, &adv))
             }
             ReconAction::Heartbeat(id) => {
                 let epoch = member(last, &id)?.member_epoch;
                 let cur_owned: BTreeSet<i32> = owned.get(&id).cloned().unwrap_or_default();
                 let mut g = rebuild_group(last);
                 let req = hb_request(&id, epoch, &cur_owned);
-                let _ = step_heartbeat(
+                let step = step_heartbeat(
                     &mut g,
                     &config(),
                     &self.metadata(),
@@ -366,7 +435,8 @@ impl Model for ReconModel {
                     Instant::now(),
                 );
                 assert_epoch_monotonic(last, &g);
-                Some(project(&g, &owned))
+                adv.insert(id, advertised_of(&step));
+                Some(project(&g, &owned, &adv))
             }
         }
     }
@@ -385,6 +455,25 @@ impl Model for ReconModel {
                 }
                 true
             }),
+            // A member is never advertised a partition another member currently
+            // owns — the coordinator-side withholding invariant.
+            Property::always(
+                "advertised_disjoint_from_others_owned",
+                |_, s: &ReconState| {
+                    for (mid, adv) in &s.advertised {
+                        for &p in adv {
+                            let owned_by_other = s
+                                .client_owned
+                                .iter()
+                                .any(|(k, v)| k != mid && v.contains(&p));
+                            if owned_by_other {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                },
+            ),
             // Non-vacuity: a handoff state is reachable (a partition is in one
             // member's target while another member currently owns it).
             Property::sometimes("handoff_witness", |_, s: &ReconState| {
@@ -448,24 +537,17 @@ fn run(model: ReconModel, label: &str) {
     checker.assert_properties();
 }
 
-/// 2 members, 1 topic, 2 partitions: the minimal handoff scenario.
-///
-/// FINDING (KRM-T2): this model CURRENTLY FAILS — it proves a real KIP-848
-/// conformance gap. `build_assignment_resp` (actor.rs) returns each member its
-/// full *target* assignment with no cross-member withholding gate
-/// (`CurrentAssignmentBuilder`-equivalent), so a partition is advertised to a
-/// new owner before the previous owner revokes it. Minimal counterexample
-/// (`p0`/`p1` are the topic's two partitions):
-///
-/// 1. `Join("a")` — sole member; coordinator sets `target[a] = {p0, p1}`.
-/// 2. `ClientAdd("a", 0)` then `ClientAdd("a", 1)` — `a` consumes `{p0, p1}`.
-/// 3. `Join("b")` — `UniformAssignor` rebalances to `target[a] = {p0}` and `target[b] = {p1}`; `b`'s heartbeat response advertises `p1` while `a` still consumes it.
-/// 4. `ClientAdd("b", 1)` — `b` consumes `p1` before `a` revokes it, so `p1` is owned by both `a` and `b` (`no_double_ownership` violated).
-///
-/// `#[ignore]`d so the tree builds green; un-ignore once the coordinator
-/// withholds not-yet-released partitions from the response (KRM-T3 fix).
 #[test]
-#[ignore = "proves a real KIP-848 conformance gap (no cross-member withholding); un-ignore once fixed (KRM-T3)"]
 fn recon_basic() {
+    // 2 members, 1 topic, 2 partitions: the minimal handoff scenario. Proves the
+    // coordinator's `reconcile_member` withholding keeps ownership disjoint
+    // across every interleaving of join / leave / heartbeat / client revoke+add.
     run(ReconModel::basic(), "recon_basic");
+}
+
+#[test]
+fn recon_wide() {
+    // 3 members contending for 2 partitions: more handoff interleavings as
+    // members join/leave and partitions migrate between live members.
+    run(ReconModel::wide(), "recon_wide");
 }

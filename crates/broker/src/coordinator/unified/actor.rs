@@ -1076,6 +1076,10 @@ pub(crate) fn step_heartbeat(
         state.add_or_update_member(m);
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
+        // Compute the new member's current assignment (grants free target
+        // partitions, withholds those still held by others) before responding.
+        let owned = reported_owned(req);
+        state.reconcile_member(&new_member_id, &owned);
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id));
         let response = build_assignment_resp(state, &new_member_id, config);
         return HeartbeatStep { response, pending };
@@ -1161,6 +1165,20 @@ async fn handle_heartbeat(
     Ok(step.response)
 }
 
+/// The partitions a member reports owning in its heartbeat. Absent
+/// `topic_partitions` means "unchanged" — the caller substitutes the member's
+/// current assignment so a keepalive can still pick up newly-freed partitions.
+fn reported_owned(req: &ConsumerGroupHeartbeatRequest) -> HashMap<Uuid, Vec<i32>> {
+    req.topic_partitions
+        .as_ref()
+        .map(|tp| {
+            tp.iter()
+                .map(|t| (t.topic_id, t.partitions.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Apply steady-state member updates and run reconciliation.
 /// Returns `true` if any change occurred that requires a log write.
 fn update_member_state(
@@ -1194,16 +1212,6 @@ fn update_member_state(
             m.set_regex(req.subscribed_topic_regex.clone());
             state.dirty = true;
         }
-        if let Some(ref tp) = req.topic_partitions {
-            let owned: HashMap<Uuid, Vec<i32>> = tp
-                .iter()
-                .map(|t| (t.topic_id, t.partitions.clone()))
-                .collect();
-            m.assigned_partitions = owned;
-            if m.partitions_pending_revocation.is_empty() {
-                m.assignment_state = MemberAssignmentState::Stable;
-            }
-        }
     }
     if became_dirty {
         state.dirty = true;
@@ -1214,7 +1222,22 @@ fn update_member_state(
     if epoch_advanced {
         state.advance_member_epoch(&req.member_id);
     }
-    subscription_changed || was_dirty || epoch_advanced
+    // Reconcile this member's current assignment against the (possibly new)
+    // target and what it reports owning: grant free target partitions, mark
+    // revocations, and withhold partitions still held by another member. A
+    // heartbeat without `topic_partitions` is a keepalive — reuse the member's
+    // current assignment as its owned set so it can still pick up freed partitions.
+    let owned = if req.topic_partitions.is_some() {
+        reported_owned(req)
+    } else {
+        state
+            .members
+            .get(&req.member_id)
+            .map(|m| m.assigned_partitions.clone())
+            .unwrap_or_default()
+    };
+    let assignment_changed = state.reconcile_member(&req.member_id, &owned);
+    subscription_changed || was_dirty || epoch_advanced || assignment_changed
 }
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
@@ -1311,19 +1334,13 @@ fn build_assignment_resp(
         .members
         .get(member_id)
         .expect("member exists at build_assignment_resp");
-    // KIP-848: the `assignment` field in the heartbeat response carries the
-    // server's TARGET assignment for this member — the full set of partitions
-    // the member should eventually own.  The client acknowledges receipt by
-    // echoing its current partition set back in subsequent heartbeats
-    // (`topic_partitions` on the request side).  Using the target here
-    // (rather than the client-acked subset) ensures new members learn their
-    // initial assignment on the very first heartbeat.
-    let target_partitions = state
-        .target
-        .per_member
-        .get(member_id)
-        .cloned()
-        .unwrap_or_default();
+    // KIP-848: the `assignment` field carries the member's *current* assignment —
+    // the partitions it may own right now — NOT the raw target. `reconcile_member`
+    // computes this each heartbeat, withholding any target partition still held by
+    // another member until that member revokes it. Returning the current
+    // assignment (`assigned_partitions`) rather than the target is what prevents
+    // two members from owning the same partition during a handoff.
+    let target_partitions = m.assigned_partitions.clone();
     let assignment = Some(RespAssignment {
         topic_partitions: target_partitions
             .iter()

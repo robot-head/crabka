@@ -210,13 +210,25 @@ impl GroupState {
         self.target.per_member = per_member;
         for (mid, member) in &mut self.members {
             let target = self.target.per_member.get(mid).cloned().unwrap_or_default();
-            let (revoke, assigned) = compute_revoke_split(&member.assigned_partitions, &target);
+            // Split everything the member still holds — its current assignment
+            // PLUS any partitions already pending revocation — against the new
+            // target. Splitting `assigned ∪ pending` (not just `assigned`)
+            // preserves in-flight revocations across successive reconciles, so a
+            // partition a member is still releasing is never mistaken for "free"
+            // by the withholding in `reconcile_member`.
+            let mut held = member.assigned_partitions.clone();
+            for (tid, parts) in &member.partitions_pending_revocation {
+                held.entry(*tid).or_default().extend(parts.iter().copied());
+            }
+            let (revoke, assigned) = compute_revoke_split(&held, &target);
             member.partitions_pending_revocation = revoke;
             member.assigned_partitions = assigned;
-            member.assignment_state = if member.partitions_pending_revocation.is_empty() {
+            member.assignment_state = if !member.partitions_pending_revocation.is_empty() {
+                MemberAssignmentState::UnrevokedPartitions
+            } else if assignment_covers(&member.assigned_partitions, &target) {
                 MemberAssignmentState::Stable
             } else {
-                MemberAssignmentState::UnrevokedPartitions
+                MemberAssignmentState::UnreleasedPartitions
             };
         }
     }
@@ -228,9 +240,114 @@ impl GroupState {
         }
     }
 
+    /// KIP-848 per-heartbeat reconciliation (the `CurrentAssignmentBuilder`):
+    /// compute `member_id`'s authoritative *current* assignment from its reported
+    /// owned set and the group target, **withholding any partition still held
+    /// (owned or pending revocation) by another member**. The returned set is
+    /// what the coordinator grants the member now and advertises in the heartbeat
+    /// response; storing it as `assigned_partitions` makes the grant
+    /// authoritative, so a partition is never advertised to two members at once
+    /// (the headline KIP-848 safety property — see `reconciler_model.rs`).
+    ///
+    /// A member keeps every target partition it already owns and gains target
+    /// partitions that are *free*; partitions it owns but no longer targets move
+    /// to `partitions_pending_revocation`. Other members claim a freed partition
+    /// only once its previous owner reports having released it (its next
+    /// heartbeat drops it from `reported_owned`, draining it from both sets).
+    /// Returns `true` if the member's assignment or pending set changed.
+    pub fn reconcile_member(
+        &mut self,
+        member_id: &str,
+        reported_owned: &HashMap<Uuid, Vec<i32>>,
+    ) -> bool {
+        let target = self
+            .target
+            .per_member
+            .get(member_id)
+            .cloned()
+            .unwrap_or_default();
+        // `assigned ∪ pending` of every OTHER member is exactly what that member
+        // still holds; it is invariant under `install_target`'s keep/revoke split.
+        let mut held_by_others: HashSet<(Uuid, i32)> = HashSet::new();
+        for (mid, m) in &self.members {
+            if mid == member_id {
+                continue;
+            }
+            for (tid, parts) in m
+                .assigned_partitions
+                .iter()
+                .chain(m.partitions_pending_revocation.iter())
+            {
+                for &p in parts {
+                    held_by_others.insert((*tid, p));
+                }
+            }
+        }
+        // Grant each target partition the member already owns OR that is free.
+        let mut new_assigned: HashMap<Uuid, Vec<i32>> = HashMap::new();
+        let mut fully_assigned = true;
+        for (tid, tparts) in &target {
+            for &p in tparts {
+                let owned_here = reported_owned.get(tid).is_some_and(|o| o.contains(&p));
+                let free = !held_by_others.contains(&(*tid, p));
+                if owned_here || free {
+                    new_assigned.entry(*tid).or_default().push(p);
+                } else {
+                    fully_assigned = false;
+                }
+            }
+        }
+        // Pending revocation = reported-owned partitions no longer in the target.
+        let mut new_pending: HashMap<Uuid, Vec<i32>> = HashMap::new();
+        for (tid, oparts) in reported_owned {
+            let tset: HashSet<i32> = target
+                .get(tid)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            for &p in oparts {
+                if !tset.contains(&p) {
+                    new_pending.entry(*tid).or_default().push(p);
+                }
+            }
+        }
+        for v in new_assigned.values_mut() {
+            v.sort_unstable();
+        }
+        for v in new_pending.values_mut() {
+            v.sort_unstable();
+        }
+        let m = self
+            .members
+            .get_mut(member_id)
+            .expect("member exists in reconcile_member");
+        let changed =
+            m.assigned_partitions != new_assigned || m.partitions_pending_revocation != new_pending;
+        m.assigned_partitions = new_assigned;
+        m.partitions_pending_revocation = new_pending;
+        m.assignment_state = if !m.partitions_pending_revocation.is_empty() {
+            MemberAssignmentState::UnrevokedPartitions
+        } else if fully_assigned {
+            MemberAssignmentState::Stable
+        } else {
+            MemberAssignmentState::UnreleasedPartitions
+        };
+        changed
+    }
+
     pub fn current_member_for_instance(&self, instance_id: &str) -> Option<&str> {
         self.instance_to_member.get(instance_id).map(String::as_str)
     }
+}
+
+/// True if `assigned` contains every partition in `target`.
+fn assignment_covers(assigned: &HashMap<Uuid, Vec<i32>>, target: &HashMap<Uuid, Vec<i32>>) -> bool {
+    target.iter().all(|(tid, tparts)| {
+        tparts
+            .iter()
+            .all(|p| assigned.get(tid).is_some_and(|a| a.contains(p)))
+    })
 }
 
 fn compute_revoke_split(
