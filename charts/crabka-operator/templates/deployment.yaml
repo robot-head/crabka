@@ -29,11 +29,11 @@ spec:
       securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
       containers:
         - name: operator
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - run
-            - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag }}
+            - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag | default .Chart.AppVersion }}
             - --default-gateway-image={{ .Values.gatewayImage.repository }}:{{ .Values.gatewayImage.tag | default .Chart.AppVersion }}
             {{- if .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," .Values.watchNamespaces }}

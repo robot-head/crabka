@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/robot-head/crabka-schema-registry
-  tag: "v0.3.6"
+  tag: ""  # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
 replicaCount: 1

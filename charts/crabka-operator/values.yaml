@@ -1,12 +1,12 @@
 image:
   repository: ghcr.io/robot-head/crabka-operator
-  tag: "v0.3.6"
+  tag: ""  # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
 # Default broker image used when a Kafka CR doesn't override it.
 brokerImage:
   repository: ghcr.io/robot-head/crabka-broker
-  tag: "v0.3.6"
+  tag: ""  # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
 # Default gateway image used when a KafkaGrpcGateway CR doesn't override it.
