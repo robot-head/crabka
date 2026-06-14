@@ -128,6 +128,7 @@ pub(crate) async fn handle(
     let controller = &broker.controller;
     let node_id = broker.config.node_id;
     let partitions_map = broker.partitions.clone();
+    let producer_state = broker.producer_state.clone();
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
@@ -277,6 +278,7 @@ pub(crate) async fn handle(
                         &log_dirs,
                         &log_config,
                         &log_dir_status,
+                        &producer_state,
                     ) {
                         tracing::error!(
                             topic = %t.name, partition = *p, error = %e,

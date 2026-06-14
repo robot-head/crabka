@@ -399,6 +399,35 @@ mod record_tests {
 }
 
 impl RecordBatch {
+    /// KIP-534 delete horizon, if the delete-horizon attribute bit is set.
+    /// `base_timestamp` is repurposed to carry it (no separate wire field).
+    #[must_use]
+    pub fn delete_horizon_ms(&self) -> Option<i64> {
+        self.attributes
+            .has_delete_horizon()
+            .then_some(self.base_timestamp)
+    }
+
+    /// Stamp the delete horizon: set bit 6, move the horizon into
+    /// `base_timestamp`, and rewrite every record's `timestamp_delta` so
+    /// reconstructed absolute timestamps (`base_timestamp + delta`) are
+    /// unchanged.
+    #[must_use]
+    pub fn with_delete_horizon(mut self, horizon_ms: i64) -> Self {
+        let old_base = self.base_timestamp;
+        for r in &mut self.records {
+            // Reconstruct the original absolute timestamp, then re-base it onto
+            // the new `base_timestamp`. Deltas are `i64`, so absolute timestamps
+            // round-trip exactly across re-basing; `saturating_*` only guards
+            // pathological inputs from panicking.
+            let abs = old_base.saturating_add(r.timestamp_delta);
+            r.timestamp_delta = abs.saturating_sub(horizon_ms);
+        }
+        self.base_timestamp = horizon_ms;
+        self.attributes = self.attributes.with_delete_horizon(true);
+        self
+    }
+
     /// Decode a complete v2 record batch from `buf`. Reads from the start of
     /// the header.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
@@ -716,6 +745,82 @@ mod batch_tests {
     roundtrip_compressed!(compressed_snappy, CompressionType::Snappy);
     roundtrip_compressed!(compressed_lz4, CompressionType::Lz4);
     roundtrip_compressed!(compressed_zstd, CompressionType::Zstd);
+
+    #[test]
+    fn with_delete_horizon_stamps_and_preserves_record_timestamps() {
+        // base 1000, two records at deltas [0, 5] → absolutes [1000, 1005].
+        let b = RecordBatch {
+            base_timestamp: 1000,
+            records: vec![
+                Record {
+                    timestamp_delta: 0,
+                    ..Default::default()
+                },
+                Record {
+                    timestamp_delta: 5,
+                    ..Default::default()
+                },
+            ],
+            ..RecordBatch::default()
+        };
+
+        let stamped = b.with_delete_horizon(9999);
+
+        assert!(stamped.attributes.has_delete_horizon());
+        assert!(stamped.base_timestamp == 9999);
+        assert!(stamped.delete_horizon_ms() == Some(9999));
+
+        // Reconstructed absolutes (base + delta) must equal the ORIGINALS.
+        let absolutes: Vec<i64> = stamped
+            .records
+            .iter()
+            .map(|r| stamped.base_timestamp + r.timestamp_delta)
+            .collect();
+        assert!(absolutes == vec![1000, 1005]);
+    }
+
+    #[test]
+    fn delete_horizon_round_trips_through_encode_decode() {
+        // base 1000, two keyed records at deltas [0, 5] → absolutes [1000, 1005].
+        let b = RecordBatch {
+            base_timestamp: 1000,
+            last_offset_delta: 1,
+            records: vec![
+                Record {
+                    timestamp_delta: 0,
+                    offset_delta: 0,
+                    key: Some(Bytes::from_static(b"k1")),
+                    value: Some(Bytes::from_static(b"v1")),
+                    ..Default::default()
+                },
+                Record {
+                    timestamp_delta: 5,
+                    offset_delta: 1,
+                    key: Some(Bytes::from_static(b"k2")),
+                    value: Some(Bytes::from_static(b"v2")),
+                    ..Default::default()
+                },
+            ],
+            ..RecordBatch::default()
+        }
+        .with_delete_horizon(9999);
+
+        let mut buf = BytesMut::new();
+        b.encode(&mut buf).unwrap();
+
+        let mut cur: &[u8] = &buf[..];
+        let decoded = RecordBatch::decode(&mut cur).unwrap();
+        assert!(cur.is_empty());
+
+        assert!(decoded.delete_horizon_ms() == Some(9999));
+
+        let absolutes: Vec<i64> = decoded
+            .records
+            .iter()
+            .map(|r| decoded.base_timestamp + r.timestamp_delta)
+            .collect();
+        assert!(absolutes == vec![1000, 1005]);
+    }
 
     #[test]
     fn decode_huge_records_count_does_not_overallocate() {

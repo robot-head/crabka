@@ -563,6 +563,7 @@ mod tests {
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
         );
         reg.insert(bootstrap::TOPIC.to_string(), p, part);
     }

@@ -77,6 +77,7 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 ///
 /// Returns `Ok(())` if the partition is already present (no-op) or was
 /// successfully opened. Returns `Err(String)` on I/O failure.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_partition(
     partitions: &PartitionRegistry,
     topic: &str,
@@ -84,6 +85,7 @@ pub(crate) fn materialize_partition(
     log_dirs: &[PathBuf],
     log_config: &LogConfig,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
+    producer_state: &Arc<crate::producer_state::ProducerState>,
 ) -> Result<(), String> {
     // `materialize_if_vacant` runs `build` under the per-key write lock —
     // only one thread can be inside it for a given key at a time,
@@ -105,6 +107,7 @@ pub(crate) fn materialize_partition(
             owning_dir,
             log,
             log_dir_status.clone(),
+            producer_state.clone(),
         ))
     })
 }
@@ -213,6 +216,11 @@ pub(crate) struct ReplicatorSupervisor {
     /// partition writer's storage-failure path can flip the dir
     /// offline broker-wide.
     log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Broker-wide idempotent/transactional producer-sequence tracker.
+    /// Forwarded into each `materialize_partition` so the partition
+    /// writer's `Compact` handler can snapshot active producers for
+    /// KIP-534 `RETAIN_EMPTY`.
+    producer_state: Arc<crate::producer_state::ProducerState>,
     /// Broker-wide metrics handle. Each spawned replicator
     /// clones this so it can increment `replication_bytes_in` after a
     /// successful follower-side append.
@@ -244,6 +252,7 @@ impl ReplicatorSupervisor {
         inter_broker_listener_name: String,
         throttle_state: Arc<ThrottleState>,
         log_dir_status: crate::log_dir_status::LogDirRegistry,
+        producer_state: Arc<crate::producer_state::ProducerState>,
         metrics: crate::metrics::BrokerMetrics,
         log_dir_ids: crate::log_dir_id::LogDirIds,
     ) -> Self {
@@ -265,6 +274,7 @@ impl ReplicatorSupervisor {
             inter_broker_listener_name,
             throttle_state,
             log_dir_status,
+            producer_state,
             metrics,
             log_dir_ids,
             reported_dirs: dashmap::DashMap::new(),
@@ -410,6 +420,7 @@ impl ReplicatorSupervisor {
                 throttle_state: self.throttle_state.clone(),
                 controller: self.controller.clone(),
                 log_dir_status: self.log_dir_status.clone(),
+                producer_state: self.producer_state.clone(),
                 metrics: self.metrics.clone(),
             }));
         }
@@ -481,6 +492,7 @@ impl ReplicatorSupervisor {
             &self.log_dirs,
             &self.log_config,
             &self.log_dir_status,
+            &self.producer_state,
         )
     }
 
@@ -614,6 +626,7 @@ mod tests {
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
         let part = partitions.get("t", 0).expect("part");
@@ -729,6 +742,7 @@ mod tests {
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
 
@@ -782,6 +796,7 @@ mod tests {
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
 
@@ -836,6 +851,7 @@ mod tests {
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
 

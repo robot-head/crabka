@@ -203,6 +203,50 @@ impl ProducerState {
         state.entries.iter().map(|(pid, e)| (*pid, *e)).collect()
     }
 
+    /// Snapshot of currently-active producers on `(topic, partition)`:
+    /// `producer_id` → that producer's last-accepted-batch `base_offset`.
+    /// A producer is "active" when `now_ms - last_activity_ms <=
+    /// expiration_ms` (Kafka's `producer.id.expiration.ms` inactivity
+    /// window). Expired producers are excluded.
+    ///
+    /// Used by the cleaner to build a `CompactionContext`: an active
+    /// producer's last batch must be preserved via `RETAIN_EMPTY` even when
+    /// fully compacted away, so the producer's sequence/epoch state survives.
+    ///
+    /// Returns an empty map for an unknown `(topic, partition)`.
+    ///
+    /// Called by the partition writer task's `WriterMessage::Compact`
+    /// handler (the broker-wide `ProducerState` is threaded through
+    /// `spawn_partition` into `partition_writer::run`) to populate the
+    /// `CompactionContext::active_producers` set.
+    pub async fn active_snapshot(
+        &self,
+        topic: &str,
+        partition: i32,
+        now_ms: i64,
+        expiration_ms: i64,
+    ) -> HashMap<i64, i64> {
+        // Mirror `snapshot`: avoid inserting an empty entry for an unknown
+        // partition (the borrowed lookups allocate nothing on a miss).
+        let Some(topic_ref) = self.by_topic.get(topic) else {
+            return HashMap::new();
+        };
+        let parts = topic_ref.value().clone();
+        drop(topic_ref);
+        let Some(part_ref) = parts.get(&partition) else {
+            return HashMap::new();
+        };
+        let handle = part_ref.value().clone();
+        drop(part_ref);
+        let state = handle.lock().await;
+        state
+            .entries
+            .iter()
+            .filter(|(_pid, e)| now_ms.saturating_sub(e.last_activity_ms) <= expiration_ms)
+            .map(|(pid, e)| (*pid, e.base_offset))
+            .collect()
+    }
+
     /// Evict idempotent-producer entries whose last activity is older
     /// than `ttl_ms` relative to `now_ms`, mirroring Kafka's
     /// `producer.id.expiration.ms` (default `86_400_000` ms = 24h). Kafka
@@ -381,6 +425,29 @@ mod tests {
         let snap = s.snapshot("t", 0).await;
         assert!(snap.len() == 1);
         assert!(snap[0].0 == 2, "only the recently-active producer survives");
+    }
+
+    #[tokio::test]
+    async fn active_snapshot_excludes_expired_includes_active() {
+        let s = ProducerState::new();
+        // pid 1: last batch base_offset 10; pid 2: base_offset 20.
+        s.commit("t", 0, 1, 0, 0, 0, /* base_offset */ 10, 0).await;
+        s.commit("t", 0, 2, 0, 0, 0, /* base_offset */ 20, 0).await;
+        {
+            let h = s.handle("t", 0);
+            let mut st = h.lock().await;
+            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_500; // recent
+        }
+        // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
+        // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
+        let snap = s.active_snapshot("t", 0, 10_000, 5_000).await;
+        assert!(snap.len() == 1);
+        assert!(snap.get(&2) == Some(&20));
+        assert!(snap.get(&1) == None);
+        // Unknown partition / topic → empty without panicking.
+        assert!(s.active_snapshot("t", 99, 10_000, 5_000).await.is_empty());
+        assert!(s.active_snapshot("nope", 0, 10_000, 5_000).await.is_empty());
     }
 
     #[tokio::test]

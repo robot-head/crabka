@@ -72,6 +72,11 @@ pub struct LogConfig {
     /// Local-disk size budget for tiered partitions (KIP-405).
     /// `None` inherits `retention_bytes`. Default `None`.
     pub local_retention_bytes: Option<u64>,
+
+    /// KIP-534. After a tombstone or transaction marker first becomes
+    /// compaction-eligible, retain it for at least this long before deletion
+    /// (the delete-horizon grace window). Default 24h.
+    pub delete_retention_ms: Duration,
 }
 
 impl Default for LogConfig {
@@ -93,6 +98,7 @@ impl Default for LogConfig {
             remote_storage_enable: false,
             local_retention_ms: None,
             local_retention_bytes: None,
+            delete_retention_ms: Duration::from_hours(24),
         }
     }
 }
@@ -128,5 +134,10 @@ mod tests {
         let c = LogConfig::default();
         assert!(c.local_retention_ms == None);
         assert!(c.local_retention_bytes == None);
+    }
+
+    #[test]
+    fn default_delete_retention_is_24h() {
+        assert!(LogConfig::default().delete_retention_ms == std::time::Duration::from_hours(24));
     }
 }

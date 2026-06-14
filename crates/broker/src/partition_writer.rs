@@ -14,7 +14,15 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::log_dir_status::LogDirRegistry;
 use crate::partition::{ProduceJob, SwapOutcome, WriterMessage};
+use crate::producer_state::ProducerState;
 use crate::replica_state::ReplicaState;
+
+/// Inactivity window after which an idempotent / transactional producer's
+/// in-memory entry is considered expired and excluded from the
+/// `RETAIN_EMPTY` active-producer snapshot fed to compaction. Mirrors
+/// Kafka's `producer.id.expiration.ms` default (24h). Hard-coded for now;
+/// can be wired to a broker config (`producer.id.expiration.ms`) later.
+const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
 
 /// Inspect a `BrokerError` returned by a partition-writer mutation
 /// (`append`, `append_at`, `truncate_to`, `reset_to`, `compact`,
@@ -68,8 +76,10 @@ fn storage_failure_error(
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run(
+    topic: String,
+    partition: i32,
     log: Arc<Mutex<Log>>,
     log_dir: Arc<ArcSwap<PathBuf>>,
     mut rx: mpsc::Receiver<WriterMessage>,
@@ -77,6 +87,7 @@ pub async fn run(
     replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
     hw_advance_notify: Arc<Notify>,
     log_dir_status: LogDirRegistry,
+    producer_state: Arc<ProducerState>,
 ) {
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -256,10 +267,31 @@ pub async fn run(
             }
             WriterMessage::Compact { ack } => {
                 // Compaction rewrites segments + fsyncs — off the reactor.
+                //
+                // The `CompactionContext` carries the wall clock (for KIP-534
+                // delete-horizon stamping/expiry) and the set of active
+                // producers (so an active producer's last batch is preserved
+                // via `RETAIN_EMPTY` even when fully compacted away — its
+                // on-disk sequence/epoch state then survives the clean).
+                //
+                // We stamp `now` once and derive `now_ms` from the same
+                // instant so the active-producer inactivity window and the
+                // delete-horizon expiry agree on a single wall clock.
+                let now = std::time::SystemTime::now();
+                let now_ms = now
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+                let active_producers = producer_state
+                    .active_snapshot(&topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
+                    .await;
+                let ctx = crabka_log::CompactionContext {
+                    now,
+                    active_producers,
+                };
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .compact()
+                        .compact(&ctx)
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -421,6 +453,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -430,6 +464,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -466,6 +501,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -475,6 +512,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         // Subscribe BEFORE sending so we don't miss the notification.
@@ -507,6 +545,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -516,6 +556,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         // First replicate batch must start at offset 0 to match the
@@ -542,6 +583,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -551,6 +594,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         // Wrong offset — log_end_offset is 0 but we claim 7.
@@ -581,6 +625,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -590,6 +636,7 @@ mod tests {
             )),
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         // Produce two batches so the log has some data.
@@ -633,6 +680,8 @@ mod tests {
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -640,6 +689,7 @@ mod tests {
             replica_state.clone(),
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -677,6 +727,8 @@ mod tests {
         ));
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -684,6 +736,7 @@ mod tests {
             replica_state,
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         let new_cfg = LogConfig {
@@ -728,6 +781,8 @@ mod tests {
         ));
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -735,6 +790,7 @@ mod tests {
             replica_state,
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -766,6 +822,8 @@ mod tests {
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -773,6 +831,7 @@ mod tests {
             replica_state.clone(),
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
         ));
 
         let (ack, ack_rx) = oneshot::channel();

@@ -1,9 +1,10 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Twelve keys are recognized. Five propagate live to `Log.config`
+//! Thirteen keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
 //! `compression.type`), plus the tiered-storage local-retention
-//! pair (`local.retention.ms`, `local.retention.bytes`). One is read by
+//! pair (`local.retention.ms`, `local.retention.bytes`) and the KIP-534
+//! delete-horizon grace window (`delete.retention.ms`). One is read by
 //! the produce hot path's pre-flight gate: `min.insync.replicas`
 //! (integers >= 1) — `acks=-1` produces against a partition whose ISR is
 //! already smaller fail fast with `NOT_ENOUGH_REPLICAS` (19). Two are
@@ -77,6 +78,9 @@ pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 pub(crate) const LOCAL_RETENTION_MS: &str = "local.retention.ms";
 /// KIP-405: per-topic local-retention size budget for tiered partitions.
 pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
+/// KIP-534: how long tombstones and transaction markers are retained after
+/// they first become compaction-eligible (the delete-horizon grace window).
+pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
@@ -85,6 +89,7 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
     match key {
         RETENTION_MS | RETENTION_BYTES => parse_i64_at_least(-1, value).map(|_| ()),
         LOCAL_RETENTION_MS | LOCAL_RETENTION_BYTES => parse_i64_at_least(-2, value).map(|_| ()),
+        DELETE_RETENTION_MS => parse_i64_at_least(0, value).map(|_| ()),
         SEGMENT_BYTES => parse_u64_at_least(1, value).map(|_| ()),
         CLEANUP_POLICY => match value {
             "delete" | "compact" => Ok(()),
@@ -178,6 +183,7 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | REMOTE_STORAGE_ENABLE
             | LOCAL_RETENTION_MS
             | LOCAL_RETENTION_BYTES
+            | DELETE_RETENTION_MS
             | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
             | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
@@ -273,6 +279,15 @@ pub(crate) fn apply_to_log_config(
             }
             REMOTE_STORAGE_ENABLE => {
                 out.remote_storage_enable = v == "true";
+            }
+            DELETE_RETENTION_MS => {
+                if let Ok(ms) = v.parse::<i64>()
+                    && ms >= 0
+                {
+                    out.delete_retention_ms = Duration::from_millis(
+                        u64::try_from(ms).expect("validated non-negative above"),
+                    );
+                }
             }
             // The remaining keys are recognized but no broker behavior is
             // wired to them yet (see module docs).
@@ -374,6 +389,13 @@ pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
             description: "Local-tier retention size budget for tiered partitions.",
         },
         TopicConfigDoc {
+            key: DELETE_RETENTION_MS,
+            value_type: "long (ms)",
+            default: Some("86400000"),
+            kip: Some("KIP-534"),
+            description: "How long tombstones and transaction markers are retained after becoming compaction-eligible.",
+        },
+        TopicConfigDoc {
             key: crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
             value_type: "string",
             default: None,
@@ -425,6 +447,7 @@ mod doc_tests {
             REMOTE_STORAGE_ENABLE,
             LOCAL_RETENTION_MS,
             LOCAL_RETENTION_BYTES,
+            DELETE_RETENTION_MS,
             crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
             crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
         ] {
@@ -738,6 +761,26 @@ mod tests {
         o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
         assert!(out.local_retention_bytes == None);
+    }
+
+    #[test]
+    fn validate_delete_retention_ms_accepts_nonneg_rejects_negative() {
+        assert!(validate_topic_config(DELETE_RETENTION_MS, "0").is_ok());
+        assert!(validate_topic_config(DELETE_RETENTION_MS, "86400000").is_ok());
+        assert!(validate_topic_config(DELETE_RETENTION_MS, "-1").is_err());
+    }
+
+    #[test]
+    fn is_recognized_includes_delete_retention_ms() {
+        assert!(is_recognized(DELETE_RETENTION_MS));
+    }
+
+    #[test]
+    fn apply_delete_retention_ms_propagates() {
+        let mut o = BTreeMap::new();
+        o.insert(DELETE_RETENTION_MS.into(), "12345".into());
+        let out = apply_to_log_config(&o, &LogConfig::default());
+        assert!(out.delete_retention_ms == std::time::Duration::from_millis(12345));
     }
 
     #[test]
