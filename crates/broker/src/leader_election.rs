@@ -32,6 +32,88 @@ pub(crate) struct FailoverPlan {
     pub recoveries: Vec<(String, i32, RecoveryStrategy)>,
 }
 
+/// The pure per-partition failover decision shared by the dead-broker scan
+/// (`compute_failover_changes`) and the offline-log-dir scan
+/// (`compute_offline_dir_failover_changes`). No I/O: the callers handle
+/// partition filtering, the alive snapshot, record construction, metrics, and
+/// recovery enqueue. Extracted so the failover policy is independently
+/// unit-testable and model-checkable, and so the two scans share one copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FailoverDecision {
+    /// Elect `leader` with `isr`; the caller bumps `leader_epoch + 1` and, when
+    /// `unclean`, records the unclean-election metric.
+    Elect {
+        leader: NodeId,
+        isr: Vec<NodeId>,
+        unclean: bool,
+    },
+    /// Defer to the offset-aware Unclean Recovery Manager (KIP-966).
+    Recover(RecoveryStrategy),
+    /// Dead broker was a non-leader ISR member: shrink ISR (leader/epoch kept).
+    ShrinkIsr { isr: Vec<NodeId> },
+    /// Leader is dead, ISR empty, and no unclean path is permitted/available.
+    Unavailable,
+    /// Nothing to do for this partition.
+    NoChange,
+}
+
+/// Decide the failover action for one partition. `alive` is the controller's
+/// snapshot of live brokers; `strategy` / `unclean_enabled` are the topic's
+/// resolved recovery policy.
+pub(crate) fn failover_one(
+    pr: &PartitionRecord,
+    dead: NodeId,
+    alive: &std::collections::HashSet<NodeId>,
+    strategy: RecoveryStrategy,
+    unclean_enabled: bool,
+) -> FailoverDecision {
+    // The ISR after dropping the dead broker AND any other non-alive member.
+    let alive_isr: Vec<NodeId> = pr
+        .isr
+        .iter()
+        .filter(|n| **n != dead && alive.contains(n))
+        .copied()
+        .collect();
+    if pr.leader == dead {
+        if let Some(&new_leader) = alive_isr.first() {
+            // Clean: the new leader was in the ISR, so it holds every committed
+            // record. No data loss.
+            FailoverDecision::Elect {
+                leader: new_leader,
+                isr: alive_isr,
+                unclean: false,
+            }
+        } else {
+            match strategy {
+                RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
+                    FailoverDecision::Recover(strategy)
+                }
+                RecoveryStrategy::None if unclean_enabled => {
+                    // KIP-841: ISR is dead but the operator opted into possible
+                    // data loss. Elect the first alive replica, singleton ISR.
+                    match pr
+                        .replicas
+                        .iter()
+                        .find(|n| **n != dead && alive.contains(n))
+                    {
+                        Some(&new_leader) => FailoverDecision::Elect {
+                            leader: new_leader,
+                            isr: vec![new_leader],
+                            unclean: true,
+                        },
+                        None => FailoverDecision::Unavailable,
+                    }
+                }
+                RecoveryStrategy::None => FailoverDecision::Unavailable,
+            }
+        }
+    } else if alive_isr.len() < pr.isr.len() {
+        FailoverDecision::ShrinkIsr { isr: alive_isr }
+    } else {
+        FailoverDecision::NoChange
+    }
+}
+
 /// Read `unclean.leader.election.enable` for a topic, defaulting to
 /// `false` when the key is unset or unparseable. Centralized so the
 /// failover path and any future caller stay consistent.
@@ -62,105 +144,62 @@ pub(crate) async fn compute_failover_changes(
         if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
             continue;
         }
-        // Compute the new ISR after dropping the dead broker AND any
-        // other replicas that aren't alive.
-        let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
-        for n in &pr.isr {
-            if *n != dead && alive.contains(n) {
-                alive_isr.push(*n);
-            }
-        }
-        let needs_election = pr.leader == dead;
-        if needs_election {
-            if let Some(&new_leader) = alive_isr.first() {
+        let strategy = resolve_recovery_strategy(image, &pr.topic);
+        let unclean_enabled = unclean_election_enabled(image, &pr.topic);
+        match failover_one(pr, dead, &alive, strategy, unclean_enabled) {
+            FailoverDecision::Elect {
+                leader,
+                isr,
+                unclean,
+            } => {
+                if unclean {
+                    warn!(
+                        topic = %pr.topic, partition = pr.partition, leader,
+                        "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                    );
+                    // KIP-841: account this election so operators can alert on a
+                    // non-zero rate of unclean failovers in their cluster.
+                    metrics.record_unclean_leader_election();
+                }
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: pr.topic.clone(),
                     partition: pr.partition,
-                    leader: new_leader,
+                    leader,
                     replicas: pr.replicas.clone(),
-                    isr: alive_isr,
+                    isr,
                     leader_epoch: pr.leader_epoch + 1,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
                     partition_epoch: pr.partition_epoch + 1,
                 }));
-            } else {
-                // ISR is empty after dropping the dead broker. How we
-                // proceed depends on the topic's recovery strategy.
-                match resolve_recovery_strategy(image, &pr.topic) {
-                    RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
-                        // KIP-966: defer to the offset-aware Unclean
-                        // Recovery Manager — it polls surviving replicas
-                        // for log state and elects the most complete log.
-                        // Don't make an immediate (blind) change here.
-                        recoveries.push((
-                            pr.topic.clone(),
-                            pr.partition,
-                            resolve_recovery_strategy(image, &pr.topic),
-                        ));
-                    }
-                    RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
-                        // KIP-841 legacy path: ISR is dead but operator
-                        // has opted into possible data loss. Pick the
-                        // first alive replica (in or out of ISR) and
-                        // elect with singleton-ISR.
-                        let mut elected: Option<NodeId> = None;
-                        for &n in &pr.replicas {
-                            if n != dead && alive.contains(&n) {
-                                elected = Some(n);
-                                break;
-                            }
-                        }
-                        if let Some(new_leader) = elected {
-                            warn!(
-                                topic = %pr.topic, partition = pr.partition, leader = new_leader,
-                                "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
-                            );
-                            // KIP-841: account this election so
-                            // operators can alert on a non-zero rate of unclean
-                            // failovers in their cluster.
-                            metrics.record_unclean_leader_election();
-                            changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                                topic: pr.topic.clone(),
-                                partition: pr.partition,
-                                leader: new_leader,
-                                replicas: pr.replicas.clone(),
-                                isr: vec![new_leader],
-                                leader_epoch: pr.leader_epoch + 1,
-                                adding_replicas: pr.adding_replicas.clone(),
-                                removing_replicas: pr.removing_replicas.clone(),
-                                directories: pr.directories.clone(),
-                                partition_epoch: pr.partition_epoch + 1,
-                            }));
-                        } else {
-                            warn!(
-                                topic = %pr.topic, partition = pr.partition,
-                                "unclean leader election enabled but no alive replica; partition unavailable"
-                            );
-                        }
-                    }
-                    RecoveryStrategy::None => {
-                        warn!(
-                            topic = %pr.topic, partition = pr.partition,
-                            "no live ISR replica; partition unavailable (strategy None, unclean.leader.election.enable=false)"
-                        );
-                    }
-                }
             }
-        } else if alive_isr.len() < pr.isr.len() {
-            changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                topic: pr.topic.clone(),
-                partition: pr.partition,
-                leader: pr.leader,
-                replicas: pr.replicas.clone(),
-                isr: alive_isr,
-                leader_epoch: pr.leader_epoch,
-                adding_replicas: pr.adding_replicas.clone(),
-                removing_replicas: pr.removing_replicas.clone(),
-                directories: pr.directories.clone(),
-                partition_epoch: pr.partition_epoch + 1,
-            }));
+            FailoverDecision::ShrinkIsr { isr } => {
+                changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                    topic: pr.topic.clone(),
+                    partition: pr.partition,
+                    leader: pr.leader,
+                    replicas: pr.replicas.clone(),
+                    isr,
+                    leader_epoch: pr.leader_epoch,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
+                    partition_epoch: pr.partition_epoch + 1,
+                }));
+            }
+            FailoverDecision::Recover(strategy) => {
+                // KIP-966: defer to the offset-aware Unclean Recovery Manager —
+                // it polls surviving replicas and elects the most complete log.
+                recoveries.push((pr.topic.clone(), pr.partition, strategy));
+            }
+            FailoverDecision::Unavailable => {
+                warn!(
+                    topic = %pr.topic, partition = pr.partition,
+                    "leader dead, no live ISR replica; partition unavailable"
+                );
+            }
+            FailoverDecision::NoChange => {}
         }
     }
     FailoverPlan {
@@ -204,88 +243,58 @@ pub(crate) async fn compute_offline_dir_failover_changes(
         if !on_offline {
             continue;
         }
-        let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
-        for n in &pr.isr {
-            if *n != broker && alive.contains(n) {
-                alive_isr.push(*n);
-            }
-        }
-        if pr.leader == broker {
-            if let Some(&new_leader) = alive_isr.first() {
+        let strategy = resolve_recovery_strategy(image, &pr.topic);
+        let unclean_enabled = unclean_election_enabled(image, &pr.topic);
+        match failover_one(pr, broker, &alive, strategy, unclean_enabled) {
+            FailoverDecision::Elect {
+                leader,
+                isr,
+                unclean,
+            } => {
+                if unclean {
+                    warn!(
+                        topic = %pr.topic, partition = pr.partition, leader,
+                        "offline-dir unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                    );
+                    metrics.record_unclean_leader_election();
+                }
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: pr.topic.clone(),
                     partition: pr.partition,
-                    leader: new_leader,
+                    leader,
                     replicas: pr.replicas.clone(),
-                    isr: alive_isr,
+                    isr,
                     leader_epoch: pr.leader_epoch + 1,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
                     partition_epoch: pr.partition_epoch + 1,
                 }));
-            } else {
-                // ISR is empty after dropping the broker. Apply the same
-                // recovery policy as compute_failover_changes.
-                let strategy = resolve_recovery_strategy(image, &pr.topic);
-                match strategy {
-                    RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
-                        recoveries.push((pr.topic.clone(), pr.partition, strategy));
-                    }
-                    RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
-                        let mut elected: Option<NodeId> = None;
-                        for &n in &pr.replicas {
-                            if n != broker && alive.contains(&n) {
-                                elected = Some(n);
-                                break;
-                            }
-                        }
-                        if let Some(new_leader) = elected {
-                            warn!(
-                                topic = %pr.topic, partition = pr.partition, leader = new_leader,
-                                "offline-dir unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
-                            );
-                            metrics.record_unclean_leader_election();
-                            changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                                topic: pr.topic.clone(),
-                                partition: pr.partition,
-                                leader: new_leader,
-                                replicas: pr.replicas.clone(),
-                                isr: vec![new_leader],
-                                leader_epoch: pr.leader_epoch + 1,
-                                adding_replicas: pr.adding_replicas.clone(),
-                                removing_replicas: pr.removing_replicas.clone(),
-                                directories: pr.directories.clone(),
-                                partition_epoch: pr.partition_epoch + 1,
-                            }));
-                        } else {
-                            warn!(
-                                topic = %pr.topic, partition = pr.partition,
-                                "offline-dir unclean leader election enabled but no alive replica; partition unavailable"
-                            );
-                        }
-                    }
-                    RecoveryStrategy::None => {
-                        warn!(
-                            topic = %pr.topic, partition = pr.partition,
-                            "offline dir on leader, no live ISR replica; partition unavailable"
-                        );
-                    }
-                }
             }
-        } else if alive_isr.len() < pr.isr.len() {
-            changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                topic: pr.topic.clone(),
-                partition: pr.partition,
-                leader: pr.leader,
-                replicas: pr.replicas.clone(),
-                isr: alive_isr,
-                leader_epoch: pr.leader_epoch,
-                adding_replicas: pr.adding_replicas.clone(),
-                removing_replicas: pr.removing_replicas.clone(),
-                directories: pr.directories.clone(),
-                partition_epoch: pr.partition_epoch + 1,
-            }));
+            FailoverDecision::ShrinkIsr { isr } => {
+                changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                    topic: pr.topic.clone(),
+                    partition: pr.partition,
+                    leader: pr.leader,
+                    replicas: pr.replicas.clone(),
+                    isr,
+                    leader_epoch: pr.leader_epoch,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
+                    partition_epoch: pr.partition_epoch + 1,
+                }));
+            }
+            FailoverDecision::Recover(strategy) => {
+                recoveries.push((pr.topic.clone(), pr.partition, strategy));
+            }
+            FailoverDecision::Unavailable => {
+                warn!(
+                    topic = %pr.topic, partition = pr.partition,
+                    "offline dir on leader, no live ISR replica; partition unavailable"
+                );
+            }
+            FailoverDecision::NoChange => {}
         }
     }
     FailoverPlan {
@@ -1285,3 +1294,7 @@ mod tests {
         assert!(pr.isr == vec![2]);
     }
 }
+
+#[cfg(test)]
+#[path = "leader_failover_model.rs"]
+mod leader_failover_model;
