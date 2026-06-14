@@ -129,6 +129,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // binary entrypoint: linear startup wiring
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 

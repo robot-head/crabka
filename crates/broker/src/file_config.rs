@@ -80,8 +80,8 @@ pub struct FileConfig {
 
     /// KIP-595 static controller quorum voter set. Each entry is
     /// `<node_id>@<host>:<port>` pointing at a broker's controller listener
-    /// (port 9093). At apply time each host is DNS-resolved to a SocketAddr
-    /// (with retry, to ride out the StatefulSet headless-Service DNS startup
+    /// (port 9093). At apply time each host is DNS-resolved to a `SocketAddr`
+    /// (with retry, to ride out the `StatefulSet` headless-Service DNS startup
     /// race) and the result replaces `BrokerConfig::controller_quorum_voters`.
     /// Empty leaves the single self-voter the binary seeds (standalone).
     #[serde(default)]
@@ -510,7 +510,7 @@ pub struct FileOAuthBearerConfig {
 const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
 
 /// Max DNS-resolution attempts per `controller_quorum_voters` entry, one
-/// second apart — a ~60s total budget to ride out the StatefulSet
+/// second apart — a ~60s total budget to ride out the `StatefulSet`
 /// headless-Service DNS startup race for a peer pod that hasn't published
 /// its A record yet when this broker boots.
 const QUORUM_VOTER_DNS_ATTEMPTS: u32 = 60;

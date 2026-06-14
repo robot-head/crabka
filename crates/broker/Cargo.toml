@@ -59,6 +59,7 @@ dashmap = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 rustix = { workspace = true }
+socket2 = "0.6"
 tracing-subscriber = { workspace = true }
 opentelemetry-proto = { workspace = true }
 clap = { workspace = true, features = ["env"] }

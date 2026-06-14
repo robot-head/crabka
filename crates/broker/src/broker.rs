@@ -3538,6 +3538,7 @@ async fn accept_loop(
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
                         let peer_ip = peer.ip();
+                        tune_accepted_socket(&stream);
 
                         // `max.connections` / `max.connections.per.ip` caps.
                         // Reserve a slot before doing any work; on rejection
@@ -3603,6 +3604,34 @@ async fn accept_loop(
                 }
             }
         }
+    }
+}
+
+/// Tune an accepted broker connection before serving it.
+///
+/// - `TCP_NODELAY`: disable Nagle so the request/response ping-pong isn't
+///   stalled up to ~40 ms by delayed ACKs. Apache Kafka sets this on its
+///   broker sockets; without it small-request latency and the header+records
+///   write coalescing (once fetch uses `sendfile`) suffer.
+/// - `SO_SNDBUF`/`SO_RCVBUF` (1 MiB): widen the kernel buffers so a single
+///   large fetch/produce isn't throttled by a small in-flight window — the
+///   send buffer in particular keeps a `sendfile`'d large fetch from stalling.
+///
+/// All failures are non-fatal (logged at debug): a connection that can't be
+/// tuned still serves correctly, just less optimally.
+fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
+    // 1 MiB send/recv. Kafka's defaults are 100 KiB but it commonly tunes to
+    // 1 MiB+; large fetches/produces want the headroom.
+    const SOCKET_BUF_BYTES: usize = 1 << 20;
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::debug!(error = %e, "TCP_NODELAY set failed on accepted socket");
+    }
+    let sock = socket2::SockRef::from(stream);
+    if let Err(e) = sock.set_send_buffer_size(SOCKET_BUF_BYTES) {
+        tracing::debug!(error = %e, "SO_SNDBUF set failed on accepted socket");
+    }
+    if let Err(e) = sock.set_recv_buffer_size(SOCKET_BUF_BYTES) {
+        tracing::debug!(error = %e, "SO_RCVBUF set failed on accepted socket");
     }
 }
 

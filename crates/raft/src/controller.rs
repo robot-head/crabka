@@ -644,6 +644,7 @@ impl Controller {
 /// validation — a node killed mid-election (segment dir created but no
 /// `quorum-state` yet) reads as un-formatted and re-Bootstraps rather than
 /// dying with "Rejoin requires non-empty raft log".
+#[must_use]
 pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
     let qs = dir.join("quorum-state");
     if qs.exists() {
