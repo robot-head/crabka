@@ -1,33 +1,48 @@
 # Benchmark Status
 
 **Branch:** `claude/amazing-raman-44dff6`
-**Last Updated:** 2026-06-13 (~16:35 PT)
+**Last Updated:** 2026-06-14
 
 ---
 
 ## 1. Executive Summary
 
-The `crabka/failover` benchmark is blocked because **the 3 broker pods never form a
-joint KRaft quorum** — each runs as an isolated single-node cluster, so replication
-factor 3 cannot be satisfied. This is the same root cause described in earlier
-revisions of this doc, but two earlier claims were wrong and have been corrected:
+**The Crabka-vs-Strimzi steady-state comparison is DONE and the numbers are in.**
+Every blocker documented in earlier revisions of this doc is resolved — 3-broker
+KRaft quorum formation (§3–§6), multi-broker produce routing (§7), the
+Crabka/Strimzi consumer + idempotent-producer incompatibility (FindCoordinator,
+goal #1), accurate producer latency (pipelined driver), and — the last gap —
+**real, apples-to-apples resource capture from Prometheus** (commit `e74a7712`).
 
-* **The previously-documented fix was never committed.** The earlier doc listed
-  voter-rendering changes to `file_config.rs`, `listeners.rs`, and `common.rs` as
-  "completed". `git grep` finds them on **no branch** — not `HEAD`, not
-  `deploy-operator-fixes` (which is the *same commit* as this branch), not
-  `origin/main`. The work was lost or never made. The fix has to be written.
-* **The "Docker/WSL on Windows" blocker was a dead end.** The deployed images
-  (`ghcr.io/robot-head/crabka-{broker,operator}:v0.3.6`) are built by CI, not
-  locally — [`.github/workflows/publish-images.yml`](.github/workflows/publish-images.yml)
-  runs melange/apko on a GitHub runner and exposes a **`workflow_dispatch`** trigger
-  with a `tag` input. No local Docker is needed to rebuild images.
+Headline (3 brokers each, identical pod resources 6Gi req / 12Gi limit, GKE
+`test-crabka-cluster`, driver `quorum-fix12`, single sample per scenario):
 
-**Good news:** the broker engine *already* supports static multi-voter quorums
-([`broker.rs:1221`](crates/broker/src/broker.rs:1221), "KIP-595 static multi-voter
-set"). When `controller_quorum_voters.len() > 1`, every node starts with the full
-voter set and elects over the real KIP-595 wire. Only the config plumbing and a
-listener bind are missing.
+| scenario | crabka thrpt | strimzi thrpt | crabka mem | strimzi mem | mem advantage | msgs/CPU-core |
+|---|---|---|---|---|---|---|
+| small-msg-saturate (100 B) | 118.4k/s | 117.4k/s | **53 MB** | 2,521 MB | **47×** | 2.5× |
+| fan-out (1 KB, 4p/4c, 24 part) | **71.1k/s** | 42.7k/s | **266 MB** | 5,027 MB | 19× | 2.0× |
+| mixed-acks (1 KB @20k, acks=all) | 20.0k/s | 19.8k/s | **114 MB** | 4,249 MB | 37× | 2.0× |
+| large-msg (100 KB) | 3.0k/s | **4.4k/s** | **114 MB** | 5,151 MB | 45× | 1.2× |
+
+**The story:** Crabka matches Strimzi's throughput and ack-latency on small-record
+and fan-out workloads (and wins fan-out outright), trails on large-message
+throughput (Kafka's zero-copy `sendfile` path), and uses **19–47× less memory and
+~2–2.5× less CPU across every workload**. A 3-broker Strimzi cluster carries ~1.7 GB
+of JVM heap *per broker* (the JMX heap/non-heap/page-cache split is now captured);
+Crabka's entire 3-broker working set is 53–266 MB. Full tables:
+[`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
+
+**Two honest caveats:**
+* `fixed-rate-latency` (same config as `mixed-acks`) was **infrastructure-degraded**
+  this pass — both stacks reached only ~half the 20k/s target because GKE
+  pd-balanced/e2 ack-latency spiked to 48–80 ms (vs 2–6 ms earlier and in the clean
+  `mixed-acks` run). Throughput there is `max_inflight(512) / ack_latency`-bound,
+  i.e. a shared-infra artifact, not a broker property — Strimzi never fsyncs per
+  produce yet its latency ballooned too. Use `mixed-acks` as the reliable
+  fixed-rate-acks=all sample.
+* **`failover` is the one open item** — see §7e. Crabka's producer hung on the dead
+  leader this pass (did not recover); Strimzi completed but its recovery metric is
+  undefined (`recovery_at_ms=0`, the known "transparent failover → 0" artifact).
 
 ---
 
@@ -222,6 +237,37 @@ The killed broker restarts at a **new pod IP**; survivors have its old IP pinned
 2/3. This does **not** block the failover measurement — RF-3 with `min.insync.replicas=2`
 still serves at 2/3 — but full self-heal needs per-dial hostname re-resolution in the
 raft layer.
+
+## 7e. Failover in the `quorum-fix12` matrix — crabka producer hung on the dead leader
+
+In the full 6-scenario matrix (2026-06-14, driver `quorum-fix12`), the five
+steady-state scenarios all produced clean results, but **`failover` regressed**:
+
+* **crabka** — after the partition-0-leader kill at +60 s, the producer looped
+  `produce to leader failed 1×; re-routing leader=0 error=request timed out after 30s`
+  every 30 s for the rest of the run and **never recovered**, so the driver job
+  never emitted a result (`crabka-failover-*.json` absent). The re-route fired but
+  metadata kept reporting `leader=0` — i.e. the producer could not obtain a *live*
+  leader for broker-0's partitions. This is **not** the §7d idempotent-fencing bug
+  (that surfaces as `INVALID_PRODUCER_EPOCH` / `OUT_OF_ORDER_SEQUENCE`, not a
+  timeout). The likely root cause: the killed pod `demo-broker-0-0` is also a
+  *controller voter*, and if it held the raft/controller leadership, partition
+  re-election can't proceed until the surviving voters re-elect a controller leader
+  first — so for a window the metadata still advertises the dead `leader=0`. §7b saw
+  a clean failover (`quorum-fix6`, 4 drops, transparent) when the kill did **not**
+  land on the controller leader; failover outcome therefore depends on *which* role
+  the killed broker held. Needs: deterministic controller-leadership handling on
+  kill + a bounded client metadata-refresh that doesn't wedge on a stale leader id.
+
+* **strimzi** — completed (6,101 produced / 1.05M consumed) with
+  `recovery_at_ms=0`, `dropped=0`. Per the §7d open observation, `recovery_at_ms=0`
+  means *no surfaced failure* (transparent failover), so the metric understates
+  rather than indicates breakage; a lone `consumer-0-poll: connection closed` was
+  the only blip. The disturbance metric still needs redefining to a latency-spike /
+  throughput-dip measure across the kill window rather than first-failure→first-ack.
+
+**Status:** failover is the remaining correctness + measurement gap. The five
+steady-state scenarios stand on their own as the apples-to-apples comparison.
 
 ## 8. Known follow-up
 

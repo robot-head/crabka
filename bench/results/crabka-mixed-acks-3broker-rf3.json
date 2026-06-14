@@ -1,0 +1,66 @@
+{
+  "scenario": {
+    "name": "mixed-acks-all",
+    "mode_tag": "cluster",
+    "msg_size_bytes": 1024,
+    "key_size_bytes": 0,
+    "partitions": 6,
+    "replication_factor": 1,
+    "producers": 2,
+    "consumers": 1,
+    "mode": {
+      "kind": "fixed_rate",
+      "msgs_per_sec": 20000
+    },
+    "acks": "all",
+    "compression": "none",
+    "linger_ms": 5,
+    "batch_size": 16384,
+    "duration_s": 120,
+    "warmup_s": 15,
+    "failover": null
+  },
+  "stack": "crabka",
+  "topology": {
+    "partitions": 6,
+    "replication_factor": 1,
+    "broker_count": 3
+  },
+  "wallclock_start_unix_ms": 1781419995752,
+  "wallclock_end_unix_ms": 1781420130779,
+  "throughput": {
+    "msgs_produced": 2395379,
+    "msgs_consumed": 1080245,
+    "mb_in": 2339.2373046875,
+    "mb_out": 1054.9267578125,
+    "producer_msgs_per_sec": 19961.491666666665,
+    "consumer_msgs_per_sec": 9002.041666666666
+  },
+  "producer_latency_ms": {
+    "p50_ms": 1.67,
+    "p95_ms": 2.885,
+    "p99_ms": 9.783,
+    "p999_ms": 82.111,
+    "max_ms": 160.383,
+    "mean_ms": 2.0469197438067246,
+    "count": 2395379
+  },
+  "consumer_e2e_latency_ms": {
+    "p50_ms": 14303.231,
+    "p95_ms": 27607.039,
+    "p99_ms": 29245.439,
+    "p999_ms": 29835.263,
+    "max_ms": 29900.799,
+    "mean_ms": 14559.616473196347,
+    "count": 1080245
+  },
+  "resource": {
+    "broker_cpu_seconds": 70.3646678269296,
+    "mem_cgroup_working_set_bytes": 119951360,
+    "msgs_per_cpu_core": 34042.35497695696
+  },
+  "first_ack_ms": 40,
+  "errors": [],
+  "notes": [],
+  "startup_ms": 29323
+}
