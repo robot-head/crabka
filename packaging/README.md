@@ -18,6 +18,24 @@ registries on a `crabka-broker-v*` release tag:
 | `crabka-schema-registry` | `robothead/crabka-schema-registry` | `ghcr.io/robot-head/crabka-schema-registry` |
 | `bench-driver`           | `robothead/bench-driver`           | `ghcr.io/robot-head/bench-driver`           |
 
+## Architectures
+
+Each image is a multi-arch OCI index covering:
+
+| Platform      | apko arch | Runs natively on                              |
+| ------------- | --------- | --------------------------------------------- |
+| `linux/amd64` | `x86_64`  | Intel/AMD hosts                               |
+| `linux/arm64` | `aarch64` | **Apple Silicon (M1–M4)**, AWS Graviton, etc. |
+
+Because the tag points at the index, `docker pull` / `docker run` (and
+Kubernetes) automatically select the matching variant — on an Apple Silicon Mac
+that's the native `linux/arm64` image, no emulation:
+
+```sh
+docker run --rm robothead/crabka-broker:latest --version
+docker image inspect robothead/crabka-broker:latest --format '{{.Architecture}}'  # arm64 on Apple Silicon
+```
+
 ## Attestations
 
 Every published image carries two cryptographically signed, keyless
