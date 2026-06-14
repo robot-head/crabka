@@ -301,3 +301,9 @@ fn txn_basic() {
     // Phase1 / Phase3, including a fencing Init inside the marker window.
     run(TxnModel { max_epoch: 3 }, "txn_basic");
 }
+
+#[test]
+fn txn_wide() {
+    // More producer-epoch generations → deeper commit/abort/fence interleavings.
+    run(TxnModel { max_epoch: 6 }, "txn_wide");
+}
