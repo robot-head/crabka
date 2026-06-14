@@ -91,7 +91,11 @@ pub(crate) fn failover_one(
                 RecoveryStrategy::None if unclean_enabled => {
                     // KIP-841: ISR is dead but the operator opted into possible
                     // data loss. Elect the first alive replica, singleton ISR.
-                    match pr.replicas.iter().find(|n| **n != dead && alive.contains(n)) {
+                    match pr
+                        .replicas
+                        .iter()
+                        .find(|n| **n != dead && alive.contains(n))
+                    {
                         Some(&new_leader) => FailoverDecision::Elect {
                             leader: new_leader,
                             isr: vec![new_leader],
@@ -198,7 +202,10 @@ pub(crate) async fn compute_failover_changes(
             FailoverDecision::NoChange => {}
         }
     }
-    FailoverPlan { changes, recoveries }
+    FailoverPlan {
+        changes,
+        recoveries,
+    }
 }
 
 /// Compute failover changes for partitions whose replica on `broker` lives

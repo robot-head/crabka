@@ -53,7 +53,7 @@ impl FailoverModel {
             replicas: vec![1, 2, 3],
             strategy,
             unclean_enabled,
-            max_epoch: 4,
+            max_epoch: 6,
         }
     }
 }
@@ -316,8 +316,8 @@ impl RecoveryModel {
     fn offset_recovery() -> Self {
         Self {
             replicas: vec![1, 2, 3],
-            max_epoch: 1,
-            max_leo: 1,
+            max_epoch: 2,
+            max_leo: 2,
             known_leader_epoch: 1,
         }
     }
