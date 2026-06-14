@@ -92,11 +92,24 @@ where encryption happens, not what crosses the wire.
 
 ## Reproduce
 
+The GKE cluster is Terraform, checked into the repo at
+[`bench/terraform/gke/`](https://github.com/robot-head/crabka/tree/main/bench/terraform/gke);
+its [README](https://github.com/robot-head/crabka/tree/main/bench/terraform/gke/README.md)
+is the full end-to-end recipe — provision the cluster, install both operators +
+Prometheus, run the matrix, aggregate.
+
 ```bash
-# from a kubectl context with the Crabka + Strimzi operators installed:
+# provision the e2-standard-4 / pd-ssd cluster and point kubectl at it:
+cd bench/terraform/gke && terraform init && terraform apply
+eval "$(terraform output -raw get_credentials_command)"
+
+# install both operators + Prometheus, then run a scenario on each stack:
+just -f bench/justfile install-all
 bench/scripts/run-scenario.sh crabka small-msg-saturate 3broker-rf3
 bench/scripts/run-scenario.sh kafka  small-msg-saturate 3broker-rf3
 # add a 4th arg `tls` to exercise the TLS (kTLS) data path:
 bench/scripts/run-scenario.sh crabka large-msg 3broker-rf3 tls
-# results land in bench/results/ ; aggregate with crabka-bench-report
+
+# results land in bench/results/ ; aggregate into SUMMARY.md:
+just -f bench/justfile bench-report
 ```
