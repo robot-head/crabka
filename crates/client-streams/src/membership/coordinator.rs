@@ -534,14 +534,19 @@ mod tests {
         let (st, mut rx) = state_with(Arc::clone(&fake));
         let shutdown = CancellationToken::new();
         let handle = tokio::spawn(run(st, shutdown.clone()));
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Deterministically wait for the Assigned event the first heartbeat
+        // response produces, rather than racing a fixed sleep (which flakes
+        // under the ~2-3x slowdown of coverage instrumentation).
+        let ev = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an Assigned event within 5s")
+            .expect("event channel stays open");
+        check!(matches!(ev, StreamsEvent::Assigned(_)));
         shutdown.cancel();
         handle.await.unwrap();
-        // A leave heartbeat (member_epoch == -1) must have been sent last.
+        // A leave heartbeat (member_epoch == -1) must have been sent on shutdown.
         let sent = sent.lock().unwrap();
         check!(sent.iter().any(|r| r.member_epoch == -1));
-        // At least one Assigned event was emitted.
-        check!(matches!(rx.try_recv(), Ok(StreamsEvent::Assigned(_))));
     }
 
     #[tokio::test]
@@ -551,15 +556,22 @@ mod tests {
         let (st, mut rx) = state_with(Arc::clone(&fake));
         let shutdown = CancellationToken::new();
         let handle = tokio::spawn(run(st, shutdown.clone()));
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Deterministically wait for the Fenced event the error response
+        // produces, rather than racing a fixed sleep (which flakes under the
+        // ~2-3x slowdown of coverage instrumentation).
+        let saw_fenced = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(ev) = rx.recv().await {
+                if matches!(ev, StreamsEvent::Fenced) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .expect("a Fenced event within 5s");
+        check!(saw_fenced);
         shutdown.cancel();
         handle.await.unwrap();
-        // Collect all events
-        let mut events = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            events.push(ev);
-        }
-        check!(events.iter().any(|e| matches!(e, StreamsEvent::Fenced)));
     }
 
     #[tokio::test]
