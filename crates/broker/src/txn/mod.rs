@@ -2,6 +2,7 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod coordinator;
+pub(crate) mod decision;
 pub(crate) mod handlers;
 pub(crate) mod log_record;
 pub(crate) mod marker;
