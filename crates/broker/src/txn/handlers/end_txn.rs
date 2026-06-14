@@ -37,6 +37,9 @@ use crate::codes;
 use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 use crate::network::client::InterBrokerClient;
+use crate::txn::decision::{
+    CompletionDecision, decide_end_txn_completion, decide_phase1_transition,
+};
 use crate::txn::marker::{MarkerType, build_marker_batch};
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
@@ -95,30 +98,21 @@ pub(crate) async fn handle(
 
     // ── Phase 1: Ongoing → Prepare{Commit,Abort} ──────────────────────
 
-    let prepare = if req.committed {
-        TxnState::PrepareCommit
-    } else {
-        TxnState::PrepareAbort
-    };
-    let complete = if req.committed {
-        TxnState::CompleteCommit
-    } else {
-        TxnState::CompleteAbort
-    };
     let marker_type = if req.committed {
         MarkerType::Commit
     } else {
         MarkerType::Abort
     };
 
-    let prepare_snap: TxnEntry = {
+    let (prepare, complete, prepare_snap): (TxnState, TxnState, TxnEntry) = {
         let mut entry = entry_mutex.lock().await;
-        if !entry.state.can_transition_to(prepare) {
-            return encode_err(version, codes::INVALID_TXN_STATE);
+        match decide_phase1_transition(&mut entry, req.committed) {
+            Ok((prepare, complete)) => {
+                entry.last_update_ms = now_millis();
+                (prepare, complete, entry.clone())
+            }
+            Err(code) => return encode_err(version, code),
         }
-        entry.state = prepare;
-        entry.last_update_ms = now_millis();
-        entry.clone()
         // Lock dropped here.
     };
 
@@ -189,24 +183,51 @@ pub(crate) async fn handle(
 
     let complete_snap: TxnEntry = {
         let mut entry = current_mutex.lock().await;
-        match validate_complete_reacquire(
+        // KIP-890: on the Proceed path `decide_end_txn_completion` bumps the
+        // producer epoch (at TV_2) so a zombie holding the old epoch is fenced
+        // WITHOUT a fresh InitProducerId. The bump is applied AFTER the Phase-2
+        // marker fan-out (markers were written with the old/current epoch); only
+        // the persisted and returned identity reflects it. On epoch exhaustion
+        // the producer rolls to a freshly-allocated producer_id at epoch 0.
+        match decide_end_txn_completion(
             &entry,
             req.producer_id,
             req.producer_epoch,
             prepare,
             complete,
+            txnv,
+            &coord.producer_ids,
         ) {
-            ReacquireDecision::Proceed => {}
-            ReacquireDecision::AlreadyComplete => {
-                // Another caller already drove this exact transition to
-                // completion (or we are an idempotent EndTxn retry that lost
-                // the race). The desired post-state is already persisted, so
-                // report success without re-writing. Return the persisted
-                // (possibly already-bumped) epoch so a KIP-890 client that
-                // retried picks up the authoritative value.
-                return encode_ok(version, entry.producer_id, entry.producer_epoch);
+            CompletionDecision::Proceed {
+                next_state,
+                response_pid: new_pid,
+                response_epoch: new_epoch,
+            } => {
+                if new_pid != entry.producer_id {
+                    // Epoch rolled over to a new producer_id: record the prior id
+                    // so the transition is traceable (KIP-890 PreviousProducerId).
+                    entry.prev_producer_id = entry.producer_id;
+                }
+                entry.state = next_state;
+                entry.last_update_ms = now_millis();
+                entry.producer_id = new_pid;
+                entry.producer_epoch = new_epoch;
+                response_pid = new_pid;
+                response_epoch = new_epoch;
+                entry.clone()
             }
-            ReacquireDecision::Reject(code) => {
+            CompletionDecision::AlreadyComplete {
+                response_pid: pid,
+                response_epoch: epoch,
+            } => {
+                // Another caller already drove this exact transition to
+                // completion (or we are an idempotent EndTxn retry that lost the
+                // race). Report success without re-writing, returning the
+                // persisted (possibly already-bumped) identity so a KIP-890
+                // client that retried picks up the authoritative value.
+                return encode_ok(version, pid, epoch);
+            }
+            CompletionDecision::Reject(code) => {
                 tracing::warn!(
                     tid,
                     expected_epoch = req.producer_epoch,
@@ -220,31 +241,6 @@ pub(crate) async fn handle(
                 return encode_err(version, code);
             }
         }
-        entry.state = complete;
-        entry.last_update_ms = now_millis();
-        // KIP-890: at TV_2 bump the producer epoch on completion so a zombie
-        // holding the old epoch is fenced WITHOUT a fresh InitProducerId. The
-        // bump is applied AFTER the Phase-2 marker fan-out (markers were written
-        // with the producer's old/current epoch above); only the persisted and
-        // returned identity reflects it. On epoch exhaustion the producer rolls
-        // to a freshly-allocated producer_id at epoch 0. Below TV_2 both are
-        // unchanged.
-        let (new_pid, new_epoch) = next_producer_identity(
-            txnv,
-            entry.producer_id,
-            entry.producer_epoch,
-            &coord.producer_ids,
-        );
-        if new_pid != entry.producer_id {
-            // Epoch rolled over to a new producer_id: record the prior id so the
-            // transition is traceable on the entry (KIP-890 PreviousProducerId).
-            entry.prev_producer_id = entry.producer_id;
-        }
-        entry.producer_id = new_pid;
-        entry.producer_epoch = new_epoch;
-        response_pid = new_pid;
-        response_epoch = new_epoch;
-        entry.clone()
         // Lock dropped here.
     };
 
@@ -342,7 +338,7 @@ async fn materialize_txn_offsets(broker: &Broker, producer_id: i64, committed: b
 ///   the old id as the entry's `prev_producer_id` so the transition is
 ///   traceable. The `EndTxn` v5 response returns the new pair and the producer
 ///   adopts it for its next transaction.
-fn next_producer_identity(
+pub(crate) fn next_producer_identity(
     txnv: TxnVersion,
     pid: i64,
     epoch: i16,
@@ -361,7 +357,7 @@ fn next_producer_identity(
 /// Decision for the Phase-3 (Complete) re-acquire re-validation. See
 /// [`validate_complete_reacquire`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReacquireDecision {
+pub(crate) enum ReacquireDecision {
     /// State is exactly as this handler left it after Prepare; write Complete.
     Proceed,
     /// The entry already advanced to the Complete state this handler intended
@@ -394,7 +390,7 @@ enum ReacquireDecision {
 ///   live transaction and we must not finalise.
 /// - [`ReacquireDecision::Proceed`] only when the epoch matches and the state
 ///   is still exactly `prepare`.
-fn validate_complete_reacquire(
+pub(crate) fn validate_complete_reacquire(
     entry: &TxnEntry,
     expected_pid: i64,
     expected_epoch: i16,
