@@ -433,7 +433,38 @@ async fn serve_connection_stream<S>(
                 handle_produce_frame(&broker, &frame, &auth, &peer),
                 "Produce"
             ),
-            Some(1) => intercept!(handle_fetch_frame(&broker, &frame, &auth, &peer), "Fetch"),
+            Some(1) => {
+                // Fetch takes the zero-copy write-plan path: build an ordered
+                // `WriteOp` plan, flush any buffered codec output, then drain
+                // the plan directly on the raw stream (vectored write / — in
+                // Increment D — sendfile). This bypasses `encode_response`'s
+                // whole-body copy and the `Framed` codec's internal copy.
+                match handle_fetch_frame(&broker, &frame, &auth, &peer)
+                    .instrument(req_span.clone())
+                    .await
+                {
+                    Ok(ops) => {
+                        // Flush the codec's write buffer first so the plan bytes
+                        // don't interleave with anything the codec has pending.
+                        if let Err(e) = SinkExt::<Bytes>::flush(&mut framed).await {
+                            tracing::warn!(error = %e, "framed.flush error before fetch plan, closing");
+                            break;
+                        }
+                        let stream = framed.get_mut();
+                        if let Err(e) =
+                            crate::network::fetch_writer::write_fetch_plan(stream, ops).await
+                        {
+                            tracing::warn!(error = %e, "fetch plan write error, closing");
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Fetch dispatch error, closing connection");
+                        break;
+                    }
+                }
+            }
             Some(3) => intercept!(
                 handle_metadata_frame(&broker, &frame, &auth, &peer),
                 "Metadata"
@@ -1984,12 +2015,24 @@ async fn handle_produce_frame(
 /// `Authenticated { ANONYMOUS / Plain }` (see the loop init), so
 /// `principal()` always returns `Some` here; the `unwrap_or_else`
 /// fallback covers the defensive SASL pre-auth case.
+/// Build the Fetch response as an ordered [`WriteOp`] plan rather than a single
+/// contiguous `Bytes`. The plan's first op carries the 4-byte frame length +
+/// correlation header; subsequent ops are the response envelope interleaved
+/// with each partition's records region (a refcounted view of the verbatim
+/// `.log` bytes — no copy). The connection writer drains the plan directly on
+/// the raw stream, bypassing `encode_response` + the `Framed` codec copies.
+///
+/// The legacy v0–v3 path has no canonical write-plan (it down-converts), so it
+/// is encoded the old way and returned as a single `Inline` op — i.e. the
+/// existing copy path, just expressed as a one-element plan.
 async fn handle_fetch_frame(
     broker: &Broker,
     frame: &[u8],
     auth: &crate::network::auth::ConnectionAuth,
     peer: &SocketAddr,
-) -> Result<Bytes, BrokerError> {
+) -> Result<Vec<crate::network::fetch_writer::WriteOp>, BrokerError> {
+    use crate::network::fetch_writer::{WriteOp, build_fetch_plan, resolve_records_inline};
+
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 1);
     let body_flexible = handler_body_flexible(api_key, api_version);
@@ -2002,14 +2045,32 @@ async fn handle_fetch_frame(
         client_id,
     };
 
-    let resp_body =
+    let (resp, version) =
         crate::handlers::fetch::handle(broker, api_version, correlation_id, body, &ctx).await?;
-    Ok(encode_response(
-        api_key,
+
+    if version < 4 {
+        // Legacy down-conversion path: encode the whole body the old way and
+        // wrap it (plus the response header) as a single inline op.
+        let body_bytes = crate::handlers::fetch::encode_fetch_response(resp, version)?;
+        let framed = encode_response(api_key, correlation_id, body_flexible, &body_bytes);
+        // Prepend the 4-byte frame length so the writer path is uniform.
+        let mut framed_with_len = BytesMut::with_capacity(4 + framed.len());
+        framed_with_len.put_u32(u32::try_from(framed.len()).map_err(|_| {
+            BrokerError::Io(std::io::Error::other(
+                "fetch response exceeds max frame size",
+            ))
+        })?);
+        framed_with_len.put_slice(&framed);
+        return Ok(vec![WriteOp::Inline(framed_with_len.freeze())]);
+    }
+
+    build_fetch_plan(
+        &resp,
+        version,
         correlation_id,
         body_flexible,
-        &resp_body,
-    ))
+        resolve_records_inline,
+    )
 }
 
 /// Decode + dispatch a `Metadata` (`api_key` 3) frame. Pulls the

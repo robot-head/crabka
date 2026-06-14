@@ -21,6 +21,11 @@ include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/generated/FetchResponse.owned.rs"
 ));
+
+#[path = "fetch_response_plan.rs"]
+mod plan;
+pub use plan::FetchWriteOp;
+
 #[cfg(test)]
 mod tests {
     use super::*;

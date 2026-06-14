@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use tokio::sync::Notify;
 
 use crabka_metadata::AclOperation;
@@ -68,6 +68,12 @@ struct PendingRead {
     cpu_micros: u64,
 }
 
+/// Handle a `Fetch` request, returning the response **struct** (not yet
+/// encoded) plus the negotiated `version`. The dispatch layer turns this into
+/// either a zero-copy write-plan (v4+, the canonical codec) or a legacy
+/// copy-encoded frame (v0–v3). Returning the struct — rather than `Bytes` —
+/// lets the connection writer split out each partition's records region as a
+/// separate write segment instead of materializing the whole body.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
@@ -75,7 +81,7 @@ pub(crate) async fn handle(
     _correlation_id: i32,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
-) -> Result<Bytes, BrokerError> {
+) -> Result<(FetchResponse, i16), BrokerError> {
     // KIP-124 request_percentage meters server-side handler time; capture the
     // start so the request throttle can be combined with the consumer
     // byte-rate throttle below (KIP-219).
@@ -125,8 +131,7 @@ pub(crate) async fn handle(
             responses: Vec::new(),
             ..Default::default()
         };
-        let buf = encode_fetch_response(resp, version)?;
-        return Ok(buf.freeze());
+        return Ok((resp, version));
     }
 
     let effective_topics: Vec<EffectiveTopic> = match &decision {
@@ -752,7 +757,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    Ok(encode_fetch_response(resp, version)?.freeze())
+    Ok((resp, version))
 }
 
 /// Projection of `FetchRequest::topics` / cached session partitions —
@@ -1489,7 +1494,7 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> GroupedResponses {
 /// Encode a `FetchResponse` into a `BytesMut`, choosing the legacy
 /// `kafka_3_6_2` codec for Fetch v0-3 and the current canonical codec
 /// for v4+. The version boundary mirrors the request-decode boundary.
-fn encode_fetch_response(
+pub(crate) fn encode_fetch_response(
     resp: FetchResponse,
     version: i16,
 ) -> Result<BytesMut, crate::error::BrokerError> {
