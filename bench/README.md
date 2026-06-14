@@ -64,6 +64,12 @@ This runs the full scenario matrix (including `failover` and `large-msg`)
 at 3 brokers / RF=3. Plan for ~2 hours of runtime, plus storage for
 PersistentVolumeClaims.
 
+Need a cluster? [`bench/terraform/gke/`](./terraform/gke) provisions the exact
+GKE cluster the published [Crabka vs Strimzi](https://robot-head.github.io/crabka/benchmarks/crabka-vs-strimzi/)
+run used (`e2-standard-4` / COS / pd-ssd), and its
+[README](./terraform/gke/README.md) is the full provision → install → run →
+aggregate recipe.
+
 ### Iteration loop
 
 ```bash
@@ -154,5 +160,6 @@ showing.
 - `bench/scenarios/` — YAML scenario definitions.
 - `bench/scripts/` — install / run / teardown bash helpers.
 - `bench/justfile` — top-level orchestration.
+- `bench/terraform/gke/` — Terraform for the GKE benchmark cluster, plus the end-to-end provision → install → run → aggregate README.
 - `.github/workflows/benchmark.yml` — `workflow_dispatch` + weekly cron CI run.
 - `packaging/melange/bench-driver.yaml` + `packaging/apko/bench-driver.yaml` — driver image build.

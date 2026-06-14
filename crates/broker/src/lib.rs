@@ -119,6 +119,35 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.6")]
 
+/// Emit the wrapped item(s) only on platforms with a usable file→socket
+/// `sendfile(2)` for the zero-copy fetch path — Linux, the Apple targets, and
+/// FreeBSD/DragonFly (the "SENDFILE alias"). Windows is excluded: there is no
+/// safe `TransmitFile` wrapper under `unsafe_code = "forbid"`, so the fetch path
+/// `pread`s + `write_all`s there and `WriteOp` carries only the `Inline` variant.
+///
+/// One macro per crate keeps the predicate identical across every sendfile-gated
+/// item (`SENDFILE_MIN_BYTES`, the `WriteOp::File` drain helpers, the
+/// `tcp_for_sendfile` trait method, the sendfile resolver, etc.), so the cfg set
+/// can't drift. The single per-OS syscall *inside* `sendfile_region` is gated
+/// separately (Linux `rustix` vs Apple/BSD `nix`), not by this macro.
+macro_rules! sendfile_cfg {
+    ($($item:item)*) => {
+        $(
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            $item
+        )*
+    };
+}
+pub(crate) use sendfile_cfg;
+
 pub mod api_catalog;
 pub(crate) mod assign_dirs;
 pub mod authorizer;

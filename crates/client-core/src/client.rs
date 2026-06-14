@@ -83,6 +83,13 @@ impl Client {
         }
     }
 
+    /// Drop the pooled connection to `broker_id` so the next request to it
+    /// reconnects (to its current advertised address). Call this after a send
+    /// fails so a bounced / failed-over broker isn't retried over a dead socket.
+    pub fn evict_broker(&self, broker_id: i32) {
+        self.pool.evict(broker_id);
+    }
+
     /// Send a default `MetadataRequest`, parse the broker list from the response,
     /// refresh the pool's address registry, and return the typed response.
     pub async fn refresh_metadata(
@@ -100,7 +107,7 @@ impl Client {
                 rack: b.rack.clone(),
             })
             .collect();
-        self.pool.refresh_brokers(&brokers);
+        self.pool.refresh_brokers(&brokers).await;
         Ok(resp)
     }
 
@@ -182,8 +189,24 @@ pub struct BrokerHandle<'a> {
 
 impl BrokerHandle<'_> {
     /// Send a request to this specific broker.
+    ///
+    /// When the pool has no dialable address for `broker_id` — which happens
+    /// when the broker advertises port `0` (a single-broker cluster whose
+    /// OS-assigned port never got rewritten in metadata), so
+    /// [`BrokerPool::refresh_brokers`] deliberately skipped it — fall back to
+    /// the bootstrap connection. On such a cluster the bootstrap broker *is*
+    /// this broker (e.g. the group coordinator a consumer routes to), so the
+    /// request still reaches its intended target instead of failing
+    /// `Disconnected`. A *known* broker whose connect fails is not masked: the
+    /// fallback only triggers when the id was never in the registry.
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
-        let conn = self.pool.get(self.broker_id).await?;
+        let conn = match self.pool.get(self.broker_id).await {
+            Ok(conn) => conn,
+            Err(ClientError::Disconnected) if !self.pool.knows_broker(self.broker_id) => {
+                self.pool.bootstrap_connection().await?
+            }
+            Err(e) => return Err(e),
+        };
         conn.send(req).await
     }
 }

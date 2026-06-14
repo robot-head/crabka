@@ -1,0 +1,7 @@
+# Terraform state can contain the cluster endpoint + other sensitive values.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+crash.log

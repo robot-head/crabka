@@ -1,0 +1,20 @@
+# Orders-of-magnitude-larger aggregate-throughput run: 8 producers + 4 consumers
+# saturating 96 partitions across the 3-broker cluster for 5 minutes. Pushes
+# ~10-100x the total message volume of the standard scenarios so the comparison
+# reflects sustained high load, not a short burst. Topline: aggregate producer
+# msgs/s and MB/s; secondary: working-set/CPU under sustained pressure.
+name: firehose
+mode_tag: cluster
+msg_size_bytes: 1024
+partitions: 96
+replication_factor: 1
+producers: 8
+consumers: 4
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 65536
+warmup_s: 20
+duration_s: 300

@@ -1307,6 +1307,7 @@ pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, Rec
                         key_path: format!("/etc/crabka/broker-tls/{id}.key"),
                         client_ca_path: "/etc/crabka/cluster-ca/ca.crt".into(),
                         client_auth: "Required".into(),
+                        trust_roots_path: "/etc/crabka/cluster-ca/ca.crt".into(),
                     },
                 )
             })

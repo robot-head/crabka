@@ -6,4 +6,9 @@ pub(crate) mod auth;
 pub mod client;
 pub(crate) mod codec;
 pub(crate) mod dispatch;
+/// Zero-copy fetch response write-plan + vectored/sendfile drain.
+pub(crate) mod fetch_writer;
+/// Linux kTLS support probe (Increment F): run once at startup to decide
+/// whether TLS fetch connections route through kernel-offloaded sendfile.
+pub(crate) mod ktls_probe;
 pub(crate) mod listener;

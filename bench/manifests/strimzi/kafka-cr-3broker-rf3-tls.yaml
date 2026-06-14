@@ -1,0 +1,94 @@
+---
+# 3-broker RF=3 Strimzi cluster with a TLS data-path listener.
+#
+# Identical to kafka-cr-3broker-rf3.yaml except the Kafka CR declares a second
+# internal listener `tls` on 9093 with tls:true, alongside the existing
+# plaintext `plain` on 9092 (kept so the plaintext benchmark cells still work).
+# Strimzi auto-issues broker serving certs from its cluster CA and publishes
+# the CA bundle in the `demo-cluster-ca-cert` Secret (key `ca.crt`), which the
+# driver Job mounts and trusts. Clients dialing :9093 hit the TLS-encrypted
+# produce/fetch path (Strimzi serves it via the JVM SSL engine).
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: kafka
+  namespace: default
+  labels:
+    strimzi.io/cluster: demo
+spec:
+  replicas: 3
+  roles:
+    - controller
+    - broker
+  storage:
+    type: persistent-claim
+    class: premium-rwo
+    size: 200Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    pod:
+      metadata:
+        labels:
+          bench-pool: beefy
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: cloud.google.com/gke-nodepool
+                    operator: In
+                    values:
+                      - beefy-pool
+        # Spread the 3 Strimzi brokers across distinct nodes (parity with the
+        # crabka pool's anti-affinity) so the comparison is fair.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  strimzi.io/cluster: demo
+                  strimzi.io/pool-name: kafka
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: demo
+  namespace: default
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: 3.9.0
+    metadataVersion: 3.9-IV0
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+      - name: tls
+        port: 9093
+        type: internal
+        tls: true
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+    metricsConfig:
+      type: jmxPrometheusExporter
+      valueFrom:
+        configMapKeyRef:
+          name: strimzi-kafka-jmx-exporter
+          key: kafka-metrics-config.yml
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}

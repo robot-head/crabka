@@ -129,6 +129,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // binary entrypoint: linear startup wiring
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
@@ -166,6 +167,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_addr: std::net::SocketAddr = {
         let mut a = args.listen_addr;
         a.set_port(9093);
+        // Under `--config-file` (operator/StatefulSet mode), `--listen-addr`
+        // conflicts_with the config file, so `args.listen_addr` keeps its
+        // 127.0.0.1:9092 default. Peers dial this broker's controller via its
+        // pod FQDN, so binding the controller listener to loopback would make
+        // it unreachable across pods — bind all interfaces (0.0.0.0) instead.
+        if args.config_file.is_some() {
+            a.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        }
         a
     };
     let node_id = u64::try_from(args.broker_id).unwrap_or_else(|_| {
@@ -274,12 +283,19 @@ fn parse_metrics_addr(s: &str) -> Result<Option<SocketAddr>, Box<dyn std::error:
 /// `log_is_empty` check without having to open the log store from
 /// here.
 fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
-    let raft_log_dir = log_dir.join("__cluster_metadata").join("@metadata-0");
-    let has_state = match std::fs::read_dir(&raft_log_dir) {
-        Ok(mut entries) => entries.next().is_some(),
-        Err(_) => false,
-    };
-    if has_state {
+    // Use the controller's own emptiness check (durable raft state =
+    // `__cluster_metadata/quorum-state`, written only after the node has
+    // participated in an election/commit) so this Bootstrap/Rejoin choice can
+    // never disagree with `Controller::start_with_listener`'s mode validation.
+    //
+    // The bare `__cluster_metadata/@metadata-0` segment dir is created by
+    // `KraftController::open` *before* the first commit. Keying Rejoin on its
+    // existence (as we used to) bricked any node killed mid-election on a
+    // multi-node cold start: the next boot saw the segment dir, picked Rejoin,
+    // and died with "Rejoin requires non-empty raft log" — a crashloop. A node
+    // with no persisted quorum-state now correctly re-Bootstraps.
+    let metadata_dir = log_dir.join("__cluster_metadata");
+    if crabka_raft::metadata_log_nonempty(&metadata_dir) {
         BootstrapMode::Rejoin
     } else {
         BootstrapMode::Bootstrap
@@ -324,12 +340,27 @@ mod tests {
     }
 
     #[test]
-    fn detect_rejoin_when_metadata_dir_has_state() {
+    fn detect_rejoin_when_quorum_state_persisted() {
+        let dir = tempdir().unwrap();
+        let meta = dir.path().join("__cluster_metadata");
+        std::fs::create_dir_all(&meta).unwrap();
+        // Durable raft state — `quorum-state` is written only after the node
+        // has participated in an election/commit. This marks a true Rejoin.
+        std::fs::write(meta.join("quorum-state"), b"{}").unwrap();
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Rejoin);
+    }
+
+    #[test]
+    fn detect_bootstrap_when_segment_dir_but_no_quorum_state() {
+        // Regression: a node killed mid-election on a multi-node cold start has
+        // an `@metadata-0` segment dir (created by `KraftController::open`)
+        // but no `quorum-state`. It must re-Bootstrap, not die in a Rejoin
+        // crashloop. Previously this returned Rejoin and bricked the node.
         let dir = tempdir().unwrap();
         let meta = dir.path().join("__cluster_metadata").join("@metadata-0");
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("00000000000000000000.log"), b"segment").unwrap();
-        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Rejoin);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Bootstrap);
     }
 
     #[test]

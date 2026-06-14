@@ -57,6 +57,33 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.3.6")]
 
+/// Emit the wrapped item(s) only on platforms with a usable file→socket
+/// `sendfile(2)` for the zero-copy fetch path — Linux, the Apple targets, and
+/// FreeBSD/DragonFly (the "SENDFILE alias"). Windows is excluded: there is no
+/// safe `TransmitFile` wrapper under `unsafe_code = "forbid"`, so the fetch path
+/// `pread`s + `write_all`s there and never needs the file-region descriptors.
+///
+/// One macro per crate keeps the predicate identical across every sendfile-gated
+/// site (the `read_raw_desc` descriptor types, their impls, and the re-exports),
+/// so the cfg set can't drift between them.
+macro_rules! sendfile_cfg {
+    ($($item:item)*) => {
+        $(
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            $item
+        )*
+    };
+}
+pub(crate) use sendfile_cfg;
+
 mod compact;
 mod config;
 mod error;
@@ -72,6 +99,15 @@ mod txn_index;
 pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
 pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
-pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport};
+sendfile_cfg! {
+    pub use log::RawReadDesc;
+}
+pub use log::{CompactionContext, Log, RawRead, ReadOutput, SegmentExport, VerbatimBatch};
+sendfile_cfg! {
+    pub use segment::RawSegmentDesc;
+}
 pub use segment::{RawSegmentRead, Segment};
 pub use txn_index::{AbortedTxn, TxnIndex};
+// Re-export the zero-copy fetch descriptor so broker code can name
+// `crabka_log::FileRegion` without depending on the protocol crate's path.
+pub use crabka_protocol::records::FileRegion;

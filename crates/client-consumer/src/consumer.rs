@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -23,7 +24,9 @@ use crate::builder::{
     AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
     encode_subscription,
 };
-use crate::coordinator::{COORDINATOR_RETRY_TIMEOUT, CoordinatorState, with_coordinator_retry};
+use crate::coordinator::{
+    COORDINATOR_RETRY_TIMEOUT, CoordinatorState, find_coordinator, with_coordinator_refind,
+};
 use crate::error::ConsumerError;
 use crate::group_metadata::ConsumerGroupMetadata;
 
@@ -34,6 +37,11 @@ use crate::group_metadata::ConsumerGroupMetadata;
 pub struct Consumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,
+    /// Node id of the group's coordinator broker, discovered via
+    /// `FindCoordinator` at build time and kept current by the coordinator task
+    /// (shared `Arc<AtomicI32>`). The commit path (`commit.rs`) reads it to route
+    /// `OffsetCommit` to the coordinator over this data-path client.
+    pub(crate) coordinator_id: Arc<AtomicI32>,
     pub(crate) member_id: String,
     /// Captured at start; not kept in sync as the coordinator rejoins.
     pub(crate) generation_id: i32,
@@ -115,6 +123,15 @@ impl Consumer {
         let session_timeout_ms = i32::try_from(session_timeout.as_millis()).unwrap_or(i32::MAX);
         let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
 
+        // 0. Discover the group's coordinator broker. Real Kafka (Strimzi)
+        //    returns NOT_COORDINATOR (16) for any group RPC that doesn't reach
+        //    the group's actual coordinator, so every Join/Sync/Heartbeat/Commit/
+        //    Fetch/Leave must target it — not the arbitrary bootstrap broker.
+        //    `find_coordinator` also `refresh_metadata`s the main client's pool
+        //    so it learns the coordinator broker's address (needed by
+        //    `client.broker(coordinator_id)` here and by `commit.rs`).
+        let coordinator_id = Arc::new(AtomicI32::new(find_coordinator(&client, &group_id).await?));
+
         // First JoinGroup uses empty `owned_partitions` + `generation_id=-1`:
         // we've never been in the group before, so we have nothing to claim
         // and no prior generation to defend against zombie ownership.
@@ -123,8 +140,12 @@ impl Consumer {
 
         // 1. First JoinGroup — empty member_id, expect MEMBER_ID_REQUIRED (79)
         //    or a regular response; either way the broker hands us a member_id.
-        //    Retry a cold/relocating coordinator (14/15/16) with backoff.
-        let r1 = with_coordinator_retry(
+        //    Routed to the coordinator broker, re-discovering it on a
+        //    cold/relocating-coordinator code (14/15/16) before each retry.
+        let r1 = with_coordinator_refind(
+            &client,
+            &group_id,
+            &coordinator_id,
             COORDINATOR_RETRY_TIMEOUT,
             |r: &JoinGroupResponse| r.error_code,
             || {
@@ -132,8 +153,10 @@ impl Consumer {
                 let protocol_name = protocol_name.clone();
                 let subscription_bytes = subscription_bytes.clone();
                 let client = &client;
+                let target = coordinator_id.load(Ordering::Relaxed);
                 async move {
                     client
+                        .broker(target)
                         .send(JoinGroupRequest {
                             group_id,
                             protocol_type: "consumer".into(),
@@ -164,8 +187,11 @@ impl Consumer {
             ));
         }
 
-        // 2. Second JoinGroup with the assigned member_id.
-        let r2 = with_coordinator_retry(
+        // 2. Second JoinGroup with the assigned member_id, on the coordinator.
+        let r2 = with_coordinator_refind(
+            &client,
+            &group_id,
+            &coordinator_id,
             COORDINATOR_RETRY_TIMEOUT,
             |r: &JoinGroupResponse| r.error_code,
             || {
@@ -174,8 +200,10 @@ impl Consumer {
                 let subscription_bytes = subscription_bytes.clone();
                 let member_id = member_id.clone();
                 let client = &client;
+                let target = coordinator_id.load(Ordering::Relaxed);
                 async move {
                     client
+                        .broker(target)
                         .send(JoinGroupRequest {
                             group_id,
                             protocol_type: "consumer".into(),
@@ -256,9 +284,13 @@ impl Consumer {
             Vec::new()
         };
 
-        // 4. SyncGroup — leader installs assignments; everyone receives
-        //    their own assignment in the response. Retry a cold coordinator.
-        let r3 = with_coordinator_retry(
+        // 4. SyncGroup — leader installs assignments; everyone receives their
+        //    own assignment in the response. On the coordinator broker, with
+        //    re-discovery on a cold/relocating-coordinator code.
+        let r3 = with_coordinator_refind(
+            &client,
+            &group_id,
+            &coordinator_id,
             COORDINATOR_RETRY_TIMEOUT,
             |r: &SyncGroupResponse| r.error_code,
             || {
@@ -268,8 +300,10 @@ impl Consumer {
                 let assignments_for_sync = assignments_for_sync.clone();
                 let generation_id = r2.generation_id;
                 let client = &client;
+                let target = coordinator_id.load(Ordering::Relaxed);
                 async move {
                     client
+                        .broker(target)
                         .send(SyncGroupRequest {
                             group_id,
                             generation_id,
@@ -299,7 +333,10 @@ impl Consumer {
             for (t, p) in &assigned_partitions {
                 by_topic.entry(t.clone()).or_default().push(*p);
             }
+            // OffsetFetch is a coordinator RPC — route it to the coordinator
+            // broker (its id is fresh from the join/sync above).
             let of = client
+                .broker(coordinator_id.load(Ordering::Relaxed))
                 .send(crate::offset_wire::build_offset_fetch(
                     &group_id, &by_topic, &topic_ids,
                 ))
@@ -358,6 +395,7 @@ impl Consumer {
         let state = CoordinatorState {
             client: coordinator_client,
             group_id: group_id.clone(),
+            coordinator_id: Arc::clone(&coordinator_id),
             member_id: member_id.clone(),
             generation_id: r2.generation_id,
             assignor,
@@ -377,6 +415,7 @@ impl Consumer {
         Ok(Consumer {
             client,
             group_id,
+            coordinator_id,
             member_id,
             generation_id: r2.generation_id,
             subscribed_topics: subscribe,

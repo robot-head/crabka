@@ -33,6 +33,23 @@ pub enum RecordsPayload {
     /// Opaque pre-v2 bytes (v0/v1 `MessageSet`). Decode with
     /// `crabka_records_legacy::decode_message_set`.
     Legacy(Bytes),
+    /// Zero-copy fetch (Increments D + E): the records run lives in segment
+    /// `.log` files and is `sendfile(2)`d straight to a plaintext socket —
+    /// never materialized in userspace. One [`FileRegion`] per contributing
+    /// segment. `encode_to` falls back to `pread` + `put_slice` (used on TLS /
+    /// non-sendfile platforms and for `encoded_len` agreement). Gated on the
+    /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly) because it only exists
+    /// to feed the `sendfile` drainer; on Windows the fallback `pread` path runs.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "watchos",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+    ))]
+    FileRegions(Vec<crate::records::FileRegion>),
 }
 
 impl RecordsPayload {
@@ -57,10 +74,25 @@ impl RecordsPayload {
         match self {
             Self::V2(batches) => batches.iter().map(RecordBatch::encoded_len).sum(),
             Self::Raw(b) | Self::Legacy(b) => b.len(),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Self::FileRegions(regions) => regions.iter().map(|r| r.len).sum(),
         }
     }
 
     /// Write the payload bytes into `buf` (caller owns the outer framing).
+    ///
+    /// For `FileRegions` this is the **fallback** path (TLS / non-Linux /
+    /// `encoded_len` agreement): it `pread`s each region out of the segment
+    /// file and copies it into `buf`. The zero-copy `sendfile` path in the
+    /// broker never calls this — it consumes the `FileRegion`s directly.
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         match self {
             Self::V2(batches) => {
@@ -73,15 +105,65 @@ impl RecordsPayload {
                 buf.put_slice(b);
                 Ok(())
             }
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Self::FileRegions(regions) => {
+                use std::os::unix::fs::FileExt;
+                let mut scratch = vec![0u8; 0];
+                for region in regions {
+                    scratch.resize(region.len, 0);
+                    let mut filled = 0usize;
+                    let mut offset = region.offset;
+                    while filled < region.len {
+                        match region.file.read_at(&mut scratch[filled..], offset) {
+                            Ok(0) => {
+                                return Err(RecordsError::RecordParse(
+                                    "FileRegion read hit EOF before len bytes".into(),
+                                ));
+                            }
+                            Ok(n) => {
+                                filled += n;
+                                offset += n as u64;
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(e) => {
+                                return Err(RecordsError::RecordParse(format!(
+                                    "FileRegion read error: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    buf.put_slice(&scratch);
+                }
+                Ok(())
+            }
         }
     }
 
     /// Borrow the parsed v2 batches, if this is a parsed `V2` payload.
-    /// Returns `None` for `Raw` (intentionally unparsed) and `Legacy`.
+    /// Returns `None` for `Raw` (intentionally unparsed), `Legacy`, and
+    /// `FileRegions` (deliberately never materialized).
     #[must_use]
     pub fn as_v2(&self) -> Option<&[RecordBatch]> {
         match self {
             Self::V2(batches) => Some(batches),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Self::FileRegions(_) => None,
             Self::Raw(_) | Self::Legacy(_) => None,
         }
     }
@@ -91,6 +173,16 @@ impl RecordsPayload {
     pub fn as_legacy(&self) -> Option<&Bytes> {
         match self {
             Self::Legacy(b) => Some(b),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Self::FileRegions(_) => None,
             Self::V2(_) | Self::Raw(_) => None,
         }
     }
@@ -316,7 +408,7 @@ mod tests {
         let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
         match p {
             RecordsPayload::V2(batches) => assert!(batches == vec![rb]),
-            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => panic!("expected V2"),
+            _ => panic!("expected V2"),
         }
     }
 
@@ -361,7 +453,7 @@ mod tests {
         let p = RecordsPayload::from_bytes(Bytes::from(buf.clone())).unwrap();
         match p {
             RecordsPayload::Legacy(b) => assert!(&b[..] == &buf[..]),
-            RecordsPayload::Raw(_) | RecordsPayload::V2(_) => panic!("expected Legacy"),
+            _ => panic!("expected Legacy"),
         }
     }
 
@@ -396,7 +488,7 @@ mod tests {
         let owned = p.to_owned().unwrap();
         match owned {
             RecordsPayload::V2(batches) => assert!(batches[0].base_offset == 42),
-            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => panic!("expected V2"),
+            _ => panic!("expected V2"),
         }
     }
 
@@ -471,7 +563,7 @@ mod tests {
         let owned = p.to_owned().unwrap();
         match owned {
             RecordsPayload::Legacy(b) => assert!(&b[..] == &bytes[..]),
-            RecordsPayload::Raw(_) | RecordsPayload::V2(_) => panic!("expected Legacy"),
+            _ => panic!("expected Legacy"),
         }
     }
 

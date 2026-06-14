@@ -98,6 +98,67 @@ impl RawRead {
     }
 }
 
+crate::sendfile_cfg! {
+    /// Descriptor form of [`Log::read_raw`] for the zero-copy (`sendfile`) fetch
+    /// path (Increments D + E): the records run is described by one
+    /// [`FileRegion`] per contributing segment — so a multi-segment fetch is
+    /// `sendfile`d as several regions with **no** coalescing copy (unlike
+    /// `read_raw`, which concatenates cross-segment chunks into a fresh
+    /// `BytesMut`). Compiled on the SENDFILE alias (Linux + Apple +
+    /// FreeBSD/DragonFly).
+    #[derive(Debug, Clone)]
+    pub struct RawReadDesc {
+        /// Absolute offset of the first batch in the regions, or the requested
+        /// offset when no bytes were returned.
+        pub start_offset: i64,
+        /// One file-backed region per contributing segment, in wire order.
+        pub regions: Vec<crabka_protocol::records::FileRegion>,
+        /// Total byte length across all regions.
+        pub total: usize,
+    }
+
+    impl RawReadDesc {
+        fn empty(off: i64) -> Self {
+            Self {
+                start_offset: off,
+                regions: Vec::new(),
+                total: 0,
+            }
+        }
+    }
+}
+
+/// A producer batch to append **verbatim** (no decode/re-encode), used by
+/// the produce zero-copy passthrough path. Carries the producer's exact
+/// wire bytes plus the header fields the log needs for offset assignment,
+/// LSO/transaction tracking, the leader-epoch checkpoint, and the time
+/// index — all of which the caller has already read from the batch header
+/// via a borrowed header-only decode.
+///
+/// The append patches only `base_offset` and `partition_leader_epoch`
+/// (both outside the CRC region) into a writable copy of [`Self::bytes`];
+/// the body and CRC are written byte-for-byte as the producer sent them.
+///
+/// Control batches (transaction markers) are intentionally **not**
+/// representable here — the LSO bookkeeping for a control batch needs the
+/// inner marker record, which the header-only path does not read. Such
+/// batches take the owned [`Log::append`] path instead.
+#[derive(Debug, Clone)]
+pub struct VerbatimBatch {
+    /// The producer's verbatim v2 batch bytes (CRC-validated by the caller).
+    pub bytes: Bytes,
+    /// `last_offset_delta` from the header — how many offsets the batch spans.
+    pub last_offset_delta: i32,
+    /// `max_timestamp` from the header (for `max_timestamp` + time index).
+    pub max_timestamp: i64,
+    /// Leader epoch to stamp into the batch (`partition_leader_epoch`).
+    pub leader_epoch: i32,
+    /// `producer_id` from the header (for LSO/transaction tracking).
+    pub producer_id: i64,
+    /// `true` when the batch's attributes mark it transactional.
+    pub is_transactional: bool,
+}
+
 /// A sealed segment described for tiered-storage
 /// offload (KIP-405). Carries the on-disk file paths plus the offset / timestamp /
 /// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
@@ -380,6 +441,93 @@ impl Log {
         Ok(assigned_base)
     }
 
+    /// Append a producer batch **verbatim** (no decode/re-encode), assigning
+    /// `base_offset` from the log's current end. Returns the assigned
+    /// `base_offset`.
+    ///
+    /// This is the produce zero-copy passthrough path. The caller has
+    /// already CRC-validated the bytes and read the header fields into
+    /// [`VerbatimBatch`]; the log patches `base_offset` +
+    /// `partition_leader_epoch` (both outside the CRC region) and writes the
+    /// bytes as-is. Offset assignment, segment roll, flush, LSO/transaction
+    /// tracking, and the leader-epoch checkpoint behave exactly as
+    /// [`Log::append`] — verbatim vs. owned differ only in how the batch
+    /// bytes are produced, not in any log-level invariant.
+    pub fn append_verbatim(&mut self, batch: &VerbatimBatch) -> Result<i64, LogError> {
+        let leader_epoch = batch.leader_epoch;
+        let assigned_base = self.log_end_offset();
+        self.append_verbatim_preserving_offset(batch, assigned_base)?;
+        if leader_epoch >= 0
+            && self
+                .epoch_checkpoint
+                .latest_epoch()
+                .is_none_or(|e| leader_epoch > e)
+        {
+            self.epoch_checkpoint.append(leader_epoch, assigned_base)?;
+        }
+        Ok(assigned_base)
+    }
+
+    /// Verbatim counterpart of [`Log::append_preserving_offset`]: roll if
+    /// needed, append the verbatim bytes to the active segment, honor
+    /// `flush_on_append`, and update LSO from the batch's
+    /// transactional/producer metadata. Mirrors the non-control branches of
+    /// the owned path; control batches never reach here (they take the
+    /// owned path).
+    fn append_verbatim_preserving_offset(
+        &mut self,
+        batch: &VerbatimBatch,
+        base_offset: i64,
+    ) -> Result<(), LogError> {
+        let (segment_bytes, index_interval_bytes, flush_on_append) = {
+            let cfg = self.config.read().unwrap();
+            (
+                cfg.segment_bytes,
+                cfg.index_interval_bytes,
+                cfg.flush_on_append,
+            )
+        };
+
+        let should_roll = match &self.active {
+            Some(seg) => seg.size_bytes() >= segment_bytes,
+            None => false,
+        };
+        if should_roll {
+            self.roll_active_segment()?;
+        }
+
+        let active = self
+            .active
+            .as_mut()
+            .expect("active segment must exist after Log::open");
+        active.append_verbatim(
+            &batch.bytes,
+            base_offset,
+            batch.last_offset_delta,
+            batch.max_timestamp,
+            batch.leader_epoch,
+            index_interval_bytes,
+        )?;
+
+        if flush_on_append {
+            active.flush()?;
+        }
+
+        // --- LSO tracking (no control batches on this path) ---
+        let pid = batch.producer_id;
+        if batch.is_transactional && pid >= 0 {
+            // Record the first offset of this txn on this partition; LSO
+            // stays put until a commit/abort marker (which arrives via the
+            // owned control-batch path).
+            self.pending.entry(pid).or_insert(base_offset);
+        } else if self.pending.is_empty() {
+            // Non-transactional batch with no in-flight txns: LSO advances.
+            self.lso = self.log_end_offset();
+        }
+
+        Ok(())
+    }
+
     /// Access the per-partition leader-epoch checkpoint.
     #[must_use]
     pub fn epoch_checkpoint(&self) -> &LeaderEpochCheckpoint {
@@ -642,6 +790,85 @@ impl Log {
             bytes,
             total,
         })
+    }
+
+    crate::sendfile_cfg! {
+    /// Descriptor variant of [`Log::read_raw`] for the zero-copy (`sendfile`)
+    /// fetch path: walks sealed segments then the active segment exactly as
+    /// `read_raw` does, but collects one [`FileRegion`] per contributing segment
+    /// (via [`Segment::read_raw_desc`]) instead of owned `Bytes`. Crucially,
+    /// multi-segment fetches are **not** coalesced — each region is `sendfile`d
+    /// separately, dropping the cross-segment copy.
+    ///
+    /// The selected byte ranges are byte-identical to what `read_raw` would
+    /// have returned for the same `(fetch_offset, limit_offset, max_bytes)`.
+    pub fn read_raw_desc(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawReadDesc, LogError> {
+        let log_start = self.log_start_offset();
+        if fetch_offset < log_start {
+            return Err(LogError::OffsetTooLow {
+                requested: fetch_offset,
+                log_start,
+            });
+        }
+        if fetch_offset >= limit_offset {
+            return Ok(RawReadDesc::empty(fetch_offset));
+        }
+
+        let mut regions: Vec<crabka_protocol::records::FileRegion> = Vec::new();
+        let mut start_offset = fetch_offset;
+        let mut current = fetch_offset;
+        let mut remaining = max_bytes;
+        let mut got_first = false;
+
+        for seg in &self.segments {
+            if seg.last_offset() < current {
+                continue;
+            }
+            let r = seg.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                    got_first = true;
+                }
+                remaining = remaining.saturating_sub(r.len());
+                current = r.last_offset + 1;
+                if let Some(region) = r.region {
+                    regions.push(region);
+                }
+                if remaining == 0 || current >= limit_offset {
+                    break;
+                }
+            }
+        }
+
+        if (remaining > 0 || !got_first)
+            && current < limit_offset
+            && let Some(active) = &self.active
+            && current <= active.last_offset()
+        {
+            let r = active.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            if !r.is_empty() {
+                if !got_first {
+                    start_offset = r.start_offset;
+                }
+                if let Some(region) = r.region {
+                    regions.push(region);
+                }
+            }
+        }
+
+        let total: usize = regions.iter().map(|r| r.len).sum();
+        Ok(RawReadDesc {
+            start_offset,
+            regions,
+            total,
+        })
+    }
     }
 
     /// Truncate the log so no records at offset `>= offset` remain. Used
@@ -1233,6 +1460,172 @@ mod tests {
             bases.push(b.base_offset);
         }
         assert!(bases == expected_bases);
+        drop(dir);
+    }
+
+    crate::sendfile_cfg! {
+    /// Increment D/E: `Log::read_raw_desc` across a segment seam must yield
+    /// regions whose **concatenation** is byte-identical to `read_raw`'s
+    /// coalesced bytes — but as multiple `FileRegion`s (one per contributing
+    /// segment), proving the cross-segment copy was dropped.
+    #[test]
+    fn log_read_raw_desc_multi_segment_regions_equal_read_raw() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempdir().unwrap();
+        let config = LogConfig {
+            segment_bytes: 100, // tiny: roll roughly each batch
+            ..LogConfig::default()
+        };
+        let mut log = Log::open(dir.path(), config).unwrap();
+
+        let n: i64 = 6;
+        for off in 0..n {
+            let mut b = test_batch_at(off);
+            log.append(&mut b).unwrap();
+        }
+        assert!(!log.segments.is_empty(), "expected a segment roll");
+
+        let log_end = log.log_end_offset();
+        let raw = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        let desc = log.read_raw_desc(0, log_end, 10 * 1024 * 1024).unwrap();
+
+        assert!(desc.start_offset == raw.start_offset);
+        assert!(desc.total == raw.total);
+        // Multi-segment ⇒ more than one region (no coalescing copy).
+        assert!(
+            desc.regions.len() >= 2,
+            "expected >=2 regions across the seam, got {}",
+            desc.regions.len()
+        );
+
+        // Concatenate the pread'd regions and compare to read_raw's bytes.
+        let mut assembled = Vec::with_capacity(desc.total);
+        for region in &desc.regions {
+            let mut buf = vec![0u8; region.len];
+            let mut filled = 0;
+            let mut off = region.offset;
+            while filled < buf.len() {
+                let r = region.file.read_at(&mut buf[filled..], off).unwrap();
+                assert!(r > 0);
+                filled += r;
+                off += r as u64;
+            }
+            assembled.extend_from_slice(&buf);
+        }
+        assert!(
+            assembled == raw.bytes[..],
+            "concatenated regions must equal read_raw bytes across the seam"
+        );
+        drop(dir);
+    }
+    } // sendfile_cfg!
+
+    /// Encode a "producer" batch (with a producer-chosen `base_offset` and
+    /// leader epoch) and return both the wire bytes and a `VerbatimBatch`.
+    fn verbatim_from(producer: &RecordBatch, leader_epoch: i32) -> (Bytes, VerbatimBatch) {
+        let mut wire = bytes::BytesMut::new();
+        producer.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+        let vb = VerbatimBatch {
+            bytes: wire.clone(),
+            last_offset_delta: producer.last_offset_delta,
+            max_timestamp: producer.max_timestamp,
+            leader_epoch,
+            producer_id: producer.producer_id,
+            is_transactional: producer.attributes.is_transactional(),
+        };
+        (wire, vb)
+    }
+
+    #[test]
+    fn append_verbatim_assigns_offsets_and_is_byte_exact() {
+        let (dir, mut log) = test_log();
+
+        // Append three single-record batches verbatim. Each producer batch
+        // carries a bogus base_offset (999) that the log must overwrite.
+        let mut expected_wire = bytes::BytesMut::new();
+        for _ in 0..3 {
+            let mut producer = test_batch_at(0);
+            producer.base_offset = 999;
+            producer.partition_leader_epoch = -1;
+            let (_wire, vb) = verbatim_from(&producer, 4);
+            log.append_verbatim(&vb).unwrap();
+            // Re-encode the expectation with the assigned offset + epoch.
+            let mut stamped = producer.clone();
+            stamped.base_offset = log.log_end_offset() - 1;
+            stamped.partition_leader_epoch = 4;
+            stamped.encode(&mut expected_wire).unwrap();
+        }
+        assert!(log.log_end_offset() == 3);
+
+        let log_end = log.log_end_offset();
+        let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
+        assert!(
+            &r.bytes[..] == &expected_wire[..],
+            "verbatim append must be byte-exact after offset+epoch stamping"
+        );
+
+        // Decodes cleanly (CRC valid) with the assigned offsets.
+        let mut cur: &[u8] = &r.bytes;
+        let mut bases = Vec::new();
+        while !cur.is_empty() {
+            bases.push(RecordBatch::decode(&mut cur).unwrap().base_offset);
+        }
+        assert!(bases == vec![0, 1, 2]);
+        drop(dir);
+    }
+
+    #[test]
+    fn append_verbatim_matches_owned_append_bytes() {
+        // The verbatim path and the owned path must write byte-identical
+        // .log bytes for the same logical batch — proving passthrough does
+        // not perturb the stored representation.
+        let dir_owned = tempdir().unwrap();
+        let mut log_owned = Log::open(dir_owned.path(), LogConfig::default()).unwrap();
+        let dir_verb = tempdir().unwrap();
+        let mut log_verb = Log::open(dir_verb.path(), LogConfig::default()).unwrap();
+
+        let mut producer = test_batch_at(0);
+        producer.base_offset = 12345; // overwritten by both paths
+        producer.partition_leader_epoch = -1;
+
+        // Owned path: stamp epoch like the produce handler does, then append.
+        let mut owned = producer.clone();
+        owned.partition_leader_epoch = 9;
+        log_owned.append(&mut owned).unwrap();
+
+        // Verbatim path: same epoch via the meta.
+        let (_wire, vb) = verbatim_from(&producer, 9);
+        log_verb.append_verbatim(&vb).unwrap();
+
+        let end_owned = log_owned.log_end_offset();
+        let end_verb = log_verb.log_end_offset();
+        assert!(end_owned == end_verb);
+        let r_owned = log_owned.read_raw(0, end_owned, 10 * 1024 * 1024).unwrap();
+        let r_verb = log_verb.read_raw(0, end_verb, 10 * 1024 * 1024).unwrap();
+        assert!(
+            &r_owned.bytes[..] == &r_verb.bytes[..],
+            "owned and verbatim appends must produce identical .log bytes"
+        );
+        drop(dir_owned);
+        drop(dir_verb);
+    }
+
+    #[test]
+    fn append_verbatim_transactional_holds_lso() {
+        let (dir, mut log) = test_log();
+        // A transactional batch must hold the LSO at the batch's base offset
+        // (it isn't stable until a commit/abort marker arrives).
+        let mut producer = test_batch_at(0);
+        producer.last_offset_delta = 1; // spans offsets 0..=1
+        producer.producer_id = 77;
+        producer.producer_epoch = 0;
+        producer.attributes = producer.attributes.with_transactional(true);
+        let (_wire, vb) = verbatim_from(&producer, 0);
+        log.append_verbatim(&vb).unwrap();
+        assert!(log.log_end_offset() == 2);
+        // LSO stays at 0 (the open txn's first offset), not log_end (2).
+        assert!(log.lso() == 0);
         drop(dir);
     }
 

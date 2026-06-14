@@ -9,8 +9,9 @@ use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::Client;
+use crabka_client_core::{Client, ClientError};
 use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
+use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
 
 use crate::compression::Compression;
 use crate::error::ProducerError;
@@ -18,6 +19,71 @@ use crate::partitioner::UniformStickyPartitioner;
 use crate::producer::{Acks, Producer};
 use crate::sender;
 use crate::transactional::TxnState;
+
+/// Retriable cold-coordinator error codes for `InitProducerId`. The broker is
+/// loading its coordinator state (`14`), the coordinator is not yet available
+/// (`15`), or it has moved to another broker (`16`). At cluster startup a
+/// conformant client retries these with backoff rather than failing the build.
+const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+const NOT_COORDINATOR: i16 = 16;
+
+/// How long [`init_producer_id`] keeps retrying a cold coordinator before
+/// surfacing the last response. Mirrors a typical client `request.timeout.ms`
+/// and the consumer crate's `COORDINATOR_RETRY_TIMEOUT`.
+const INIT_PRODUCER_ID_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn is_retriable_coordinator_code(code: i16) -> bool {
+    matches!(
+        code,
+        COORDINATOR_LOAD_IN_PROGRESS | COORDINATOR_NOT_AVAILABLE | NOT_COORDINATOR
+    )
+}
+
+/// Send `InitProducerId` for an idempotent-only producer, retrying on the
+/// cold-coordinator codes (14/15/16) and transient `Disconnected` transport
+/// errors with capped exponential backoff until the deadline elapses.
+///
+/// Mirrors the consumer crate's `with_coordinator_retry` shape: on deadline it
+/// returns the last response (so the caller's `error_code != 0` handling runs)
+/// or surfaces the transport error if the final attempt disconnected. Idempotent
+/// producers carry no `transactional_id`, so the id is allocated from any broker
+/// — no `FindCoordinator` routing is needed here.
+async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, ProducerError> {
+    const MAX_BACKOFF: Duration = Duration::from_secs(1);
+    let start = tokio::time::Instant::now();
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        match client
+            .send(InitProducerIdRequest {
+                transactional_id: None,
+                transaction_timeout_ms: 0,
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
+            Ok(resp) => {
+                // Cold coordinator: retry until the deadline, then surface the
+                // last response so the caller maps it to ProducerError::Server.
+                if start.elapsed() >= INIT_PRODUCER_ID_RETRY_TIMEOUT {
+                    return Ok(resp);
+                }
+            }
+            Err(ClientError::Disconnected) => {
+                // Transient transport failure (e.g. the broker dropped the
+                // connection while still loading): retry until the deadline,
+                // then surface the disconnect.
+                if start.elapsed() >= INIT_PRODUCER_ID_RETRY_TIMEOUT {
+                    return Err(ProducerError::Client(ClientError::Disconnected));
+                }
+            }
+            Err(e) => return Err(ProducerError::Client(e)),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
 
 #[bon::bon]
 impl Producer {
@@ -65,14 +131,17 @@ impl Producer {
             .await?;
 
         // 2. InitProducerId if idempotence on.
+        //
+        // Idempotent-only producers (no transactional_id) allocate a producer
+        // id from *any* broker — no FindCoordinator routing to a transaction
+        // coordinator is required. But at cluster startup the broker can still
+        // transiently return COORDINATOR_LOAD_IN_PROGRESS (14) /
+        // COORDINATOR_NOT_AVAILABLE (15) / NOT_COORDINATOR (16) while its
+        // internal state loads, and a conformant client retries these with
+        // backoff rather than surfacing the first error. `init_producer_id`
+        // does that retry and returns the final response.
         let (producer_id, producer_epoch) = if enable_idempotence {
-            let init = client
-                .send(InitProducerIdRequest {
-                    transactional_id: None,
-                    transaction_timeout_ms: 0,
-                    ..Default::default()
-                })
-                .await?;
+            let init = init_producer_id(&client).await?;
             if init.error_code != 0 {
                 return Err(ProducerError::Server(init.error_code));
             }
