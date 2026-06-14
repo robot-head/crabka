@@ -391,6 +391,7 @@ pub(crate) async fn handle(
                         u64::try_from(effective_replica_id).unwrap_or(0),
                         fetch_offset,
                         leader_leo,
+                        std::time::Instant::now(),
                     );
                     new > prev
                 };
