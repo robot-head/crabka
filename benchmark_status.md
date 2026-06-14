@@ -186,20 +186,34 @@ fixed and the **broker** side already worked:
 — 45,556 produced / 45,524 consumed, **4 dropped** across a partition-leader kill,
 p50 1.36 ms. The cluster + client failed over transparently.
 
-**Tuning for a representative number (`quorum-fix7`):** that first run detected the
-dead leader slowly (3 transport attempts × the 30s request timeout ≈ 90s), so
-in-flight records failed and producer tasks blocked, dropping throughput to 253/s.
-Fixed by re-routing after the first transport failure and using a 10s producer
-request timeout, so the measured recovery reflects the cluster's ~9s re-election.
+**Tuning attempt (`quorum-fix7`):** the first run detected the dead leader slowly
+(3 transport attempts × the 30s request timeout ≈ 90s), so in-flight records failed
+and producer tasks blocked, dropping throughput to 253/s. Re-routing after the first
+transport failure + a 10s producer request timeout fixed the *speed* — but the
+faster re-route exposed a **deeper correctness bug** (§7d): one producer was
+**fenced** on the leader change and dropped its whole stream (900k). The slow
+detection had masked it (in-flight records timed out before reaching the new leader
+with a stale sequence).
+
+## 7d. Current frontier: idempotent producer is fenced across a leader failover
+
+`acks=all` forces idempotence, so each producer carries a PID + epoch + per-partition
+sequence. When a partition's leader changes (failover), the producer's next send to
+the **new** leader must continue the sequence — but the run shows
+`fenced by newer producer instance` (INVALID_PRODUCER_EPOCH / OUT_OF_ORDER_SEQUENCE),
+i.e. the producer's idempotent state did not survive the leader election. This is a
+real, separate correctness issue (producer-state durability/recovery on the new
+leader, or the client re-initialising its PID on reconnect and fencing its own
+in-flight batches). It is the next deep investigation — broker-side producer-state
+replication + client-side epoch handling.
 
 **Open observations (bench-methodology, not correctness):**
 * The driver's producer is **synchronous** (send→await per record), so it can't
   approach the `fixed_rate` 10000/s target regardless of cluster speed — throughput
   numbers are driver-bound, not cluster-bound.
 * `disturbance.recovery_at_ms` is computed as first-surfaced-failure→first-success;
-  a *transparent* failover (re-route succeeds, nothing surfaced) leaves it `0`. The
-  metric should instead measure the latency spike / throughput dip across the kill
-  window.
+  a *transparent* failover leaves it `0`. The metric should instead measure the
+  latency spike / throughput dip across the kill window.
 
 ## 7c. Still-open follow-up: broker rejoin after a kill (not needed for the result)
 
