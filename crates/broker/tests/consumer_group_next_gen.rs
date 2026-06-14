@@ -113,14 +113,27 @@ async fn two_members_split_partitions() {
     b.subscribed_topic_names = Some(vec!["t2".into()]);
     let rb = client.send(b).await.unwrap();
     assert!(rb.error_code == 0, "B join failed: {:?}", rb.error_code);
+    let mid_b = rb.member_id.unwrap();
+    let b_epoch = rb.member_epoch;
 
-    // A re-heartbeats at its own epoch (1) to learn the rebalanced assignment.
-    // B's join bumped the group epoch to 2 and updated A's target, but A's
-    // stored member_epoch is still 1 — we must heartbeat at that epoch.
+    // A re-heartbeats at its own epoch (1) to learn the rebalanced assignment
+    // and revoke the partitions B's target needs. B's join bumped the group
+    // epoch to 2 and updated A's target, but A's stored member_epoch is still
+    // 1 — we must heartbeat at that epoch.
     let mut a3 = heartbeat("g2", &mid_a, ra.member_epoch);
     a3.subscribed_topic_names = Some(vec!["t2".into()]);
     let ra3 = client.send(a3).await.unwrap();
     assert!(ra3.error_code == 0, "A re-hb failed: {:?}", ra3.error_code);
+
+    // B re-heartbeats to acquire the partitions A just released. Per KIP-848 the
+    // coordinator withholds a partition from its new owner until the previous
+    // owner has revoked it, so B's *join* response (rb) intentionally carries
+    // fewer partitions than B's target; B converges on this next heartbeat, now
+    // that A's re-heartbeat above revoked them.
+    let mut b3 = heartbeat("g2", &mid_b, b_epoch);
+    b3.subscribed_topic_names = Some(vec!["t2".into()]);
+    let rb3 = client.send(b3).await.unwrap();
+    assert!(rb3.error_code == 0, "B re-hb failed: {:?}", rb3.error_code);
 
     let parts_a: usize = ra3
         .assignment
@@ -129,7 +142,7 @@ async fn two_members_split_partitions() {
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    let parts_b: usize = rb
+    let parts_b: usize = rb3
         .assignment
         .unwrap()
         .topic_partitions
