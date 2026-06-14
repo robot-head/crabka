@@ -27,7 +27,7 @@ const MAX_STATES: usize = 200_000;
 /// Depth backstop; must exceed each config's reachable-graph diameter.
 const MAX_DEPTH: usize = 80;
 /// Wall-clock backstop.
-const CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const CHECK_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Bounded model config (held here, not in the fingerprinted state).
 struct IsrModel {
@@ -115,7 +115,7 @@ impl Hash for IsrState {
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum IsrAction {
-    /// Leader appends one record (leader_leo += 1) and recomputes HW.
+    /// Leader appends one record (`leader_leo` += 1) and recomputes HW.
     LeaderAppend,
     /// A follower reports `leo` via fetch.
     FollowerFetch { follower: NodeId, leo: i64 },
@@ -146,7 +146,7 @@ impl Model for IsrModel {
         // follower's reported LEO never regresses, which is what keeps HW
         // monotone. `test_overshoot` additionally probes the defensive clamp.
         for f in self.followers() {
-            let cur = state.rs.per_follower.get(&f).map(|s| s.leo).unwrap_or(0);
+            let cur = state.rs.per_follower.get(&f).map_or(0, |s| s.leo);
             let mut targets: Vec<i64> = Vec::new();
             if cur < state.leader_leo {
                 targets.push(cur + 1);
@@ -182,7 +182,7 @@ impl Model for IsrModel {
             let expansion_ok = isr
                 .iter()
                 .filter(|&&n| n != leader && !cur_isr.contains(&n))
-                .all(|f| state.rs.per_follower.get(f).map(|s| s.leo).unwrap_or(0) >= state.rs.hw);
+                .all(|f| state.rs.per_follower.get(f).map_or(0, |s| s.leo) >= state.rs.hw);
             if !expansion_ok {
                 continue;
             }
@@ -236,8 +236,7 @@ impl Model for IsrModel {
                 s.rs.isr.iter().filter(|&&f| f != leader).all(|f| {
                     s.rs.per_follower
                         .get(f)
-                        .map(|st| st.leo >= s.rs.hw)
-                        .unwrap_or(false)
+                        .is_some_and(|st| st.leo >= s.rs.hw)
                 })
             }),
             Property::always("leo_clamped", |_, s: &IsrState| {
