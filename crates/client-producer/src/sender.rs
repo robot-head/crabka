@@ -59,12 +59,13 @@ mod codes {
 /// bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
 
-/// Quick reconnect attempts to a specific leader on a transport failure before
-/// giving up on it and re-routing. Rides out a transient connection blip (socket
-/// dropped, broker fine) without a full metadata round-trip; past this the leader
-/// has likely moved (failover) and we re-resolve instead of hammering a dead
-/// broker over a dead socket.
-const TRANSPORT_RETRIES: i32 = 3;
+/// Transport attempts to a specific leader before re-routing. `1` means: on the
+/// first failure, re-resolve immediately rather than burning more
+/// `request_timeout`s on a leader that has likely moved (failover). A transient
+/// blip (socket dropped, broker still alive) is handled just as cheaply — the
+/// re-route re-resolves to the same alive leader and reconnects — so paying
+/// multiple full request-timeouts here only slows failover recovery.
+const TRANSPORT_RETRIES: i32 = 1;
 
 /// Wall-clock budget for routing a batch to a reachable leader across one
 /// `send_to_leaders` cycle. Spans a typical failover leader re-election (the

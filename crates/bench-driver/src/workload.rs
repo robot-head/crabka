@@ -328,6 +328,12 @@ async fn run_producer(
         .enable_idempotence(enable_idempotence)
         .linger(Duration::from_millis(scenario.linger_ms))
         .batch_size(scenario.batch_size)
+        // A produce to a healthy broker completes in low single-digit ms, so a
+        // 10s ceiling never trips under normal load — but it bounds how long a
+        // send to a *killed* leader blocks before the client re-routes, so the
+        // measured failover recovery reflects the cluster's leader re-election
+        // (single-digit seconds) rather than the 30s default request timeout.
+        .request_timeout(Duration::from_secs(10))
         .build()
         .await
         .context("build producer")
