@@ -114,6 +114,15 @@ surface).
 These exercise time-based share-lock semantics; replacing the sleep with state-polling
 would destroy what they test. Each gets a one-line comment marking the sleep intentional.
 
+**Discovered during execution (added to the keep list):** the two membership-pacing
+sleeps in `consumer_cooperative_rebalance.rs` (before m2 and m3 join). A 15× stress run
+showed that introducing the next member while the prior cooperative-sticky rebalance is
+still in flight causes cascading rebalances that never converge to a clean snapshot.
+There is no client- or broker-observable "group fully stable" signal to await (only
+member-count, which fires at JoinGroup before SyncGroup completes), so these joins must
+be paced — a real protocol-timing property, not a flaky guess. They are kept with an
+explanatory comment. (So 4 sleeps are kept; 25 reduced.)
+
 ## DRY
 
 Several files duplicate near-identical bounded-await helpers. Where it removes duplication
