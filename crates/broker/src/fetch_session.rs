@@ -972,3 +972,101 @@ mod tests {
         assert!(cache.total_partitions_cached() == 1);
     }
 }
+
+/// Large-N random fuzzing of `apply_incremental` (KIP-227 forget+merge),
+/// complementing the exhaustive `fetch_session_model`. Random sequences of
+/// incremental fetches over a tiny topic/id/partition universe (random identity
+/// halves) must preserve no-shadow, subscription fidelity, and no-orphan-default
+/// after every step.
+#[cfg(test)]
+mod fuzz {
+    use super::{CachedPartitionState, FetchSessionKey, apply_incremental};
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
+    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+    use proptest::prelude::*;
+    use std::collections::HashMap;
+
+    // name index 0 = empty (id-only wire form), 1 = "A", 2 = "B".
+    fn name_of(i: u8) -> String {
+        ["", "A", "B"][i as usize].to_string()
+    }
+    // id index 0 = ZERO (name-only wire form), 1 = U, 2 = V.
+    fn id_of(i: u8) -> WireUuid {
+        [WireUuid::ZERO, WireUuid([1; 16]), WireUuid([2; 16])][i as usize]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2000))]
+        #[test]
+        fn forget_merge_invariants(
+            ops in proptest::collection::vec(
+                // (forget name, forget id, forget partition,
+                //  do-subscribe, sub name, sub id, sub partition, sub max_bytes)
+                (0u8..3, 0u8..3, 0i32..2, any::<bool>(), 0u8..3, 0u8..3, 0i32..2, 1i32..4),
+                0..200,
+            )
+        ) {
+            let mut partitions: HashMap<FetchSessionKey, CachedPartitionState> = HashMap::new();
+            for (fname, fid, fp, do_sub, sname, sid, sp, mb) in ops {
+                // A forget with an all-empty identity matches nothing — skip it
+                // (the wire never carries a topic with neither name nor id).
+                let forgotten = if fname == 0 && fid == 0 {
+                    vec![]
+                } else {
+                    vec![ForgottenTopic {
+                        topic: name_of(fname),
+                        topic_id: id_of(fid),
+                        partitions: vec![fp],
+                        ..Default::default()
+                    }]
+                };
+                let subscribe = do_sub && !(sname == 0 && sid == 0);
+                let topics = if subscribe {
+                    vec![FetchTopic {
+                        topic: name_of(sname),
+                        topic_id: id_of(sid),
+                        partitions: vec![FetchPartition {
+                            partition: sp,
+                            partition_max_bytes: mb,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }]
+                } else {
+                    vec![]
+                };
+
+                apply_incremental(&mut partitions, &forgotten, &topics);
+
+                // No shadow: no two keys share a logical partition.
+                let keys: Vec<_> = partitions.keys().cloned().collect();
+                for (i, a) in keys.iter().enumerate() {
+                    for b in &keys[i + 1..] {
+                        let shadow = a.partition == b.partition
+                            && ((!a.topic_name.is_empty() && a.topic_name == b.topic_name)
+                                || (a.topic_id != WireUuid::ZERO && a.topic_id == b.topic_id));
+                        prop_assert!(!shadow, "shadow: {a:?} vs {b:?}");
+                    }
+                }
+
+                // No orphan default: every cached entry carries a subscribed
+                // max_bytes (merge always sets it; we only ever request >= 1).
+                prop_assert!(partitions.values().all(|v| v.max_bytes != 0));
+
+                // Subscription fidelity: a subscribed partition is reflected with
+                // the requested max_bytes by some key matching the request.
+                if subscribe {
+                    let name = name_of(sname);
+                    let id = id_of(sid);
+                    let present = partitions.iter().any(|(k, st)| {
+                        k.partition == sp
+                            && ((!name.is_empty() && k.topic_name == name)
+                                || (id != WireUuid::ZERO && k.topic_id == id))
+                            && st.max_bytes == mb
+                    });
+                    prop_assert!(present, "subscription not reflected");
+                }
+            }
+        }
+    }
+}
