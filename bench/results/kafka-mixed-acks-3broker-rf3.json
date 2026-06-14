@@ -26,44 +26,44 @@
     "replication_factor": 1,
     "broker_count": 3
   },
-  "wallclock_start_unix_ms": 1781420250766,
-  "wallclock_end_unix_ms": 1781420385850,
+  "wallclock_start_unix_ms": 1781469867271,
+  "wallclock_end_unix_ms": 1781470002346,
   "throughput": {
-    "msgs_produced": 2381282,
-    "msgs_consumed": 1053711,
-    "mb_in": 2325.470703125,
-    "mb_out": 1029.0146484375,
-    "producer_msgs_per_sec": 19844.016666666666,
-    "consumer_msgs_per_sec": 8780.925
+    "msgs_produced": 1642453,
+    "msgs_consumed": 1047308,
+    "mb_in": 1603.9580078125,
+    "mb_out": 1022.76171875,
+    "producer_msgs_per_sec": 13687.108333333334,
+    "consumer_msgs_per_sec": 8727.566666666668
   },
   "producer_latency_ms": {
-    "p50_ms": 1.814,
-    "p95_ms": 6.943,
-    "p99_ms": 31.263,
-    "p999_ms": 141.311,
-    "max_ms": 192.255,
-    "mean_ms": 3.1075870463892943,
-    "count": 2381282
+    "p50_ms": 69.247,
+    "p95_ms": 121.471,
+    "p99_ms": 160.255,
+    "p999_ms": 263.679,
+    "max_ms": 415.231,
+    "mean_ms": 66.9541491360787,
+    "count": 1642453
   },
   "consumer_e2e_latency_ms": {
-    "p50_ms": 41877.503,
-    "p95_ms": 60030.975,
+    "p50_ms": 33652.735,
+    "p95_ms": 58097.663,
     "p99_ms": 60030.975,
     "p999_ms": 60030.975,
     "max_ms": 60030.975,
-    "mean_ms": 39969.05450126648,
-    "count": 1053711
+    "mean_ms": 33573.75200155829,
+    "count": 1047308
   },
   "resource": {
-    "broker_cpu_seconds": 141.8979656602385,
-    "mem_cgroup_working_set_bytes": 4455559168,
-    "jvm_heap_used_bytes": 2383111320,
-    "jvm_nonheap_used_bytes": 273482592,
-    "kafka_page_cache_approx_bytes": 1798965256,
-    "msgs_per_cpu_core": 16781.650032261623
+    "broker_cpu_seconds": 178.5234380669544,
+    "mem_cgroup_working_set_bytes": 3820965888,
+    "jvm_heap_used_bytes": 2152540600,
+    "jvm_nonheap_used_bytes": 273961680,
+    "kafka_page_cache_approx_bytes": 1394463608,
+    "msgs_per_cpu_core": 9200.209327046488
   },
-  "first_ack_ms": 218,
+  "first_ack_ms": 220,
   "errors": [],
   "notes": [],
-  "startup_ms": 72290
+  "startup_ms": 73735
 }

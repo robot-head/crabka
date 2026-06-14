@@ -25,41 +25,41 @@
     "replication_factor": 1,
     "broker_count": 3
   },
-  "wallclock_start_unix_ms": 1781419527253,
-  "wallclock_end_unix_ms": 1781419662368,
+  "wallclock_start_unix_ms": 1781469149598,
+  "wallclock_end_unix_ms": 1781469284775,
   "throughput": {
-    "msgs_produced": 8536997,
-    "msgs_consumed": 1073982,
-    "mb_in": 8336.9111328125,
-    "mb_out": 1048.810546875,
-    "producer_msgs_per_sec": 71141.64166666666,
-    "consumer_msgs_per_sec": 8949.85
+    "msgs_produced": 8335833,
+    "msgs_consumed": 1076297,
+    "mb_in": 8140.4619140625,
+    "mb_out": 1051.0712890625,
+    "producer_msgs_per_sec": 69465.275,
+    "consumer_msgs_per_sec": 8969.141666666666
   },
   "producer_latency_ms": {
-    "p50_ms": 26.335,
-    "p95_ms": 43.935,
-    "p99_ms": 70.143,
-    "p999_ms": 122.623,
-    "max_ms": 154.623,
-    "mean_ms": 28.77648384039493,
-    "count": 8536997
+    "p50_ms": 27.407,
+    "p95_ms": 43.359,
+    "p99_ms": 63.871,
+    "p999_ms": 90.879,
+    "max_ms": 148.479,
+    "mean_ms": 29.469470767948497,
+    "count": 8335833
   },
   "consumer_e2e_latency_ms": {
-    "p50_ms": 6541.311,
-    "p95_ms": 14417.919,
-    "p99_ms": 18792.447,
-    "p999_ms": 19726.335,
-    "max_ms": 19824.639,
-    "mean_ms": 6833.99809254159,
-    "count": 1073982
+    "p50_ms": 6463.487,
+    "p95_ms": 12541.951,
+    "p99_ms": 14188.543,
+    "p999_ms": 14802.943,
+    "max_ms": 14901.247,
+    "mean_ms": 6612.6152076016115,
+    "count": 1076297
   },
   "resource": {
-    "broker_cpu_seconds": 191.10302745877206,
-    "mem_cgroup_working_set_bytes": 279175168,
-    "msgs_per_cpu_core": 44672.22269328906
+    "broker_cpu_seconds": 196.94724113806984,
+    "mem_cgroup_working_set_bytes": 652709888,
+    "msgs_per_cpu_core": 42325.20827319518
   },
-  "first_ack_ms": 31,
+  "first_ack_ms": 34,
   "errors": [],
   "notes": [],
-  "startup_ms": 29370
+  "startup_ms": 30089
 }
