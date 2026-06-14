@@ -97,10 +97,14 @@ jobs:
       - name: Build APK packages (single compile for all images)
         run: |
           mkdir -p packages .melange-cache
-          melange keygen
+          # Each arch's repo is signed with its own key. apk references signing
+          # keys by basename, so the keys must have arch-unique names — otherwise
+          # the two `melange.rsa.pub` files collide in apko's keyring and one
+          # arch's APKINDEX fails verification at publish time.
+          melange keygen "melange-${{ matrix.arch }}.rsa"
           melange build packaging/melange/crabka.yaml \
             --source-dir . \
-            --signing-key melange.rsa \
+            --signing-key "melange-${{ matrix.arch }}.rsa" \
             --arch ${{ matrix.arch }} \
             --runner docker \
             --cache-dir "$PWD/.melange-cache" \
@@ -112,7 +116,7 @@ jobs:
           name: apk-repository-${{ matrix.arch }}
           path: |
             packages/
-            melange.rsa.pub
+            melange-${{ matrix.arch }}.rsa.pub
           retention-days: 1
           if-no-files-found: error
 
@@ -213,8 +217,8 @@ jobs:
             "${TAGS[@]}" \
             --sbom-path sbom \
             --repository-append "${PWD}/packages" \
-            --keyring-append "${PWD}/dist/x86_64/melange.rsa.pub" \
-            --keyring-append "${PWD}/dist/aarch64/melange.rsa.pub")"
+            --keyring-append "${PWD}/dist/x86_64/melange-x86_64.rsa.pub" \
+            --keyring-append "${PWD}/dist/aarch64/melange-aarch64.rsa.pub")"
           echo "apko published: ${REF}"
 
           DIGEST="$(printf '%s\n' "${REF}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
