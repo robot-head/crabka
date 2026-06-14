@@ -105,6 +105,7 @@ pub(crate) async fn handle(
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
     let partitions_map = broker.partitions.clone();
+    let producer_state = broker.producer_state.clone();
 
     {
         let mut cur: &[u8] = &req_bytes;
@@ -253,6 +254,7 @@ pub(crate) async fn handle(
                             &log_dirs,
                             &log_config,
                             &log_dir_status,
+                            &producer_state,
                         ) {
                             tracing::error!(
                                 topic = %name, partition = p_i32, error = %e,

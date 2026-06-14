@@ -215,12 +215,10 @@ impl ProducerState {
     ///
     /// Returns an empty map for an unknown `(topic, partition)`.
     ///
-    /// Currently unused in production: the partition writer task does not yet
-    /// receive `ProducerState` (it is not threaded into `spawn_partition`), so
-    /// the `WriterMessage::Compact` handler passes an empty active-producer
-    /// set. See the WIRING GAP comment in `partition_writer.rs`. Kept (and
-    /// unit-tested) so closing that gap is a one-line call-site change.
-    #[allow(dead_code)]
+    /// Called by the partition writer task's `WriterMessage::Compact`
+    /// handler (the broker-wide `ProducerState` is threaded through
+    /// `spawn_partition` into `partition_writer::run`) to populate the
+    /// `CompactionContext::active_producers` set.
     pub async fn active_snapshot(
         &self,
         topic: &str,

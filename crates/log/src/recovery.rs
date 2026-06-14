@@ -45,12 +45,17 @@ pub fn swap_orphan_recover(dir: &Path) -> Result<(), LogError> {
         let log_swap = swap_triple(dir, base, "log");
         let index_swap = swap_triple(dir, base, "index");
         let timeindex_swap = swap_triple(dir, base, "timeindex");
+        let txnindex_swap = swap_triple(dir, base, "txnindex");
 
         if existing_log_bases.contains(&base) {
-            // Orphan partial — discard.
+            // Orphan partial — discard. The `.txnindex.swap` is only
+            // produced when the survivor segment retains aborted txns
+            // (`RewriteOutput::txnindex_swap` is `Option`), so it may be
+            // absent; `remove_file` no-ops on a missing path.
             let _ = std::fs::remove_file(&log_swap);
             let _ = std::fs::remove_file(&index_swap);
             let _ = std::fs::remove_file(&timeindex_swap);
+            let _ = std::fs::remove_file(&txnindex_swap);
         } else {
             // Complete swap interrupted mid-rename — promote.
             std::fs::rename(&log_swap, name::log_path(dir, base))?;
@@ -67,6 +72,19 @@ pub fn swap_orphan_recover(dir: &Path) -> Result<(), LogError> {
                 std::fs::rename(&timeindex_swap, name::timeindex_path(dir, base))?;
             } else {
                 std::fs::File::create(name::timeindex_path(dir, base))?;
+            }
+            // The `.txnindex` is an OPTIONAL sidecar (`atomic_swap` only
+            // renames it when the survivor retained aborted txns). Unlike
+            // the index / timeindex, a segment with no aborted txns has NO
+            // `.txnindex` at all and `Segment::open` tolerates its absence,
+            // so we must NOT synthesize an empty one. Promote the survivor
+            // `.txnindex.swap` if present; otherwise remove any leftover
+            // `.txnindex` at the target offset so a stale pre-swap index
+            // can't outlive the segment it described.
+            if txnindex_swap.exists() {
+                std::fs::rename(&txnindex_swap, name::txnindex_path(dir, base))?;
+            } else {
+                let _ = std::fs::remove_file(name::txnindex_path(dir, base));
             }
         }
     }
@@ -97,11 +115,14 @@ mod tests {
         touch(&p.join("00000000000000000000.log.swap"));
         touch(&p.join("00000000000000000000.index.swap"));
         touch(&p.join("00000000000000000000.timeindex.swap"));
+        touch(&p.join("00000000000000000000.txnindex.swap"));
         swap_orphan_recover(p).unwrap();
         assert!(name::log_path(p, 0).exists());
         assert!(!p.join("00000000000000000000.log.swap").exists());
         assert!(!p.join("00000000000000000000.index.swap").exists());
         assert!(!p.join("00000000000000000000.timeindex.swap").exists());
+        // The orphaned survivor `.txnindex.swap` is discarded too.
+        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
     }
 
     #[test]
@@ -117,5 +138,41 @@ mod tests {
         assert!(name::index_path(p, 0).exists());
         assert!(name::timeindex_path(p, 0).exists());
         assert!(!p.join("00000000000000000000.log.swap").exists());
+    }
+
+    #[test]
+    fn promotes_txnindex_swap_when_present() {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        // Complete swap (originals gone) whose survivor retained aborted
+        // txns, so a `.txnindex.swap` exists alongside the other three.
+        touch(&p.join("00000000000000000000.log.swap"));
+        touch(&p.join("00000000000000000000.index.swap"));
+        touch(&p.join("00000000000000000000.timeindex.swap"));
+        touch(&p.join("00000000000000000000.txnindex.swap"));
+        swap_orphan_recover(p).unwrap();
+        assert!(name::log_path(p, 0).exists());
+        assert!(name::txnindex_path(p, 0).exists());
+        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
+    }
+
+    #[test]
+    fn promote_without_txnindex_swap_synthesizes_none_and_clears_stale() {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        // A stale `.txnindex` from a prior segment sits at the target
+        // offset, but the survivor of THIS swap had no aborted txns, so
+        // no `.txnindex.swap` was produced. Recovery must NOT synthesize
+        // an empty `.txnindex` and must clear the stale one so it can't
+        // outlive the segment it described.
+        touch(&name::txnindex_path(p, 0));
+        touch(&p.join("00000000000000000000.log.swap"));
+        touch(&p.join("00000000000000000000.index.swap"));
+        touch(&p.join("00000000000000000000.timeindex.swap"));
+        swap_orphan_recover(p).unwrap();
+        assert!(name::log_path(p, 0).exists());
+        // No `.txnindex` is synthesized when the survivor had none.
+        assert!(!name::txnindex_path(p, 0).exists());
+        assert!(!p.join("00000000000000000000.txnindex.swap").exists());
     }
 }

@@ -2036,6 +2036,11 @@ impl Broker {
         //    fail the whole startup on the first IO error, and we want
         //    to keep recovering partitions on the surviving dirs.
         let partitions: Arc<PartitionRegistry> = Arc::new(PartitionRegistry::new());
+        // Broker-wide idempotent/transactional producer-sequence tracker.
+        // Created before the partition scan so each recovered partition's
+        // writer task gets the shared handle (the `Compact` handler needs
+        // it to build the `RETAIN_EMPTY` active-producer snapshot).
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         // Controller-only nodes host no data partitions, so they skip the
         // disk scan/recovery entirely.
         if config.is_broker() {
@@ -2049,6 +2054,7 @@ impl Broker {
                     owning_dir,
                     log,
                     log_dir_status.clone(),
+                    producer_state.clone(),
                 );
                 partitions.insert(topic.clone(), partition_id, part);
             }
@@ -2072,13 +2078,13 @@ impl Broker {
             config.streams_group.as_ref().clone(),
         ));
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
-        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         crate::coordinator::bootstrap::bootstrap(
             &config,
             &controller,
             &partitions,
             &group_coordinator,
             &log_dir_status,
+            &producer_state,
         )
         .await?;
 
@@ -2193,6 +2199,7 @@ impl Broker {
             config.inter_broker_listener_name.clone(),
             throttle_state.clone(),
             log_dir_status.clone(),
+            producer_state.clone(),
             metrics.clone(),
             log_dir_ids.clone(),
         );
@@ -3345,6 +3352,7 @@ pub(crate) fn spawn_partition(
     log_dir: std::path::PathBuf,
     log: crabka_log::Log,
     log_dir_status: crate::log_dir_status::LogDirRegistry,
+    producer_state: Arc<crate::producer_state::ProducerState>,
 ) -> Arc<Partition> {
     let log = Arc::new(Mutex::new(log));
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(64);
@@ -3357,6 +3365,8 @@ pub(crate) fn spawn_partition(
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
     let writer = tokio::spawn(crate::partition_writer::run(
+        topic.clone(),
+        partition_id,
         log.clone(),
         log_dir.clone(),
         rx,
@@ -3364,6 +3374,7 @@ pub(crate) fn spawn_partition(
         replica_state.clone(),
         hw_advance_notify.clone(),
         log_dir_status,
+        producer_state,
     ));
     Arc::new(Partition {
         topic,

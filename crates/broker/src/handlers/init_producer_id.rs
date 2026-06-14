@@ -124,6 +124,7 @@ pub(crate) async fn handle(
                     &log_dirs,
                     &log_config,
                     &log_dir_status,
+                    &broker.producer_state,
                 )
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req, txnv).await?

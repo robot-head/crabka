@@ -63,6 +63,7 @@ pub async fn bootstrap(
     partitions: &Arc<PartitionRegistry>,
     coordinator: &Arc<GroupCoordinator>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
+    producer_state: &Arc<crate::producer_state::ProducerState>,
 ) -> Result<(), BrokerError> {
     // KIP-113 offline-dir handling: exclude dirs flagged offline by the
     // startup probe; placing `__consumer_offsets-N` on a known-bad dir
@@ -168,6 +169,7 @@ pub async fn bootstrap(
         owning_dir,
         log,
         log_dir_status.clone(),
+        producer_state.clone(),
     );
     partitions.insert(OFFSETS_TOPIC.into(), OFFSETS_PARTITION, partition);
     Ok(())
@@ -799,6 +801,7 @@ mod tests {
             &partitions,
             &coordinator,
             &log_dir_status,
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .await
         .unwrap();
@@ -833,6 +836,7 @@ mod tests {
             &partitions,
             &coordinator,
             &log_dir_status,
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .await
         .unwrap();
@@ -851,6 +855,7 @@ mod tests {
             &partitions,
             &coordinator,
             &log_dir_status,
+            &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .await
         .unwrap();

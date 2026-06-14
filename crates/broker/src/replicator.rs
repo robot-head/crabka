@@ -76,6 +76,11 @@ pub(crate) struct Config {
     /// `spawn_partition` so the per-partition writer can flip the
     /// owning dir offline on a segment-write / fsync failure.
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Broker-wide idempotent/transactional producer-sequence tracker.
+    /// Forwarded into `spawn_partition` (via `ensure_local_partition`)
+    /// so the per-partition writer's `Compact` handler can snapshot
+    /// active producers for KIP-534 `RETAIN_EMPTY`.
+    pub producer_state: Arc<crate::producer_state::ProducerState>,
     /// Broker-wide metrics handle so the replicator can
     /// increment `replication_bytes_in` after a successful follower-
     /// side append.
@@ -128,6 +133,7 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
                 owning_dir,
                 log,
                 cfg.log_dir_status.clone(),
+                cfg.producer_state.clone(),
             ))
         })
 }
