@@ -48,6 +48,39 @@ pub enum Decision {
     Fenced,
 }
 
+/// Pure idempotent-producer dedup/ordering decision. The async `check` is a thin
+/// lock-acquiring wrapper over this; extracted so it is exhaustively and
+/// property-tested in isolation (see `producer_state_model.rs`).
+pub(crate) fn check_pure(
+    entry: Option<&ProducerEntry>,
+    producer_epoch: i16,
+    base_sequence: i32,
+) -> Decision {
+    match entry {
+        None => Decision::Append,
+        Some(entry) => {
+            if producer_epoch < entry.epoch {
+                return Decision::Fenced;
+            }
+            if producer_epoch > entry.epoch {
+                // A bumped epoch establishes a fresh sequence baseline (restart
+                // or KIP-890 per-EndTxn bump). Accept the first higher-epoch batch.
+                return Decision::Append;
+            }
+            if base_sequence <= entry.last_sequence {
+                return Decision::Duplicate {
+                    base_offset: entry.base_offset,
+                };
+            }
+            if base_sequence == entry.last_sequence + 1 {
+                Decision::Append
+            } else {
+                Decision::OutOfOrder
+            }
+        }
+    }
+}
+
 /// Per-partition idempotent-producer state, nested under the owning
 /// topic. Keyed by partition index (`i32`, `Copy`) so per-call lookups
 /// allocate nothing; the outer topic map is keyed by `String` but its
@@ -84,51 +117,8 @@ impl ProducerState {
     ) -> Decision {
         let handle = self.handle(topic, partition);
         let s = handle.lock().await;
-        match s.entries.get(&producer_id) {
-            None => Decision::Append,
-            Some(entry) => {
-                if producer_epoch < entry.epoch {
-                    return Decision::Fenced;
-                }
-                if producer_epoch > entry.epoch {
-                    // A bumped producer epoch establishes a FRESH sequence
-                    // baseline: the new epoch's `base_sequence` is authoritative
-                    // and must NOT be dedup-checked against the prior epoch's
-                    // `last_sequence`. Two distinct paths reach here, both legal:
-                    //
-                    //   * Restart with `InitProducerId` (same producer_id, bumped
-                    //     epoch) — the client resets its sequence to 0.
-                    //   * KIP-890 (TV_2) per-EndTxn epoch bump within the SAME
-                    //     producer session — the broker bumps the epoch on every
-                    //     commit/abort to fence zombies, and the client continues
-                    //     its sequence counter (so `base_sequence > 0`).
-                    //
-                    // Dedup-ing the new epoch against the old `last_sequence`
-                    // silently swallowed the first record on each partition (and,
-                    // under EOS, lost output while the offset commit still landed
-                    // → cross-restart data loss). Accept the first higher-epoch
-                    // batch as the new baseline; subsequent same-epoch checks
-                    // enforce ordering under it. `commit` records the new epoch +
-                    // sequence, so the next batch is validated against it.
-                    let _ = last_offset_delta;
-                    return Decision::Append;
-                }
-                // Same epoch: ordinary idempotent dedup / ordering checks.
-                if base_sequence <= entry.last_sequence {
-                    // Anywhere within (or before) the committed range counts
-                    // as duplicate. We echo the previously-committed base offset.
-                    return Decision::Duplicate {
-                        base_offset: entry.base_offset,
-                    };
-                }
-                if base_sequence == entry.last_sequence + 1 {
-                    let _ = last_offset_delta; // used by caller to compute last_sequence
-                    Decision::Append
-                } else {
-                    Decision::OutOfOrder
-                }
-            }
-        }
+        let _ = last_offset_delta; // used only by the caller to compute last_sequence on commit
+        check_pure(s.entries.get(&producer_id), producer_epoch, base_sequence)
     }
 
     /// Commit a successful append into the tracker.
@@ -264,6 +254,10 @@ impl ProducerState {
         evicted
     }
 }
+
+#[cfg(test)]
+#[path = "producer_state_model.rs"]
+mod producer_state_model;
 
 #[cfg(test)]
 mod tests {
@@ -406,5 +400,91 @@ mod tests {
         );
         // A subsequent produce still works after pruning.
         assert!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
+    }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use std::collections::HashMap;
+
+    use proptest::prelude::*;
+
+    use super::{Decision, ProducerEntry, check_pure};
+
+    proptest! {
+        /// Large-N randomized submit sequences over `check_pure`: the
+        /// accepted-append log per epoch is a contiguous, duplicate-free,
+        /// monotonic prefix; a lower epoch is fenced; a higher epoch resets the
+        /// baseline. Complements the exhaustive `producer_state_model` at a scale
+        /// the BFS can't reach (epoch 0..6, base_seq 0..200, up to 400 ops).
+        #[test]
+        fn idempotent_log_invariants(
+            ops in proptest::collection::vec(
+                (0i16..6, 0i32..200), // (producer_epoch, base_sequence)
+                0..400usize,
+            )
+        ) {
+            let mut entry: Option<ProducerEntry> = None;
+            let mut next_offset: i64 = 0;
+            // Reference: per-epoch highest accepted sequence (must stay contiguous).
+            let mut hi: HashMap<i16, i32> = HashMap::new();
+            for (epoch, base_seq) in ops {
+                let d = check_pure(entry.as_ref(), epoch, base_seq);
+                match d {
+                    Decision::Append => {
+                        if let Some(e) = &entry {
+                            if epoch == e.epoch {
+                                prop_assert_eq!(
+                                    base_seq,
+                                    e.last_sequence + 1,
+                                    "same-epoch Append must be contiguous"
+                                );
+                            } else {
+                                prop_assert!(epoch > e.epoch, "Append epoch must be fresh");
+                            }
+                        }
+                        // Per-epoch contiguity: an accepted seq for a fresh epoch
+                        // starts the prefix; a same-epoch accept extends it by 1.
+                        if let Some(p) = hi.get(&epoch).copied() {
+                            prop_assert_eq!(
+                                base_seq,
+                                p + 1,
+                                "accepted sequence must extend the per-epoch prefix"
+                            );
+                        }
+                        hi.insert(epoch, base_seq);
+                        entry = Some(ProducerEntry {
+                            epoch,
+                            last_sequence: base_seq,
+                            last_offset: next_offset,
+                            base_offset: next_offset,
+                            last_timestamp: 0,
+                            last_activity_ms: 0,
+                        });
+                        next_offset += 1;
+                    }
+                    Decision::Duplicate { .. } => {
+                        let e = entry.as_ref().expect("Duplicate implies an entry");
+                        prop_assert_eq!(epoch, e.epoch);
+                        prop_assert!(
+                            base_seq <= e.last_sequence,
+                            "Duplicate must be within committed range"
+                        );
+                    }
+                    Decision::OutOfOrder => {
+                        let e = entry.as_ref().expect("OutOfOrder implies an entry");
+                        prop_assert_eq!(epoch, e.epoch);
+                        prop_assert!(
+                            base_seq > e.last_sequence + 1,
+                            "OutOfOrder must be a real gap"
+                        );
+                    }
+                    Decision::Fenced => {
+                        let e = entry.as_ref().expect("Fenced implies an entry");
+                        prop_assert!(epoch < e.epoch, "Fenced must be a stale epoch");
+                    }
+                }
+            }
+        }
     }
 }

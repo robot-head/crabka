@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 use crate::error::LogError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EpochEntry {
     pub epoch: i32,
     pub start_offset: i64,
@@ -84,21 +84,17 @@ impl LeaderEpochCheckpoint {
     /// with the same epoch is a no-op (keeps the earliest recorded
     /// `start_offset`). Rewrites the file atomically.
     pub fn append(&mut self, epoch: i32, start_offset: i64) -> Result<(), LogError> {
-        if self.entries.iter().any(|e| e.epoch == epoch) {
-            return Ok(());
+        if append_to(&mut self.entries, epoch, start_offset) {
+            self.flush()?;
         }
-        self.entries.push(EpochEntry {
-            epoch,
-            start_offset,
-        });
-        self.flush()
+        Ok(())
     }
 
     /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
     /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
     pub fn truncate_from_end(&mut self, end_offset: i64) -> Result<(), LogError> {
         let before = self.entries.len();
-        self.entries.retain(|e| e.start_offset < end_offset);
+        truncate_to(&mut self.entries, end_offset);
         if self.entries.len() != before {
             self.flush()?;
         }
@@ -179,36 +175,7 @@ impl LeaderEpochCheckpoint {
     /// `end_offset` is always a valid truncation target (`>= 0`).
     #[must_use]
     pub fn epoch_and_offset_for(&self, requested_epoch: i32, log_end_offset: i64) -> (i32, i64) {
-        if requested_epoch == UNDEFINED_EPOCH {
-            return (UNDEFINED_EPOCH, log_end_offset);
-        }
-        if self.latest_epoch() == Some(requested_epoch) {
-            return (requested_epoch, log_end_offset);
-        }
-        // Smallest recorded epoch strictly greater than `requested`.
-        let higher = self
-            .entries
-            .iter()
-            .filter(|e| e.epoch > requested_epoch)
-            .min_by_key(|e| e.epoch);
-        match higher {
-            // `requested` is in the future relative to this log.
-            None => (UNDEFINED_EPOCH, log_end_offset),
-            Some(next) => {
-                // Largest recorded epoch <= requested (the floor).
-                let floor = self
-                    .entries
-                    .iter()
-                    .filter(|e| e.epoch <= requested_epoch)
-                    .map(|e| e.epoch)
-                    .max();
-                match floor {
-                    Some(f) => (f, next.start_offset),
-                    // `requested` is below the first recorded epoch.
-                    None => (requested_epoch, next.start_offset),
-                }
-            }
-        }
+        epoch_and_offset_for_entries(&self.entries, requested_epoch, log_end_offset)
     }
 
     #[must_use]
@@ -221,6 +188,67 @@ impl LeaderEpochCheckpoint {
         &self.entries
     }
 }
+
+/// Pure core of [`LeaderEpochCheckpoint::epoch_and_offset_for`] over a raw slice,
+/// so it can be exhaustively + property-tested without a file. The method
+/// delegates to this. See `leader_epoch_model.rs` for the divergence-safety model.
+pub(crate) fn epoch_and_offset_for_entries(
+    entries: &[EpochEntry],
+    requested_epoch: i32,
+    log_end_offset: i64,
+) -> (i32, i64) {
+    if requested_epoch == UNDEFINED_EPOCH {
+        return (UNDEFINED_EPOCH, log_end_offset);
+    }
+    if entries.iter().map(|e| e.epoch).max() == Some(requested_epoch) {
+        return (requested_epoch, log_end_offset);
+    }
+    // Smallest recorded epoch strictly greater than `requested`.
+    let higher = entries
+        .iter()
+        .filter(|e| e.epoch > requested_epoch)
+        .min_by_key(|e| e.epoch);
+    match higher {
+        // `requested` is in the future relative to this log.
+        None => (UNDEFINED_EPOCH, log_end_offset),
+        Some(next) => {
+            // Largest recorded epoch <= requested (the floor).
+            let floor = entries
+                .iter()
+                .filter(|e| e.epoch <= requested_epoch)
+                .map(|e| e.epoch)
+                .max();
+            match floor {
+                Some(f) => (f, next.start_offset),
+                // `requested` is below the first recorded epoch.
+                None => (requested_epoch, next.start_offset),
+            }
+        }
+    }
+}
+
+/// Pure core of [`LeaderEpochCheckpoint::append`]: idempotent push-if-absent.
+/// Returns `true` if a new entry was added (so the caller knows to flush).
+pub(crate) fn append_to(entries: &mut Vec<EpochEntry>, epoch: i32, start_offset: i64) -> bool {
+    if entries.iter().any(|e| e.epoch == epoch) {
+        return false;
+    }
+    entries.push(EpochEntry {
+        epoch,
+        start_offset,
+    });
+    true
+}
+
+/// Pure core of [`LeaderEpochCheckpoint::truncate_from_end`]: drop entries that
+/// begin at or after `end_offset`.
+pub(crate) fn truncate_to(entries: &mut Vec<EpochEntry>, end_offset: i64) {
+    entries.retain(|e| e.start_offset < end_offset);
+}
+
+#[cfg(test)]
+#[path = "leader_epoch_model.rs"]
+mod leader_epoch_model;
 
 #[cfg(test)]
 mod tests {
@@ -488,5 +516,94 @@ mod tests {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(c.epoch_and_offset_for(0, 9) == (UNDEFINED_EPOCH, 9));
+    }
+}
+
+#[cfg(test)]
+mod fuzz {
+    use proptest::prelude::*;
+
+    use super::{EpochEntry, UNDEFINED_EPOCH, append_to, epoch_and_offset_for_entries};
+
+    /// Fold random `(epoch_gap, offset_jump)` steps into a strictly-increasing
+    /// leader epoch-history (gaps allowed, mirroring how `append` builds one).
+    fn leader_history(steps: &[(i32, i64)]) -> Vec<EpochEntry> {
+        let mut v: Vec<EpochEntry> = vec![];
+        let (mut le, mut lo) = (-1i32, -1i64);
+        for &(de, doff) in steps {
+            let e = le + 1 + de.rem_euclid(3); // epoch gap 1..=3
+            let o = lo + 1 + doff.rem_euclid(1000); // offset jump 1..=1000
+            append_to(&mut v, e, o);
+            le = e;
+            lo = o;
+        }
+        v
+    }
+
+    proptest! {
+        /// Large-N randomized leader epoch-histories + requested epoch + follower
+        /// log-end, asserting the same KIP-101/320 truncation contract the
+        /// exhaustive `leader_epoch_model` checks, at a scale the BFS can't reach
+        /// (histories up to 20 entries, epochs to ~60, offsets to ~20000).
+        #[test]
+        fn truncation_contract_holds(
+            steps in proptest::collection::vec((0i32..10, 0i64..1000), 0..20usize),
+            requested in -1i32..70,
+            dleo in 0i64..2000,
+        ) {
+            let leader = leader_history(&steps);
+            let last_off = leader.last().map_or(0, |e| e.start_offset);
+            // Follower log end is at or past the last epoch boundary.
+            let leo = last_off + 1 + dleo;
+            let (found, trunc) = epoch_and_offset_for_entries(&leader, requested, leo);
+            let latest = leader.iter().map(|e| e.epoch).max();
+
+            // Always a valid truncation target.
+            prop_assert!(trunc >= 0, "truncation target {} < 0", trunc);
+            // The resolved epoch never exceeds the requested epoch.
+            prop_assert!(
+                found <= requested,
+                "found_epoch {} > requested {}",
+                found,
+                requested
+            );
+
+            if let Some(entry) = leader.iter().find(|e| e.epoch == requested) {
+                // Committed-prefix-preserved: never truncate below the start of
+                // an epoch the leader and follower agree on.
+                prop_assert!(
+                    trunc >= entry.start_offset,
+                    "truncation {} dropped agreed epoch {} (starts at {})",
+                    trunc,
+                    requested,
+                    entry.start_offset
+                );
+                if latest == Some(requested) {
+                    // Current epoch → keep up to the follower's log end.
+                    prop_assert_eq!(found, requested);
+                    prop_assert_eq!(trunc, leo, "latest epoch keeps up to log end");
+                } else {
+                    // Older agreed epoch → truncate to the next leader epoch's
+                    // start, dropping the divergent higher-epoch suffix.
+                    let next_start = leader
+                        .iter()
+                        .filter(|e| e.epoch > requested)
+                        .map(|e| e.start_offset)
+                        .min()
+                        .expect("a non-latest recorded epoch has a higher epoch");
+                    prop_assert_eq!(found, requested);
+                    prop_assert_eq!(
+                        trunc,
+                        next_start,
+                        "older epoch truncates to next epoch start"
+                    );
+                    prop_assert!(trunc <= leo, "truncation {} above log end {}", trunc, leo);
+                }
+            } else if requested == UNDEFINED_EPOCH {
+                // No last epoch → no truncation this round.
+                prop_assert_eq!(found, UNDEFINED_EPOCH);
+                prop_assert_eq!(trunc, leo);
+            }
+        }
     }
 }
