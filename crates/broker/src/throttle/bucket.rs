@@ -20,6 +20,18 @@ pub struct TokenBucket {
     last_refill_nanos: AtomicU64,
 }
 
+/// Pure token-bucket consume arithmetic. Given the current `available`, the
+/// `refill` claimed for this call, the `rate` cap, and `requested` bytes, return
+/// `(grant, new_available)` where `capped = (available + refill).min(rate)`,
+/// `grant = requested.min(capped)`, and `new_available = capped - grant` (which
+/// is `>= 0` by construction). Used by the real `try_consume` CAS loop and by
+/// the stateright model + proptest (see `bucket_model.rs`).
+pub(crate) fn plan_consume(available: u64, refill: u64, rate: u64, requested: u64) -> (u64, u64) {
+    let capped = available.saturating_add(refill).min(rate);
+    let grant = requested.min(capped);
+    (grant, capped - grant)
+}
+
 impl TokenBucket {
     #[must_use]
     pub fn new() -> Self {
@@ -51,19 +63,30 @@ impl TokenBucket {
         if rate == 0 {
             return requested;
         }
-        // Refill.
+        // Refill. The `last_refill` swap atomically claims this call's elapsed
+        // gap (only one concurrent caller gets it), so refill is never
+        // double-counted.
         let now = now_nanos();
         let last = self.last_refill_nanos.swap(now, Relaxed);
         let elapsed = now.saturating_sub(last);
         let refill = ((u128::from(elapsed) * u128::from(rate)) / 1_000_000_000) as u64;
-        let mut cur = self.available.load(Relaxed);
-        let new_avail = (cur.saturating_add(refill)).min(rate);
-        self.available.store(new_avail, Relaxed);
-        cur = new_avail;
-        // Consume.
-        let grant = requested.min(cur);
-        self.available.fetch_sub(grant, Relaxed);
-        grant
+        // Refill + consume must commit atomically. A plain load/store/fetch_sub
+        // lets two concurrent callers clobber each other's read-modify-write,
+        // over-granting past the burst cap and underflowing `available` (which
+        // disables the throttle until the next refill cap) — see `bucket_model.rs`.
+        // The CAS loop recomputes against the fresh `available` on contention,
+        // and also absorbs a concurrent `set_rate` reset (the CAS simply retries).
+        loop {
+            let cur = self.available.load(Relaxed);
+            let (grant, new_avail) = plan_consume(cur, refill, rate, requested);
+            if self
+                .available
+                .compare_exchange_weak(cur, new_avail, Relaxed, Relaxed)
+                .is_ok()
+            {
+                return grant;
+            }
+        }
     }
 }
 
@@ -102,6 +125,15 @@ mod tests {
     use super::*;
     use assert2::assert;
     use std::time::Duration;
+
+    #[test]
+    fn plan_consume_grants_and_caps() {
+        assert!(plan_consume(100, 0, 1000, 50) == (50, 50)); // partial
+        assert!(plan_consume(100, 0, 1000, 200) == (100, 0)); // drained
+        assert!(plan_consume(900, 500, 1000, 200) == (200, 800)); // refill capped at rate
+        assert!(plan_consume(0, 0, 1000, 100) == (0, 0)); // empty
+        assert!(plan_consume(u64::MAX, u64::MAX, 1000, 1000) == (1000, 0)); // saturating + cap
+    }
 
     #[test]
     fn zero_rate_grants_full_request() {
