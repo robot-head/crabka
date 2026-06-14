@@ -1,0 +1,28 @@
+name: Free disk space
+description: >
+  Reclaim ~25-30 GB of preinstalled SDKs the Rust coverage build never uses, so
+  the `-C instrument-coverage` build + profraw set + cargo target dir don't
+  exhaust the default ubuntu runner's ~14 GB free disk ("No space left on
+  device", which then crashes the linker with SIGBUS). Removes only dirs that no
+  coverage/integration job depends on — it deliberately leaves the JDK
+  (`/usr/lib/jvm`) and Docker images alone, so it is safe for the JVM-acceptance
+  and testcontainers jobs too.
+runs:
+  using: composite
+  steps:
+    - name: Reclaim runner disk
+      shell: bash
+      run: |
+        echo "Disk before:"; df -h /
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /opt/ghc /usr/local/.ghcup \
+          /usr/local/lib/android \
+          /usr/share/swift \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/boost \
+          /usr/local/graalvm \
+          /usr/local/share/powershell \
+          /usr/local/share/chromium \
+          /usr/lib/google-cloud-sdk || true
+        echo "Disk after:"; df -h /
