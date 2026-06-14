@@ -126,13 +126,14 @@ pub(crate) async fn find_coordinator(
     }
     let node_id = coordinator_node_id(&resp);
 
-    // Learn the coordinator's address: it's in the cluster broker list, so a
-    // metadata refresh populates the pool's (id → addr) registry and lets
-    // `client.broker(node_id)` dial it directly.
+    // Refresh the pool's (id → addr) registry so a multi-broker cluster learns
+    // the coordinator broker's real address and `client.broker(node_id)` dials
+    // it directly. A single-broker cluster advertises the coordinator on port 0
+    // (deliberately skipped by `refresh_brokers`), leaving the id unknown — but
+    // `BrokerHandle::send` then falls back to the bootstrap connection, which on
+    // a single-broker cluster IS the coordinator. So we no longer hard-fail when
+    // the coordinator isn't a separately dialable broker.
     client.refresh_metadata().await?;
-    if !client.knows_broker(node_id) {
-        return Err(ConsumerError::CoordinatorUnavailable);
-    }
     Ok(node_id)
 }
 
