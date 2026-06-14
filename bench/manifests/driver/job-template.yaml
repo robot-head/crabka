@@ -68,11 +68,16 @@ spec:
               mountPath: /results
           resources:
             requests:
-              cpu: "100m"
-              memory: 256Mi
-            limits:
-              cpu: "2"
+              cpu: "500m"
               memory: 1Gi
+            limits:
+              # Large-message scenarios (e.g. datarate-512k) pipeline up to 512
+              # in-flight records per producer; at 512 KiB × 4 producers that is
+              # ~1 GiB of in-flight buffers alone, so the old 1Gi limit OOM-killed
+              # the driver. 8Gi gives headroom for the in-flight window + payload
+              # template + consumer fetch buffers without crowding the brokers.
+              cpu: "4"
+              memory: 8Gi
       volumes:
         - name: results
           emptyDir: {}
