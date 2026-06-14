@@ -1,5 +1,19 @@
 name: publish-images
 
+# Publishes the Crabka container images and their supply-chain attestations.
+#
+# For every published image we generate, keylessly sign (Sigstore/Fulcio), and
+# publish two attestations:
+#   * SLSA build provenance (actions/attest-build-provenance)
+#   * SPDX SBOM produced by apko    (actions/attest-sbom)
+# Attestations are stored in GitHub's attestation API *and* pushed to GHCR as
+# OCI referrers. Verify with:
+#   gh attestation verify oci://ghcr.io/robot-head/crabka-broker:<tag> \
+#     --repo robot-head/crabka
+# The same command works for the Docker Hub mirror (robothead/<image>) because
+# verification resolves the digest from the registry and looks the attestation
+# up in GitHub's store by digest.
+
 on:
   push:
     tags:
@@ -17,17 +31,18 @@ on:
 
 permissions:
   contents: read
-  packages: write  # for GHCR
 
 concurrency:
   group: publish-images-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  publish:
+  # Compile the APK packages once; every image is assembled from the same set.
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
+    outputs:
+      version: ${{ steps.tags.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 
@@ -35,10 +50,9 @@ jobs:
         with:
           go-version: stable
 
-      - name: Install melange + apko
+      - name: Install melange
         run: |
           go install chainguard.dev/melange@latest
-          go install chainguard.dev/apko@latest
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Determine image tag
@@ -52,19 +66,6 @@ jobs:
             VERSION="edge"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to DockerHub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache melange/cargo build artifacts
         uses: actions/cache@v5
@@ -86,27 +87,129 @@ jobs:
             --cache-dir "$PWD/.melange-cache" \
             --out-dir packages/
 
-      - name: Publish images to DockerHub + GHCR
-        env:
-          VERSION: ${{ steps.tags.outputs.version }}
+      # The signed APK repo (packages/) plus the public keyring are all the
+      # publish job needs — the private signing key never leaves this job.
+      - name: Upload APK repository + keyring
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-repository
+          path: |
+            packages/
+            melange.rsa.pub
+          retention-days: 1
+          if-no-files-found: error
+
+  # One leg per image: assemble + publish with apko, then attest the digest.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push images + attestation referrers to GHCR
+      id-token: write # request the Sigstore OIDC token (keyless signing)
+      attestations: write # write to GitHub's attestation store
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - crabka-broker
+          - crabka-operator
+          - crabka-schema-registry
+          - bench-driver
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install apko
         run: |
-          for image in crabka-broker crabka-operator crabka-schema-registry bench-driver; do
-            DOCKERHUB_IMAGE="robothead/${image}"
-            GHCR_IMAGE="ghcr.io/robot-head/${image}"
-            TAGS=(
-              "${DOCKERHUB_IMAGE}:${VERSION}"
-              "${GHCR_IMAGE}:${VERSION}"
+          go install chainguard.dev/apko@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Download APK repository + keyring
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-repository
+          path: .
+
+      - name: Log in to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish image + capture digest
+        id: publish
+        run: |
+          set -euo pipefail
+          IMAGE='${{ matrix.image }}'
+          DOCKERHUB_IMAGE="robothead/${IMAGE}"
+          GHCR_IMAGE="ghcr.io/robot-head/${IMAGE}"
+
+          TAGS=(
+            "${DOCKERHUB_IMAGE}:${VERSION}"
+            "${GHCR_IMAGE}:${VERSION}"
+          )
+          # Also tag as latest on proper release tags (not edge builds).
+          if [[ "${VERSION}" != "edge" ]]; then
+            TAGS+=(
+              "${DOCKERHUB_IMAGE}:latest"
+              "${GHCR_IMAGE}:latest"
             )
-            # Also tag as latest on proper release tags (not edge builds).
-            if [[ "${VERSION}" != "edge" ]]; then
-              TAGS+=(
-                "${DOCKERHUB_IMAGE}:latest"
-                "${GHCR_IMAGE}:latest"
-              )
-            fi
-            apko publish "packaging/apko/${image}.yaml" \
-              "${TAGS[@]}" \
-              --arch x86_64 \
-              --repository-append "$PWD/packages" \
-              --keyring-append "$PWD/melange.rsa.pub"
-          done
+          fi
+
+          mkdir -p sbom
+          # apko prints the published image reference (with @sha256: digest) to
+          # stdout; build logs go to stderr. The digest is content-addressed and
+          # identical across every tag/registry it was pushed to.
+          REF="$(apko publish "packaging/apko/${IMAGE}.yaml" \
+            "${TAGS[@]}" \
+            --arch x86_64 \
+            --sbom-path sbom \
+            --repository-append "${PWD}/packages" \
+            --keyring-append "${PWD}/melange.rsa.pub")"
+          echo "apko published: ${REF}"
+
+          DIGEST="$(printf '%s\n' "${REF}" | grep -oE 'sha256:[0-9a-f]{64}' | head -n1)"
+          if [[ -z "${DIGEST}" ]]; then
+            echo "::error::could not parse image digest from apko output" >&2
+            exit 1
+          fi
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+          # Prefer the SBOM describing the published index; fall back to the
+          # single-arch SBOM if apko emitted a plain manifest.
+          SBOM="$(ls sbom/*index*.spdx.json 2>/dev/null | head -n1 || true)"
+          [[ -z "${SBOM}" ]] && SBOM="$(ls sbom/*.spdx.json 2>/dev/null | head -n1 || true)"
+          if [[ -z "${SBOM}" ]]; then
+            echo "::error::no SBOM produced by apko in ./sbom" >&2
+            exit 1
+          fi
+          echo "sbom=${SBOM}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/robot-head/${{ matrix.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v4
+        with:
+          subject-name: ghcr.io/robot-head/${{ matrix.image }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          sbom-path: ${{ steps.publish.outputs.sbom }}
+          push-to-registry: true
