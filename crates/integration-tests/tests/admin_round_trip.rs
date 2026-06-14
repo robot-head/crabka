@@ -90,9 +90,22 @@ async fn admin_round_trip_create_alter_delete() {
         .await
         .unwrap();
     assert!(outcomes[0].error.is_none());
-    // Brief wait for metadata refresh.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let md = admin.metadata(&["foo"]).await.unwrap();
+    // Bounded poll until metadata reflects the partition increase to 5.
+    let md = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let md = admin.metadata(&["foo"]).await.expect("metadata");
+            if md
+                .topics
+                .iter()
+                .any(|t| t.name == "foo" && t.partition_count == 5)
+            {
+                break md;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("partition count reached 5 within 10s");
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
     assert!(foo.partition_count == 5);
 
@@ -151,8 +164,23 @@ async fn admin_round_trip_create_alter_delete() {
     // 8. Delete the topic.
     let outcomes = admin.delete_topics(&["foo"], 5_000).await.unwrap();
     assert!(outcomes[0].error.is_none());
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let md = admin.metadata(&["foo"]).await.unwrap();
+    // Bounded poll until metadata no longer reports `foo` as a live topic
+    // (either absent entirely, or present but error-marked as unknown).
+    let md = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let md = admin.metadata(&["foo"]).await.expect("metadata");
+            let live = md
+                .topics
+                .iter()
+                .any(|t| t.name == "foo" && t.error.is_none());
+            if !live {
+                break md;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("topic foo removed from metadata within 10s");
     let foo = md.topics.iter().find(|t| t.name == "foo");
     if let Some(t) = foo {
         assert!(t.error.is_some(), "deleted topic should report unknown");
