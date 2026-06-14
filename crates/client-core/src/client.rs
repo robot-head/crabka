@@ -83,6 +83,13 @@ impl Client {
         }
     }
 
+    /// Drop the pooled connection to `broker_id` so the next request to it
+    /// reconnects (to its current advertised address). Call this after a send
+    /// fails so a bounced / failed-over broker isn't retried over a dead socket.
+    pub fn evict_broker(&self, broker_id: i32) {
+        self.pool.evict(broker_id);
+    }
+
     /// Send a default `MetadataRequest`, parse the broker list from the response,
     /// refresh the pool's address registry, and return the typed response.
     pub async fn refresh_metadata(

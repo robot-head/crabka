@@ -59,12 +59,20 @@ mod codes {
 /// bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
 
-/// Hard cap on routing re-routes per send cycle, independent of the (often
-/// `i32::MAX`) transport-retry budget `cfg.retries`. Routing converges in one
-/// or two re-routes after a metadata refresh learns the real leaders; this cap
-/// keeps a partition that *never* reaches its leader from recursing
-/// `Box::pin(send_to_leaders(..))` deep enough to overflow the worker stack.
-const MAX_ROUTING_REROUTES: i32 = 8;
+/// Quick reconnect attempts to a specific leader on a transport failure before
+/// giving up on it and re-routing. Rides out a transient connection blip (socket
+/// dropped, broker fine) without a full metadata round-trip; past this the leader
+/// has likely moved (failover) and we re-resolve instead of hammering a dead
+/// broker over a dead socket.
+const TRANSPORT_RETRIES: i32 = 3;
+
+/// Wall-clock budget for routing a batch to a reachable leader across one
+/// `send_to_leaders` cycle. Spans a typical failover leader re-election (the
+/// broker session timeout is single-digit seconds) with margin, then fails the
+/// still-unroutable batch so the caller's ack/`flush` resolves instead of
+/// hanging forever. The retry is iterative (no recursion), so this never grows
+/// the worker stack no matter how many rounds elapse.
+const ROUTING_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
@@ -192,7 +200,7 @@ async fn drain_once(cfg: &mut SenderConfig) {
     //    ProduceRequest per leader. `send_to_leaders` decrements `in_flight`
     //    once per batch as each completes and wakes any `flush` waiter when the
     //    last in-flight batch lands.
-    send_to_leaders(cfg, prepared, 0).await;
+    send_to_leaders(cfg, prepared).await;
 }
 
 /// Resolve a partition's leader id from the cache. Returns [`BOOTSTRAP_LEADER`]
@@ -254,28 +262,93 @@ async fn prepare_batch(
     }
 }
 
-/// Group the prepared per-partition batches by leader id and send one
-/// `ProduceRequest` per leader. Each partition's batch appears in exactly one
-/// leader's request, so per-partition sequencing is untouched by the grouping.
-///
-/// `reroute_depth` bounds the recursive re-route triggered by a
-/// `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION` response: once it
-/// reaches `cfg.retries`, a still-misrouted batch is failed rather than retried
-/// forever (the producer's existing bounded-retry budget).
-async fn send_to_leaders(cfg: &SenderConfig, prepared: Vec<PreparedBatch>, reroute_depth: i32) {
-    // Group by leader id. Resolution is a synchronous registry lookup (no
-    // await), so the cache is read here and the per-leader sends happen below
-    // with no lock held across the `.await`.
-    let mut by_leader: HashMap<i32, Vec<PreparedBatch>> = HashMap::new();
-    for pb in prepared {
-        let leader = resolve_leader(cfg, &pb.topic, pb.partition);
-        by_leader.entry(leader).or_default().push(pb);
-    }
+/// Outcome of one [`send_leader_group`] call.
+struct LeaderSendOutcome {
+    /// Batches that came back mis-routed (`NOT_LEADER`/`UNKNOWN`) or whose
+    /// leader's connection failed — still in-flight, to be re-resolved.
+    reroute: Vec<PreparedBatch>,
+    /// A metadata refresh is required before the re-route can route correctly
+    /// (no usable inline leader hint, or the hinted leader's address is unknown).
+    refresh_needed: bool,
+}
 
-    // Send sequentially so a single parked leader can't starve the others'
-    // deadlines beyond the per-request timeout, mirroring the consumer's poll.
-    for (leader, batches) in by_leader {
-        send_leader_group(cfg, leader, batches, reroute_depth).await;
+/// Drive the prepared batches to their partition leaders, re-routing any that
+/// come back mis-routed or whose leader's connection failed (broker bounce /
+/// failover) until every batch reaches a terminal outcome (ack/fail) or the
+/// routing budget elapses.
+///
+/// Iterative — it re-groups and re-resolves each round rather than recursing —
+/// so a partition whose leader takes several seconds to re-elect can be retried
+/// across the whole window without growing the worker stack.
+async fn send_to_leaders(cfg: &SenderConfig, mut prepared: Vec<PreparedBatch>) {
+    let deadline = std::time::Instant::now() + ROUTING_RETRY_BUDGET;
+    let mut round: i32 = 0;
+    loop {
+        // Group by leader id. Resolution is a synchronous registry lookup (no
+        // await), so the cache is read here and the per-leader sends happen
+        // below with no lock held across the `.await`. Sequential sends keep a
+        // single parked leader from starving the others past the per-request
+        // timeout, mirroring the consumer's poll.
+        let mut by_leader: HashMap<i32, Vec<PreparedBatch>> = HashMap::new();
+        for pb in prepared.drain(..) {
+            let leader = resolve_leader(cfg, &pb.topic, pb.partition);
+            by_leader.entry(leader).or_default().push(pb);
+        }
+
+        let mut to_reroute: Vec<PreparedBatch> = Vec::new();
+        let mut refresh_needed = false;
+        for (leader, batches) in by_leader {
+            let outcome = send_leader_group(cfg, leader, batches).await;
+            to_reroute.extend(outcome.reroute);
+            refresh_needed |= outcome.refresh_needed;
+        }
+
+        if to_reroute.is_empty() {
+            return;
+        }
+
+        round += 1;
+        if round > cfg.retries || std::time::Instant::now() >= deadline {
+            // Out of routing budget: fail the still-misrouted batches with the
+            // routing error so the caller sees a real Server error, and release
+            // each in-flight slot.
+            for pb in to_reroute {
+                fail_batch(
+                    pb.records,
+                    ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
+                );
+                finish_in_flight(cfg);
+            }
+            return;
+        }
+
+        // Learn the partition→leader map the cluster (re-)elected so the next
+        // round routes correctly, then back off to avoid a hot loop while a
+        // leader is mid-election. A pure hint adoption (refresh not needed)
+        // re-resolves immediately on the next round without a round-trip.
+        if refresh_needed {
+            update_leaders_from_metadata(cfg).await;
+        }
+        tokio::time::sleep(cfg.retry_backoff).await;
+        prepared = to_reroute;
+    }
+}
+
+/// Refresh cluster metadata and adopt the fresh partition→leader map. The
+/// refresh also re-populates the pool's broker-address registry, so a leader
+/// re-elected onto a broker the pool hadn't dialed becomes routable.
+async fn update_leaders_from_metadata(cfg: &SenderConfig) {
+    if let Ok(md) = cfg.client.refresh_metadata().await {
+        for t in &md.topics {
+            let Some(name) = &t.name else { continue };
+            if t.error_code != 0 {
+                continue;
+            }
+            for p in &t.partitions {
+                cfg.partition_leaders
+                    .insert((name.clone(), p.partition_index), p.leader_id);
+            }
+        }
     }
 }
 
@@ -287,21 +360,19 @@ fn finish_in_flight(cfg: &SenderConfig) {
     }
 }
 
-/// Send one `ProduceRequest` carrying every batch routed to `leader`, with
-/// bounded retries. On a partition-level routing error
-/// (`NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`) the affected
-/// partitions are re-resolved and retried — by recursing into
-/// [`send_to_leaders`] with just those batches after a metadata refresh, so a
-/// re-routed partition's batch (same allocated `base_sequence`) reaches its new
-/// leader. Each batch's `in_flight` slot is released exactly once, when its
-/// terminal outcome (ack or failure) is reached.
+/// Send one `ProduceRequest` carrying every batch routed to `leader`. Returns
+/// the batches that came back mis-routed (`NOT_LEADER_OR_FOLLOWER` /
+/// `UNKNOWN_TOPIC_OR_PARTITION`) or whose leader's connection failed, for the
+/// caller ([`send_to_leaders`]) to re-resolve and resend (same allocated
+/// `base_sequence`, so sequencing stays monotonic). Each batch's `in_flight`
+/// slot is released exactly once, when its terminal outcome (ack or failure) is
+/// reached; a re-routed batch stays held until then.
 #[allow(clippy::too_many_lines)] // single per-leader send+response state machine; splitting hurts readability
 async fn send_leader_group(
     cfg: &SenderConfig,
     leader: i32,
     batches: Vec<PreparedBatch>,
-    reroute_depth: i32,
-) {
+) -> LeaderSendOutcome {
     // Frame a multi-topic ProduceRequest from the grouped batches. Partition
     // data for the same topic is merged under one TopicProduceData entry.
     let req = build_produce_request(cfg, &batches);
@@ -317,32 +388,28 @@ async fn send_leader_group(
         match send {
             Ok(r) => break r,
             Err(e) => {
-                if attempts > cfg.retries {
-                    tracing::error!(
+                // The cached connection is likely dead (broker bounced / failed
+                // over). Evict it so a reconnect targets the broker's current
+                // address; never evict the shared bootstrap connection.
+                if leader != BOOTSTRAP_LEADER {
+                    cfg.client.evict_broker(leader);
+                }
+                if attempts >= TRANSPORT_RETRIES {
+                    // Stop hammering this leader — hand the batches back for a
+                    // metadata-driven re-route to whatever leader the cluster
+                    // (re-)elected. In-flight slots stay held (still pending);
+                    // `send_to_leaders` bounds the overall routing budget.
+                    tracing::warn!(
                         leader,
                         error = %e,
-                        "producer giving up after {attempts} attempts",
+                        "produce to leader failed {attempts}×; re-routing",
                     );
-                    // Fail every batch in this group; release each in-flight slot.
-                    // `ClientError` is not `Clone`, so the real transport error
-                    // goes to the first batch and the rest get `Closed` (same
-                    // policy `fail_batch` uses within a single multi-record batch).
-                    let mut iter = batches.into_iter();
-                    if let Some(first) = iter.next() {
-                        fail_batch(first.records, ProducerError::Client(e));
-                        finish_in_flight(cfg);
-                    }
-                    for pb in iter {
-                        fail_batch(pb.records, ProducerError::Closed);
-                        finish_in_flight(cfg);
-                    }
-                    return;
+                    return LeaderSendOutcome {
+                        reroute: batches,
+                        refresh_needed: true,
+                    };
                 }
-                // A transport failure to a specific leader may mean its address
-                // is stale; refresh metadata so a retry (and the next cycle) can
-                // re-resolve. Best-effort — the retry re-sends to the same id.
-                let _ = cfg.client.refresh_metadata().await;
-                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; retrying");
+                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; reconnecting");
                 tokio::time::sleep(cfg.retry_backoff).await;
             }
         }
@@ -431,45 +498,13 @@ async fn send_leader_group(
         }
     }
 
-    if to_reroute.is_empty() {
-        return;
+    // Hand any mis-routed batches back to `send_to_leaders`, which re-resolves
+    // (refreshing metadata when needed) and resends them — iteratively, within
+    // a bounded budget — until they reach their leader or time out.
+    LeaderSendOutcome {
+        reroute: to_reroute,
+        refresh_needed,
     }
-
-    // Bounded retry: if we've already re-routed `cfg.retries` times and the
-    // partition still isn't reaching its leader, give up rather than loop
-    // forever. Fail the still-misrouted batches with the routing error code so
-    // the caller sees a real Server error, and release their in-flight slots.
-    if reroute_depth >= cfg.retries.min(MAX_ROUTING_REROUTES) {
-        for pb in to_reroute {
-            fail_batch(
-                pb.records,
-                ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
-            );
-            finish_in_flight(cfg);
-        }
-        return;
-    }
-
-    // Refresh metadata so the next resolution learns the current leaders, then
-    // re-group and resend just the re-routable batches. The refresh also
-    // re-populates the pool's address registry. We update `partition_leaders`
-    // from the fresh Metadata so the immediate re-resolve routes correctly.
-    if refresh_needed && let Ok(md) = cfg.client.refresh_metadata().await {
-        for t in &md.topics {
-            let Some(name) = &t.name else { continue };
-            if t.error_code != 0 {
-                continue;
-            }
-            for p in &t.partitions {
-                cfg.partition_leaders
-                    .insert((name.clone(), p.partition_index), p.leader_id);
-            }
-        }
-    }
-    // Backoff between the failed attempt and the re-resolved send avoids a hot
-    // loop if the leader is mid-election.
-    tokio::time::sleep(cfg.retry_backoff).await;
-    Box::pin(send_to_leaders(cfg, to_reroute, reroute_depth + 1)).await;
 }
 
 /// Build a multi-topic `ProduceRequest` from a leader's grouped batches.

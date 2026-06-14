@@ -57,6 +57,15 @@ impl BrokerPool {
         Ok(conn)
     }
 
+    /// Drop the cached connection to `broker_id` (if any) so the next
+    /// [`get`](BrokerPool::get) reconnects. Used after a send fails: a bounced
+    /// or failed-over broker must not be retried over its dead, cached socket.
+    /// The `(id → addr)` mapping is left intact so the reconnect targets the
+    /// broker's current advertised address.
+    pub fn evict(&self, broker_id: i32) {
+        self.by_id.remove(&broker_id);
+    }
+
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
     pub async fn bootstrap_connection(&self) -> Result<Arc<Connection>, ClientError> {
