@@ -13,7 +13,7 @@
 //! as the most-recent entry for their key. `delete.retention.ms`
 //! ages them out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,314 @@ use crabka_protocol::records::RecordBatch;
 use crate::error::LogError;
 use crate::name;
 use crate::segment::Segment;
+use crate::txn_index::{AbortedTxn, TxnIndex};
+
+// ---------------------------------------------------------------------------
+// KIP-534 pure decision cores
+//
+// These are `pub(crate)` (reachable from a sibling test module via `super::`)
+// because a later task builds a stateright model + proptest on them. The
+// retain/horizon logic lives here in pure form so it can be exhaustively
+// model-checked without touching the filesystem.
+// ---------------------------------------------------------------------------
+
+/// Per-record facts the retain decision needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecordMeta {
+    pub has_key: bool,
+    pub has_value: bool,
+}
+
+/// Per-batch facts the retain decision needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BatchMeta {
+    pub is_control: bool,
+    pub producer_id: i64,
+    /// The batch's existing delete horizon (`base_timestamp` when bit 6 is
+    /// set), `None` if the batch has never been stamped.
+    pub existing_horizon: Option<i64>,
+}
+
+/// Whether a producer's transactional DATA still survives compaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TxnDataState {
+    /// `producer_id < 0`: not a transactional producer.
+    NotTransactional,
+    /// At least one of this producer's data records survives compaction.
+    DataSurvives,
+    /// All of this producer's data records have been compacted away.
+    DataFullyGone,
+}
+
+/// What to do with a record during the rewrite pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainDecision {
+    /// Keep the record as-is.
+    Keep,
+    /// Keep the record but stamp its batch with this delete horizon
+    /// (`base_timestamp = horizon`, bit 6 set).
+    SetHorizon(i64),
+    /// Drop the record.
+    Delete,
+}
+
+/// `build_offset_map` filter; the control-batch bug fix lives here. Control-batch
+/// records carry a control-type key (commit/abort marker) that must NEVER enter
+/// the dedup map. Null-key data is also never indexed.
+pub(crate) fn should_index_key(key: Option<&[u8]>, is_control_batch: bool) -> bool {
+    !is_control_batch && key.is_some()
+}
+
+/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
+/// tombstone/marker is retained until wall-clock reaches this value.
+pub(crate) fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
+    now_ms.saturating_add(delete_retention_ms)
+}
+
+/// Reinterpret per-record timestamp deltas (`i64`) when stamping a delete
+/// horizon into `base_timestamp`, preserving each record's absolute timestamp.
+///
+/// Exercised by `core_tests` and the upcoming stateright/proptest model; the
+/// production rewrite path delegates the same arithmetic to
+/// `RecordBatch::with_delete_horizon`, hence `dead_code` outside tests.
+#[allow(dead_code)]
+pub(crate) fn rewrite_batch_horizon(
+    base_timestamp: i64,
+    deltas: &[i64],
+    horizon: i64,
+) -> (i64, Vec<i64>) {
+    let new = deltas
+        .iter()
+        .map(|d| base_timestamp.saturating_add(*d).saturating_sub(horizon))
+        .collect();
+    (horizon, new)
+}
+
+/// Whether a transactional producer's data is fully compacted away: the
+/// `producer_id` is not in the `survivors` set of producers with a
+/// surviving data record.
+///
+/// The production rewrite path uses [`CleanedTransactionMetadata::txn_state`]
+/// (which folds this in); this standalone form exists for `core_tests` and
+/// the upcoming stateright/proptest model.
+#[allow(dead_code)]
+pub(crate) fn txn_data_fully_gone(producer_id: i64, survivors: &HashSet<i64>) -> bool {
+    !survivors.contains(&producer_id)
+}
+
+/// The single per-record KIP-534 retain decision.
+///
+/// Control batches (txn commit/abort markers) are retained as long as their
+/// transaction's data survives; once the data is fully compacted away the
+/// marker ages out via the delete horizon. Data records dedup newest-wins;
+/// tombstones (null value) age out via the delete horizon once they are the
+/// newest entry for their key.
+pub(crate) fn retain_decision(
+    rec: RecordMeta,
+    batch: BatchMeta,
+    is_newest_for_key: bool,
+    txn: TxnDataState,
+    now_ms: i64,
+    delete_retention_ms: i64,
+) -> RetainDecision {
+    if batch.is_control {
+        return match txn {
+            TxnDataState::DataSurvives | TxnDataState::NotTransactional => RetainDecision::Keep,
+            TxnDataState::DataFullyGone => match batch.existing_horizon {
+                Some(h) if now_ms >= h => RetainDecision::Delete,
+                Some(_) => RetainDecision::Keep,
+                None => RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)),
+            },
+        };
+    }
+    if !rec.has_key {
+        return RetainDecision::Delete;
+    }
+    if !is_newest_for_key {
+        return RetainDecision::Delete;
+    }
+    if rec.has_value {
+        return RetainDecision::Keep;
+    }
+    // Newest-for-key tombstone: age out via the delete horizon.
+    match batch.existing_horizon {
+        Some(h) if now_ms >= h => RetainDecision::Delete,
+        Some(_) => RetainDecision::Keep,
+        None => RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::similar_names)]
+mod core_tests {
+    use super::*;
+    use assert2::assert;
+
+    fn data(has_key: bool, has_value: bool) -> RecordMeta {
+        RecordMeta { has_key, has_value }
+    }
+
+    fn batch(is_control: bool, producer_id: i64, existing_horizon: Option<i64>) -> BatchMeta {
+        BatchMeta {
+            is_control,
+            producer_id,
+            existing_horizon,
+        }
+    }
+
+    #[test]
+    fn control_batch_key_is_never_indexed() {
+        // A control batch's key (commit/abort marker) must NOT enter the
+        // dedup map, regardless of whether the key is present.
+        assert!(should_index_key(Some(b"\x00\x00\x00\x01".as_ref()), true) == false);
+        // Null-key data is also never indexed.
+        assert!(should_index_key(None, false) == false);
+        // Ordinary keyed data IS indexed.
+        assert!(should_index_key(Some(b"k".as_ref()), false) == true);
+    }
+
+    #[test]
+    fn tombstone_sets_horizon_then_deletes_after_expiry() {
+        let rec = data(true, false); // keyed, null value (tombstone)
+        // Newest tombstone, no existing horizon: stamp now+ret = 100+50 = 150.
+        assert!(
+            retain_decision(
+                rec,
+                batch(false, -1, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::SetHorizon(150)
+        );
+        // Now=149 < horizon 150: keep.
+        assert!(
+            retain_decision(
+                rec,
+                batch(false, -1, Some(150)),
+                true,
+                TxnDataState::NotTransactional,
+                149,
+                50
+            ) == RetainDecision::Keep
+        );
+        // Now=150 >= horizon 150: delete.
+        assert!(
+            retain_decision(
+                rec,
+                batch(false, -1, Some(150)),
+                true,
+                TxnDataState::NotTransactional,
+                150,
+                50
+            ) == RetainDecision::Delete
+        );
+        // Superseded tombstone (not newest-for-key): delete outright.
+        assert!(
+            retain_decision(
+                rec,
+                batch(false, -1, None),
+                false,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Delete
+        );
+    }
+
+    #[test]
+    fn marker_retained_while_data_survives_then_ages() {
+        let marker = data(true, false); // control records carry a key, no value
+        // Data still survives: keep the marker.
+        assert!(
+            retain_decision(
+                marker,
+                batch(true, 1000, None),
+                false,
+                TxnDataState::DataSurvives,
+                100,
+                50
+            ) == RetainDecision::Keep
+        );
+        // Data fully gone, no horizon yet: stamp now+ret = 100+50 = 150.
+        assert!(
+            retain_decision(
+                marker,
+                batch(true, 1000, None),
+                false,
+                TxnDataState::DataFullyGone,
+                100,
+                50
+            ) == RetainDecision::SetHorizon(150)
+        );
+        // Data fully gone, horizon 150, now 150: delete.
+        assert!(
+            retain_decision(
+                marker,
+                batch(true, 1000, Some(150)),
+                false,
+                TxnDataState::DataFullyGone,
+                150,
+                50
+            ) == RetainDecision::Delete
+        );
+    }
+
+    #[test]
+    fn live_data_kept_nullkey_dropped() {
+        // Newest-for-key data with a value: keep.
+        assert!(
+            retain_decision(
+                data(true, true),
+                batch(false, -1, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Keep
+        );
+        // Null-key data: dropped regardless of newest-ness.
+        assert!(
+            retain_decision(
+                data(false, true),
+                batch(false, -1, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Delete
+        );
+        // Keyed data with a value but not newest-for-key: dropped.
+        assert!(
+            retain_decision(
+                data(true, true),
+                batch(false, -1, None),
+                false,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Delete
+        );
+    }
+
+    #[test]
+    fn rewrite_batch_horizon_preserves_absolute_timestamps() {
+        let (base, deltas) = rewrite_batch_horizon(1000, &[0, 5, 20], 9999);
+        assert!(base == 9999);
+        // Reconstructed absolute timestamps (base + delta) must equal the
+        // originals: 1000, 1005, 1020.
+        let reconstructed: Vec<i64> = deltas.iter().map(|d| base + d).collect();
+        assert!(reconstructed == vec![1000, 1005, 1020]);
+    }
+
+    #[test]
+    fn txn_data_fully_gone_checks_survivor_set() {
+        let mut survivors = HashSet::new();
+        survivors.insert(1000i64);
+        assert!(txn_data_fully_gone(2000, &survivors) == true);
+        assert!(txn_data_fully_gone(1000, &survivors) == false);
+    }
+}
 
 /// Read every `RecordBatch` from a sealed segment by streaming the
 /// whole `.log` file directly. We bypass `Segment::read` because that
@@ -58,16 +366,107 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
     let mut map: HashMap<Bytes, i64> = HashMap::new();
     for seg in segments {
         for batch in read_all_batches(seg)? {
+            // Control batches (txn commit/abort markers) carry a control-type
+            // key that must NEVER enter the dedup map. Skip them entirely —
+            // indexing their key silently dropped all-but-newest markers and
+            // broke read_committed (the control-batch data-loss bug).
+            if batch.attributes.is_control_batch() {
+                continue;
+            }
             for record in &batch.records {
-                let Some(key_bytes) = record.key.as_ref() else {
+                if !should_index_key(record.key.as_deref(), false) {
                     continue;
-                };
+                }
+                let key_bytes = record.key.as_ref().expect("should_index_key checked Some");
                 let absolute = batch.base_offset + i64::from(record.offset_delta);
                 map.insert(key_bytes.clone(), absolute);
             }
         }
     }
     Ok(map)
+}
+
+/// Per-producer transactional-data survival, computed in a first pass over
+/// the sealed segments. KIP-534 keeps a transaction's commit/abort marker as
+/// long as any of that transaction's data records survive compaction; once
+/// the data is fully gone the marker ages out via the delete horizon.
+///
+/// Seeded with aborted-txn entries from each sealed segment's `.txnindex` so
+/// the rewritten survivor `.txnindex` can be reconstructed for transactions
+/// whose data still partially survives.
+pub struct CleanedTransactionMetadata {
+    /// Producers (`producer_id`) with at least one surviving data record.
+    survivors: HashSet<i64>,
+    /// Aborted-txn entries gathered from the consumed segments' `.txnindex`
+    /// files, in input order.
+    aborted: Vec<AbortedTxn>,
+}
+
+impl CleanedTransactionMetadata {
+    /// Build the metadata: for each producer, whether any of its
+    /// transactional DATA records will survive (a data record that is
+    /// newest-for-key per `offset_map`). Aborted-txn entries are seeded from
+    /// every sealed segment's `.txnindex`.
+    pub fn build(
+        segments: &[&Segment],
+        offset_map: &HashMap<Bytes, i64>,
+    ) -> Result<Self, LogError> {
+        let mut survivors: HashSet<i64> = HashSet::new();
+        let mut aborted: Vec<AbortedTxn> = Vec::new();
+        for seg in segments {
+            // Seed aborted-txn entries from this segment's transaction index.
+            let idx = TxnIndex::open(seg.txn_index_path())?;
+            aborted.extend(idx.entries().iter().copied());
+
+            for batch in read_all_batches(seg)? {
+                // Only data batches contribute survivors. Control batches
+                // carry no data records.
+                if batch.attributes.is_control_batch() {
+                    continue;
+                }
+                // Only transactional producers (producer_id >= 0) matter for
+                // marker retention.
+                if batch.producer_id < 0 {
+                    continue;
+                }
+                for record in &batch.records {
+                    // A surviving data record is one that is newest-for-key.
+                    let Some(key_bytes) = record.key.as_ref() else {
+                        continue;
+                    };
+                    let absolute = batch.base_offset + i64::from(record.offset_delta);
+                    if offset_map.get(key_bytes.as_ref()).copied() == Some(absolute) {
+                        survivors.insert(batch.producer_id);
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(Self { survivors, aborted })
+    }
+
+    /// The transactional-data state for a given producer.
+    #[must_use]
+    pub fn txn_state(&self, producer_id: i64) -> TxnDataState {
+        if producer_id < 0 {
+            return TxnDataState::NotTransactional;
+        }
+        if self.survivors.contains(&producer_id) {
+            TxnDataState::DataSurvives
+        } else {
+            TxnDataState::DataFullyGone
+        }
+    }
+
+    /// Aborted-txn entries to carry forward into the rewritten survivor
+    /// `.txnindex`: those whose aborted data still partially survives (the
+    /// producer is in the survivor set). Entries for producers whose data is
+    /// fully gone are dropped along with the (now-removable) marker.
+    fn retained_aborted(&self) -> impl Iterator<Item = &AbortedTxn> {
+        self.aborted
+            .iter()
+            .filter(move |e| self.survivors.contains(&e.producer_id))
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +515,69 @@ mod build_map_tests {
         seg.append(&batch, 4096).unwrap();
         seg.seal();
         seg
+    }
+
+    /// Write a sealed segment containing the given batches verbatim
+    /// (`base_offset`/attributes/`producer_id` preserved). Lets tests build
+    /// control batches and mixed data/control layouts.
+    pub(super) fn write_sealed_batches(dir: &Path, batches: &[RecordBatch]) -> Segment {
+        let base = batches.first().map_or(0, |b| b.base_offset);
+        let mut seg = Segment::create(dir, base).unwrap();
+        for batch in batches {
+            seg.append(batch, 4096).unwrap();
+        }
+        seg.seal();
+        seg
+    }
+
+    /// A control batch carrying a single commit/abort marker record. The
+    /// marker key is `(version: i16, marker_type: i16)` big-endian.
+    pub(super) fn control_batch(
+        base_offset: i64,
+        producer_id: i64,
+        marker_type: i16,
+    ) -> RecordBatch {
+        let mut key = [0u8; 4];
+        key[2..4].copy_from_slice(&marker_type.to_be_bytes());
+        RecordBatch {
+            base_offset,
+            last_offset_delta: 0,
+            producer_id,
+            attributes: Attributes::default()
+                .with_transactional(true)
+                .with_control(true),
+            records: vec![Record {
+                offset_delta: 0,
+                key: Some(Bytes::copy_from_slice(&key)),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        }
+    }
+
+    #[test]
+    fn control_batch_key_is_not_indexed() {
+        let dir = tempdir().unwrap();
+        // A control batch (commit marker) at offset 0, then keyed data at
+        // offset 1. Only the data key should appear in the map; the control
+        // marker's key must be absent.
+        let mut data = RecordBatch {
+            base_offset: 1,
+            last_offset_delta: 0,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            attributes: Attributes::default(),
+            ..RecordBatch::default()
+        };
+        data.records[0].offset_delta = 0;
+        let seg = write_sealed_batches(dir.path(), &[control_batch(0, 1000, 1 /* COMMIT */), data]);
+        let segs: Vec<&Segment> = vec![&seg];
+        let map = build_offset_map(&segs).unwrap();
+        // The data key is present.
+        assert!(map.get(b"k1".as_ref()) == Some(&1));
+        // The control-marker key (\x00\x00\x00\x01) is NOT present.
+        let marker_key: &[u8] = &[0, 0, 0, 1];
+        assert!(map.get(marker_key) == None);
+        assert!(map.len() == 1);
     }
 
     #[test]
@@ -184,24 +646,42 @@ pub struct RewriteOutput {
     /// Highest absolute offset of any surviving record.
     #[allow(dead_code)]
     pub new_last_offset: i64,
+    /// Path to the rewritten survivor `.txnindex`, written only when any
+    /// aborted-txn entries were carried forward. `None` when no aborted
+    /// transactions survive.
+    pub txnindex_swap: Option<PathBuf>,
 }
 
-/// Stream `segments` (oldest → newest) into new `.swap` files, dropping
-/// records whose key is missing or whose offset is not the newest known
-/// offset for that key (per `offset_map`).
+/// Stream `segments` (oldest → newest) into new `.swap` files, applying the
+/// KIP-534 per-record [`retain_decision`].
 ///
-/// Records keep their **absolute** offsets — the output `RecordBatch`es
-/// may contain gaps in their `offset_delta` values where superseded
-/// records used to live. This matches Kafka's on-disk format for
-/// compacted topics.
+/// For each record the decision is:
+///   - `Keep` → write it through.
+///   - `SetHorizon(h)` → write it through, and stamp the output batch with
+///     delete horizon `h` (bit 6 set, `base_timestamp = h`).
+///   - `Delete` → drop it.
 ///
-/// The `.swap` files are written to the segments' shared directory.
-/// Caller is responsible for fsyncing + promoting via
-/// [`atomic_swap`].
+/// Records keep their **absolute** offsets — the output `RecordBatch`es may
+/// contain gaps in their `offset_delta` values where superseded records used
+/// to live. This matches Kafka's on-disk format for compacted topics.
+///
+/// `RETAIN_EMPTY`: a batch that ends up with no kept records is normally
+/// skipped, but it is re-emitted as a bare header (no records) when it is the
+/// last batch of an active producer (`active_producers`) or the last batch of
+/// the consolidated output — preserving producer sequence/epoch and the
+/// log-end offset (Kafka's `retainEmpty`).
+///
+/// The `.swap` files are written to the segments' shared directory. Caller is
+/// responsible for fsyncing + promoting via [`atomic_swap`].
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn rewrite_segments(
     dir: &Path,
     segments: &[&Segment],
     offset_map: &HashMap<Bytes, i64>,
+    txn_meta: &CleanedTransactionMetadata,
+    now_ms: i64,
+    delete_retention_ms: i64,
+    active_producers: &HashMap<i64, i64>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
     let first = segments
@@ -234,54 +714,151 @@ pub fn rewrite_segments(
         .truncate(true)
         .open(&timeindex_swap)?;
 
+    // Flatten all batches across all segments so we can identify the last
+    // batch (for RETAIN_EMPTY) and the last batch per active producer.
+    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    for seg in segments {
+        all_batches.extend(read_all_batches(seg)?);
+    }
+    let last_batch_index = all_batches.len().saturating_sub(1);
+    // The index of each active producer's last batch in `all_batches`.
+    let mut producer_last_batch: HashMap<i64, usize> = HashMap::new();
+    for (i, batch) in all_batches.iter().enumerate() {
+        if active_producers.contains_key(&batch.producer_id) {
+            producer_last_batch.insert(batch.producer_id, i);
+        }
+    }
+
     let mut last_kept_offset = new_base - 1;
 
-    for seg in segments {
-        for batch in read_all_batches(seg)? {
-            let mut kept: Vec<crabka_protocol::records::Record> =
-                Vec::with_capacity(batch.records.len());
-            for record in &batch.records {
-                let Some(key_bytes) = record.key.as_ref() else {
-                    continue;
-                };
-                let absolute = batch.base_offset + i64::from(record.offset_delta);
-                if offset_map.get(key_bytes.as_ref()).copied() == Some(absolute) {
+    for (batch_idx, batch) in all_batches.iter().enumerate() {
+        let is_control = batch.attributes.is_control_batch();
+        let txn = txn_meta.txn_state(batch.producer_id);
+        let batch_meta = BatchMeta {
+            is_control,
+            producer_id: batch.producer_id,
+            existing_horizon: batch.delete_horizon_ms(),
+        };
+
+        let mut kept: Vec<crabka_protocol::records::Record> =
+            Vec::with_capacity(batch.records.len());
+        // Stamp the output batch with a delete horizon if any record's
+        // decision asks for it (stamp once per batch).
+        let mut stamp_horizon: Option<i64> = None;
+        for record in &batch.records {
+            let absolute = batch.base_offset + i64::from(record.offset_delta);
+            let is_newest_for_key = record
+                .key
+                .as_ref()
+                .is_some_and(|k| offset_map.get(k.as_ref()).copied() == Some(absolute));
+            let rec_meta = RecordMeta {
+                has_key: record.key.is_some(),
+                has_value: record.value.is_some(),
+            };
+            match retain_decision(
+                rec_meta,
+                batch_meta,
+                is_newest_for_key,
+                txn,
+                now_ms,
+                delete_retention_ms,
+            ) {
+                RetainDecision::Keep => kept.push(record.clone()),
+                RetainDecision::SetHorizon(h) => {
                     kept.push(record.clone());
+                    stamp_horizon = Some(h);
                 }
+                RetainDecision::Delete => {}
             }
-            if kept.is_empty() {
+        }
+
+        if kept.is_empty() {
+            // RETAIN_EMPTY: re-emit a bare header for an emptied batch when
+            // it is the last batch of an active producer or the last batch
+            // of the consolidated output, so producer sequence/epoch and the
+            // log-end offset survive.
+            let is_producer_last =
+                producer_last_batch.get(&batch.producer_id).copied() == Some(batch_idx);
+            let is_output_last = batch_idx == last_batch_index;
+            if !(is_producer_last || is_output_last) {
                 continue;
             }
-
-            // Compute new last_offset_delta covering the kept range
-            // (relative to the batch's original base_offset). Kafka
-            // preserves base_offset and only updates last_offset_delta
-            // when records are removed mid-batch.
-            let last_delta = kept
-                .iter()
-                .map(|r| r.offset_delta)
-                .max()
-                .expect("kept non-empty");
             let out_batch = RecordBatch {
                 base_offset: batch.base_offset,
-                last_offset_delta: last_delta,
+                last_offset_delta: batch.last_offset_delta,
                 max_timestamp: batch.max_timestamp,
+                base_timestamp: batch.base_timestamp,
                 attributes: batch.attributes,
-                records: kept,
-                ..batch.clone()
+                producer_id: batch.producer_id,
+                producer_epoch: batch.producer_epoch,
+                base_sequence: batch.base_sequence,
+                partition_leader_epoch: batch.partition_leader_epoch,
+                records: vec![],
             };
-
             let mut buf = BytesMut::with_capacity(out_batch.encoded_len());
             out_batch.encode(&mut buf)?;
             log_file.write_all(&buf)?;
-
             let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
             if batch_last > last_kept_offset {
                 last_kept_offset = batch_last;
             }
+            continue;
+        }
+
+        // Compute new last_offset_delta covering the kept range (relative to
+        // the batch's original base_offset). Kafka preserves base_offset and
+        // only updates last_offset_delta when records are removed mid-batch.
+        let last_delta = kept
+            .iter()
+            .map(|r| r.offset_delta)
+            .max()
+            .expect("kept non-empty");
+        let mut out_batch = RecordBatch {
+            base_offset: batch.base_offset,
+            last_offset_delta: last_delta,
+            max_timestamp: batch.max_timestamp,
+            attributes: batch.attributes,
+            records: kept,
+            ..batch.clone()
+        };
+        // Stamp the delete horizon once, after the kept batch is built. This
+        // rewrites each kept record's timestamp_delta so absolute timestamps
+        // are preserved (see `RecordBatch::with_delete_horizon`).
+        if let Some(h) = stamp_horizon {
+            out_batch = out_batch.with_delete_horizon(h);
+        }
+
+        let mut buf = BytesMut::with_capacity(out_batch.encoded_len());
+        out_batch.encode(&mut buf)?;
+        log_file.write_all(&buf)?;
+
+        let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
+        if batch_last > last_kept_offset {
+            last_kept_offset = batch_last;
         }
     }
     log_file.sync_all()?;
+
+    // Rebuild the survivor `.txnindex`: carry forward aborted-txn entries
+    // whose aborted data still partially survives. Producers whose data is
+    // fully compacted away have their entries (and markers) dropped.
+    let retained: Vec<AbortedTxn> = txn_meta.retained_aborted().copied().collect();
+    let txnindex_swap = if retained.is_empty() {
+        None
+    } else {
+        let path = swap_path(dir, new_base, "txnindex");
+        // Truncate any stale swap, then append the retained entries.
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        let mut idx = TxnIndex::open(path.clone())?;
+        for entry in retained {
+            idx.append(entry)?;
+        }
+        Some(path)
+    };
 
     Ok(RewriteOutput {
         log_swap,
@@ -289,6 +866,7 @@ pub fn rewrite_segments(
         timeindex_swap,
         new_base_offset: new_base,
         new_last_offset: last_kept_offset,
+        txnindex_swap,
     })
 }
 
@@ -303,10 +881,47 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod rewrite_tests {
-    use super::build_map_tests::{make_record, write_sealed_segment};
+    use super::build_map_tests::{
+        control_batch, make_record, write_sealed_batches, write_sealed_segment,
+    };
     use super::*;
     use assert2::assert;
+    use crabka_protocol::records::Record;
     use std::fs;
+
+    /// A far-future `now` so nothing in the simple tests ages out, plus an
+    /// empty active-producer set and no surviving transactions.
+    const NEVER_AGE_NOW_MS: i64 = 0;
+    const RET_MS: i64 = 1_000;
+
+    fn rewrite_simple(dir: &Path, segs: &[&Segment]) -> RewriteOutput {
+        let map = build_offset_map(segs).unwrap();
+        let txn = CleanedTransactionMetadata::build(segs, &map).unwrap();
+        let active: HashMap<i64, i64> = HashMap::new();
+        rewrite_segments(
+            dir,
+            segs,
+            &map,
+            &txn,
+            NEVER_AGE_NOW_MS,
+            RET_MS,
+            &active,
+            4096,
+        )
+        .unwrap()
+    }
+
+    fn decode_all(bytes: &[u8]) -> Vec<RecordBatch> {
+        let mut cursor = bytes;
+        let mut out = Vec::new();
+        while !cursor.is_empty() {
+            let Ok(b) = RecordBatch::decode(&mut cursor) else {
+                break;
+            };
+            out.push(b);
+        }
+        out
+    }
 
     #[test]
     fn rewrite_drops_superseded_records() {
@@ -321,8 +936,7 @@ mod rewrite_tests {
             ],
         );
         let segs = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
-        let out = rewrite_segments(dir.path(), &segs, &map, 4096).unwrap();
+        let out = rewrite_simple(dir.path(), &segs);
         assert!(out.new_base_offset == 0);
 
         // Decode the swap .log to verify contents.
@@ -350,8 +964,7 @@ mod rewrite_tests {
             ],
         );
         let segs = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
-        let out = rewrite_segments(dir.path(), &segs, &map, 4096).unwrap();
+        let out = rewrite_simple(dir.path(), &segs);
         let bytes = fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
@@ -373,8 +986,7 @@ mod rewrite_tests {
             ],
         );
         let segs = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
-        let out = rewrite_segments(dir.path(), &segs, &map, 4096).unwrap();
+        let out = rewrite_simple(dir.path(), &segs);
         assert!(out.new_base_offset == 100);
         assert!(out.new_last_offset == 102);
 
@@ -391,6 +1003,182 @@ mod rewrite_tests {
             .map(|r| batch.base_offset + i64::from(r.offset_delta))
             .collect();
         assert!(abs_offsets == vec![101, 102]);
+    }
+
+    /// (a) End-to-end control-batch bug fix: two commit markers at different
+    /// offsets BOTH survive when their transactions' data survives.
+    #[test]
+    fn rewrite_both_commit_markers_survive_when_data_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        // pid 1000: data batch at offset 0 (key k1), commit marker at offset 1.
+        // pid 2000: data batch at offset 2 (key k2), commit marker at offset 3.
+        let data1 = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: 1000,
+            attributes: crabka_protocol::records::Attributes::default().with_transactional(true),
+            records: vec![Record {
+                offset_delta: 0,
+                key: Some(Bytes::copy_from_slice(b"k1")),
+                value: Some(Bytes::copy_from_slice(b"v1")),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        };
+        let marker1 = control_batch(1, 1000, 1 /* COMMIT */);
+        let data2 = RecordBatch {
+            base_offset: 2,
+            last_offset_delta: 0,
+            producer_id: 2000,
+            attributes: crabka_protocol::records::Attributes::default().with_transactional(true),
+            records: vec![Record {
+                offset_delta: 0,
+                key: Some(Bytes::copy_from_slice(b"k2")),
+                value: Some(Bytes::copy_from_slice(b"v2")),
+                ..Default::default()
+            }],
+            ..RecordBatch::default()
+        };
+        let marker2 = control_batch(3, 2000, 1 /* COMMIT */);
+        let seg = write_sealed_batches(dir.path(), &[data1, marker1, data2, marker2]);
+        let segs = vec![&seg];
+        let out = rewrite_simple(dir.path(), &segs);
+
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let batches = decode_all(&bytes);
+        let control_count = batches
+            .iter()
+            .filter(|b| b.attributes.is_control_batch())
+            .count();
+        assert!(
+            control_count == 2,
+            "both commit markers must survive (control-batch bug fix); got {control_count}"
+        );
+    }
+
+    /// (b) A newest-for-key tombstone with no existing horizon gets bit 6 set
+    /// and `base_timestamp == now + delete_retention_ms`.
+    #[test]
+    fn rewrite_tombstone_gets_horizon_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let seg0 = write_sealed_segment(
+            dir.path(),
+            0,
+            vec![make_record(0, Some(b"k1"), None)], // tombstone, newest for k1
+        );
+        let segs = vec![&seg0];
+        let map = build_offset_map(&segs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let now = 5_000i64;
+        let ret = 50i64;
+        let out = rewrite_segments(
+            dir.path(),
+            &segs,
+            &map,
+            &txn,
+            now,
+            ret,
+            &HashMap::new(),
+            4096,
+        )
+        .unwrap();
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let mut cursor = &bytes[..];
+        let batch = RecordBatch::decode(&mut cursor).unwrap();
+        assert!(batch.attributes.has_delete_horizon());
+        assert!(batch.delete_horizon_ms() == Some(now + ret));
+        assert!(batch.base_timestamp == now + ret);
+    }
+
+    /// (c) A commit marker whose transaction's data is fully gone and whose
+    /// existing horizon has elapsed is dropped.
+    #[test]
+    fn rewrite_marker_dropped_when_data_gone_and_horizon_elapsed() {
+        let dir = tempfile::tempdir().unwrap();
+        // A standalone commit marker for pid 1000 with NO surviving data, and
+        // an already-stamped delete horizon at base_timestamp = 100.
+        let mut marker = control_batch(0, 1000, 1 /* COMMIT */);
+        marker.base_timestamp = 100;
+        marker.attributes = marker.attributes.with_delete_horizon(true);
+        // A second data batch (pid -1) so the marker is not the last batch
+        // (otherwise RETAIN_EMPTY would keep a bare header).
+        let data = RecordBatch {
+            base_offset: 1,
+            last_offset_delta: 0,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[marker, data]);
+        let segs = vec![&seg];
+        let map = build_offset_map(&segs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        // now=200 >= horizon 100 → marker deleted.
+        let out = rewrite_segments(
+            dir.path(),
+            &segs,
+            &map,
+            &txn,
+            200,
+            50,
+            &HashMap::new(),
+            4096,
+        )
+        .unwrap();
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let batches = decode_all(&bytes);
+        let control_count = batches
+            .iter()
+            .filter(|b| b.attributes.is_control_batch())
+            .count();
+        assert!(control_count == 0, "expired marker with no data must drop");
+        // The data record survives.
+        assert!(batches.iter().any(|b| !b.records.is_empty()));
+    }
+
+    /// (d) `RETAIN_EMPTY`: an active producer's fully-emptied batch is
+    /// re-emitted as a bare header (no records), preserving
+    /// `producer_id`/`epoch`/`sequence`.
+    #[test]
+    fn rewrite_retain_empty_for_active_producer() {
+        let dir = tempfile::tempdir().unwrap();
+        // pid 1000 data batch under k1 at offset 0, then a NEWER data batch
+        // (pid -1) under k1 at offset 1 that supersedes it — so pid 1000's
+        // only record is dropped, emptying its batch. pid 1000 is active.
+        let data1 = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: 1000,
+            producer_epoch: 7,
+            base_sequence: 3,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        let data2 = RecordBatch {
+            base_offset: 1,
+            last_offset_delta: 0,
+            producer_id: -1,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v2"))], // newest for k1
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[data1, data2]);
+        let segs = vec![&seg];
+        let map = build_offset_map(&segs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let mut active = HashMap::new();
+        active.insert(1000i64, 0i64); // pid 1000 active, last batch base 0
+        let out =
+            rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let batches = decode_all(&bytes);
+        // The emptied pid-1000 batch is re-emitted as a bare header.
+        let bare = batches
+            .iter()
+            .find(|b| b.producer_id == 1000)
+            .expect("pid 1000 bare header retained");
+        assert!(bare.records.is_empty());
+        assert!(bare.producer_epoch == 7);
+        assert!(bare.base_sequence == 3);
+        assert!(bare.base_offset == 0);
     }
 }
 
@@ -426,12 +1214,18 @@ pub fn atomic_swap(
         .write(true)
         .open(&rewrite.timeindex_swap)?
         .sync_all()?;
+    if let Some(txn_swap) = &rewrite.txnindex_swap {
+        OpenOptions::new().write(true).open(txn_swap)?.sync_all()?;
+    }
 
-    // Step 2: delete originals.
+    // Step 2: delete originals (including consumed `.txnindex` files — the
+    // rewritten survivor `.txnindex` carries forward only surviving aborted
+    // transactions).
     for base in consumed_base_offsets {
         let _ = std::fs::remove_file(name::log_path(dir, *base));
         let _ = std::fs::remove_file(name::index_path(dir, *base));
         let _ = std::fs::remove_file(name::timeindex_path(dir, *base));
+        let _ = std::fs::remove_file(name::txnindex_path(dir, *base));
     }
 
     // Step 3: rename swap → final.
@@ -447,6 +1241,9 @@ pub fn atomic_swap(
         &rewrite.timeindex_swap,
         name::timeindex_path(dir, rewrite.new_base_offset),
     )?;
+    if let Some(txn_swap) = &rewrite.txnindex_swap {
+        std::fs::rename(txn_swap, name::txnindex_path(dir, rewrite.new_base_offset))?;
+    }
 
     // Step 4: fsync the directory. On Windows this is a no-op
     // (`std::fs::File::open` on a dir fails with EACCES); guard the call.
@@ -485,7 +1282,18 @@ mod swap_tests {
             );
             let segs = vec![&seg0, &seg1];
             let map = build_offset_map(&segs).unwrap();
-            rewrite_segments(dir.path(), &segs, &map, 4096).unwrap()
+            let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+            rewrite_segments(
+                dir.path(),
+                &segs,
+                &map,
+                &txn,
+                0,
+                1_000,
+                &HashMap::new(),
+                4096,
+            )
+            .unwrap()
             // seg0, seg1 dropped here — file handles closed
         };
         atomic_swap(dir.path(), &[0, 10], &rewrite).unwrap();

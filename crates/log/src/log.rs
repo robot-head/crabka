@@ -1006,18 +1006,27 @@ impl Log {
     /// The active segment is never touched. Output is a single new
     /// sealed segment at the lowest input base offset, replacing all
     /// consumed sealed segments.
-    pub fn compact(&mut self) -> Result<(), LogError> {
+    ///
+    /// `ctx` carries the wall clock (for KIP-534 delete-horizon
+    /// computation) and the set of currently-active producers (so their
+    /// last batch is preserved via `RETAIN_EMPTY` even when fully
+    /// compacted away).
+    pub fn compact(&mut self, ctx: &CompactionContext) -> Result<(), LogError> {
         if self.segments.is_empty() {
             return Ok(());
         }
 
-        let cfg_guard = self.config.read().unwrap();
-        if cfg_guard.cleanup_policy != crate::CleanupPolicy::Compact {
-            return Ok(());
-        }
-        let index_interval = cfg_guard.index_interval_bytes;
-        drop(cfg_guard);
+        let (index_interval, delete_retention_ms) = {
+            let cfg_guard = self.config.read().unwrap();
+            if cfg_guard.cleanup_policy != crate::CleanupPolicy::Compact {
+                return Ok(());
+            }
+            let retention_ms =
+                i64::try_from(cfg_guard.delete_retention_ms.as_millis()).unwrap_or(i64::MAX);
+            (cfg_guard.index_interval_bytes, retention_ms)
+        };
 
+        let now_ms = retention::now_ms(ctx.now);
         let consumed_bases: Vec<i64> = self.segments.iter().map(Segment::base_offset).collect();
 
         // Borrow sealed segments to run map + rewrite (which open
@@ -1028,7 +1037,18 @@ impl Log {
         let rewrite = {
             let sealed_refs: Vec<&Segment> = self.segments.iter().collect();
             let offset_map = crate::compact::build_offset_map(&sealed_refs)?;
-            crate::compact::rewrite_segments(&self.dir, &sealed_refs, &offset_map, index_interval)?
+            let txn_meta =
+                crate::compact::CleanedTransactionMetadata::build(&sealed_refs, &offset_map)?;
+            crate::compact::rewrite_segments(
+                &self.dir,
+                &sealed_refs,
+                &offset_map,
+                &txn_meta,
+                now_ms,
+                delete_retention_ms,
+                &ctx.active_producers,
+                index_interval,
+            )?
         };
 
         self.segments.clear();
@@ -1041,6 +1061,23 @@ impl Log {
         self.segments.push(new_seg);
         Ok(())
     }
+}
+
+/// Inputs to one [`Log::compact`] pass that depend on broker-side state:
+/// the wall clock used to compute KIP-534 delete horizons, and the set of
+/// producers currently considered active.
+///
+/// `active_producers` maps `producer_id` → the `base_offset` of that
+/// producer's last batch. When a producer's last batch is fully compacted
+/// away, the cleaner re-emits a bare batch header (`RETAIN_EMPTY`) so the
+/// producer's sequence/epoch state and the log-end offset survive.
+#[derive(Debug, Clone)]
+pub struct CompactionContext {
+    /// Wall clock for this pass. Drives delete-horizon stamping/expiry.
+    pub now: std::time::SystemTime,
+    /// `producer_id` → last batch `base_offset` for currently-active
+    /// producers.
+    pub active_producers: std::collections::HashMap<i64, i64>,
 }
 
 /// Leader epochs whose coverage `[start_e, start_{e+1})` overlaps the
@@ -1706,6 +1743,16 @@ mod tests {
         }
     }
 
+    /// A `CompactionContext` with a fixed epoch (deterministic) and no
+    /// active producers. Used by the in-crate compaction tests where
+    /// tombstone/marker aging is not under test.
+    fn compaction_ctx() -> CompactionContext {
+        CompactionContext {
+            now: SystemTime::UNIX_EPOCH,
+            active_producers: HashMap::new(),
+        }
+    }
+
     #[test]
     fn compact_no_op_when_only_one_segment() {
         let dir = tempdir().unwrap();
@@ -1717,7 +1764,7 @@ mod tests {
         let mut b = keyed_batch(0, &[(0, b"k1", b"v1")]);
         log.append(&mut b).unwrap();
         // Only the active segment exists; sealed list is empty.
-        log.compact().unwrap();
+        log.compact(&compaction_ctx()).unwrap();
         assert!(log.log_end_offset() == 1);
     }
 
@@ -1745,7 +1792,7 @@ mod tests {
         log.append(&mut b).unwrap();
 
         let active_leo_before = log.log_end_offset();
-        log.compact().unwrap();
+        log.compact(&compaction_ctx()).unwrap();
         assert!(
             log.log_end_offset() == active_leo_before,
             "compaction must not change LEO"
@@ -1910,9 +1957,9 @@ mod tests {
         }
         let mut b = keyed_batch(0, &[(0, b"active", b"x")]);
         log.append(&mut b).unwrap();
-        log.compact().unwrap();
+        log.compact(&compaction_ctx()).unwrap();
         let leo1 = log.log_end_offset();
-        log.compact().unwrap();
+        log.compact(&compaction_ctx()).unwrap();
         let leo2 = log.log_end_offset();
         assert!(leo1 == leo2);
     }
