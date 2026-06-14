@@ -79,3 +79,58 @@ proptest_codec!(gzip, CompressionType::Gzip);
 proptest_codec!(snappy, CompressionType::Snappy);
 proptest_codec!(lz4, CompressionType::Lz4);
 proptest_codec!(zstd, CompressionType::Zstd);
+
+proptest! {
+    /// KIP-534: stamping a delete horizon sets bit 6, repurposes
+    /// `base_timestamp`, and re-bases every record's `timestamp_delta` so the
+    /// reconstructed absolute timestamps survive an encode/decode round trip.
+    ///
+    /// Bounds are kept modest so absolute timestamps stay well within `i64`
+    /// after re-basing (no saturation in the helper).
+    #[test]
+    fn delete_horizon_batches_round_trip(
+        base in 0i64..1_000_000,
+        horizon in 0i64..1_000_000,
+        deltas in proptest::collection::vec(0i64..10_000, 0..=8),
+    ) {
+        let records: Vec<Record> = deltas
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| Record {
+                timestamp_delta: d,
+                offset_delta: i32::try_from(i).unwrap(),
+                key: Some(Bytes::from(format!("k{i}"))),
+                value: Some(Bytes::from(format!("v{i}"))),
+                ..Default::default()
+            })
+            .collect();
+
+        // Original absolute timestamps, captured before stamping.
+        let originals: Vec<i64> = records.iter().map(|r| base + r.timestamp_delta).collect();
+
+        let last_offset_delta = i32::try_from(deltas.len().saturating_sub(1)).unwrap_or(0);
+        let b = RecordBatch {
+            base_timestamp: base,
+            last_offset_delta,
+            records,
+            ..RecordBatch::default()
+        }
+        .with_delete_horizon(horizon);
+
+        let mut buf = BytesMut::new();
+        b.encode(&mut buf).unwrap();
+
+        let mut cur: &[u8] = &buf[..];
+        let decoded = RecordBatch::decode(&mut cur).unwrap();
+        prop_assert!(cur.is_empty());
+
+        prop_assert_eq!(decoded.delete_horizon_ms(), Some(horizon));
+
+        let reconstructed: Vec<i64> = decoded
+            .records
+            .iter()
+            .map(|r| decoded.base_timestamp + r.timestamp_delta)
+            .collect();
+        prop_assert_eq!(reconstructed, originals);
+    }
+}

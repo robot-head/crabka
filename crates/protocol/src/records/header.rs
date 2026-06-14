@@ -17,7 +17,7 @@ pub enum TimestampType {
 /// - bit 3:    timestamp type (0 = `CreateTime`, 1 = `LogAppendTime`)
 /// - bit 4:    `is_transactional`
 /// - bit 5:    `is_control_batch`
-/// - bit 6:    `has_delete_horizon_ms` (Kafka 2.8+; not surfaced separately here)
+/// - bit 6:    `has_delete_horizon` (KIP-534; `base_timestamp` carries the horizon)
 /// - bits 7-15: reserved
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Attributes(pub i16);
@@ -26,6 +26,7 @@ impl Attributes {
     pub const TIMESTAMP_TYPE_BIT: i16 = 1 << 3;
     pub const TRANSACTIONAL_BIT: i16 = 1 << 4;
     pub const CONTROL_BIT: i16 = 1 << 5;
+    pub const DELETE_HORIZON_BIT: i16 = 1 << 6; // 0x40
 
     #[must_use]
     pub fn compression(self) -> CompressionType {
@@ -52,6 +53,11 @@ impl Attributes {
     #[must_use]
     pub fn is_control_batch(self) -> bool {
         self.0 & Self::CONTROL_BIT != 0
+    }
+
+    #[must_use]
+    pub fn has_delete_horizon(self) -> bool {
+        self.0 & Self::DELETE_HORIZON_BIT != 0
     }
 
     #[must_use]
@@ -83,6 +89,15 @@ impl Attributes {
             Self(self.0 | Self::CONTROL_BIT)
         } else {
             Self(self.0 & !Self::CONTROL_BIT)
+        }
+    }
+
+    #[must_use]
+    pub fn with_delete_horizon(self, set: bool) -> Self {
+        if set {
+            Self(self.0 | Self::DELETE_HORIZON_BIT)
+        } else {
+            Self(self.0 & !Self::DELETE_HORIZON_BIT)
         }
     }
 }
@@ -124,7 +139,7 @@ mod tests {
     use crabka_compression::CompressionType;
 
     macro_rules! attr_case {
-        ($name:ident, $bits:expr, $codec:expr, $ts:expr, $txn:expr, $ctrl:expr) => {
+        ($name:ident, $bits:expr, $codec:expr, $ts:expr, $txn:expr, $ctrl:expr, $horizon:expr) => {
             #[test]
             fn $name() {
                 let a = Attributes($bits);
@@ -148,6 +163,11 @@ mod tests {
                     "is_control_batch mismatch in {}",
                     stringify!($name)
                 );
+                assert!(
+                    a.has_delete_horizon() == $horizon,
+                    "has_delete_horizon mismatch in {}",
+                    stringify!($name)
+                );
             }
         };
     }
@@ -158,6 +178,7 @@ mod tests {
         CompressionType::None,
         TimestampType::CreateTime,
         false,
+        false,
         false
     );
     attr_case!(
@@ -165,6 +186,7 @@ mod tests {
         0b0000_0000_0000_0001,
         CompressionType::Gzip,
         TimestampType::CreateTime,
+        false,
         false,
         false
     );
@@ -174,6 +196,7 @@ mod tests {
         CompressionType::Snappy,
         TimestampType::CreateTime,
         false,
+        false,
         false
     );
     attr_case!(
@@ -181,6 +204,7 @@ mod tests {
         0b0000_0000_0000_0011,
         CompressionType::Lz4,
         TimestampType::CreateTime,
+        false,
         false,
         false
     );
@@ -190,6 +214,7 @@ mod tests {
         CompressionType::Zstd,
         TimestampType::CreateTime,
         false,
+        false,
         false
     );
     attr_case!(
@@ -197,6 +222,7 @@ mod tests {
         0b0000_0000_0000_1000,
         CompressionType::None,
         TimestampType::LogAppendTime,
+        false,
         false,
         false
     );
@@ -206,6 +232,7 @@ mod tests {
         CompressionType::None,
         TimestampType::CreateTime,
         true,
+        false,
         false
     );
     attr_case!(
@@ -214,13 +241,24 @@ mod tests {
         CompressionType::None,
         TimestampType::CreateTime,
         false,
+        true,
+        false
+    );
+    attr_case!(
+        delete_horizon_only,
+        0b0000_0000_0100_0000,
+        CompressionType::None,
+        TimestampType::CreateTime,
+        false,
+        false,
         true
     );
     attr_case!(
         all_set,
-        0b0000_0000_0011_1100,
+        0b0000_0000_0111_1100,
         CompressionType::Zstd,
         TimestampType::LogAppendTime,
+        true,
         true,
         true
     );
@@ -247,6 +285,35 @@ mod tests {
         let b = a.with_compression(CompressionType::Gzip);
         assert!(b.compression() == CompressionType::Gzip);
         assert!(b.0 & 0x07 == 1);
+    }
+
+    #[test]
+    fn delete_horizon_bit_round_trips() {
+        // Default has no delete horizon.
+        let base = Attributes::default();
+        assert!(!base.has_delete_horizon());
+
+        // Setting it flips exactly bit 6 (mask 0x40).
+        let set = base.with_delete_horizon(true);
+        assert!(set.has_delete_horizon());
+        assert!(set.0 & Attributes::DELETE_HORIZON_BIT == 0x40);
+
+        // Orthogonal to control / transactional: setting those does not touch
+        // bit 6, and bit 6 does not touch them.
+        let combo = Attributes::default()
+            .with_control(true)
+            .with_transactional(true)
+            .with_delete_horizon(true);
+        assert!(combo.has_delete_horizon());
+        assert!(combo.is_control_batch());
+        assert!(combo.is_transactional());
+
+        // Clearing bit 6 leaves the others intact.
+        let cleared = combo.with_delete_horizon(false);
+        assert!(!cleared.has_delete_horizon());
+        assert!(cleared.is_control_batch());
+        assert!(cleared.is_transactional());
+        assert!(cleared.0 & Attributes::DELETE_HORIZON_BIT == 0);
     }
 
     /// Build a sample 61-byte header with known values. Reused across the
