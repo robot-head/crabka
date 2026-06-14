@@ -594,57 +594,6 @@ impl BrokerHandle {
         rx.await.ok()
     }
 
-    /// Test-only: await until the group is Stable — non-empty membership with
-    /// every member fully reconciled (member_epoch == group_epoch AND
-    /// assignment_state == Stable).
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_for_group_stable(&self, group_id: &str) {
-        use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if let Some(v) = self.group_describe_for_test(group_id).await
-                    && !v.members.is_empty()
-                    && v.members.iter().all(|m| {
-                        m.member_epoch == v.group_epoch
-                            && m.assignment_state == MemberAssignmentState::Stable
-                    })
-                {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
-        })
-        .await;
-        assert!(
-            res.is_ok(),
-            "group {group_id} did not reach Stable within 30s"
-        );
-    }
-
-    /// Test-only: await until the group epoch >= `min`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_until_group_epoch(&self, group_id: &str, min: i32) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if let Some(v) = self.group_describe_for_test(group_id).await
-                    && v.group_epoch >= min
-                {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
-        })
-        .await;
-        assert!(
-            res.is_ok(),
-            "group {group_id} epoch did not reach {min} within 30s"
-        );
-    }
-
     /// Test-only: await until the group has exactly `n` members.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
@@ -730,34 +679,6 @@ impl BrokerHandle {
         assert!(
             res.is_ok(),
             "classic group {group_id} did not settle at {n} members within 30s"
-        );
-    }
-
-    /// Test-only: await until the group's assigned active-task partitions
-    /// (summed across all members) >= `min`.
-    #[doc(hidden)]
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_until_group_active_partitions(&self, group_id: &str, min: usize) {
-        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if let Some(v) = self.group_describe_for_test(group_id).await {
-                    let total: usize = v
-                        .members
-                        .iter()
-                        .map(|m| m.assigned_partitions.values().map(Vec::len).sum::<usize>())
-                        .sum();
-                    if total >= min {
-                        return;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            }
-        })
-        .await;
-        assert!(
-            res.is_ok(),
-            "group {group_id} active partitions did not reach {min} within 30s"
         );
     }
 
