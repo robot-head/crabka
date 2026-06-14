@@ -665,7 +665,7 @@ impl BrokerHandle {
         .await;
         assert!(
             res.is_ok(),
-            "group {group_id} member count did not reach {n} within 30s"
+            "group {group_id} did not settle at {n} members within 30s"
         );
     }
 
@@ -703,6 +703,75 @@ impl BrokerHandle {
             res.is_ok(),
             "group {group_id} active partitions did not reach {min} within 30s"
         );
+    }
+
+    // ── streams-group awaiters ────────────────────────────────────────────────
+
+    /// Test-only: describe a streams group via its actor.
+    /// `None` if the group has no live streams actor.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn streams_group_describe_for_test(
+        &self,
+        group_id: &str,
+    ) -> Option<crate::coordinator::unified::streams::actor::StreamsDescribeView> {
+        let handle = self
+            ._broker
+            .group_coordinator
+            .streams_groups
+            .get(group_id)?
+            .value()
+            .clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(
+                crate::coordinator::unified::streams::actor::StreamsGroupActorMessage::Describe {
+                    reply: tx,
+                },
+            )
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Test-only: await until the streams group has exactly `n` members.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_streams_group_member_count(&self, group_id: &str, n: usize) {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let count = self
+                    .streams_group_describe_for_test(group_id)
+                    .await
+                    .map_or(0, |v| v.members.len());
+                if count == n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "streams group {group_id} did not settle at {n} members within 30s"
+        );
+    }
+
+    /// Test-only: await until the streams group is empty/drained (no members).
+    ///
+    /// Replaces the fixed-duration `tokio::time::sleep` calls that follow a
+    /// `streams_leave()` heartbeat in the downgrade integration tests, where the
+    /// test must ensure the leave has propagated through the streams actor before
+    /// issuing the classic `JoinGroup` that triggers the streams→classic conversion.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_streams_group_empty(&self, group_id: &str) {
+        self.wait_until_streams_group_member_count(group_id, 0)
+            .await;
     }
 
     // ── partition log helpers ──────────────────────────────────────────────────
