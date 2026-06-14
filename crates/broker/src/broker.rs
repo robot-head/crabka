@@ -1596,8 +1596,14 @@ impl Broker {
         //     raft transport receives it as an injected dialer.
         let tls_connector = match &config.tls_config {
             Some(tls) => {
+                // Build a client config that BOTH trusts the peer's serving
+                // CA (`trust_roots_path`, the cluster CA) AND presents this
+                // broker's own cert as a client cert — the controller
+                // listener requires mTLS (`client_auth = Required`), so an
+                // anonymous client config would be rejected with a TLS
+                // `UnknownCA`/handshake failure on every KIP-595 peer dial.
                 let client_cfg = tls
-                    .build_client_config()
+                    .build_client_config_with_identity()
                     .map_err(|e| BrokerError::Tls(e.to_string()))?;
                 Some(tokio_rustls::TlsConnector::from(client_cfg))
             }
@@ -1674,11 +1680,19 @@ impl Broker {
             Some(Arc::new(hs) as Arc<dyn crabka_raft::RaftListenerHandshake>)
         };
 
+        // SNI for dialing peer controller listeners. The operator renders the
+        // shared headless-Service FQDN (a SAN on every broker's serving cert)
+        // so mTLS validates regardless of which peer pod IP we connect to.
+        // Falls back to "localhost" for single-node / dev (no peers dialed).
+        let controller_server_name = config
+            .controller_server_name
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
         let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> =
             Some(Arc::new(crate::network::client::InterBrokerDialer::new(
                 inter_broker_client.clone(),
                 config.controller_listener_protocol,
-                "localhost".to_string(),
+                controller_server_name,
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
         // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load

@@ -87,6 +87,15 @@ pub struct FileConfig {
     #[serde(default)]
     pub controller_quorum_voters: Vec<String>,
 
+    /// TLS server name (SNI) presented when dialing a PEER's controller
+    /// listener for the KIP-595 quorum. The operator renders the shared
+    /// headless-Service FQDN here — a SAN on every broker's serving cert —
+    /// so mTLS validation succeeds no matter which peer (resolved to a pod
+    /// IP) is dialed. Absent falls back to `"localhost"`. Maps to
+    /// [`crate::BrokerConfig::controller_server_name`].
+    #[serde(default)]
+    pub controller_server_name: Option<String>,
+
     #[serde(default)]
     pub listeners: Vec<FileListener>,
     #[serde(default)]
@@ -547,6 +556,13 @@ pub enum FileInterBrokerCredentials {
 pub struct FileTlsConfig {
     pub cert_path: std::path::PathBuf,
     pub key_path: std::path::PathBuf,
+    /// PEM file of CA(s) this broker trusts when validating a PEER's server
+    /// cert as an outbound inter-broker / controller-quorum dialer. The
+    /// operator renders the cluster CA here so KIP-595 controller peers can
+    /// mutually authenticate over the controller listener. Maps to
+    /// [`crabka_security::TlsConfig::trust_roots_path`].
+    #[serde(default)]
+    pub trust_roots_path: Option<std::path::PathBuf>,
     #[serde(default)]
     pub client_ca_path: Option<std::path::PathBuf>,
     #[serde(default)]
@@ -704,7 +720,7 @@ impl FileConfig {
             cfg.tls_config = Some(BrokerTlsConfig {
                 cert_chain_path: tls.cert_path,
                 private_key_path: tls.key_path,
-                trust_roots_path: None,
+                trust_roots_path: tls.trust_roots_path,
                 client_ca_path: tls.client_ca_path,
                 client_auth: match tls.client_auth {
                     FileClientAuthMode::Disabled => ClientAuthMode::Disabled,
@@ -1097,6 +1113,12 @@ impl FileConfig {
             cfg.controller_quorum_voters = voters;
         }
 
+        // SNI for dialing peer controller listeners (mTLS). Absent leaves the
+        // `BrokerConfig` default (`None` → "localhost" at the dialer).
+        if self.controller_server_name.is_some() {
+            cfg.controller_server_name = self.controller_server_name;
+        }
+
         Ok(())
     }
 
@@ -1164,7 +1186,7 @@ impl FileListener {
             tls_config: self.tls_config.map(|t| BrokerTlsConfig {
                 cert_chain_path: t.cert_path,
                 private_key_path: t.key_path,
-                trust_roots_path: None,
+                trust_roots_path: t.trust_roots_path,
                 client_ca_path: t.client_ca_path,
                 client_auth: match t.client_auth {
                     FileClientAuthMode::Disabled => ClientAuthMode::Disabled,
@@ -1597,6 +1619,50 @@ client_auth = "Required"
         assert!(cfg.controller_listener_protocol == crabka_security::ListenerProtocol::Ssl);
         let tls = cfg.tls_config.expect("tls_config propagated");
         assert!(tls.cert_chain_path == std::path::PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn apply_to_threads_trust_roots_and_controller_server_name() {
+        // The operator renders the cluster CA as the dialer trust root and
+        // the shared headless FQDN as the controller SNI so KIP-595 peers can
+        // mTLS to each other.
+        let src = r#"
+controller_server_name = "demo-broker-headless.default.svc.cluster.local"
+[tls_config]
+cert_path = "/etc/crabka/broker-tls/0.crt"
+key_path = "/etc/crabka/broker-tls/0.key"
+trust_roots_path = "/etc/crabka/cluster-ca/ca.crt"
+client_ca_path = "/etc/crabka/cluster-ca/ca.crt"
+client_auth = "Required"
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(
+            cfg.controller_server_name.as_deref()
+                == Some("demo-broker-headless.default.svc.cluster.local")
+        );
+        let tls = cfg.tls_config.expect("tls_config propagated");
+        assert!(
+            tls.trust_roots_path.as_deref()
+                == Some(std::path::Path::new("/etc/crabka/cluster-ca/ca.crt"))
+        );
+    }
+
+    #[test]
+    fn apply_to_absent_controller_server_name_leaves_default() {
+        let src = r#"
+controller_listener_protocol = "Ssl"
+[tls_config]
+cert_path = "/c"
+key_path = "/k"
+client_auth = "Required"
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(cfg.controller_server_name.is_none());
+        assert!(cfg.tls_config.expect("tls").trust_roots_path.is_none());
     }
 
     #[test]

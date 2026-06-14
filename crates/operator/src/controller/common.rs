@@ -355,6 +355,13 @@ pub(crate) fn render_configmap(
                 .map(|adv| format!("{broker_id}@{}:{CONTROLLER_PORT}", adv.host))
         })
         .collect();
+    // TLS server-name (SNI) every broker presents when dialing a peer's
+    // controller listener for the KIP-595 quorum. The shared headless-Service
+    // FQDN is a SAN on every broker's serving cert (see `kafka.rs` keystore
+    // SAN list), so mTLS validation succeeds regardless of which peer pod IP
+    // is dialed. Identical across all brokers.
+    let ns = owner.meta().namespace.clone().unwrap_or_default();
+    let controller_server_name = format!("{name}-broker-headless.{ns}.svc.cluster.local");
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
         let toml = crate::controller::listeners::render_broker_toml(
@@ -370,6 +377,7 @@ pub(crate) fn render_configmap(
             tiered_storage,
             inter_broker_kerberos,
             &controller_quorum_voters,
+            &controller_server_name,
         );
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
@@ -1368,6 +1376,11 @@ mod cluster_object_tests {
 
         let expected =
             "controller_quorum_voters = [\"0@host-a:9093\", \"1@host-b:9093\", \"2@host-c:9093\"]";
+        // The controller TLS server-name is the shared headless-Service FQDN
+        // (`<name>-broker-headless.<ns>.svc.cluster.local`), identical across
+        // every broker — a SAN on each broker's serving cert.
+        let expected_server_name =
+            "controller_server_name = \"demo-broker-headless.default.svc.cluster.local\"";
         for id in 0..3 {
             let toml = data
                 .get(&format!("broker-{id}.toml"))
@@ -1376,10 +1389,17 @@ mod cluster_object_tests {
                 toml.contains(expected),
                 "broker-{id}.toml must carry the full voter set, got:\n{toml}"
             );
+            assert!(
+                toml.contains(expected_server_name),
+                "broker-{id}.toml must carry the controller server name, got:\n{toml}"
+            );
             // Voters must precede the first [[listeners]] header.
             let key_pos = toml.find("controller_quorum_voters").unwrap();
             let listeners_pos = toml.find("[[listeners]]").unwrap();
             assert!(key_pos < listeners_pos);
+            // The server-name top-level scalar must also precede [[listeners]].
+            let server_name_pos = toml.find("controller_server_name").unwrap();
+            assert!(server_name_pos < listeners_pos);
         }
     }
 }
