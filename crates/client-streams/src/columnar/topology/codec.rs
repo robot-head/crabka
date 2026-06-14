@@ -1,5 +1,7 @@
 //! `BatchCodec`: bridges a per-partition batch of Kafka records ↔ a polars `DataFrame`.
 
+use crate::columnar::serde::polars::PolarsIpcSerde;
+use crate::processor::serde::Serde;
 use ::polars::prelude::*;
 use bytes::Bytes;
 
@@ -59,6 +61,94 @@ pub fn reject_reserved_payload_columns(df_columns: &[&str]) -> Result<(), BatchE
     Ok(())
 }
 
+/// `BatchCodec` where each record value is itself an Arrow-IPC `DataFrame`.
+///
+/// `decode` vstacks the per-record frames (attaching the reserved metadata
+/// columns); `encode` writes the result as IPC record(s), splitting if the
+/// encoded size would exceed `max_record_bytes`.
+#[derive(Debug, Clone)]
+pub struct BlobCodec {
+    /// Soft cap on one produced record's encoded size; the frame is row-chunked
+    /// to stay under it. Defaults to ~900 KiB (under Kafka's default 1 MiB
+    /// `max.request.size`, leaving headroom for record headers/framing).
+    pub max_record_bytes: usize,
+}
+
+impl Default for BlobCodec {
+    fn default() -> Self {
+        Self { max_record_bytes: 900 * 1024 }
+    }
+}
+
+impl BatchCodec for BlobCodec {
+    fn decode(&self, records: &[ConsumedRecord]) -> Result<DataFrame, BatchError> {
+        let mut acc: Option<DataFrame> = None;
+        for (i, rec) in records.iter().enumerate() {
+            let frame = PolarsIpcSerde
+                .deserialize("", &rec.value)
+                .map_err(|e| BatchError(format!("decode record {i}: {e}")))?;
+            let frame = with_meta_columns(frame, rec)?;
+            acc = Some(match acc {
+                None => frame,
+                Some(a) => a.vstack(&frame).map_err(|e| BatchError(e.to_string()))?,
+            });
+        }
+        acc.ok_or_else(|| BatchError("decode called with empty record batch".into()))
+    }
+
+    fn encode(&self, df: &DataFrame) -> Result<Vec<ProduceRecord>, BatchError> {
+        let payload = drop_reserved_columns(df);
+        let ts = last_timestamp(df).unwrap_or(0);
+        let mut out = Vec::new();
+        for chunk in chunk_by_size(&payload, self.max_record_bytes) {
+            let value = PolarsIpcSerde.serialize("", &chunk);
+            out.push(ProduceRecord { key: None, value, timestamp: ts });
+        }
+        Ok(out)
+    }
+}
+
+/// Add the four reserved metadata columns (broadcast to every row of `frame`).
+fn with_meta_columns(frame: DataFrame, rec: &ConsumedRecord) -> Result<DataFrame, BatchError> {
+    let n = frame.height();
+    let mut df = frame;
+    // `Vec<Option<Vec<u8>>>` maps to a Binary column via polars' `NamedFrom` impl.
+    let key_vals: Vec<Option<Vec<u8>>> = vec![rec.key.as_ref().map(|k| k.to_vec()); n];
+    df.with_column(Column::new(COL_KEY.into(), key_vals)).map_err(|e| BatchError(e.to_string()))?;
+    df.with_column(Column::new(COL_TIMESTAMP.into(), vec![rec.timestamp; n]))
+        .map_err(|e| BatchError(e.to_string()))?;
+    df.with_column(Column::new(COL_PARTITION.into(), vec![rec.partition; n]))
+        .map_err(|e| BatchError(e.to_string()))?;
+    df.with_column(Column::new(COL_OFFSET.into(), vec![rec.offset; n]))
+        .map_err(|e| BatchError(e.to_string()))?;
+    Ok(df)
+}
+
+/// Drop the reserved metadata columns, leaving only payload columns. Tolerates a
+/// frame that never carried them (`drop_many` ignores absent names).
+fn drop_reserved_columns(df: &DataFrame) -> DataFrame {
+    df.drop_many(RESERVED_COLUMNS.iter().map(|s| PlSmallStr::from_str(s)))
+}
+
+fn last_timestamp(df: &DataFrame) -> Option<i64> {
+    let col = df.column(COL_TIMESTAMP).ok()?;
+    col.i64().ok()?.get(df.height().saturating_sub(1))
+}
+
+/// Split a frame into row-slices whose IPC-encoded size stays under `cap`.
+fn chunk_by_size(df: &DataFrame, cap: usize) -> Vec<DataFrame> {
+    if PolarsIpcSerde.serialize("", df).len() <= cap || df.height() <= 1 {
+        return vec![df.clone()];
+    }
+    let mid = df.height() / 2;
+    let mut out = chunk_by_size(&df.slice(0, mid), cap);
+    // `mid` is at most `df.height() / 2`, which fits in i64 on any real frame.
+    #[allow(clippy::cast_possible_wrap, reason = "row count cannot exceed i64::MAX")]
+    let mid_i64 = mid as i64;
+    out.extend(chunk_by_size(&df.slice(mid_i64, df.height() - mid), cap));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +166,31 @@ mod tests {
     fn reject_reserved_payload_columns_flags_collision() {
         check!(reject_reserved_payload_columns(&["id", "total"]).is_ok());
         check!(reject_reserved_payload_columns(&["id", "__key"]).is_err());
+    }
+
+    use crate::columnar::serde::polars::PolarsIpcSerde;
+    use crate::processor::serde::Serde;
+
+    fn ipc_bytes(df: &DataFrame) -> Bytes {
+        PolarsIpcSerde.serialize("t", df)
+    }
+
+    #[test]
+    fn blob_codec_vstacks_records_then_round_trips() {
+        let codec = BlobCodec::default();
+        let a = df!("v" => [1_i64, 2]).unwrap();
+        let b = df!("v" => [3_i64]).unwrap();
+        let records = vec![
+            ConsumedRecord { key: None, value: ipc_bytes(&a), timestamp: 10, partition: 0, offset: 5 },
+            ConsumedRecord { key: None, value: ipc_bytes(&b), timestamp: 11, partition: 0, offset: 6 },
+        ];
+        let df = codec.decode(&records).unwrap();
+        check!(df.height() == 3);
+        check!(df.column(COL_PARTITION).is_ok());
+
+        let out = codec.encode(&df).unwrap();
+        check!(out.len() == 1);
+        let back = PolarsIpcSerde.deserialize("t", &out[0].value).unwrap();
+        check!(back.height() == 3);
     }
 }

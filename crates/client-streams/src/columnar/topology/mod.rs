@@ -4,4 +4,4 @@
 
 pub mod codec;
 
-pub use codec::{BatchCodec, BatchError, ConsumedRecord, ProduceRecord};
+pub use codec::{BatchCodec, BatchError, BlobCodec, ConsumedRecord, ProduceRecord};
