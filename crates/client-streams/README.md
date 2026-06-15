@@ -107,6 +107,110 @@ cargo run -p crabka-client-streams --example protobuf_pipeline
 cargo run -p crabka-client-streams --example json_pipeline
 ```
 
+## Columnar / DataFrame support
+
+Process records as columns instead of one-at-a-time rows. This is **opt-in**
+behind three cargo features, all **off by default**:
+
+- `polars` — polars `DataFrame` serde and the native columnar topology.
+- `arrow` — arrow-rs `RecordBatch` serde. (The original design called for
+  `minarrow`, but it was substituted with arrow-rs because `minarrow` requires
+  nightly Rust; this crate stays on stable.)
+- `columnar` — native serde for [frankmcsherry's `columnar`](https://crates.io/crates/columnar)
+  types.
+
+```sh
+cargo add crabka-client-streams --features polars
+```
+
+### Columnar serdes
+
+Three serdes plug straight into the Streams `Serde<T>` boundary, each
+**topic-aware** like the schema serdes (`serialize(topic, data)`):
+
+- `PolarsIpcSerde` — `Serde<DataFrame>`, Arrow-IPC framed (feature `polars`).
+- `ArrowIpcSerde` — `Serde<RecordBatch>`, Arrow-IPC framed (feature `arrow`).
+- `ColumnarSerde<T>` — `Serde<T>` for any `columnar::Columnar` type (feature `columnar`).
+
+```rust,no_run
+use crabka_client_streams::Serde;
+use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
+use polars::prelude::*;
+
+let df = df!("id" => ["a", "b"], "total" => [1.0_f64, 2.5]).unwrap();
+let bytes = PolarsIpcSerde.serialize("orders", &df);
+let back = PolarsIpcSerde.deserialize("orders", &bytes).unwrap();
+assert!(back.equals(&df));
+```
+
+### Native columnar topology (feature `polars`)
+
+`ColumnarTopology` builds a source → operator → sink graph whose **edges carry
+polars `DataFrame`s**. A `BatchCodec` bridges Kafka records ↔ `DataFrame` at
+each source/sink; two are provided:
+
+- `RowCodec` — rows stay standard Kafka records (key/value decoded via a
+  `RowBridge`, e.g. `JsonRowBridge`); the codec assembles a column-per-field
+  `DataFrame` for a batch.
+- `BlobCodec` — each record's *value* is itself an Arrow-IPC `DataFrame`; the
+  codec vstacks per-record frames into the batch frame and re-chunks output to
+  stay under Kafka's record-size limit.
+
+Every assembled `DataFrame` carries reserved metadata columns —
+`__key`, `__timestamp`, `__partition`, `__offset` — so the sink codec can
+faithfully reconstruct records and the runtime can commit offsets. Payload
+columns may not use these names.
+
+Operators are expressed with polars `Expr`s via `BuiltinOp`: `Filter`,
+`Select`, `WithColumns`, and `GroupByAgg { keys, aggs }`. The topology runs on
+the existing broker runtime through `run_partition_once`, or broker-free in
+tests with `ColumnarTestDriver`:
+
+```rust,no_run
+use crabka_client_streams::Serde;
+use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
+use crabka_client_streams::columnar::topology::codec::{BlobCodec, ConsumedRecord};
+use crabka_client_streams::columnar::topology::operator::BuiltinOp;
+use crabka_client_streams::columnar::topology::{ColumnarTestDriver, ColumnarTopology};
+use polars::prelude::*;
+
+let mut topo = ColumnarTopology::new();
+let src = topo.add_source("src", ["txns"], BlobCodec::default());
+let agg = topo.add_operator(
+    "sum-by-user",
+    BuiltinOp::GroupByAgg {
+        keys: vec![col("user")],
+        aggs: vec![col("amount").sum().alias("total")],
+    },
+    src,
+);
+topo.add_sink("out", "txn-totals", BlobCodec::default(), agg);
+
+let mut driver = ColumnarTestDriver::new(&topo).unwrap();
+let df = df!("user" => ["a", "a", "b"], "amount" => [5_i64, 3, 9]).unwrap();
+driver
+    .pipe_batch("txns", vec![ConsumedRecord {
+        key: None,
+        value: PolarsIpcSerde.serialize("txns", &df),
+        timestamp: 0,
+        partition: 0,
+        offset: 0,
+    }])
+    .unwrap();
+```
+
+> **Within-batch only.** Operators apply to one consumed batch at a time.
+> Cross-batch *stateful* operations — joins, windows, and aggregations that
+> accumulate across batches — are **not yet implemented** and are a named
+> follow-up. `GroupByAgg` aggregates only the rows present in the current batch.
+
+### Examples
+
+```bash
+cargo run -p crabka-client-streams --features polars --example dataframe_serde
+cargo run -p crabka-client-streams --features polars --example polars_pipeline
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-client-streams](https://docs.rs/crabka-client-streams). The repository README contains project-wide setup, development, and release notes.

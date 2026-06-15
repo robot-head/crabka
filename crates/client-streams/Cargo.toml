@@ -49,6 +49,14 @@ arrow = ["dep:arrow"]
 columnar = ["dep:columnar"]
 polars = ["dep:polars", "dep:polars-arrow", "dep:serde_json"]
 
+[[example]]
+name = "dataframe_serde"
+required-features = ["polars"]
+
+[[example]]
+name = "polars_pipeline"
+required-features = ["polars"]
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
