@@ -106,6 +106,13 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 # Use the PEM parsers in `rustls-pki-types` (same code; pull explicitly).
 rustls-pki-types = { version = "1.14", features = ["alloc"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+# Linux kTLS: offload TLS record encryption to the kernel so `sendfile(2)`
+# works THROUGH TLS (zero-copy fetch over encrypted connections). v6 tracks
+# rustls ^0.23.12 + tokio-rustls ^0.26.0 (the workspace pins above). Safe
+# wrapper — no raw `setsockopt` FFI — so it satisfies `unsafe_code = "forbid"`.
+# Consumed Linux-only; gated under `[target.'cfg(target_os="linux")']` in the
+# broker so non-Linux builds never pull it.
+ktls = "6"
 x509-parser = "0.18"
 rustls-webpki = "0.103"
 arc-swap = "1"

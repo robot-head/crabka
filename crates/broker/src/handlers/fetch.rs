@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use tokio::sync::Notify;
 
 use crabka_metadata::AclOperation;
@@ -68,6 +68,12 @@ struct PendingRead {
     cpu_micros: u64,
 }
 
+/// Handle a `Fetch` request, returning the response **struct** (not yet
+/// encoded) plus the negotiated `version`. The dispatch layer turns this into
+/// either a zero-copy write-plan (v4+, the canonical codec) or a legacy
+/// copy-encoded frame (v0–v3). Returning the struct — rather than `Bytes` —
+/// lets the connection writer split out each partition's records region as a
+/// separate write segment instead of materializing the whole body.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
@@ -75,7 +81,7 @@ pub(crate) async fn handle(
     _correlation_id: i32,
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
-) -> Result<Bytes, BrokerError> {
+) -> Result<(FetchResponse, i16), BrokerError> {
     // KIP-124 request_percentage meters server-side handler time; capture the
     // start so the request throttle can be combined with the consumer
     // byte-rate throttle below (KIP-219).
@@ -125,8 +131,7 @@ pub(crate) async fn handle(
             responses: Vec::new(),
             ..Default::default()
         };
-        let buf = encode_fetch_response(resp, version)?;
-        return Ok(buf.freeze());
+        return Ok((resp, version));
     }
 
     let effective_topics: Vec<EffectiveTopic> = match &decision {
@@ -480,6 +485,7 @@ pub(crate) async fn handle(
             p.max_bytes,
             p.read_committed,
             p.is_follower_fetch,
+            ctx.sendfile_capable,
             &mut p.out,
         )
         .await?;
@@ -501,7 +507,7 @@ pub(crate) async fn handle(
     // partition's append_notify with a single timeout, then re-read.
     let want_more = total_bytes < usize::try_from(req.min_bytes.max(0)).unwrap_or(0);
     if want_more && req.max_wait_ms > 0 {
-        long_poll_then_reread(broker, &mut pending, req.max_wait_ms).await?;
+        long_poll_then_reread(broker, &mut pending, req.max_wait_ms, ctx.sendfile_capable).await?;
     }
 
     // Drain per-partition cpu_micros accumulators before
@@ -752,7 +758,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    Ok(encode_fetch_response(resp, version)?.freeze())
+    Ok((resp, version))
 }
 
 /// Projection of `FetchRequest::topics` / cached session partitions —
@@ -1048,6 +1054,7 @@ async fn do_read(
     max_bytes: i32,
     read_committed: bool,
     is_follower_fetch: bool,
+    sendfile_capable: bool,
     out: &mut PartitionData,
 ) -> Result<usize, BrokerError> {
     // Decision derived from a brief metadata-only hold of the log mutex.
@@ -1104,7 +1111,7 @@ async fn do_read(
     };
     // Log mutex released here.
 
-    let (raw, aborted_txns): (Option<crabka_log::RawRead>, Vec<AbortedTransaction>) = match plan {
+    let (records, aborted_txns): (Option<RecordsPayload>, Vec<AbortedTransaction>) = match plan {
         ReadPlan::OffsetOutOfRange => return Ok(0),
         ReadPlan::Empty => (None, Vec::new()),
         ReadPlan::Read {
@@ -1120,7 +1127,58 @@ async fn do_read(
             let log = part.log.clone();
             let join = tokio::task::spawn_blocking(move || {
                 let log = log.lock().expect("log mutex poisoned");
-                let raw = log.read_raw(fetch_offset, limit_offset, read_max)?;
+
+                // Zero-copy (Increments D + E): on a plaintext connection
+                // (SENDFILE alias: Linux + Apple + FreeBSD/DragonFly), describe
+                // the records run with a cheap header-only walk (`read_raw_desc`)
+                // instead of `pread`ing the payload. If the run is large enough
+                // to amortize the sendfile syscall, return file-backed regions
+                // for the `sendfile` drain; otherwise fall back to the byte-copy
+                // `read_raw` path (small/fragmented fetches stay on the vectored
+                // path). The descriptor is captured here under the log lock so
+                // retention can't truncate the region out from under the later
+                // async send (the `Arc<File>` pins the inode).
+                #[cfg(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                ))]
+                let records: RecordsPayload = {
+                    let mut chosen: Option<RecordsPayload> = None;
+                    if sendfile_capable {
+                        let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
+                        if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
+                            && !desc.regions.is_empty()
+                        {
+                            chosen = Some(RecordsPayload::FileRegions(desc.regions));
+                        }
+                    }
+                    match chosen {
+                        Some(p) => p,
+                        None => RecordsPayload::Raw(
+                            log.read_raw(fetch_offset, limit_offset, read_max)?.bytes,
+                        ),
+                    }
+                };
+                // Windows fallback: no safe `sendfile`/`TransmitFile`, so always
+                // `read_raw` + copy (the Increment C vectored path drains it).
+                #[cfg(not(any(
+                    target_os = "linux",
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "tvos",
+                    target_os = "watchos",
+                    target_os = "freebsd",
+                    target_os = "dragonfly",
+                )))]
+                let records: RecordsPayload = {
+                    let _ = sendfile_capable;
+                    RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)
+                };
 
                 // read_committed does NO server-side batch filtering: verbatim
                 // bytes (including aborted/control batches) are returned and the
@@ -1150,9 +1208,9 @@ async fn do_read(
                     Vec::new()
                 };
 
-                Ok::<_, BrokerError>((raw, aborted))
+                Ok::<_, BrokerError>((records, aborted))
             });
-            let (raw, aborted) = match join.await {
+            let (records, aborted) = match join.await {
                 Ok(res) => res?,
                 Err(join_err) => {
                     // A panic inside the blocking read poisoned/aborted the
@@ -1164,8 +1222,12 @@ async fn do_read(
                 }
             };
 
-            let raw = if raw.total > 0 { Some(raw) } else { None };
-            (raw, aborted)
+            let records = if records.payload_len() > 0 {
+                Some(records)
+            } else {
+                None
+            };
+            (records, aborted)
         }
     };
 
@@ -1181,8 +1243,8 @@ async fn do_read(
         out.aborted_transactions = Some(aborted_txns);
     }
 
-    let bytes_est = raw.as_ref().map_or(0, |r| r.total);
-    out.records = raw.map(|r| RecordsPayload::Raw(r.bytes));
+    let bytes_est = records.as_ref().map_or(0, RecordsPayload::payload_len);
+    out.records = records;
     Ok(bytes_est)
 }
 
@@ -1320,6 +1382,7 @@ async fn long_poll_then_reread(
     broker: &Broker,
     pending: &mut [PendingRead],
     max_wait_ms: i32,
+    sendfile_capable: bool,
 ) -> Result<(), BrokerError> {
     let mut notifies: Vec<Arc<Notify>> = Vec::new();
     for p in pending.iter() {
@@ -1365,6 +1428,7 @@ async fn long_poll_then_reread(
             p.max_bytes,
             p.read_committed,
             p.is_follower_fetch,
+            sendfile_capable,
             &mut p.out,
         )
         .await?;
@@ -1489,7 +1553,7 @@ fn group_into_topic_responses(pending: Vec<PendingRead>) -> GroupedResponses {
 /// Encode a `FetchResponse` into a `BytesMut`, choosing the legacy
 /// `kafka_3_6_2` codec for Fetch v0-3 and the current canonical codec
 /// for v4+. The version boundary mirrors the request-decode boundary.
-fn encode_fetch_response(
+pub(crate) fn encode_fetch_response(
     resp: FetchResponse,
     version: i16,
 ) -> Result<BytesMut, crate::error::BrokerError> {

@@ -21,9 +21,12 @@ impl Stack {
     #[must_use]
     pub fn broker_pod_regex(self) -> &'static str {
         match self {
-            // Crabka StatefulSet is `<kafka>-<nodepool>` per the operator;
-            // the e2e workflow's KafkaNodePool is named `brokers`.
-            Stack::Crabka => "^demo-brokers-",
+            // Crabka StatefulSets are `<kafka>-<nodepool>` per the operator.
+            // `^demo-broker` is a literal prefix common to both the e2e
+            // single-pool naming (`demo-brokers-0`, pool `brokers`) and the
+            // multi-pool bench topology (`demo-broker-0-0`, pools `broker-0/1/2`)
+            // — `failover.rs` uses it via `starts_with`, `prom.rs` as a regex.
+            Stack::Crabka => "^demo-broker",
             // Strimzi StatefulSets are `<kafka>-<pool>` with pool typically
             // `kafka` for the broker pool.
             Stack::Kafka => "^demo-kafka-",
@@ -268,8 +271,13 @@ mod tests {
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
-        assert!(Stack::Crabka.broker_pod_regex() == "^demo-brokers-");
+        assert!(Stack::Crabka.broker_pod_regex() == "^demo-broker");
         assert!(Stack::Kafka.broker_pod_regex() == "^demo-kafka-");
+        // The crabka prefix must match BOTH the single-pool e2e naming and the
+        // multi-pool bench naming (used by failover.rs `starts_with`).
+        let p = Stack::Crabka.broker_pod_regex().trim_start_matches('^');
+        assert!("demo-brokers-0".starts_with(p));
+        assert!("demo-broker-0-0".starts_with(p));
     }
 
     #[test]

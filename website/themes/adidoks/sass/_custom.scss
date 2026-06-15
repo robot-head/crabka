@@ -193,18 +193,6 @@ body.dark .navbar-brand::before { background-image: url("crabka-mark-dark.png");
   background: $gray-100;
 }
 
-.vs-figure {
-  max-width: 880px;
-  margin: 0 auto 2.75rem;
-
-  img {
-    width: 100%;
-    height: auto;
-    border-radius: 0.85rem;
-    box-shadow: 0 1.5rem 3rem rgba(29, 45, 53, 0.22);
-  }
-}
-
 .compare-table {
   width: 100%;
   max-width: 880px;

@@ -132,6 +132,40 @@ pub const HEADER_LEN: usize = 61;
 // Compile-time assertion that the layout is exactly 61 bytes.
 const _: () = assert!(size_of::<RecordBatchHeader>() == HEADER_LEN);
 
+/// Byte offset of the `base_offset` field (i64 BE, 8 bytes) within a v2
+/// record-batch header.
+pub const BASE_OFFSET_RANGE: std::ops::Range<usize> = 0..8;
+
+/// Byte offset of the `partition_leader_epoch` field (i32 BE, 4 bytes)
+/// within a v2 record-batch header.
+pub const LEADER_EPOCH_RANGE: std::ops::Range<usize> = 12..16;
+
+/// First byte covered by the v2 batch CRC (`attributes` onward). Bytes
+/// `0..21` — `base_offset`, `batch_length`, `partition_leader_epoch`,
+/// `magic`, and the `crc` field itself — are **outside** the CRC region.
+pub const CRC_COVERAGE_START: usize = 21;
+
+/// Patch `base_offset` (bytes 0..8) and `partition_leader_epoch`
+/// (bytes 12..16) in place in a writable copy of the verbatim batch
+/// bytes, writing both as big-endian.
+///
+/// Both fields lie **before** [`CRC_COVERAGE_START`], so this never
+/// invalidates the producer's CRC — the broker can stamp the assigned
+/// offset and leader epoch without recomputing CRC or touching the body.
+///
+/// # Panics
+///
+/// Panics if `buf` is shorter than [`HEADER_LEN`]; callers must validate
+/// the batch header (e.g. via borrowed decode) first.
+pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, leader_epoch: i32) {
+    assert!(
+        buf.len() >= HEADER_LEN,
+        "patch target shorter than v2 header"
+    );
+    buf[BASE_OFFSET_RANGE].copy_from_slice(&base_offset.to_be_bytes());
+    buf[LEADER_EPOCH_RANGE].copy_from_slice(&leader_epoch.to_be_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +409,33 @@ mod tests {
     fn too_short_buffer_errors() {
         let buf = [0u8; HEADER_LEN - 1];
         assert!(RecordBatchHeader::ref_from_bytes(&buf[..]).is_err());
+    }
+
+    #[test]
+    fn patch_writes_only_pre_crc_fields() {
+        let mut buf = sample_header_bytes().to_vec();
+        let crc_region_before = buf[CRC_COVERAGE_START..].to_vec();
+        let crc_field_before = buf[17..21].to_vec();
+
+        patch_base_offset_and_leader_epoch(&mut buf, 9_001, 42);
+
+        // The two stamped fields changed to the expected big-endian values.
+        let h = RecordBatchHeader::ref_from_bytes(&buf[..]).unwrap();
+        assert!(h.base_offset.get() == 9_001);
+        assert!(h.partition_leader_epoch.get() == 42);
+
+        // The CRC field itself is untouched (no recompute).
+        assert!(&buf[17..21] == &crc_field_before[..]);
+        // Everything in the CRC-covered region is byte-identical.
+        assert!(&buf[CRC_COVERAGE_START..] == &crc_region_before[..]);
+    }
+
+    #[test]
+    fn crc_coverage_constants_match_field_layout() {
+        // base_offset and leader_epoch are entirely below the CRC start;
+        // attributes (the first CRC-covered field) begins exactly at 21.
+        assert!(BASE_OFFSET_RANGE.end <= CRC_COVERAGE_START);
+        assert!(LEADER_EPOCH_RANGE.end <= CRC_COVERAGE_START);
+        assert!(CRC_COVERAGE_START == 21);
     }
 }

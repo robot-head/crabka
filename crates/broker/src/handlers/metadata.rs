@@ -101,9 +101,13 @@ pub(crate) async fn handle(
     );
 
     // Brokers: enumerate all registered nodes from the metadata image.
+    // Each broker's `host:port` is projected from the endpoint matching the
+    // listener this request arrived on (Kafka returns the connection
+    // listener's advertised address), falling back to the inter-broker
+    // endpoint when the connection listener isn't recorded on that broker.
     let brokers: Vec<MetadataResponseBroker> = image
         .brokers()
-        .map(|b| project_broker(b, &inter_broker_name))
+        .map(|b| project_broker(b, ctx.connection_listener_name, &inter_broker_name))
         .collect();
 
     let allowed = |name: &str| {
@@ -284,31 +288,58 @@ pub(crate) async fn handle(
 ///
 /// The Kafka `MetadataResponse` wire format (v0..v12 at time of writing)
 /// carries exactly one `host:port`/`rack` tuple per broker — there is no
-/// `endpoints[]` array on `MetadataResponseBroker`. To honor per-listener
-/// registration we pick the broker's inter-broker endpoint
-/// (matched by name) and fall back to the first recorded endpoint, then
-/// to the legacy top-level `host`/`port` if `endpoints` is empty.
+/// `endpoints[]` array on `MetadataResponseBroker`. Apache Kafka returns the
+/// advertised address **of the listener the request arrived on**, so a TLS
+/// client gets the TLS endpoint and a plaintext client gets the plaintext
+/// endpoint. We honor that by selecting, in order:
+///   1. the endpoint whose name matches the connection's listener
+///      (`connection_listener_name`) — the correct, Kafka-faithful choice;
+///   2. the inter-broker endpoint (matched by name) — defensive fallback
+///      when the connection listener isn't recorded on this broker (e.g. a
+///      heterogeneous-listener cluster);
+///   3. the first recorded endpoint;
+///   4. the legacy top-level `host`/`port` when `endpoints` is empty.
+///
 /// Clamps `node_id` to `i32::MAX` if the openraft `u64` overflows — broker
 /// ids are tiny in practice so this is purely defensive.
 fn project_broker(
     b: &crabka_metadata::BrokerRegistrationRecord,
+    connection_listener_name: &str,
     inter_broker_name: &str,
 ) -> MetadataResponseBroker {
-    let primary = b
-        .endpoints
-        .iter()
-        .find(|e| e.name == inter_broker_name)
-        .or_else(|| b.endpoints.first());
-    let (host, port) = match primary {
-        Some(e) => (e.host.clone(), i32::from(e.port)),
-        None => (b.host.clone(), i32::from(b.port)),
-    };
+    let (host, port) = pick_endpoint_host_port(b, connection_listener_name, inter_broker_name);
     MetadataResponseBroker {
         node_id: i32::try_from(b.node_id).unwrap_or(i32::MAX),
         host,
         port,
         rack: b.rack.clone(),
         ..Default::default()
+    }
+}
+
+/// Select the `(host, port)` to advertise for a registered broker given the
+/// listener the request arrived on. Shared by every handler that projects a
+/// broker address into a wire response (`Metadata`, `DescribeCluster`) so
+/// they all honor the connection listener identically. Selection order:
+///   1. the endpoint whose name matches `connection_listener_name`
+///      (Kafka returns the connection listener's advertised address);
+///   2. the inter-broker endpoint (matched by name);
+///   3. the first recorded endpoint;
+///   4. the legacy top-level `host`/`port` when `endpoints` is empty.
+pub(crate) fn pick_endpoint_host_port(
+    b: &crabka_metadata::BrokerRegistrationRecord,
+    connection_listener_name: &str,
+    inter_broker_name: &str,
+) -> (String, i32) {
+    let primary = b
+        .endpoints
+        .iter()
+        .find(|e| e.name == connection_listener_name)
+        .or_else(|| b.endpoints.iter().find(|e| e.name == inter_broker_name))
+        .or_else(|| b.endpoints.first());
+    match primary {
+        Some(e) => (e.host.clone(), i32::from(e.port)),
+        None => (b.host.clone(), i32::from(b.port)),
     }
 }
 
@@ -338,5 +369,92 @@ mod tests {
     #[test]
     fn parse_host_port_falls_back() {
         assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
+    }
+
+    fn endpoint(name: &str, host: &str, port: u16) -> crabka_metadata::BrokerEndpoint {
+        crabka_metadata::BrokerEndpoint {
+            name: name.to_string(),
+            host: host.to_string(),
+            port,
+            protocol: crabka_security::ListenerProtocol::Plaintext,
+        }
+    }
+
+    fn record(
+        endpoints: Vec<crabka_metadata::BrokerEndpoint>,
+    ) -> crabka_metadata::BrokerRegistrationRecord {
+        crabka_metadata::BrokerRegistrationRecord {
+            node_id: 7,
+            broker_epoch: 0,
+            incarnation_id: uuid::Uuid::nil(),
+            host: "legacy-host".to_string(),
+            port: 1000,
+            rack: Some("rack-a".to_string()),
+            endpoints,
+        }
+    }
+
+    /// The connection-listener endpoint wins when present: a request that
+    /// arrived on the `"tls"` listener gets the tls endpoint's host:port,
+    /// even though `"plain"` is the inter-broker listener.
+    #[test]
+    fn project_broker_picks_connection_listener_endpoint() {
+        let rec = record(vec![
+            endpoint("plain", "plain-host", 9092),
+            endpoint("tls", "tls-host", 9094),
+        ]);
+        let out = project_broker(&rec, "tls", "plain");
+        assert!(out.node_id == 7);
+        assert!(out.host == "tls-host");
+        assert!(out.port == 9094);
+        assert!(out.rack == Some("rack-a".to_string()));
+    }
+
+    /// A plaintext client on the `"plain"` listener gets the plain endpoint
+    /// (regression guard for the pre-fix behaviour).
+    #[test]
+    fn project_broker_picks_plain_for_plain_connection() {
+        let rec = record(vec![
+            endpoint("plain", "plain-host", 9092),
+            endpoint("tls", "tls-host", 9094),
+        ]);
+        let out = project_broker(&rec, "plain", "plain");
+        assert!(out.host == "plain-host");
+        assert!(out.port == 9092);
+    }
+
+    /// When the connection listener isn't registered on the broker, fall back
+    /// to the inter-broker endpoint (preserves the previous behaviour).
+    #[test]
+    fn project_broker_falls_back_to_inter_broker() {
+        let rec = record(vec![
+            endpoint("plain", "plain-host", 9092),
+            endpoint("tls", "tls-host", 9094),
+        ]);
+        let out = project_broker(&rec, "external", "plain");
+        assert!(out.host == "plain-host");
+        assert!(out.port == 9092);
+    }
+
+    /// When neither the connection listener nor the inter-broker listener are
+    /// present, fall back to the first recorded endpoint.
+    #[test]
+    fn project_broker_falls_back_to_first_endpoint() {
+        let rec = record(vec![
+            endpoint("other-a", "host-a", 5000),
+            endpoint("other-b", "host-b", 5001),
+        ]);
+        let out = project_broker(&rec, "tls", "plain");
+        assert!(out.host == "host-a");
+        assert!(out.port == 5000);
+    }
+
+    /// With no endpoints at all, fall back to the legacy top-level host/port.
+    #[test]
+    fn project_broker_falls_back_to_legacy_host_port() {
+        let rec = record(vec![]);
+        let out = project_broker(&rec, "tls", "plain");
+        assert!(out.host == "legacy-host");
+        assert!(out.port == 1000);
     }
 }

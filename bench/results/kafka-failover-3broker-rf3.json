@@ -1,0 +1,80 @@
+{
+  "scenario": {
+    "name": "failover",
+    "mode_tag": "cluster",
+    "msg_size_bytes": 1024,
+    "key_size_bytes": 0,
+    "partitions": 12,
+    "replication_factor": 3,
+    "producers": 2,
+    "consumers": 1,
+    "mode": {
+      "kind": "fixed_rate",
+      "msgs_per_sec": 10000
+    },
+    "acks": "all",
+    "compression": "none",
+    "linger_ms": 5,
+    "batch_size": 16384,
+    "duration_s": 180,
+    "warmup_s": 30,
+    "failover": {
+      "kill_at_s": 60,
+      "target": "partition0_leader"
+    }
+  },
+  "stack": "kafka",
+  "topology": {
+    "partitions": 12,
+    "replication_factor": 3,
+    "broker_count": 3
+  },
+  "wallclock_start_unix_ms": 1781421098999,
+  "wallclock_end_unix_ms": 1781421309346,
+  "throughput": {
+    "msgs_produced": 1098202,
+    "msgs_consumed": 188908,
+    "mb_in": 1072.462890625,
+    "mb_out": 184.48046875,
+    "producer_msgs_per_sec": 6101.122222222222,
+    "consumer_msgs_per_sec": 1049.4888888888888
+  },
+  "producer_latency_ms": {
+    "p50_ms": 160.767,
+    "p95_ms": 212.095,
+    "p99_ms": 274.431,
+    "p999_ms": 658.431,
+    "max_ms": 719.871,
+    "mean_ms": 167.3861790235315,
+    "count": 1098202
+  },
+  "consumer_e2e_latency_ms": {
+    "p50_ms": 294.655,
+    "p95_ms": 400.639,
+    "p99_ms": 610.815,
+    "p999_ms": 777.215,
+    "max_ms": 811.519,
+    "mean_ms": 300.52829305270325,
+    "count": 188908
+  },
+  "resource": {
+    "broker_cpu_seconds": 366.5503243374673,
+    "mem_cgroup_working_set_bytes": 8809426944,
+    "jvm_heap_used_bytes": 4408572264,
+    "jvm_nonheap_used_bytes": 274651192,
+    "kafka_page_cache_approx_bytes": 4126203488,
+    "msgs_per_cpu_core": 2996.0470011450107
+  },
+  "disturbance": {
+    "kill_at_ms": 1781421159000,
+    "recovery_at_ms": 0,
+    "dropped": 0,
+    "latency_spike_max_ms": 0.0
+  },
+  "first_ack_ms": 227,
+  "errors": [
+    "consumer-0-poll: client: connection closed"
+  ],
+  "notes": [],
+  "startup_ms": 66936
+}

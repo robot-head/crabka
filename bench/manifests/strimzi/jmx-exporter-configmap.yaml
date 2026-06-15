@@ -1,8 +1,20 @@
 ---
-# JMX prometheus exporter rule set referenced by Kafka.spec.kafka.metricsConfig
-# above. Reproduces the upstream Strimzi sample rules; trimmed to the ones the
-# benchmark actually reads (jvm_memory_bytes_used) so the PodMonitor target
-# stays light.
+# JMX prometheus exporter rule set referenced by Kafka.spec.kafka.metricsConfig.
+#
+# Strimzi 0.46 bundles the *new* Prometheus Java client (1.x,
+# `io.prometheus.metrics.*`) whose agent already registers built-in JVM
+# collectors (`jvm_memory_used_bytes`, `jvm_threads_current`, `jvm_gc_*`, …).
+# The previous hand-written rules re-declared `jvm_threads_current` (and a
+# malformed `jvm_memory_bytes_$3`), which collided with the built-ins:
+#
+#   java.lang.IllegalStateException: jvm_threads_current: duplicate metric name
+#
+# That exception aborts the *entire* /metrics scrape (HTTP 500 → `up=0`), so
+# Prometheus collected NO data for the Strimzi brokers at all. We therefore
+# drop the custom JVM rules and let the built-in collectors provide the heap /
+# non-heap breakdown (`jvm_memory_used_bytes{area="heap"|"nonheap"}`). Only a
+# Kafka-specific MBean rule remains, kept as a cross-check on the driver's own
+# byte counters — it cannot collide with a built-in name.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,25 +24,6 @@ data:
   kafka-metrics-config.yml: |
     lowercaseOutputName: true
     rules:
-      # Standard JVM metrics (heap, non-heap, GC, threads). The benchmark
-      # reads `jvm_memory_bytes_used{area=...}` for the Kafka memory split.
-      - pattern: "java.lang<type=Memory><(HeapMemoryUsage|NonHeapMemoryUsage)>(\\w+)"
-        name: jvm_memory_bytes_$3
-        type: GAUGE
-        labels:
-          area: "$1"
-        attrNameSnakeCase: false
-        valueFactor: 1
-      - pattern: "java.lang<type=GarbageCollector, name=(.+)><>(\\w+)"
-        name: jvm_gc_$2
-        type: COUNTER
-        labels:
-          gc: "$1"
-      - pattern: "java.lang<type=Threading><>ThreadCount"
-        name: jvm_threads_current
-        type: GAUGE
-      # Bytes-in/out per topic for the broker — handy as a sanity-check
-      # against the driver's own counters.
       - pattern: "kafka.server<type=BrokerTopicMetrics, name=(BytesInPerSec|BytesOutPerSec), topic=(.+)><>OneMinuteRate"
         name: kafka_server_brokertopicmetrics_$1_one_minute_rate
         type: GAUGE

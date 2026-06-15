@@ -18,8 +18,15 @@ case "$STACK" in
     log "tearing down Crabka cluster 'demo'"
     kubectl delete kafkatopic.crabka.io bench-topic -n "$BENCH_NAMESPACE" --ignore-not-found
     kubectl delete kafka.crabka.io demo -n "$BENCH_NAMESPACE" --ignore-not-found --wait=false
-    # KafkaNodePool is GC'd by its owner-ref on the Kafka — but if not, hit it.
-    kubectl delete kafkanodepool.crabka.io brokers -n "$BENCH_NAMESPACE" --ignore-not-found
+    # Delete all KafkaNodePools belonging to the demo cluster (handles both
+    # single 'brokers' pool and multi-pool topologies like broker-0/1/2).
+    kubectl delete kafkanodepool.crabka.io \
+      -n "$BENCH_NAMESPACE" \
+      -l "crabka.io/cluster=demo" \
+      --ignore-not-found 2>/dev/null || true
+    # Fallback: also try the old single-pool name in case the label isn't set
+    kubectl delete kafkanodepool.crabka.io brokers \
+      -n "$BENCH_NAMESPACE" --ignore-not-found 2>/dev/null || true
     kubectl delete pvc -n "$BENCH_NAMESPACE" -l app.kubernetes.io/instance=demo --ignore-not-found
     ;;
   kafka|strimzi)
@@ -40,7 +47,9 @@ esac
 for i in $(seq 1 60); do
   case "$STACK" in
     crabka)
-      pods=$(kubectl get pods -n "$BENCH_NAMESPACE" -l app.kubernetes.io/instance=demo -o name 2>/dev/null | wc -l | tr -d ' ')
+      pods=$(kubectl get pods -n "$BENCH_NAMESPACE" \
+        -l "app.kubernetes.io/instance=demo,app.kubernetes.io/managed-by=crabka-operator" \
+        -o name 2>/dev/null | wc -l | tr -d ' ')
       ;;
     *)
       pods=$(kubectl get pods -n "$BENCH_NAMESPACE" -l strimzi.io/cluster=demo -o name 2>/dev/null | wc -l | tr -d ' ')

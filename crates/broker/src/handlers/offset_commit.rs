@@ -27,7 +27,7 @@ use crate::coordinator::unified::actor::{
 };
 use crate::coordinator::unified::classic_state::OffsetEntry;
 use crate::error::BrokerError;
-use crate::partition::{ProduceJob, WriterMessage};
+use crate::partition::{ProduceData, ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
@@ -338,7 +338,10 @@ async fn append_batch(
     let (ack_tx, ack_rx) = oneshot::channel();
     if part_handle
         .writer_tx
-        .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
+        .send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Owned(batch),
+            ack: ack_tx,
+        }))
         .await
         .is_err()
     {

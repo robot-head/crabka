@@ -71,7 +71,8 @@ impl TlsConfig {
         let certs = load_certs(&self.cert_chain_path)?;
         let key = load_private_key(&self.private_key_path)?;
         let builder = rustls::ServerConfig::builder();
-        let cfg = match self.client_auth {
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut cfg = match self.client_auth {
             ClientAuthMode::Disabled => {
                 builder.with_no_client_auth().with_single_cert(certs, key)?
             }
@@ -97,6 +98,17 @@ impl TlsConfig {
                     .with_single_cert(certs, key)?
             }
         };
+        // Linux kTLS (Increment F): the kernel TLS offload needs rustls to
+        // surface the negotiated traffic secrets so `ktls` can install them
+        // into the socket's `crypto_info`. This is same-trust-boundary — the
+        // broker already holds the private key and the plaintext records — and
+        // it is a no-op on connections that never get configured for kTLS.
+        // Flows through `DynamicServerConfig::from_tls_config`/`reload_from`
+        // automatically, so TLS hot-reload keeps extraction enabled.
+        #[cfg(target_os = "linux")]
+        {
+            cfg.enable_secret_extraction = true;
+        }
         Ok(Arc::new(cfg))
     }
 

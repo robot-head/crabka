@@ -634,10 +634,18 @@ impl Controller {
     }
 }
 
-/// True when the metadata log under `dir` already holds committed records (a
-/// previously-formatted node). Detects either a quorum-state file or any log
-/// segment, indicating a previously-formatted node.
-fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
+/// True when the metadata log under `dir` already holds durable raft state (a
+/// previously-running node). Detects either a quorum-state file or any log
+/// segment, indicating a node that has persisted state.
+///
+/// `dir` is the controller data dir (`<log_dir>/__cluster_metadata`). The
+/// broker binary's `detect_bootstrap_mode` calls this so its Bootstrap/Rejoin
+/// choice can never disagree with [`Controller::start_with_listener`]'s mode
+/// validation — a node killed mid-election (segment dir created but no
+/// `quorum-state` yet) reads as un-formatted and re-Bootstraps rather than
+/// dying with "Rejoin requires non-empty raft log".
+#[must_use]
+pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
     let qs = dir.join("quorum-state");
     if qs.exists() {
         return true;

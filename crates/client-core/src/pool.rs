@@ -57,6 +57,15 @@ impl BrokerPool {
         Ok(conn)
     }
 
+    /// Drop the cached connection to `broker_id` (if any) so the next
+    /// [`get`](BrokerPool::get) reconnects. Used after a send fails: a bounced
+    /// or failed-over broker must not be retried over its dead, cached socket.
+    /// The `(id → addr)` mapping is left intact so the reconnect targets the
+    /// broker's current advertised address.
+    pub fn evict(&self, broker_id: i32) {
+        self.by_id.remove(&broker_id);
+    }
+
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
     pub async fn bootstrap_connection(&self) -> Result<Arc<Connection>, ClientError> {
@@ -87,13 +96,26 @@ impl BrokerPool {
     /// [`get`](BrokerPool::get) reports `Disconnected` for that id, letting a
     /// caller fall back to the bootstrap connection rather than attempting a
     /// doomed `host:0` connect.
-    pub fn refresh_brokers(&self, brokers: &[BrokerInfo]) {
+    pub async fn refresh_brokers(&self, brokers: &[BrokerInfo]) {
         for b in brokers {
-            if b.port == 0 {
+            let Ok(port) = u16::try_from(b.port) else {
+                continue;
+            };
+            if port == 0 {
                 continue;
             }
-            let addr_str = format!("{}:{}", b.host, b.port);
-            if let Ok(addr) = addr_str.parse::<SocketAddr>() {
+            // Resolve the advertised host to a dialable address. Brokers
+            // commonly advertise a DNS name (e.g. a Kubernetes pod FQDN), and a
+            // bare `parse::<SocketAddr>()` only accepts a literal IP — so a
+            // hostname-advertised broker would never enter the registry,
+            // leaving `knows_broker` false and routing every produce/fetch to
+            // the bootstrap connection. On a multi-broker cluster that means a
+            // partition whose leader isn't the bootstrap broker gets a
+            // permanent `NOT_LEADER_OR_FOLLOWER`. `lookup_host` resolves both
+            // DNS names and literal IPs.
+            if let Ok(mut addrs) = tokio::net::lookup_host((b.host.as_str(), port)).await
+                && let Some(addr) = addrs.next()
+            {
                 self.by_addr.insert(b.id, addr);
             }
         }
@@ -124,8 +146,8 @@ mod tests {
     use super::*;
     use assert2::assert;
 
-    #[test]
-    fn refresh_inserts_addresses() {
+    #[tokio::test]
+    async fn refresh_inserts_addresses() {
         let pool = BrokerPool::new(vec![], ConnectionOptions::default());
         pool.refresh_brokers(&[
             BrokerInfo {
@@ -140,10 +162,26 @@ mod tests {
                 port: 9093,
                 rack: None,
             },
-        ]);
+        ])
+        .await;
         assert!(pool.by_addr.contains_key(&1));
         assert!(pool.by_addr.contains_key(&2));
         assert!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
         assert!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn refresh_resolves_hostnames() {
+        // Regression: a broker advertising a DNS name (not a literal IP) must
+        // still enter the registry. `localhost` resolves offline.
+        let pool = BrokerPool::new(vec![], ConnectionOptions::default());
+        pool.refresh_brokers(&[BrokerInfo {
+            id: 7,
+            host: "localhost".into(),
+            port: 9092,
+            rack: None,
+        }])
+        .await;
+        assert!(pool.knows_broker(7));
     }
 }

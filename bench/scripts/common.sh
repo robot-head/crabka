@@ -12,14 +12,47 @@ log() {
 
 # bootstrap_for STACK
 #   echo the in-cluster DNS:port for the Kafka bootstrap Service.
+#   Plaintext: port 9092 on both stacks. TLS (BENCH_TLS set): the TLS data
+#   listener port, which DIFFERS per stack. crabka reserves 9093 for the KRaft
+#   controller listener (CONTROLLER_PORT), so its TLS data listener is on 9094;
+#   Strimzi follows its own convention (9093). The DNS host is identical to the
+#   plaintext case (both listeners share the headless / bootstrap Service); only
+#   the port selects the listener.
 bootstrap_for() {
   local stack="$1"
   case "$stack" in
     crabka)
-      printf 'demo-broker-headless.%s.svc.cluster.local:9092' "$BENCH_NAMESPACE"
+      local port=9092
+      [[ -n "${BENCH_TLS:-}" ]] && port=9094
+      printf 'demo-broker-headless.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
       ;;
     kafka|strimzi)
-      printf 'demo-kafka-bootstrap.%s.svc.cluster.local:9092' "$BENCH_NAMESPACE"
+      local port=9092
+      [[ -n "${BENCH_TLS:-}" ]] && port=9093
+      printf 'demo-kafka-bootstrap.%s.svc.cluster.local:%s' "$BENCH_NAMESPACE" "$port"
+      ;;
+    *)
+      log "unknown stack '$stack' (want crabka|kafka)"
+      return 2
+      ;;
+  esac
+}
+
+# tls_server_name_for STACK
+#   echo the SNI / cert-SAN name the driver must present for one-way TLS.
+#   LOAD-BEARING: the bootstrap DNS resolves to a pod IP and is dialed by IP,
+#   so the SNI is NOT the bootstrap host — it is a name that appears as a SAN
+#   on the broker serving cert:
+#     crabka : the shared headless-Service FQDN (a SAN on every broker cert)
+#     strimzi: the short bootstrap-Service name (a SAN on Strimzi broker certs)
+tls_server_name_for() {
+  local stack="$1"
+  case "$stack" in
+    crabka)
+      printf 'demo-broker-headless.%s.svc.cluster.local' "$BENCH_NAMESPACE"
+      ;;
+    kafka|strimzi)
+      printf 'demo-kafka-bootstrap'
       ;;
     *)
       log "unknown stack '$stack' (want crabka|kafka)"
@@ -40,6 +73,7 @@ kafka_kind() {
 
 # wait_kafka_ready STACK [TIMEOUT_S]
 #   poll the Kafka CR until status.conditions[type=Ready].status == True
+#   (and for Crabka: all BENCH_BROKER_COUNT brokers are listed as ready)
 #   or TIMEOUT_S elapses. Echo the elapsed wall-clock seconds.
 wait_kafka_ready() {
   local stack="$1"
@@ -50,7 +84,9 @@ wait_kafka_ready() {
     kafka|strimzi) kind="kafka.kafka.strimzi.io"; name="demo" ;;
   esac
   local started=$(date +%s)
-  local now status
+  local now status msg
+  # Number of brokers we expect (set by run-scenario.sh before sourcing common.sh).
+  local expected_brokers="${BENCH_BROKER_COUNT:-1}"
   while :; do
     now=$(date +%s)
     if (( now - started > timeout )); then
@@ -61,12 +97,25 @@ wait_kafka_ready() {
     status=$(kubectl get "$kind" "$name" -n "$BENCH_NAMESPACE" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
     if [[ "$status" == "True" ]]; then
+      # For Crabka multi-broker: also verify all brokers have joined.
+      # The operator sets message like "3/3 brokers ready across 3 pool(s)".
+      if [[ "$stack" == "crabka" && "$expected_brokers" -gt 1 ]]; then
+        msg=$(kubectl get "$kind" "$name" -n "$BENCH_NAMESPACE" \
+          -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || echo "")
+        if echo "$msg" | grep -q "${expected_brokers}/${expected_brokers} brokers ready"; then
+          echo "$(( now - started ))"
+          return 0
+        fi
+        sleep 5
+        continue
+      fi
       echo "$(( now - started ))"
       return 0
     fi
     sleep 5
   done
 }
+
 
 # wait_kafka_topic_ready STACK TOPIC [TIMEOUT_S]
 wait_kafka_topic_ready() {

@@ -1,0 +1,166 @@
+---
+# 3-broker RF=3 crabka cluster with a TLS data-path listener.
+#
+# Identical to kafka-cr-3broker-rf3.yaml except the Kafka CR declares an
+# explicit listener set: a plaintext listener on 9092 (kept so the plaintext
+# benchmark cells / admin tooling still work) and an `Ssl` listener on 9093.
+# The operator auto-issues per-broker serving certs from the cluster CA and
+# publishes the CA bundle in the `demo-cluster-ca-cert` Secret (key `ca.crt`),
+# which the driver Job mounts and trusts. Clients dialing :9093 hit the
+# TLS-encrypted produce/fetch path (crabka serves it via kTLS sendfile).
+apiVersion: crabka.io/v1alpha1
+kind: Kafka
+metadata:
+  name: demo
+  namespace: default
+spec:
+  kafkaVersion: "3.7.0"
+  # Use the plaintext listener for inter-broker replication + the operator's
+  # admin/topic management. Required because we declare explicit listeners
+  # named "plain"/"tls": the topic reconciler matches the inter-broker listener
+  # by name and otherwise defaults to "PLAIN" (uppercase), which wouldn't match
+  # "plain" → "no internal listener" and the bench-topic never reconciles.
+  interBrokerListenerName: plain
+  listeners:
+    - name: plain
+      port: 9092
+      type: internal
+      tls: false
+    # 9094, NOT 9093: crabka reserves 9093 for the KRaft controller listener
+    # (CONTROLLER_PORT in the operator), so a data listener on 9093 collides at
+    # bind time and SIGKILLs the broker. 9094 is free (9092 plaintext data,
+    # 9093 controller).
+    - name: tls
+      port: 9094
+      type: internal
+      tls: true
+  config:
+    log.retention.hours: "24"
+    default.replication.factor: "3"
+    min.insync.replicas: "2"
+  metricsConfig:
+    podMonitor:
+      interval: 15s
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: broker-0
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 0
+  storage:
+    type: PersistentClaim
+    class: premium-rwo
+    size: 200Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
+    metadata:
+      labels:
+        bench-pool: beefy
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: broker-1
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 1
+  storage:
+    type: PersistentClaim
+    class: premium-rwo
+    size: 200Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
+    metadata:
+      labels:
+        bench-pool: beefy
+---
+apiVersion: crabka.io/v1alpha1
+kind: KafkaNodePool
+metadata:
+  name: broker-2
+  namespace: default
+  labels:
+    crabka.io/cluster: demo
+spec:
+  roles: [Controller, Broker]
+  replicas: 1
+  nodeIdStart: 2
+  storage:
+    type: PersistentClaim
+    class: premium-rwo
+    size: 200Gi
+    deleteClaim: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "4"
+      memory: 12Gi
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: beefy-pool
+    # Spread brokers across distinct nodes so replication + failover cross the
+    # network and the brokers don't contend for one node's CPU/disk. 3 brokers
+    # over the 3-node beefy-pool → exactly one per node.
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: crabka-broker
+              app.kubernetes.io/instance: demo
+          topologyKey: kubernetes.io/hostname
+    metadata:
+      labels:
+        bench-pool: beefy

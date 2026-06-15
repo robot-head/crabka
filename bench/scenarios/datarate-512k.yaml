@@ -1,0 +1,23 @@
+# Large-message data-rate test: 512 KiB records (5x the `large-msg` 100 KiB)
+# with 4 producers + 2 consumers saturating, to characterise the MB/s gap vs
+# Kafka as message size grows. Crabka loses ground on large messages because
+# fetch lacks zero-copy sendfile and produce decodes+re-encodes the batch
+# (per-byte costs that only bite at 100 KiB+). Compare mb_in (produce path)
+# and mb_out (fetch path) against `large-msg` to see whether the gap widens
+# with size and which side (produce vs fetch) dominates the loss.
+# batch_size == msg_size so each record forms its own batch (no splitting).
+name: datarate-512k
+mode_tag: cluster
+msg_size_bytes: 524288
+partitions: 24
+replication_factor: 1
+producers: 4
+consumers: 2
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 524288
+warmup_s: 15
+duration_s: 120

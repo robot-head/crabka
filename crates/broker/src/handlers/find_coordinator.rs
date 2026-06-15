@@ -85,7 +85,11 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let broker_id = broker.config.broker_id;
     let node_id = broker.config.node_id;
-    let advertised = broker.config.advertised_listener.clone();
+    // The local broker's advertised `host:port` for the listener this request
+    // arrived on (Kafka returns the connection listener's address). Falls back
+    // to the legacy top-level `advertised_listener` when the connection
+    // listener isn't among this broker's configured listeners.
+    let advertised = local_advertised_for_listener(&broker.config, ctx.connection_listener_name);
     let controller = Arc::clone(&broker.controller);
     {
         let mut cur: &[u8] = req_bytes;
@@ -193,14 +197,21 @@ pub(crate) async fn handle(
                         continue;
                     };
                     let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
-                    // Prefer our own `advertised_listener` when the leader is
-                    // this broker: the metadata record may carry the pre-bind
-                    // port (0) in test setups where the OS assigns the port.
+                    // Resolve the coordinator's address for the listener this
+                    // request arrived on. For the local broker prefer our own
+                    // connection-listener advertised address (the metadata
+                    // record may carry the pre-bind port 0 in test setups
+                    // where the OS assigns the port); for a remote leader pick
+                    // its connection-listener endpoint from the image record.
                     let (host, port_i32) = if leader == node_id {
                         let (h, p) = parse_host_port(&advertised);
                         (h, i32::from(p))
                     } else {
-                        (broker_info.host.clone(), i32::from(broker_info.port))
+                        crate::handlers::metadata::pick_endpoint_host_port(
+                            broker_info,
+                            ctx.connection_listener_name,
+                            broker.config.inter_broker_listener_name.as_str(),
+                        )
                     };
                     result.push(Coordinator {
                         key: k,
@@ -285,14 +296,20 @@ pub(crate) async fn handle(
                         continue;
                     };
                     let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
-                    // Prefer our own `advertised_listener` when the leader is
-                    // this broker (the metadata record may carry a pre-bind
-                    // port in test setups).
+                    // Resolve the coordinator's address for the connection
+                    // listener (see the TXN branch). Local broker → our own
+                    // connection-listener advertised address (test setups may
+                    // record a pre-bind port); remote leader → its
+                    // connection-listener endpoint from the image record.
                     let (host, port_i32) = if leader == node_id {
                         let (h, p) = parse_host_port(&advertised);
                         (h, i32::from(p))
                     } else {
-                        (broker_info.host.clone(), i32::from(broker_info.port))
+                        crate::handlers::metadata::pick_endpoint_host_port(
+                            broker_info,
+                            ctx.connection_listener_name,
+                            broker.config.inter_broker_listener_name.as_str(),
+                        )
                     };
                     result.push(Coordinator {
                         key: k,
@@ -401,6 +418,29 @@ fn parse_share_key(key: &str) -> Option<(&str, uuid::Uuid, i32)> {
     Some((group, topic_id, partition))
 }
 
+/// The local broker's advertised `host:port` string for the listener a
+/// request arrived on. Kafka returns the connection listener's advertised
+/// address, so a TLS client gets the TLS listener's `advertised` and a
+/// plaintext client gets the plaintext one. Falls back to the legacy
+/// top-level `advertised_listener` when the connection listener isn't among
+/// this broker's configured listeners (e.g. the single-listener default,
+/// where `connection_listener_name == "PLAINTEXT"` still resolves it).
+///
+/// A matched listener whose advertised port is `0` (an OS-assigned dynamic
+/// port, common in test harnesses) is unusable as a coordinator address, so
+/// we fall back to `advertised_listener`, which `Broker::start` rewrites to
+/// the real bound port after binding.
+fn local_advertised_for_listener(
+    config: &crate::config::BrokerConfig,
+    connection_listener_name: &str,
+) -> String {
+    config
+        .effective_listeners()
+        .into_iter()
+        .find(|l| l.name == connection_listener_name && !l.advertised.ends_with(":0"))
+        .map_or_else(|| config.advertised_listener.clone(), |l| l.advertised)
+}
+
 fn parse_host_port(addr: &str) -> (String, u16) {
     if let Some((h, p)) = addr.rsplit_once(':')
         && let Ok(port) = p.parse::<u16>()
@@ -454,5 +494,45 @@ mod tests {
         let c = denied_coordinator("g".into(), codes::GROUP_AUTHORIZATION_FAILED);
         assert!(c.error_code == codes::GROUP_AUTHORIZATION_FAILED);
         assert!(c.node_id == -1);
+    }
+
+    fn listener(name: &str, advertised: &str) -> crate::config::ListenerSpec {
+        crate::config::ListenerSpec {
+            name: name.to_string(),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            advertised: advertised.to_string(),
+            protocol: crabka_security::ListenerProtocol::Plaintext,
+            tls_config: None,
+            sasl_mechanisms: None,
+        }
+    }
+
+    /// A request on the `"tls"` listener resolves the local coordinator to the
+    /// tls listener's advertised address; a request on `"plain"` resolves to
+    /// the plain listener's address.
+    #[test]
+    fn local_advertised_tracks_connection_listener() {
+        let config = crate::config::BrokerConfig {
+            advertised_listener: "legacy:1000".to_string(),
+            listeners: vec![
+                listener("plain", "plain-host:9092"),
+                listener("tls", "tls-host:9094"),
+            ],
+            ..Default::default()
+        };
+        assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
+        assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
+    }
+
+    /// When the connection listener isn't configured, fall back to the legacy
+    /// top-level `advertised_listener`.
+    #[test]
+    fn local_advertised_falls_back_to_legacy() {
+        let config = crate::config::BrokerConfig {
+            advertised_listener: "legacy:1000".to_string(),
+            listeners: vec![listener("plain", "plain-host:9092")],
+            ..Default::default()
+        };
+        assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
     }
 }

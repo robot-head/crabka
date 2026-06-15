@@ -18,12 +18,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::join_group_response::JoinGroupResponse;
@@ -52,11 +55,154 @@ pub(crate) const NOT_COORDINATOR: i16 = 16;
 /// surfacing the last error. Matches a typical client `request.timeout.ms`.
 pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn is_retriable_coordinator_code(code: i16) -> bool {
+/// `FindCoordinator` `key_type` for a consumer group (vs. `1` = TRANSACTION,
+/// `2` = SHARE). With this key-type the request `key` is the group id.
+const KEY_TYPE_GROUP: i8 = 0;
+
+pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
         code,
         COORDINATOR_LOAD_IN_PROGRESS | COORDINATOR_NOT_AVAILABLE | NOT_COORDINATOR
     )
+}
+
+/// Read the effective `error_code` from a `FindCoordinatorResponse` across wire
+/// shapes: v4+ carries per-key rows in `coordinators` (we use the first), v0-v3
+/// uses the top-level field. crabka's broker populates both, so either read is
+/// correct against it; this keeps us right against real Kafka at any negotiated
+/// version.
+fn coordinator_error_code(r: &FindCoordinatorResponse) -> i16 {
+    r.coordinators
+        .first()
+        .map_or(r.error_code, |c| c.error_code)
+}
+
+/// Read the coordinator `node_id` from a `FindCoordinatorResponse` across wire
+/// shapes (v4+ `coordinators[0].node_id`, else the top-level `node_id`).
+fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
+    r.coordinators.first().map_or(r.node_id, |c| c.node_id)
+}
+
+/// Discover the broker that currently coordinates `group_id` and return its
+/// node id.
+///
+/// Sends `FindCoordinator(key = group_id, key_type = GROUP)` over the bootstrap
+/// connection (any broker can answer `FindCoordinator`), retrying cold/loading
+/// coordinator codes (14/15/16) with backoff. On success we `refresh_metadata`
+/// so the pool learns the coordinator broker's address (it appears in the
+/// cluster's broker list); without this,
+/// [`Client::broker`](crabka_client_core::Client::broker) for the coordinator id
+/// would fail with `Disconnected`.
+///
+/// Returns the coordinator's `node_id`. Errors with `Server(code)` if the lookup
+/// keeps returning a non-zero, non-retriable code; with `CoordinatorUnavailable`
+/// if after the refresh the pool still has no dialable address for that id.
+pub(crate) async fn find_coordinator(
+    client: &Client,
+    group_id: &str,
+) -> Result<i32, ConsumerError> {
+    let resp = with_coordinator_retry(COORDINATOR_RETRY_TIMEOUT, coordinator_error_code, || {
+        let group_id = group_id.to_string();
+        async move {
+            client
+                .send(FindCoordinatorRequest {
+                    key: group_id.clone(),
+                    key_type: KEY_TYPE_GROUP,
+                    // v4+ carries the key(s) in `coordinator_keys`; older
+                    // versions ignore it and use `key`. Populating both
+                    // keeps us version-agnostic on the negotiated wire form.
+                    coordinator_keys: vec![group_id],
+                    ..Default::default()
+                })
+                .await
+                .map_err(ConsumerError::from)
+        }
+    })
+    .await?;
+
+    let code = coordinator_error_code(&resp);
+    if code != 0 {
+        return Err(ConsumerError::Server(code));
+    }
+    let node_id = coordinator_node_id(&resp);
+
+    // Refresh the pool's (id → addr) registry so a multi-broker cluster learns
+    // the coordinator broker's real address and `client.broker(node_id)` dials
+    // it directly. A single-broker cluster advertises the coordinator on port 0
+    // (deliberately skipped by `refresh_brokers`), leaving the id unknown — but
+    // `BrokerHandle::send` then falls back to the bootstrap connection, which on
+    // a single-broker cluster IS the coordinator. So we no longer hard-fail when
+    // the coordinator isn't a separately dialable broker.
+    client.refresh_metadata().await?;
+    Ok(node_id)
+}
+
+/// Send a group-coordinator RPC to the *current* coordinator broker, and on a
+/// cold/relocating-coordinator code (14/15/16) re-discover the coordinator
+/// before retrying — so a moved coordinator (real Kafka returns `NOT_COORDINATOR`
+/// when an RPC reaches the wrong broker) is chased to its new home instead of
+/// looping forever on the stale id. This is the crux of the fix: the plain
+/// `with_coordinator_retry` re-sends the identical request to the same broker.
+///
+/// `coordinator_id` is the shared cell read by `make` (so each retry targets
+/// the latest id) and updated in place as re-discovery succeeds; `make` does the
+/// `client.broker(id).send(...)` routing itself. Mirrors
+/// `with_coordinator_retry`'s deadline and backoff; the only addition is the
+/// re-find between retriable attempts.
+pub(crate) async fn with_coordinator_refind<R, F, Fut>(
+    client: &Client,
+    group_id: &str,
+    coordinator_id: &AtomicI32,
+    timeout: Duration,
+    code: impl Fn(&R) -> i16,
+    make: F,
+) -> Result<R, ConsumerError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<R, ConsumerError>>,
+{
+    const MAX_BACKOFF: Duration = Duration::from_secs(1);
+    let start = tokio::time::Instant::now();
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        let needs_refind = match make().await {
+            Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
+            Ok(r) => {
+                if start.elapsed() >= timeout {
+                    return Ok(r);
+                }
+                // Retriable broker code: the coordinator likely moved.
+                true
+            }
+            Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
+                if start.elapsed() >= timeout {
+                    return Err(ConsumerError::CoordinatorUnavailable);
+                }
+                // The socket to the coordinator is gone (bounced / failed
+                // over); evict it so re-discovery + the next attempt reconnect
+                // to the current coordinator's address.
+                client.evict_broker(coordinator_id.load(Ordering::Relaxed));
+                true
+            }
+            Err(e) => return Err(e),
+        };
+        if needs_refind {
+            // Best-effort re-discovery. A transient failure here just means the
+            // next attempt reuses the last-known id; the outer deadline (and
+            // find_coordinator's own retry) still bound us.
+            match find_coordinator(client, group_id).await {
+                Ok(id) => coordinator_id.store(id, Ordering::Relaxed),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "coordinator re-discovery failed; retrying with last-known id"
+                    );
+                }
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
 }
 
 /// Send a group-coordinator RPC, retrying on cold-coordinator codes
@@ -108,6 +254,15 @@ where
 pub(crate) struct CoordinatorState {
     pub client: Client,
     pub group_id: String,
+    /// Node id of the broker currently coordinating this group, discovered via
+    /// `FindCoordinator`. Every group RPC (Join/Sync/Heartbeat/Commit/Fetch/
+    /// Leave) is routed here with `client.broker(coordinator_id)`; it's
+    /// re-discovered when a coordinator RPC returns 14/15/16.
+    ///
+    /// Shared (`Arc<AtomicI32>`) with the parent `Consumer` so its commit path
+    /// (`commit.rs`, running on the data-path client) routes `OffsetCommit` to
+    /// the same coordinator, and sees re-discovery updates the moment they land.
+    pub coordinator_id: Arc<AtomicI32>,
     pub member_id: String,
     pub generation_id: i32,
     pub assignor: Assignor,
@@ -148,6 +303,18 @@ enum HeartbeatOutcome {
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
 pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken) {
+    // The coordinator task runs on its own `Client` (separate pool from the
+    // build/data-path client), so its pool's (id → addr) registry starts empty.
+    // Populate it once up front so the very first heartbeat's
+    // `client.broker(coordinator_id)` resolves an address instead of failing
+    // `Disconnected` and burning a heartbeat interval on re-discovery. The id
+    // was already discovered at build time; this just teaches *this* pool where
+    // that broker lives. Best-effort: a failure here is recovered by the
+    // heartbeat path's Disconnected → re-discover handling.
+    if let Err(e) = state.client.refresh_metadata().await {
+        tracing::warn!(error = %e, "coordinator client metadata refresh failed at startup");
+    }
+
     let mut ticker = tokio::time::interval(state.heartbeat_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_rejoin = false;
@@ -216,8 +383,14 @@ async fn leave_group(state: &CoordinatorState) {
     }
     // `member_id` is populated for both the v0–v2 (top-level) and v3+
     // (`members` array) wire shapes so the negotiated version picks up
-    // whichever it serializes.
-    let send = state.client.send(LeaveGroupRequest {
+    // whichever it serializes. Routed to the coordinator broker like every
+    // other group RPC; on close it's best-effort, so a stale/unknown
+    // coordinator id (Disconnected) just falls back to session-timeout
+    // eviction — no re-discovery is worth the wall-clock on shutdown.
+    let coordinator = state
+        .client
+        .broker(state.coordinator_id.load(Ordering::Relaxed));
+    let send = coordinator.send(LeaveGroupRequest {
         group_id: state.group_id.clone(),
         member_id: state.member_id.clone(),
         members: vec![MemberIdentity {
@@ -229,10 +402,17 @@ async fn leave_group(state: &CoordinatorState) {
     let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
 }
 
-/// Send one `Heartbeat` and translate the response into a directive.
+/// Send one `Heartbeat` to the coordinator broker and translate the response
+/// into a directive.
+///
+/// A cold/relocating-coordinator code (14/15/16) triggers in-place
+/// re-discovery — the coordinator moved, so the next tick's heartbeat/rejoin
+/// must target the new broker — and is reported as `Transient` so we simply
+/// retry on the next tick.
 async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
     let result = state
         .client
+        .broker(state.coordinator_id.load(Ordering::Relaxed))
         .send(HeartbeatRequest {
             group_id: state.group_id.clone(),
             generation_id: state.generation_id,
@@ -244,13 +424,40 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
         Ok(r) if r.error_code == 0 => HeartbeatOutcome::Ok,
         Ok(r) if r.error_code == 27 || r.error_code == 22 => HeartbeatOutcome::NeedRejoin,
         Ok(r) if r.error_code == 25 => HeartbeatOutcome::RejoinFromScratch,
+        Ok(r) if is_retriable_coordinator_code(r.error_code) => {
+            refind_after(state, "heartbeat").await;
+            HeartbeatOutcome::Transient
+        }
         Ok(r) => {
             tracing::warn!(error_code = r.error_code, "unexpected heartbeat error");
+            HeartbeatOutcome::Transient
+        }
+        Err(crabka_client_core::ClientError::Disconnected) => {
+            // Lost the socket to the coordinator (bounced / failed over):
+            // evict + re-discover so the next tick reconnects to its current
+            // address.
+            state
+                .client
+                .evict_broker(state.coordinator_id.load(Ordering::Relaxed));
+            refind_after(state, "heartbeat").await;
             HeartbeatOutcome::Transient
         }
         Err(e) => {
             tracing::warn!(error = %e, "heartbeat send failed");
             HeartbeatOutcome::Transient
+        }
+    }
+}
+
+/// Best-effort coordinator re-discovery used off the heartbeat path (which
+/// can't surface an error). Publishes the new id into the shared
+/// `coordinator_id` cell on success; logs and keeps the last-known id on
+/// failure (the next tick retries).
+async fn refind_after(state: &CoordinatorState, ctx: &str) {
+    match find_coordinator(&state.client, &state.group_id).await {
+        Ok(id) => state.coordinator_id.store(id, Ordering::Relaxed),
+        Err(e) => {
+            tracing::warn!(error = %e, context = ctx, "coordinator re-discovery failed");
         }
     }
 }
@@ -405,6 +612,7 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let topics = build_commit_topics(offsets, &topic_ids);
     let res = state
         .client
+        .broker(state.coordinator_id.load(Ordering::Relaxed))
         .send(OffsetCommitRequest {
             group_id: state.group_id.clone(),
             generation_id_or_member_epoch: state.generation_id,
@@ -443,20 +651,37 @@ async fn join_and_sync(
     );
     let protocol_name = state.assignor.protocol_name().to_string();
 
+    // Pull the pieces every retry closure needs out of `&mut state` into locals
+    // so `with_coordinator_refind` can borrow the shared coordinator cell
+    // alongside the closures' borrows without aliasing `state`. `Client` and
+    // the `Arc<AtomicI32>` are both cheap to clone; the atomic is the same cell
+    // `state.coordinator_id` points at, so re-discovery updates are visible to
+    // the rest of the task and the parent `Consumer` immediately.
+    let client = state.client.clone();
+    let group_id = state.group_id.clone();
+    let coordinator_id = Arc::clone(&state.coordinator_id);
+
     // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79) and
     // capture the broker-assigned id, then issue a second join. Retry a cold or
-    // relocating coordinator (14/15/16) with backoff on each send.
-    let r1 = with_coordinator_retry(
+    // relocating coordinator (14/15/16) with backoff, re-discovering the
+    // coordinator before each retry so a moved coordinator is chased rather
+    // than re-hit on the stale broker.
+    let r1 = with_coordinator_refind(
+        &client,
+        &group_id,
+        &coordinator_id,
         COORDINATOR_RETRY_TIMEOUT,
         |r: &JoinGroupResponse| r.error_code,
         || {
-            let group_id = state.group_id.clone();
+            let group_id = group_id.clone();
             let member_id = state.member_id.clone();
             let protocol_name = protocol_name.clone();
             let subscription_bytes = subscription_bytes.clone();
-            let client = &state.client;
+            let client = &client;
+            let target = coordinator_id.load(Ordering::Relaxed);
             async move {
                 client
+                    .broker(target)
                     .send(JoinGroupRequest {
                         group_id,
                         protocol_type: "consumer".into(),
@@ -486,17 +711,22 @@ async fn join_and_sync(
             ));
         }
         state.member_id.clone_from(&assigned_id);
-        let r2 = with_coordinator_retry(
+        let r2 = with_coordinator_refind(
+            &client,
+            &group_id,
+            &coordinator_id,
             COORDINATOR_RETRY_TIMEOUT,
             |r: &JoinGroupResponse| r.error_code,
             || {
-                let group_id = state.group_id.clone();
+                let group_id = group_id.clone();
                 let assigned_id = assigned_id.clone();
                 let protocol_name = protocol_name.clone();
                 let subscription_bytes = subscription_bytes.clone();
-                let client = &state.client;
+                let client = &client;
+                let target = coordinator_id.load(Ordering::Relaxed);
                 async move {
                     client
+                        .broker(target)
                         .send(JoinGroupRequest {
                             group_id,
                             protocol_type: "consumer".into(),
@@ -591,17 +821,22 @@ async fn join_and_sync(
         Vec::new()
     };
 
-    let sync_resp = with_coordinator_retry(
+    let sync_resp = with_coordinator_refind(
+        &client,
+        &group_id,
+        &coordinator_id,
         COORDINATOR_RETRY_TIMEOUT,
         |r: &SyncGroupResponse| r.error_code,
         || {
-            let group_id = state.group_id.clone();
+            let group_id = group_id.clone();
             let member_id = state.member_id.clone();
             let chosen_protocol = chosen_protocol.clone();
             let assignments_for_sync = assignments_for_sync.clone();
-            let client = &state.client;
+            let client = &client;
+            let target = coordinator_id.load(Ordering::Relaxed);
             async move {
                 client
+                    .broker(target)
                     .send(SyncGroupRequest {
                         group_id,
                         generation_id,
@@ -617,6 +852,9 @@ async fn join_and_sync(
         },
     )
     .await?;
+    // Any coordinator move discovered during this join/sync round is already
+    // published into the shared `coordinator_id` cell (same `Arc` as
+    // `state.coordinator_id`), so heartbeats/commits see it immediately.
     if sync_resp.error_code != 0 {
         return Err(ConsumerError::Server(sync_resp.error_code));
     }
@@ -640,8 +878,12 @@ async fn prime_offsets(
         by_topic.entry(t.clone()).or_default().push(*p);
     }
     let topic_ids = state.topic_ids.lock().await.clone();
+    // OffsetFetch is a coordinator RPC. `prime_offsets` only runs right after a
+    // successful join/sync (which just discovered/refreshed `coordinator_id`),
+    // so the id is fresh; route straight to it.
     let of = state
         .client
+        .broker(state.coordinator_id.load(Ordering::Relaxed))
         .send(build_offset_fetch(&state.group_id, &by_topic, &topic_ids))
         .await?;
 
@@ -756,5 +998,143 @@ mod retry_tests {
         )
         .await;
         assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+    }
+}
+
+#[cfg(test)]
+mod find_coordinator_parse_tests {
+    use super::*;
+    use crabka_protocol::owned::find_coordinator_response::Coordinator;
+
+    use assert2::assert;
+
+    // v4+ shape: the broker fills the `coordinators` array; legacy top-level
+    // fields are zeroed/unused. We must read the array.
+    #[test]
+    fn reads_node_id_and_code_from_coordinators_array() {
+        let resp = FindCoordinatorResponse {
+            // Legacy top-level deliberately wrong to prove we prefer the array.
+            node_id: -1,
+            error_code: 99,
+            coordinators: vec![Coordinator {
+                key: "g".into(),
+                node_id: 7,
+                host: "h".into(),
+                port: 9092,
+                error_code: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(coordinator_node_id(&resp) == 7);
+        assert!(coordinator_error_code(&resp) == 0);
+    }
+
+    // v0-v3 shape: no `coordinators` array, the top-level fields carry the
+    // answer. crabka's broker also populates these for the legacy versions.
+    #[test]
+    fn falls_back_to_top_level_when_array_empty() {
+        let resp = FindCoordinatorResponse {
+            node_id: 3,
+            error_code: 0,
+            coordinators: vec![],
+            ..Default::default()
+        };
+        assert!(coordinator_node_id(&resp) == 3);
+        assert!(coordinator_error_code(&resp) == 0);
+    }
+
+    // A relocating coordinator surfaces NOT_COORDINATOR in the array row; we
+    // read it so the retry/re-find path triggers.
+    #[test]
+    fn surfaces_not_coordinator_from_array_row() {
+        let resp = FindCoordinatorResponse {
+            node_id: 1,
+            error_code: 0,
+            coordinators: vec![Coordinator {
+                key: "g".into(),
+                node_id: -1,
+                error_code: NOT_COORDINATOR,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(coordinator_error_code(&resp) == NOT_COORDINATOR);
+        assert!(is_retriable_coordinator_code(coordinator_error_code(&resp)));
+    }
+}
+
+#[cfg(test)]
+mod refind_tests {
+    use super::*;
+    use assert2::assert;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Resp {
+        error_code: i16,
+    }
+
+    // Without a live broker we can't exercise the real re-find (it sends RPCs),
+    // but we can prove the retry/backoff/deadline behaviour matches
+    // `with_coordinator_retry` for the no-broker code paths. A purely
+    // successful response returns immediately without touching the
+    // coordinator cell.
+    #[tokio::test(start_paused = true)]
+    async fn returns_immediately_on_success_without_refind() {
+        // 127.0.0.1:1 is unroutable, so any re-find attempt would fail — but a
+        // success on the first attempt must never re-find.
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .build()
+            .await
+            .unwrap();
+        let coord = AtomicI32::new(5);
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_refind(
+            &client,
+            "g",
+            &coord,
+            Duration::from_secs(30),
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ConsumerError>(Resp { error_code: 0 }) }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(r.error_code == 0);
+        assert!(calls.load(Ordering::SeqCst) == 1);
+        // Coordinator cell untouched — no re-find on success.
+        assert!(coord.load(Ordering::Relaxed) == 5);
+    }
+
+    // A non-retriable broker code (e.g. UNKNOWN_MEMBER_ID 25) is returned to the
+    // caller on the first attempt, no re-find.
+    #[tokio::test(start_paused = true)]
+    async fn non_retriable_code_returns_without_refind() {
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .build()
+            .await
+            .unwrap();
+        let coord = AtomicI32::new(2);
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_refind(
+            &client,
+            "g",
+            &coord,
+            Duration::from_secs(30),
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ConsumerError>(Resp { error_code: 25 }) }
+            },
+        )
+        .await
+        .unwrap();
+        assert!(r.error_code == 25);
+        assert!(calls.load(Ordering::SeqCst) == 1);
+        assert!(coord.load(Ordering::Relaxed) == 2);
     }
 }

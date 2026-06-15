@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
-use crabka_log::{AbortedTxn, Log, ReadOutput};
+use crabka_log::{AbortedTxn, Log, ReadOutput, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -27,13 +27,31 @@ use tokio::task::JoinHandle;
 use crate::error::BrokerError;
 use crate::replica_state::ReplicaState;
 
+/// The records to append for a single produce job — either the producer's
+/// verbatim wire bytes (zero-copy passthrough fast path) or a fully owned,
+/// decoded [`RecordBatch`] (the fallback path used when passthrough is
+/// unsafe: recompression, legacy up-conversion, control batches, etc.).
+///
+/// The `Owned` arm is a complete fallback, so the whole verbatim
+/// passthrough feature is trivially revertible — "always construct
+/// `Owned`" restores the previous behavior.
+#[derive(Debug)]
+pub enum ProduceData {
+    /// Append the producer's exact wire bytes, patching only `base_offset`
+    /// + `partition_leader_epoch`. No decode/re-encode/recompress/CRC.
+    Verbatim(VerbatimBatch),
+    /// Decode + re-encode the owned batch on append (the original path).
+    /// The writer mutates `base_offset` before append.
+    Owned(RecordBatch),
+}
+
 /// Produce-path message sent from the Produce handler to the partition's
 /// writer task. The writer assigns `base_offset` (overwriting whatever the
 /// handler put there) and replies with the assigned value.
 #[derive(Debug)]
 pub struct ProduceJob {
-    /// The batch to append. The writer mutates `base_offset` before append.
-    pub batch: RecordBatch,
+    /// The records to append (verbatim passthrough or owned fallback).
+    pub data: ProduceData,
     /// Oneshot for the writer to report success (base offset assigned)
     /// or failure back to the handler.
     pub ack: oneshot::Sender<Result<i64, BrokerError>>,
@@ -386,7 +404,10 @@ impl Partition {
     pub(crate) async fn produce_batch(&self, batch: RecordBatch) -> Result<i64, BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx
-            .send(WriterMessage::Produce(ProduceJob { batch, ack: ack_tx }))
+            .send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::Owned(batch),
+                ack: ack_tx,
+            }))
             .await
             .map_err(|_| BrokerError::Txn("partition writer dead".into()))?;
         ack_rx

@@ -22,4 +22,5 @@ crabka-security = { version = "0.3.6", path = "../security" }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+proptest = { workspace = true }
 uuid = { workspace = true }

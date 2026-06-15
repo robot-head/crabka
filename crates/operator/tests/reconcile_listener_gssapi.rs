@@ -640,8 +640,14 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
     let toml = extract_broker0_toml(&observed, "c5");
 
     // Parse through the REAL broker parser, then apply to a live BrokerConfig.
-    let fc: crabka_broker::file_config::FileConfig =
+    let mut fc: crabka_broker::file_config::FileConfig =
         toml::from_str(&toml).expect("broker parses operator-rendered gssapi TOML");
+    // The operator now emits a `controller_quorum_voters` set of per-pod
+    // headless FQDNs. `apply_to` DNS-resolves each voter (bounded retry),
+    // which can't succeed against synthetic test hostnames — and this test
+    // only exercises the gssapi/inter-broker-credentials render path, not
+    // quorum wiring. Drop the voters so the round-trip stays hermetic.
+    fc.controller_quorum_voters.clear();
     let mut bc = crabka_broker::config::BrokerConfig::default();
     fc.apply_to(&mut bc)
         .expect("apply rendered gssapi TOML to BrokerConfig");

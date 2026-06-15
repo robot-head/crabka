@@ -70,6 +70,18 @@ pub(crate) fn down_convert_payload_for_fetch(
             _ => return Err(crate::codes::CORRUPT_MESSAGE),
         },
         RecordsPayload::Legacy(_) => return Ok(Some(payload.clone())),
+        // Unreachable: the zero-copy `FileRegions` payload is only emitted for
+        // Fetch v4+, which never down-converts (down-conversion is a v0–v3 path).
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "tvos",
+            target_os = "watchos",
+            target_os = "freebsd",
+            target_os = "dragonfly",
+        ))]
+        RecordsPayload::FileRegions(_) => return Err(crate::codes::CORRUPT_MESSAGE),
     };
 
     let mut out = BytesMut::new();
@@ -77,6 +89,19 @@ pub(crate) fn down_convert_payload_for_fetch(
         match down_convert_for_fetch(batch, request_version)? {
             Some(RecordsPayload::Legacy(b)) => out.extend_from_slice(&b),
             Some(RecordsPayload::V2(_) | RecordsPayload::Raw(_)) => {
+                return Err(crate::codes::CORRUPT_MESSAGE);
+            }
+            // `down_convert_for_fetch` only ever yields Legacy/V2/Raw.
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "watchos",
+                target_os = "freebsd",
+                target_os = "dragonfly",
+            ))]
+            Some(RecordsPayload::FileRegions(_)) => {
                 return Err(crate::codes::CORRUPT_MESSAGE);
             }
             None => {}
@@ -130,9 +155,7 @@ mod tests {
         let payload = result.expect("should have Some payload");
         match payload {
             RecordsPayload::V2(v) => assert!(v == vec![batch]),
-            RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => {
-                panic!("expected V2 for version >= 4")
-            }
+            _ => panic!("expected V2 for version >= 4"),
         }
     }
 
@@ -165,11 +188,8 @@ mod tests {
         let batch = make_batch(CompressionType::Zstd, records);
         let result = down_convert_for_fetch(&batch, 3).unwrap();
         let payload = result.expect("zstd batch should produce Some payload");
-        let bytes = match payload {
-            RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => {
-                panic!("expected Legacy for version < 4")
-            }
+        let RecordsPayload::Legacy(bytes) = payload else {
+            panic!("expected Legacy for version < 4");
         };
         // The outer wrapper message's attributes byte is at a well-known offset.
         // MessageSet: first message starts at byte 0:
@@ -195,9 +215,8 @@ mod tests {
         let batch = make_batch(CompressionType::None, vec![sample_record("hello", "world")]);
         let result = down_convert_for_fetch(&batch, 3).unwrap();
         let payload = result.expect("should have Some payload");
-        let bytes = match payload {
-            RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => panic!("expected Legacy"),
+        let RecordsPayload::Legacy(bytes) = payload else {
+            panic!("expected Legacy");
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
@@ -216,9 +235,8 @@ mod tests {
         batch.records[0].timestamp_delta = 500;
         let result = down_convert_for_fetch(&batch, 0).unwrap();
         let payload = result.expect("should have Some payload");
-        let bytes = match payload {
-            RecordsPayload::Legacy(b) => b,
-            RecordsPayload::V2(_) | RecordsPayload::Raw(_) => panic!("expected Legacy"),
+        let RecordsPayload::Legacy(bytes) = payload else {
+            panic!("expected Legacy");
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();

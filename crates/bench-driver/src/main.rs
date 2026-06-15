@@ -39,6 +39,31 @@ struct Cli {
     /// Output path for the `RunOutput` JSON.
     #[arg(long, env = "BENCH_OUTPUT_PATH", default_value = "/results/run.json")]
     out: PathBuf,
+    /// Enable a TLS-encrypted data path: producers and consumers dial the
+    /// broker's `Ssl` listener instead of plaintext. Unset (the default) keeps
+    /// the existing plaintext benchmark path unchanged.
+    #[arg(long, env = "BENCH_TLS_ENABLED", default_value_t = false)]
+    tls_enabled: bool,
+    /// PEM CA bundle the client trusts to verify the broker serving cert.
+    /// Required when `--tls-enabled`; mounted from the per-stack cluster-CA
+    /// Secret (e.g. `/etc/bench-ca/ca.crt`).
+    #[arg(long, env = "BENCH_TLS_CA_PATH")]
+    tls_ca_path: Option<PathBuf>,
+    /// SNI / server-name presented in the TLS handshake, matched against a SAN
+    /// on the broker serving cert. LOAD-BEARING: the bootstrap is resolved to a
+    /// pod IP and dialed by IP, so the SNI must be set explicitly to a SAN name
+    /// (crabka: `demo-broker-headless.<ns>.svc.cluster.local`;
+    /// Strimzi: `demo-kafka-bootstrap`). Required when `--tls-enabled`.
+    #[arg(long, env = "BENCH_TLS_SERVER_NAME")]
+    tls_server_name: Option<String>,
+    /// Optional mTLS client certificate (PEM). One-way TLS is sufficient for
+    /// the benchmark; set this (with `--tls-client-key`) only when the listener
+    /// requires client auth.
+    #[arg(long, env = "BENCH_TLS_CLIENT_CERT")]
+    tls_client_cert: Option<PathBuf>,
+    /// Optional mTLS client private key (PEM). Pairs with `--tls-client-cert`.
+    #[arg(long, env = "BENCH_TLS_CLIENT_KEY")]
+    tls_client_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -78,6 +103,33 @@ async fn main() -> Result<()> {
 
     let scenario_id = hash_str(&scenario.name);
 
+    // Assemble the TLS data-path config from the CLI/env knobs. When
+    // `--tls-enabled` is set, a CA path and a server-name (SNI) are mandatory:
+    // without the explicit SNI the handshake validates against a pod IP that is
+    // not on the cert and fails. mTLS is optional (one-way TLS by default).
+    let tls = if cli.tls_enabled {
+        let ca_path = cli
+            .tls_ca_path
+            .context("BENCH_TLS_ENABLED set but BENCH_TLS_CA_PATH missing")?;
+        let server_name = cli
+            .tls_server_name
+            .context("BENCH_TLS_ENABLED set but BENCH_TLS_SERVER_NAME missing")?;
+        let client_identity = match (cli.tls_client_cert, cli.tls_client_key) {
+            (Some(cert), Some(key)) => Some((cert, key)),
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "BENCH_TLS_CLIENT_CERT and BENCH_TLS_CLIENT_KEY must be set together (mTLS) or both unset (one-way TLS)"
+            ),
+        };
+        Some(workload::TlsParams {
+            ca_path,
+            server_name,
+            client_identity,
+        })
+    } else {
+        None
+    };
+
     let cfg = DriverConfig {
         bootstrap: cli.bootstrap,
         topic: cli.topic,
@@ -86,6 +138,7 @@ async fn main() -> Result<()> {
         prometheus_url: cli.prometheus,
         broker_count: cli.broker_count,
         scenario_id,
+        tls,
     };
 
     let out = workload::run(scenario, cfg).await?;

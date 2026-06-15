@@ -128,6 +128,13 @@ pub struct BrokerConfig {
     /// setups upgrade to quorum-of-1 without config changes.
     pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
 
+    /// TLS server name (SNI) presented when dialing a peer's controller
+    /// listener for the KIP-595 quorum. Set to a SAN shared by every
+    /// broker's serving cert (the headless-Service FQDN) so mTLS validates
+    /// regardless of which peer (a pod IP) is dialed. `None` falls back to
+    /// `"localhost"`.
+    pub controller_server_name: Option<String>,
+
     /// KIP-853 dynamic quorum: controller endpoints used only to discover
     /// the leader at cold start (the joiner path). Empty for a standalone
     /// bootstrap node. Maps to Kafka's `controller.quorum.bootstrap.servers`.
@@ -579,6 +586,7 @@ impl BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
             incarnation_id: uuid::Uuid::new_v4(),
@@ -851,6 +859,7 @@ impl Default for BrokerConfig {
             node_id: 1,
             controller_listen_addr: controller_addr,
             controller_quorum_voters: vec![(1, controller_addr)],
+            controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
             incarnation_id: uuid::Uuid::nil(),

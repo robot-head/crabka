@@ -66,6 +66,15 @@ pub struct Broker {
     /// `current()` and wrap it in a fresh `TlsAcceptor`. The TLS
     /// hot-reload path swaps the inner config without restart.
     pub(crate) tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
+    /// Linux kTLS (Increment F): `true` when the startup probe confirmed the
+    /// kernel supports kTLS TX (kernel ≥ 4.13 + the `tls` module loadable) and
+    /// rustls is configured to export secrets. Set ONCE at startup —
+    /// `ktls::config_ktls_server` consumes the `TlsStream` by value, so a
+    /// per-connection failure is unrecoverable; routing through kTLS only when
+    /// this is `true` keeps the per-connection path infallible-by-construction.
+    /// When `false` (non-Linux, no `tls` module, or no TLS configured), TLS
+    /// listeners serve the exact userspace rustls path (byte-identical wire).
+    pub(crate) ktls_enabled: bool,
     /// Shared outbound dialer used by the replicator, raft transport,
     /// and controller-heartbeat loops. When `inter_broker_credentials`
     /// is `None` and the listener is `PLAINTEXT` the dialer falls back
@@ -1590,14 +1599,47 @@ impl Broker {
             None => None,
         };
 
+        // 0c-bis. Probe Linux kTLS support ONCE. `ktls::config_ktls_server`
+        //         consumes the post-handshake `TlsStream` by value, so a
+        //         per-connection failure cannot fall back to userspace TLS on
+        //         that same stream. We therefore decide kTLS routing up front:
+        //         only when this probe succeeds does the per-connection path
+        //         attempt the kTLS transition. The probe runs a real loopback
+        //         TLS handshake and `config_ktls_server` on a throwaway socket
+        //         pair, exercising the exact kernel path (TCP_ULP="tls" +
+        //         crypto_info install) the data plane will use. No TLS config →
+        //         no kTLS (probe skipped, stays false).
+        let ktls_enabled = if tls_dynamic.is_some() {
+            crate::network::ktls_probe::probe_ktls_support().await
+        } else {
+            false
+        };
+        if ktls_enabled {
+            tracing::info!(
+                "Linux kTLS supported: TLS fetch connections will use kernel-offloaded \
+                 sendfile (zero-copy over TLS)"
+            );
+        } else if tls_dynamic.is_some() {
+            tracing::info!(
+                "Linux kTLS unavailable (kernel lacks `tls` module or non-Linux): TLS fetch \
+                 connections use the userspace rustls copy path"
+            );
+        }
+
         // 0d. Build the outbound `TlsConnector` and the shared
         //     `InterBrokerClient` once. Both the replicator-supervisor
         //     and the heartbeat client clone the resulting Arc; the
         //     raft transport receives it as an injected dialer.
         let tls_connector = match &config.tls_config {
             Some(tls) => {
+                // Build a client config that BOTH trusts the peer's serving
+                // CA (`trust_roots_path`, the cluster CA) AND presents this
+                // broker's own cert as a client cert — the controller
+                // listener requires mTLS (`client_auth = Required`), so an
+                // anonymous client config would be rejected with a TLS
+                // `UnknownCA`/handshake failure on every KIP-595 peer dial.
                 let client_cfg = tls
-                    .build_client_config()
+                    .build_client_config_with_identity()
                     .map_err(|e| BrokerError::Tls(e.to_string()))?;
                 Some(tokio_rustls::TlsConnector::from(client_cfg))
             }
@@ -1674,11 +1716,19 @@ impl Broker {
             Some(Arc::new(hs) as Arc<dyn crabka_raft::RaftListenerHandshake>)
         };
 
+        // SNI for dialing peer controller listeners. The operator renders the
+        // shared headless-Service FQDN (a SAN on every broker's serving cert)
+        // so mTLS validates regardless of which peer pod IP we connect to.
+        // Falls back to "localhost" for single-node / dev (no peers dialed).
+        let controller_server_name = config
+            .controller_server_name
+            .clone()
+            .unwrap_or_else(|| "localhost".to_string());
         let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> =
             Some(Arc::new(crate::network::client::InterBrokerDialer::new(
                 inter_broker_client.clone(),
                 config.controller_listener_protocol,
-                "localhost".to_string(),
+                controller_server_name,
             )) as Arc<dyn crabka_raft::OutboundDialer>);
 
         // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load
@@ -3018,6 +3068,7 @@ impl Broker {
             disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
+            ktls_enabled,
             inter_broker_client,
             inter_broker_listener_protocol: inter_listener_proto,
             unclean_recovery,
@@ -3524,6 +3575,7 @@ async fn accept_loop(
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
                         let peer_ip = peer.ip();
+                        tune_accepted_socket(&stream);
 
                         // `max.connections` / `max.connections.per.ip` caps.
                         // Reserve a slot before doing any work; on rejection
@@ -3589,6 +3641,34 @@ async fn accept_loop(
                 }
             }
         }
+    }
+}
+
+/// Tune an accepted broker connection before serving it.
+///
+/// - `TCP_NODELAY`: disable Nagle so the request/response ping-pong isn't
+///   stalled up to ~40 ms by delayed ACKs. Apache Kafka sets this on its
+///   broker sockets; without it small-request latency and the header+records
+///   write coalescing (once fetch uses `sendfile`) suffer.
+/// - `SO_SNDBUF`/`SO_RCVBUF` (1 MiB): widen the kernel buffers so a single
+///   large fetch/produce isn't throttled by a small in-flight window — the
+///   send buffer in particular keeps a `sendfile`'d large fetch from stalling.
+///
+/// All failures are non-fatal (logged at debug): a connection that can't be
+/// tuned still serves correctly, just less optimally.
+fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
+    // 1 MiB send/recv. Kafka's defaults are 100 KiB but it commonly tunes to
+    // 1 MiB+; large fetches/produces want the headroom.
+    const SOCKET_BUF_BYTES: usize = 1 << 20;
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::debug!(error = %e, "TCP_NODELAY set failed on accepted socket");
+    }
+    let sock = socket2::SockRef::from(stream);
+    if let Err(e) = sock.set_send_buffer_size(SOCKET_BUF_BYTES) {
+        tracing::debug!(error = %e, "SO_SNDBUF set failed on accepted socket");
+    }
+    if let Err(e) = sock.set_recv_buffer_size(SOCKET_BUF_BYTES) {
+        tracing::debug!(error = %e, "SO_RCVBUF set failed on accepted socket");
     }
 }
 
