@@ -173,9 +173,13 @@ async fn boot() -> Boot {
         leader_eligibility: true,
         security: SecurityConfig::default(),
     };
-    let store = KafkaStore::start(&cfg, cancel.clone()).await.expect("sr start");
+    let store = KafkaStore::start(&cfg, cancel.clone())
+        .await
+        .expect("sr start");
     let app = rest::router(AppState { store });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind sr");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind sr");
     let sr_addr = listener.local_addr().expect("sr addr");
     let serve_cancel = cancel.clone();
     tokio::spawn(async move {
@@ -253,7 +257,9 @@ impl BatchCodec for ArrowBlobCodec {
 ```rust
 // Stage A — JSON -> Protobuf: deserialize JSON, normalize, emit OrderProto.
 for v in drain(&bootstrap, "orders.json", "stage-a", events.len()).await {
-    let ev: OrderEvent = json_serde.deserialize("orders.json", &v).expect("json decode");
+    let ev: OrderEvent = json_serde
+        .deserialize("orders.json", &v)
+        .expect("json decode");
     let proto = OrderProto {
         order_id: ev.order_id,
         user: ev.user,
@@ -276,7 +282,9 @@ producer.flush().await.expect("flush proto");
 let mut users = Vec::new();
 let mut cents = Vec::new();
 for v in drain(&bootstrap, "orders.proto", "stage-b", events.len()).await {
-    let p: OrderProto = proto_serde.deserialize("orders.proto", &v).expect("proto decode");
+    let p: OrderProto = proto_serde
+        .deserialize("orders.proto", &v)
+        .expect("proto decode");
     users.push(p.user);
     cents.push(p.amount_cents);
 }
@@ -286,10 +294,18 @@ let schema = Arc::new(ArrowSchema::new(vec![
 ]));
 let batch = ::arrow::array::RecordBatch::try_new(
     schema,
-    vec![Arc::new(StringArray::from(users)), Arc::new(Int64Array::from(cents))],
+    vec![
+        Arc::new(StringArray::from(users)),
+        Arc::new(Int64Array::from(cents)),
+    ],
 )
 .expect("record batch");
-send_record(&producer, "orders.arrow", ArrowIpcSerde.serialize("orders.arrow", &batch)).await;
+send_record(
+    &producer,
+    "orders.arrow",
+    ArrowIpcSerde.serialize("orders.arrow", &batch),
+)
+.await;
 producer.flush().await.expect("flush arrow");
 ```
 <!-- /snippet -->
@@ -303,7 +319,13 @@ let consumed: Vec<ConsumedRecord> = drain(&bootstrap, "orders.arrow", "stage-c",
     .await
     .into_iter()
     .enumerate()
-    .map(|(i, v)| ConsumedRecord { key: None, value: v, timestamp: 0, partition: 0, offset: i as i64 })
+    .map(|(i, v)| ConsumedRecord {
+        key: None,
+        value: v,
+        timestamp: 0,
+        partition: 0,
+        offset: i as i64,
+    })
     .collect();
 
 let mut topo = ColumnarTopology::new();
@@ -321,7 +343,9 @@ let agg = topo.add_operator(
 );
 topo.add_sink("out", "orders.summary.df", BlobCodec::default(), agg);
 let built = topo.build().expect("build columnar");
-let produced = built.run_batch("orders.arrow", &consumed).expect("run_batch");
+let produced = built
+    .run_batch("orders.arrow", &consumed)
+    .expect("run_batch");
 ```
 <!-- /snippet -->
 
@@ -331,7 +355,9 @@ let produced = built.run_batch("orders.arrow", &consumed).expect("run_batch");
 ```rust
 // Stage D — Polars -> Protobuf: each aggregated row becomes an OrderSummary.
 for (_topic, rec) in produced {
-    let df = PolarsIpcSerde.deserialize("orders.summary.df", &rec.value).expect("polars decode");
+    let df = PolarsIpcSerde
+        .deserialize("orders.summary.df", &rec.value)
+        .expect("polars decode");
     let user_col = df.column("user").expect("user");
     let total_col = df.column("total_cents").expect("total_cents");
     let count_col = df
@@ -360,7 +386,9 @@ producer.flush().await.expect("flush summary");
 // Verify the per-user rollup off the wire.
 let mut by_user = BTreeMap::new();
 for v in drain(&bootstrap, "orders.summary", "verify", 2).await {
-    let s: OrderSummary = summary_serde.deserialize("orders.summary", &v).expect("summary decode");
+    let s: OrderSummary = summary_serde
+        .deserialize("orders.summary", &v)
+        .expect("summary decode");
     by_user.insert(s.user.clone(), s);
 }
 let alice = by_user.get("alice").expect("alice summary");

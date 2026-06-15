@@ -30,7 +30,13 @@ pub fn extract(source: &str, anchor: &str) -> Result<String, String> {
                 .unwrap_or(0);
             let body: Vec<String> = lines
                 .iter()
-                .map(|l: &String| if l.len() >= indent { l[indent..].to_string() } else { l.clone() })
+                .map(|l: &String| {
+                    if l.len() >= indent {
+                        l[indent..].to_string()
+                    } else {
+                        l.clone()
+                    }
+                })
                 .collect();
             return Ok(body.join("\n"));
         }
@@ -61,7 +67,9 @@ pub fn sync_markdown(markdown: &str, crates_dir: &Path) -> Result<String, String
             .ok_or_else(|| format!("snippet directive missing '#': {spec}"))?;
         let end_marker = "<!-- /snippet -->";
         let body_start = &after[close + 3..];
-        let body_end = body_start.find(end_marker).ok_or("missing <!-- /snippet -->")?;
+        let body_end = body_start
+            .find(end_marker)
+            .ok_or("missing <!-- /snippet -->")?;
         let source = std::fs::read_to_string(crates_dir.join(relpath.trim()))
             .map_err(|e| format!("read {relpath}: {e}"))?;
         let code = extract(&source, anchor.trim())?;

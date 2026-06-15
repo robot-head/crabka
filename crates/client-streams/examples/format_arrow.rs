@@ -4,8 +4,8 @@ use crabka_client_streams::columnar::serde::arrow::ArrowIpcSerde;
 use crabka_client_streams::processor::serde::Serde;
 use std::sync::Arc;
 
-use ::arrow::array::{Int64Array, StringArray};
 use ::arrow::array::RecordBatch;
+use ::arrow::array::{Int64Array, StringArray};
 use ::arrow::datatypes::{DataType, Field, Schema};
 
 fn main() {

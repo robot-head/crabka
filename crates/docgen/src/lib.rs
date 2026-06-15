@@ -13,7 +13,10 @@ pub mod snippets;
 ///
 /// # Errors
 /// Returns an error if a directory walk, file read/write, or snippet sync fails.
-pub fn sync_snippets(content_dir: &std::path::Path, crates_dir: &std::path::Path) -> anyhow::Result<usize> {
+pub fn sync_snippets(
+    content_dir: &std::path::Path,
+    crates_dir: &std::path::Path,
+) -> anyhow::Result<usize> {
     use std::fs;
     let mut changed = 0;
     let mut stack = vec![content_dir.to_path_buf()];
