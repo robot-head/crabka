@@ -229,9 +229,8 @@ invented to pad a one-row-per-integer table.
 
 | KIP / area | Note |
 |------------|------|
-| KIP-899 — AdminClient `--bootstrap-controller` (talk directly to controller quorum) | Controller-side `EndpointType` exists (KIP-919 schema); the dedicated admin-to-controller listener/handling path is not fully wired. |
+| KIP-899 — AdminClient `--bootstrap-controller` (talk directly to controller quorum) | `DescribeCluster` `endpoint_type=CONTROLLERS` now projects the KRaft voter set (KIP-919 — done). Still pending: the controller listener serving the admin RPC surface, and the client-side `--bootstrap-controller` dial path. |
 | KIP-1102 — client re-bootstrap on stale metadata | Native-client robustness item; not implemented. |
-| KIP-714 receiver pipeline | Handshake/advertisement done; the full metrics-receiver plugin surface is minimal (no-op subscription). |
 | Full JVM **Kafka Streams library** KIPs (e.g. KIP-258, 300, 307, 572, 761, 862, 865, 925, 1106, …) | Covered only insofar as `crabka-client-streams`' DSL needs them; full Streams-library parity is an open frontier. |
 | KIP-1150 — diskless / "Inkless" topics | Not in any GA Kafka release; out of near-term parity scope but in scope long-term. |
 
