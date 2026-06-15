@@ -1,0 +1,34 @@
+# cargo-mutants configuration — https://mutants.rs
+#
+# Checked in so `cargo mutants` runs out of the box (locally and in CI) with the
+# same runner and exclusions the project uses everywhere else.
+
+# Crabka tests run under nextest in every other job (CI, .config/nextest.toml),
+# so point cargo-mutants at the same runner. nextest fails fast by default,
+# which is exactly what we want when killing mutants. NEXTEST_PROFILE=ci (set in
+# the CI workflow) then picks up the test-group serialization in
+# .config/nextest.toml so the fixed-port broker/schema-registry binaries don't
+# race for ports inside a single mutant's test run.
+test_tool = "nextest"
+
+# A surviving mutant deep in the broker / log / raft paths is often only caught
+# by the (slower) in-process integration suites under each crate's tests/ dir.
+# Give every mutant run a generous timeout relative to the unmutated baseline so
+# a legitimately-slower-but-correct run isn't misreported as a "timeout"
+# survivor, with a high floor for those heavier suites.
+timeout_multiplier = 5.0
+minimum_test_timeout = 120
+
+# Don't generate mutants in files that carry no unit-testable signal. The first
+# four mirror the codecov `ignore` list in codecov.yml: machine-emitted protocol
+# codecs (encode/decode/populate per record type) and pure entrypoint/serve-loop
+# glue. The last two keep mutation focused on the system under test rather than
+# the test/bench harnesses themselves.
+exclude_globs = [
+    "crates/protocol/generated/**",
+    "crates/grpc-gateway/src/bin/**",
+    "crates/schema-registry/src/bin/**",
+    "crates/operator/src/run.rs",
+    "crates/*/tests/**",
+    "crates/*/benches/**",
+]
