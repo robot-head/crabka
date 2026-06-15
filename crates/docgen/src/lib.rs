@@ -38,3 +38,43 @@ pub fn sync_snippets(
     }
     Ok(changed)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    #[test]
+    fn sync_snippets_rewrites_nested_markdown_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let crates = dir.path().join("crates");
+        let content = dir.path().join("content");
+        fs::create_dir_all(crates.join("c/examples")).unwrap();
+        fs::create_dir_all(content.join("sub")).unwrap();
+        fs::write(
+            crates.join("c/examples/e.rs"),
+            "// docs:begin a\nlet z = 9;\n// docs:end a\n",
+        )
+        .unwrap();
+        let md = content.join("sub/page.md");
+        fs::write(
+            &md,
+            "intro\n<!-- snippet: c/examples/e.rs#a -->\nOLD\n<!-- /snippet -->\nend\n",
+        )
+        .unwrap();
+        // A non-markdown file is left untouched (extension filter).
+        fs::write(content.join("ignore.txt"), "OLD").unwrap();
+
+        let changed = super::sync_snippets(&content, &crates).unwrap();
+        assert_eq!(changed, 1);
+        let out = fs::read_to_string(&md).unwrap();
+        assert!(out.contains("```rust\nlet z = 9;\n```"));
+        assert!(!out.contains("OLD"));
+        assert_eq!(
+            fs::read_to_string(content.join("ignore.txt")).unwrap(),
+            "OLD"
+        );
+
+        // Second run is a no-op: already in sync.
+        assert_eq!(super::sync_snippets(&content, &crates).unwrap(), 0);
+    }
+}
