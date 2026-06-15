@@ -1,0 +1,283 @@
+//! `ColumnarTopology`: a linear/branching graph whose edges carry `DataFrame`s.
+//! A source binds a topic list + `BatchCodec`; operators are `BuiltinOp` (or a
+//! custom `ColumnarProcessor`); a sink binds an output topic + `BatchCodec`.
+//! v1 supports linear chains and fan-out from any node (no batch joins).
+
+use std::sync::Arc;
+
+use super::codec::BatchCodec;
+use super::operator::{BuiltinOp, ColumnarProcessor};
+
+/// Opaque handle to a node, returned by `add_*` and passed as a parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnarNode(usize);
+
+enum NodeKind {
+    Source { topics: Vec<String>, codec: Arc<dyn BatchCodec> },
+    Operator { make: Arc<dyn Fn() -> Box<dyn ColumnarProcessor> + Send + Sync> },
+    Sink { topic: String, codec: Arc<dyn BatchCodec> },
+}
+
+struct NodeDef {
+    name: String,
+    kind: NodeKind,
+    parents: Vec<ColumnarNode>,
+}
+
+/// A columnar topology under construction.
+#[derive(Default)]
+pub struct ColumnarTopology {
+    nodes: Vec<NodeDef>,
+}
+
+impl ColumnarTopology {
+    /// Create an empty topology.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a source node binding `topics` to `codec`.
+    pub fn add_source(
+        &mut self,
+        name: &str,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+        codec: impl BatchCodec,
+    ) -> ColumnarNode {
+        self.push(
+            name,
+            NodeKind::Source {
+                topics: topics.into_iter().map(Into::into).collect(),
+                codec: Arc::new(codec),
+            },
+            vec![],
+        )
+    }
+
+    /// Add a built-in operator node fed by `parent`.
+    ///
+    /// v1 builds the operator instance once per task; re-running a built topology
+    /// requires a fresh `build()` (the stored `BuiltinOp` is consumed on first use).
+    pub fn add_operator(&mut self, name: &str, op: BuiltinOp, parent: ColumnarNode) -> ColumnarNode {
+        let op = Arc::new(std::sync::Mutex::new(Some(op)));
+        let make = move || -> Box<dyn ColumnarProcessor> {
+            Box::new(
+                op.lock()
+                    .expect("operator mutex poisoned")
+                    .take()
+                    .expect("operator built once per task"),
+            )
+        };
+        self.push(name, NodeKind::Operator { make: Arc::new(make) }, vec![parent])
+    }
+
+    /// Add a sink node writing to `topic` via `codec`, fed by `parent`.
+    pub fn add_sink(
+        &mut self,
+        name: &str,
+        topic: &str,
+        codec: impl BatchCodec,
+        parent: ColumnarNode,
+    ) -> ColumnarNode {
+        self.push(
+            name,
+            NodeKind::Sink { topic: topic.into(), codec: Arc::new(codec) },
+            vec![parent],
+        )
+    }
+
+    fn push(&mut self, name: &str, kind: NodeKind, parents: Vec<ColumnarNode>) -> ColumnarNode {
+        let id = ColumnarNode(self.nodes.len());
+        self.nodes.push(NodeDef { name: name.into(), kind, parents });
+        id
+    }
+
+    /// Validate the graph: unique names, sources have no parent, non-sources have
+    /// ≥1 parent, and there is ≥1 source and ≥1 sink.
+    ///
+    /// # Errors
+    /// Returns a message describing the first structural problem found.
+    pub fn validate(&self) -> Result<(), String> {
+        use std::collections::HashSet;
+        let mut names = HashSet::new();
+        let (mut sources, mut sinks) = (0u32, 0u32);
+        for n in &self.nodes {
+            if !names.insert(n.name.clone()) {
+                return Err(format!("duplicate node name `{}`", n.name));
+            }
+            match n.kind {
+                NodeKind::Source { .. } => {
+                    sources += 1;
+                    if !n.parents.is_empty() {
+                        return Err(format!("source `{}` has a parent", n.name));
+                    }
+                }
+                NodeKind::Sink { .. } => {
+                    sinks += 1;
+                    if n.parents.is_empty() {
+                        return Err(format!("sink `{}` has no parent", n.name));
+                    }
+                }
+                NodeKind::Operator { .. } => {
+                    if n.parents.is_empty() {
+                        return Err(format!("operator `{}` has no parent", n.name));
+                    }
+                }
+            }
+        }
+        if sources == 0 {
+            return Err("topology has no source".into());
+        }
+        if sinks == 0 {
+            return Err("topology has no sink".into());
+        }
+        Ok(())
+    }
+
+    /// Source topics in declaration order (used by the runtime bridge, Task 11).
+    #[must_use]
+    pub fn source_topics(&self) -> Vec<String> {
+        self.nodes
+            .iter()
+            .flat_map(|n| match &n.kind {
+                NodeKind::Source { topics, .. } => topics.clone(),
+                _ => vec![],
+            })
+            .collect()
+    }
+}
+
+use super::codec::{BatchError, ConsumedRecord, ProduceRecord};
+use super::operator::ColumnarContext;
+use std::collections::HashMap;
+
+/// A built, runnable columnar topology (single task in v1). Cheap to construct.
+pub struct BuiltColumnarTopology<'t> {
+    topo: &'t ColumnarTopology,
+}
+
+impl ColumnarTopology {
+    /// Validate and wrap for execution.
+    ///
+    /// # Errors
+    /// Returns the validation error message if the graph is structurally invalid.
+    pub fn build(&self) -> Result<BuiltColumnarTopology<'_>, String> {
+        self.validate()?;
+        Ok(BuiltColumnarTopology { topo: self })
+    }
+}
+
+impl BuiltColumnarTopology<'_> {
+    /// Run one batch of records that arrived on `topic` through the graph,
+    /// returning everything the sinks want produced (`(sink_topic, record)`).
+    ///
+    /// # Errors
+    /// Returns `BatchError` if any codec or operator fails.
+    pub fn run_batch(
+        &self,
+        topic: &str,
+        records: &[ConsumedRecord],
+    ) -> Result<Vec<(String, ProduceRecord)>, BatchError> {
+        let mut frames: HashMap<usize, Vec<::polars::prelude::DataFrame>> = HashMap::new();
+        let mut produced = Vec::new();
+
+        for (idx, node) in self.topo.nodes.iter().enumerate() {
+            let inputs: Vec<::polars::prelude::DataFrame> = match &node.kind {
+                NodeKind::Source { topics, codec } => {
+                    if topics.iter().any(|t| t == topic) && !records.is_empty() {
+                        vec![codec.decode(records)?]
+                    } else {
+                        vec![]
+                    }
+                }
+                _ => node
+                    .parents
+                    .iter()
+                    .flat_map(|p| frames.get(&p.0).cloned().unwrap_or_default())
+                    .collect(),
+            };
+
+            match &node.kind {
+                NodeKind::Source { .. } => {
+                    frames.insert(idx, inputs);
+                }
+                NodeKind::Operator { make } => {
+                    let mut proc = make();
+                    let mut out = Vec::new();
+                    for batch in inputs {
+                        let mut ctx = ColumnarContext::new();
+                        proc.process(&mut ctx, batch)?;
+                        out.extend(ctx.take());
+                    }
+                    frames.insert(idx, out);
+                }
+                NodeKind::Sink { topic: sink_topic, codec } => {
+                    for batch in inputs {
+                        for rec in codec.encode(&batch)? {
+                            produced.push((sink_topic.clone(), rec));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(produced)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::columnar::serde::polars::PolarsIpcSerde;
+    use crate::columnar::topology::codec::{BlobCodec, ConsumedRecord};
+    use crate::columnar::topology::operator::BuiltinOp;
+    use crate::processor::serde::Serde;
+    use ::polars::prelude::*;
+    use assert2::check;
+
+    #[test]
+    fn builds_and_validates_linear_topology() {
+        let mut t = ColumnarTopology::new();
+        let src = t.add_source("src", ["in"], BlobCodec::default());
+        let op = t.add_operator("flt", BuiltinOp::Filter(col("amount").gt(lit(0))), src);
+        t.add_sink("out", "out", BlobCodec::default(), op);
+        check!(t.validate().is_ok());
+        check!(t.source_topics() == vec!["in".to_string()]);
+    }
+
+    #[test]
+    fn rejects_empty_topology() {
+        let t = ColumnarTopology::new();
+        check!(t.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_names() {
+        let mut t = ColumnarTopology::new();
+        let s = t.add_source("dup", ["in"], BlobCodec::default());
+        t.add_sink("dup", "out", BlobCodec::default(), s);
+        check!(t.validate().is_err());
+    }
+
+    #[test]
+    fn run_batch_filters_blob_records_end_to_end() {
+        let mut t = ColumnarTopology::new();
+        let src = t.add_source("src", ["in"], BlobCodec::default());
+        let op = t.add_operator("flt", BuiltinOp::Filter(col("amount").gt(lit(4))), src);
+        t.add_sink("out", "out", BlobCodec::default(), op);
+        let built = t.build().unwrap();
+
+        let df = df!("amount" => [1_i64, 5, 9]).unwrap();
+        let rec = ConsumedRecord {
+            key: None,
+            value: PolarsIpcSerde.serialize("", &df),
+            timestamp: 0,
+            partition: 0,
+            offset: 0,
+        };
+        let out = built.run_batch("in", &[rec]).unwrap();
+        check!(out.len() == 1);
+        check!(out[0].0 == "out");
+        let back = PolarsIpcSerde.deserialize("", &out[0].1.value).unwrap();
+        check!(back.height() == 2); // amounts 5 and 9
+    }
+}

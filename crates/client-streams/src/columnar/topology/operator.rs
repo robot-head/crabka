@@ -12,7 +12,6 @@ pub struct ColumnarContext {
 }
 
 impl ColumnarContext {
-    #[allow(dead_code, reason = "driven by the executor added in Task 9")]
     pub(crate) fn new() -> Self {
         Self { forwarded: Vec::new() }
     }
@@ -20,7 +19,6 @@ impl ColumnarContext {
     pub fn forward(&mut self, df: DataFrame) {
         self.forwarded.push(df);
     }
-    #[allow(dead_code, reason = "driven by the executor added in Task 9")]
     pub(crate) fn take(&mut self) -> Vec<DataFrame> {
         std::mem::take(&mut self.forwarded)
     }
