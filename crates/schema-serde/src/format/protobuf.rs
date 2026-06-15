@@ -213,31 +213,56 @@ mod tests {
     fn renders_scalar_field_types_as_proto3_keywords() {
         // Real prost descriptors set `type` (not `type_name`) for scalars; the
         // rendered `.proto` must name the type or the registry can't parse it.
+        // Exercise every proto3 scalar keyword (one field per `field_type` arm),
+        // plus the message-typed (`type_name`) branch.
         use prost_reflect::prost_types::field_descriptor_proto::Type;
+        let scalars = [
+            (Type::Double, "double"),
+            (Type::Float, "float"),
+            (Type::Int64, "int64"),
+            (Type::Uint64, "uint64"),
+            (Type::Int32, "int32"),
+            (Type::Fixed64, "fixed64"),
+            (Type::Fixed32, "fixed32"),
+            (Type::Bool, "bool"),
+            (Type::String, "string"),
+            (Type::Bytes, "bytes"),
+            (Type::Uint32, "uint32"),
+            (Type::Sfixed32, "sfixed32"),
+            (Type::Sfixed64, "sfixed64"),
+            (Type::Sint32, "sint32"),
+            (Type::Sint64, "sint64"),
+        ];
+        let mut field = Vec::new();
+        for (i, (ty, kw)) in scalars.iter().enumerate() {
+            field.push(FieldDescriptorProto {
+                name: Some(format!("f_{kw}")),
+                number: Some(i32::try_from(i).unwrap() + 1),
+                r#type: Some(*ty as i32),
+                ..Default::default()
+            });
+        }
+        // Message-typed field: the renderer takes the `type_name` branch and
+        // strips the leading dot.
+        field.push(FieldDescriptorProto {
+            name: Some("nested".into()),
+            number: Some(100),
+            type_name: Some(".demo.Other".into()),
+            ..Default::default()
+        });
         let file = FileDescriptorProto {
             package: Some("demo".into()),
             message_type: vec![DescriptorProto {
-                name: Some("OrderProto".into()),
-                field: vec![
-                    FieldDescriptorProto {
-                        name: Some("user".into()),
-                        number: Some(2),
-                        r#type: Some(Type::String as i32),
-                        ..Default::default()
-                    },
-                    FieldDescriptorProto {
-                        name: Some("amount_cents".into()),
-                        number: Some(3),
-                        r#type: Some(Type::Int64 as i32),
-                        ..Default::default()
-                    },
-                ],
+                name: Some("AllScalars".into()),
+                field,
                 ..Default::default()
             }],
             ..Default::default()
         };
         let text = file_to_proto(&file);
-        check!(text.contains("string user = 2;"));
-        check!(text.contains("int64 amount_cents = 3;"));
+        for (i, (_, kw)) in scalars.iter().enumerate() {
+            check!(text.contains(&format!("{kw} f_{kw} = {};", i + 1)));
+        }
+        check!(text.contains("demo.Other nested = 100;"));
     }
 }
