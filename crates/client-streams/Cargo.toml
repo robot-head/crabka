@@ -36,6 +36,27 @@ tracing = { workspace = true }
 turso = "0.6"
 pollster = "0.4"
 
+# Columnar / dataframe support (opt-in via the `arrow`, `columnar`, and
+# `polars` cargo features).
+polars = { workspace = true, optional = true }
+polars-arrow = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true }
+columnar = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+arrow = ["dep:arrow"]
+columnar = ["dep:columnar"]
+polars = ["dep:polars", "dep:polars-arrow", "dep:serde_json"]
+
+[[example]]
+name = "dataframe_serde"
+required-features = ["polars"]
+
+[[example]]
+name = "polars_pipeline"
+required-features = ["polars"]
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
@@ -43,6 +64,7 @@ crabka-broker = { version = "0.3.6", path = "../broker", features = ["test-helpe
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
+proptest = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
