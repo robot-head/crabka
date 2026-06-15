@@ -21,6 +21,12 @@ pub trait RowBridge<R>: Send + Sync + 'static {
 }
 
 /// JSON-value-backed bridge: works for any `R: Serialize + DeserializeOwned`.
+///
+/// Convenience over fidelity: column dtypes are inferred by polars from the JSON,
+/// so numeric types can shift (e.g. an all-integer column round-trips fine, but a
+/// column mixing integers and nulls/floats may be widened to `f64`). For
+/// strongly-typed, lossless batches use a custom [`RowBridge`] over a binary
+/// encoding instead.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonRowBridge;
 

@@ -33,7 +33,11 @@ pub trait ColumnarProcessor: Send + 'static {
     fn process(&mut self, ctx: &mut ColumnarContext, batch: DataFrame) -> Result<(), BatchError>;
 }
 
-/// Built-in operator kinds (the DSL/graph in Task 9 builds these).
+/// Built-in operator kinds (the DSL/graph builds these).
+///
+/// `Clone` so a topology can build a fresh operator instance per `run_batch`
+/// (the exprs are cheap, refcounted polars `Expr`s).
+#[derive(Clone)]
 pub enum BuiltinOp {
     /// `filter(predicate)` — keeps reserved columns.
     Filter(Expr),

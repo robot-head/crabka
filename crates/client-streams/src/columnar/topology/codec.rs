@@ -87,6 +87,12 @@ impl BatchCodec for BlobCodec {
             let frame = PolarsIpcSerde
                 .deserialize("", &rec.value)
                 .map_err(|e| BatchError(format!("decode record {i}: {e}")))?;
+            // Reject payloads whose own columns collide with the reserved metadata
+            // names we are about to attach — otherwise `with_meta_columns` would
+            // silently overwrite the payload's data.
+            let cols: Vec<&str> = frame.get_column_names().iter().map(|s| s.as_str()).collect();
+            reject_reserved_payload_columns(&cols)
+                .map_err(|e| BatchError(format!("decode record {i}: {e}")))?;
             let frame = with_meta_columns(frame, rec)?;
             acc = Some(match acc {
                 None => frame,
@@ -277,6 +283,28 @@ mod tests {
         check!(out.len() == 1);
         let back = PolarsIpcSerde.deserialize("t", &out[0].value).unwrap();
         check!(back.height() == 3);
+    }
+
+    #[test]
+    fn blob_codec_rejects_payload_with_reserved_column() {
+        // A blob payload that already carries `__key` must be rejected rather than
+        // silently overwritten by the attached metadata column.
+        let codec = BlobCodec::default();
+        let bad = df!("__key" => [1_i64, 2]).unwrap();
+        let records = vec![ConsumedRecord {
+            key: None,
+            value: ipc_bytes(&bad),
+            timestamp: 0,
+            partition: 0,
+            offset: 0,
+        }];
+        check!(codec.decode(&records).is_err());
+    }
+
+    #[test]
+    fn blob_codec_rejects_empty_batch() {
+        let codec = BlobCodec::default();
+        check!(codec.decode(&[]).is_err());
     }
 
     use crate::columnar::topology::row_bridge::JsonRowBridge;

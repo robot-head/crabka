@@ -56,18 +56,10 @@ impl ColumnarTopology {
 
     /// Add a built-in operator node fed by `parent`.
     ///
-    /// v1 builds the operator instance once per task; re-running a built topology
-    /// requires a fresh `build()` (the stored `BuiltinOp` is consumed on first use).
+    /// A fresh operator instance is built per `run_batch` (operators are stateless
+    /// in v1), so a built topology can be executed repeatedly.
     pub fn add_operator(&mut self, name: &str, op: BuiltinOp, parent: ColumnarNode) -> ColumnarNode {
-        let op = Arc::new(std::sync::Mutex::new(Some(op)));
-        let make = move || -> Box<dyn ColumnarProcessor> {
-            Box::new(
-                op.lock()
-                    .expect("operator mutex poisoned")
-                    .take()
-                    .expect("operator built once per task"),
-            )
-        };
+        let make = move || -> Box<dyn ColumnarProcessor> { Box::new(op.clone()) };
         self.push(name, NodeKind::Operator { make: Arc::new(make) }, vec![parent])
     }
 
@@ -279,5 +271,53 @@ mod tests {
         check!(out[0].0 == "out");
         let back = PolarsIpcSerde.deserialize("", &out[0].1.value).unwrap();
         check!(back.height() == 2); // amounts 5 and 9
+    }
+
+    #[test]
+    fn built_topology_runs_multiple_batches() {
+        // A built topology must be reusable across batches (operators are rebuilt
+        // per `run_batch`), not consumed after the first run.
+        let mut t = ColumnarTopology::new();
+        let src = t.add_source("src", ["in"], BlobCodec::default());
+        let op = t.add_operator("flt", BuiltinOp::Filter(col("amount").gt(lit(4))), src);
+        t.add_sink("out", "out", BlobCodec::default(), op);
+        let built = t.build().unwrap();
+
+        let mk = |amounts: &[i64]| {
+            let df = df!("amount" => amounts.to_vec()).unwrap();
+            vec![ConsumedRecord {
+                key: None,
+                value: PolarsIpcSerde.serialize("", &df),
+                timestamp: 0,
+                partition: 0,
+                offset: 0,
+            }]
+        };
+
+        let first = built.run_batch("in", &mk(&[1, 5, 9])).unwrap();
+        let second = built.run_batch("in", &mk(&[7, 2])).unwrap();
+        check!(first.len() == 1);
+        check!(second.len() == 1);
+        check!(PolarsIpcSerde.deserialize("", &first[0].1.value).unwrap().height() == 2);
+        check!(PolarsIpcSerde.deserialize("", &second[0].1.value).unwrap().height() == 1);
+    }
+
+    #[test]
+    fn run_batch_ignores_non_matching_source_topic() {
+        // A record arriving for a topic no source declares produces nothing.
+        let mut t = ColumnarTopology::new();
+        let src = t.add_source("src", ["in"], BlobCodec::default());
+        t.add_sink("out", "out", BlobCodec::default(), src);
+        let built = t.build().unwrap();
+
+        let df = df!("amount" => [1_i64]).unwrap();
+        let rec = ConsumedRecord {
+            key: None,
+            value: PolarsIpcSerde.serialize("", &df),
+            timestamp: 0,
+            partition: 0,
+            offset: 0,
+        };
+        check!(built.run_batch("other-topic", &[rec]).unwrap().is_empty());
     }
 }
