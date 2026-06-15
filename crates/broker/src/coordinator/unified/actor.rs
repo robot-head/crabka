@@ -1821,6 +1821,13 @@ pub(crate) async fn validate_group_commit(
 #[path = "reconciler_model.rs"]
 mod reconciler_model;
 
+/// Compositional model: the KIP-848 reconciliation engine composed with a
+/// modeled offset-commit fencing + fetch layer (consumer delivery correctness
+/// through rebalances).
+#[cfg(test)]
+#[path = "consumer_group_composition_model.rs"]
+mod consumer_group_composition_model;
+
 #[cfg(test)]
 mod tests {
     use super::*;
