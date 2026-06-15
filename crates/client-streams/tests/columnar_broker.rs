@@ -13,11 +13,11 @@ use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition};
 use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_client_streams::StreamsClientError;
 use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
 use crabka_client_streams::columnar::topology::codec::BlobCodec;
 use crabka_client_streams::columnar::topology::operator::BuiltinOp;
-use crabka_client_streams::columnar::topology::{run_partition_once, ColumnarTopology};
-use crabka_client_streams::StreamsClientError;
+use crabka_client_streams::columnar::topology::{ColumnarTopology, run_partition_once};
 use crabka_client_streams::processor::serde::Serde;
 use crabka_client_streams::runtime::io::{
     FetchBatch, FetchedRec, IsolationLevel, RecordFetcher, RecordProducer,
@@ -51,7 +51,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(resp.error_code, 0, "streams.version finalize failed: {resp:?}");
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -68,7 +71,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "topic create failed: {resp:?}");
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 async fn topic_id(admin: &Client, name: &str) -> WireUuid {
@@ -87,7 +93,10 @@ async fn open_conn(bootstrap: &str, client_id: &str) -> Connection {
         .expect("no addr");
     Connection::connect_with_options(
         addr,
-        ConnectionOptions { client_id: client_id.to_string(), ..Default::default() },
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
     )
     .await
     .expect("connect")
@@ -113,9 +122,17 @@ impl RecordFetcher for BrokerFetchAdapter {
     ) -> Result<FetchBatch, StreamsClientError> {
         // Poll a few times so freshly-produced records become visible.
         for _ in 0..50 {
-            let recs = fetch_partition(&self.conn, topic, self.topic_id, partition, offset, 500, 1 << 20)
-                .await
-                .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+            let recs = fetch_partition(
+                &self.conn,
+                topic,
+                self.topic_id,
+                partition,
+                offset,
+                500,
+                1 << 20,
+            )
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
             if !recs.is_empty() {
                 return Ok(FetchBatch {
                     records: recs
@@ -199,7 +216,11 @@ async fn columnar_runtime_bridge_against_live_broker() {
     create_topic(&admin, "out", 1).await;
 
     // Seed two IPC-DataFrame records to `in` (each a one-row frame).
-    let producer = Producer::builder().bootstrap(&bootstrap).build().await.unwrap();
+    let producer = Producer::builder()
+        .bootstrap(&bootstrap)
+        .build()
+        .await
+        .unwrap();
     for amount in [1_i64, 9] {
         let df = df!("amount" => [amount]).unwrap();
         let value = PolarsIpcSerde.serialize("", &df);
@@ -219,9 +240,18 @@ async fn columnar_runtime_bridge_against_live_broker() {
 
     // Build the bridge I/O adapters.
     let in_id = topic_id(&admin, "in").await;
-    let fetcher = BrokerFetchAdapter { conn: open_conn(&bootstrap, "bridge-fetch").await, topic_id: in_id };
-    let bridge_producer = Producer::builder().bootstrap(&bootstrap).build().await.unwrap();
-    let bridge_out = BrokerProduceAdapter { producer: bridge_producer };
+    let fetcher = BrokerFetchAdapter {
+        conn: open_conn(&bootstrap, "bridge-fetch").await,
+        topic_id: in_id,
+    };
+    let bridge_producer = Producer::builder()
+        .bootstrap(&bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let bridge_out = BrokerProduceAdapter {
+        producer: bridge_producer,
+    };
 
     // Run one fetch→process→produce cycle.
     let t = topo();

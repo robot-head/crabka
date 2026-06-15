@@ -115,7 +115,10 @@ mod tests {
             key: Option<Bytes>,
             value: Option<Bytes>,
         ) -> Result<(), StreamsClientError> {
-            self.sent.lock().unwrap().push((topic.to_string(), key, value));
+            self.sent
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), key, value));
             Ok(())
         }
         async fn flush(&self) -> Result<(), StreamsClientError> {

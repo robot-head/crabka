@@ -13,7 +13,9 @@ pub struct ColumnarContext {
 
 impl ColumnarContext {
     pub(crate) fn new() -> Self {
-        Self { forwarded: Vec::new() }
+        Self {
+            forwarded: Vec::new(),
+        }
     }
     /// Forward a batch to this node's children.
     pub fn forward(&mut self, df: DataFrame) {
@@ -119,7 +121,9 @@ mod tests {
             },
             batch(),
         );
-        let df = out[0].sort(["user"], SortMultipleOptions::default()).unwrap();
+        let df = out[0]
+            .sort(["user"], SortMultipleOptions::default())
+            .unwrap();
         check!(df.height() == 2);
         let totals = df.column("total").unwrap().i64().unwrap();
         check!(totals.get(0) == Some(8)); // a: 5+3

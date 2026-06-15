@@ -20,7 +20,10 @@ impl<'t> ColumnarTestDriver<'t> {
     /// # Errors
     /// Returns the validation error message if the topology is structurally invalid.
     pub fn new(topo: &'t ColumnarTopology) -> Result<Self, String> {
-        Ok(Self { built: topo.build()?, output: HashMap::new() })
+        Ok(Self {
+            built: topo.build()?,
+            output: HashMap::new(),
+        })
     }
 
     /// Run one batch of input records (arriving on `topic`) through the topology,
@@ -32,7 +35,10 @@ impl<'t> ColumnarTestDriver<'t> {
     // `run_batch` only needs a borrow, hence the lint suppression.
     #[allow(clippy::needless_pass_by_value)]
     pub fn pipe_batch(&mut self, topic: &str, records: Vec<ConsumedRecord>) -> Result<(), String> {
-        let produced = self.built.run_batch(topic, &records).map_err(|e| e.to_string())?;
+        let produced = self
+            .built
+            .run_batch(topic, &records)
+            .map_err(|e| e.to_string())?;
         for (sink_topic, rec) in produced {
             self.output.entry(sink_topic).or_default().push(rec);
         }

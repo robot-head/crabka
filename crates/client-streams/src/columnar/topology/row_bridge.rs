@@ -67,8 +67,14 @@ mod tests {
     fn json_bridge_round_trips_rows() {
         let bridge = JsonRowBridge;
         let rows = vec![
-            Txn { user: "a".into(), amount: 5 },
-            Txn { user: "b".into(), amount: 7 },
+            Txn {
+                user: "a".into(),
+                amount: 5,
+            },
+            Txn {
+                user: "b".into(),
+                amount: 7,
+            },
         ];
         let df = bridge.rows_to_frame(&rows).unwrap();
         check!(df.height() == 2);

@@ -76,7 +76,9 @@ pub struct BlobCodec {
 
 impl Default for BlobCodec {
     fn default() -> Self {
-        Self { max_record_bytes: 900 * 1024 }
+        Self {
+            max_record_bytes: 900 * 1024,
+        }
     }
 }
 
@@ -90,7 +92,11 @@ impl BatchCodec for BlobCodec {
             // Reject payloads whose own columns collide with the reserved metadata
             // names we are about to attach — otherwise `with_meta_columns` would
             // silently overwrite the payload's data.
-            let cols: Vec<&str> = frame.get_column_names().iter().map(|s| s.as_str()).collect();
+            let cols: Vec<&str> = frame
+                .get_column_names()
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
             reject_reserved_payload_columns(&cols)
                 .map_err(|e| BatchError(format!("decode record {i}: {e}")))?;
             let frame = with_meta_columns(frame, rec)?;
@@ -108,7 +114,11 @@ impl BatchCodec for BlobCodec {
         let mut out = Vec::new();
         for chunk in chunk_by_size(&payload, self.max_record_bytes) {
             let value = PolarsIpcSerde.serialize("", &chunk);
-            out.push(ProduceRecord { key: None, value, timestamp: ts });
+            out.push(ProduceRecord {
+                key: None,
+                value,
+                timestamp: ts,
+            });
         }
         Ok(out)
     }
@@ -120,7 +130,8 @@ fn with_meta_columns(frame: DataFrame, rec: &ConsumedRecord) -> Result<DataFrame
     let mut df = frame;
     // `Vec<Option<Vec<u8>>>` maps to a Binary column via polars' `NamedFrom` impl.
     let key_vals: Vec<Option<Vec<u8>>> = vec![rec.key.as_ref().map(|k| k.to_vec()); n];
-    df.with_column(Column::new(COL_KEY.into(), key_vals)).map_err(|e| BatchError(e.to_string()))?;
+    df.with_column(Column::new(COL_KEY.into(), key_vals))
+        .map_err(|e| BatchError(e.to_string()))?;
     df.with_column(Column::new(COL_TIMESTAMP.into(), vec![rec.timestamp; n]))
         .map_err(|e| BatchError(e.to_string()))?;
     df.with_column(Column::new(COL_PARTITION.into(), vec![rec.partition; n]))
@@ -149,7 +160,10 @@ fn chunk_by_size(df: &DataFrame, cap: usize) -> Vec<DataFrame> {
     let mid = df.height() / 2;
     let mut out = chunk_by_size(&df.slice(0, mid), cap);
     // `mid` is at most `df.height() / 2`, which fits in i64 on any real frame.
-    #[allow(clippy::cast_possible_wrap, reason = "row count cannot exceed i64::MAX")]
+    #[allow(
+        clippy::cast_possible_wrap,
+        reason = "row count cannot exceed i64::MAX"
+    )]
     let mid_i64 = mid as i64;
     out.extend(chunk_by_size(&df.slice(mid_i64, df.height() - mid), cap));
     out
@@ -173,7 +187,12 @@ pub struct RowCodec<K, V, KS, VS, B> {
 impl<K, V, KS, VS, B> RowCodec<K, V, KS, VS, B> {
     /// Construct a `RowCodec` from its key/value serdes and a row bridge.
     pub fn new(key_serde: KS, value_serde: VS, bridge: B) -> Self {
-        Self { key_serde, value_serde, bridge, _kv: PhantomData }
+        Self {
+            key_serde,
+            value_serde,
+            bridge,
+            _kv: PhantomData,
+        }
     }
 }
 
@@ -195,12 +214,18 @@ where
             );
         }
         let payload = self.bridge.rows_to_frame(&values)?;
-        let names: Vec<&str> = payload.get_column_names().iter().map(|s| s.as_str()).collect();
+        let names: Vec<&str> = payload
+            .get_column_names()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
         reject_reserved_payload_columns(&names)?;
 
         let mut df = payload;
-        let key_vals: Vec<Option<Vec<u8>>> =
-            records.iter().map(|r| r.key.as_ref().map(|k| k.to_vec())).collect();
+        let key_vals: Vec<Option<Vec<u8>>> = records
+            .iter()
+            .map(|r| r.key.as_ref().map(|k| k.to_vec()))
+            .collect();
         df.with_column(Column::new(COL_KEY.into(), key_vals))
             .map_err(|e| BatchError(e.to_string()))?;
         df.with_column(Column::new(
@@ -233,8 +258,15 @@ where
                 .and_then(|c| c.binary().ok())
                 .and_then(|c| c.get(i))
                 .map(Bytes::copy_from_slice);
-            let timestamp = ts.and_then(|c| c.i64().ok()).and_then(|c| c.get(i)).unwrap_or(0);
-            out.push(ProduceRecord { key, value, timestamp });
+            let timestamp = ts
+                .and_then(|c| c.i64().ok())
+                .and_then(|c| c.get(i))
+                .unwrap_or(0);
+            out.push(ProduceRecord {
+                key,
+                value,
+                timestamp,
+            });
         }
         Ok(out)
     }
@@ -272,8 +304,20 @@ mod tests {
         let a = df!("v" => [1_i64, 2]).unwrap();
         let b = df!("v" => [3_i64]).unwrap();
         let records = vec![
-            ConsumedRecord { key: None, value: ipc_bytes(&a), timestamp: 10, partition: 0, offset: 5 },
-            ConsumedRecord { key: None, value: ipc_bytes(&b), timestamp: 11, partition: 0, offset: 6 },
+            ConsumedRecord {
+                key: None,
+                value: ipc_bytes(&a),
+                timestamp: 10,
+                partition: 0,
+                offset: 5,
+            },
+            ConsumedRecord {
+                key: None,
+                value: ipc_bytes(&b),
+                timestamp: 11,
+                partition: 0,
+                offset: 6,
+            },
         ];
         let df = codec.decode(&records).unwrap();
         check!(df.height() == 3);
@@ -329,8 +373,13 @@ mod tests {
         fn serialize(&self, _t: &str, v: &T) -> Bytes {
             Bytes::from(serde_json::to_vec(v).unwrap())
         }
-        fn deserialize(&self, _t: &str, b: &[u8]) -> Result<T, crate::processor::serde::SerdeError> {
-            serde_json::from_slice(b).map_err(|e| crate::processor::serde::SerdeError(e.to_string()))
+        fn deserialize(
+            &self,
+            _t: &str,
+            b: &[u8],
+        ) -> Result<T, crate::processor::serde::SerdeError> {
+            serde_json::from_slice(b)
+                .map_err(|e| crate::processor::serde::SerdeError(e.to_string()))
         }
     }
     impl<T: Send + Sync + 'static> crate::processor::serde::SerdeAssociate for JsonValueSerde<T> {
@@ -347,14 +396,26 @@ mod tests {
         let recs = vec![
             ConsumedRecord {
                 key: Some(Bytes::from_static(b"a")),
-                value: Bytes::from(serde_json::to_vec(&Txn { user: "a".into(), amount: 5 }).unwrap()),
+                value: Bytes::from(
+                    serde_json::to_vec(&Txn {
+                        user: "a".into(),
+                        amount: 5,
+                    })
+                    .unwrap(),
+                ),
                 timestamp: 1,
                 partition: 0,
                 offset: 0,
             },
             ConsumedRecord {
                 key: Some(Bytes::from_static(b"b")),
-                value: Bytes::from(serde_json::to_vec(&Txn { user: "b".into(), amount: 7 }).unwrap()),
+                value: Bytes::from(
+                    serde_json::to_vec(&Txn {
+                        user: "b".into(),
+                        amount: 7,
+                    })
+                    .unwrap(),
+                ),
                 timestamp: 2,
                 partition: 0,
                 offset: 1,
@@ -369,7 +430,12 @@ mod tests {
         check!(out.len() == 2);
         check!(out[0].key.as_deref() == Some(b"a".as_ref()));
         let v0: Txn = serde_json::from_slice(&out[0].value).unwrap();
-        check!(v0 == Txn { user: "a".into(), amount: 5 });
+        check!(
+            v0 == Txn {
+                user: "a".into(),
+                amount: 5
+            }
+        );
     }
 
     use proptest::prelude::*;

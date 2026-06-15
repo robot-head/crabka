@@ -13,9 +13,17 @@ use super::operator::{BuiltinOp, ColumnarProcessor};
 pub struct ColumnarNode(usize);
 
 enum NodeKind {
-    Source { topics: Vec<String>, codec: Arc<dyn BatchCodec> },
-    Operator { make: Arc<dyn Fn() -> Box<dyn ColumnarProcessor> + Send + Sync> },
-    Sink { topic: String, codec: Arc<dyn BatchCodec> },
+    Source {
+        topics: Vec<String>,
+        codec: Arc<dyn BatchCodec>,
+    },
+    Operator {
+        make: Arc<dyn Fn() -> Box<dyn ColumnarProcessor> + Send + Sync>,
+    },
+    Sink {
+        topic: String,
+        codec: Arc<dyn BatchCodec>,
+    },
 }
 
 struct NodeDef {
@@ -58,9 +66,20 @@ impl ColumnarTopology {
     ///
     /// A fresh operator instance is built per `run_batch` (operators are stateless
     /// in v1), so a built topology can be executed repeatedly.
-    pub fn add_operator(&mut self, name: &str, op: BuiltinOp, parent: ColumnarNode) -> ColumnarNode {
+    pub fn add_operator(
+        &mut self,
+        name: &str,
+        op: BuiltinOp,
+        parent: ColumnarNode,
+    ) -> ColumnarNode {
         let make = move || -> Box<dyn ColumnarProcessor> { Box::new(op.clone()) };
-        self.push(name, NodeKind::Operator { make: Arc::new(make) }, vec![parent])
+        self.push(
+            name,
+            NodeKind::Operator {
+                make: Arc::new(make),
+            },
+            vec![parent],
+        )
     }
 
     /// Add a sink node writing to `topic` via `codec`, fed by `parent`.
@@ -73,14 +92,21 @@ impl ColumnarTopology {
     ) -> ColumnarNode {
         self.push(
             name,
-            NodeKind::Sink { topic: topic.into(), codec: Arc::new(codec) },
+            NodeKind::Sink {
+                topic: topic.into(),
+                codec: Arc::new(codec),
+            },
             vec![parent],
         )
     }
 
     fn push(&mut self, name: &str, kind: NodeKind, parents: Vec<ColumnarNode>) -> ColumnarNode {
         let id = ColumnarNode(self.nodes.len());
-        self.nodes.push(NodeDef { name: name.into(), kind, parents });
+        self.nodes.push(NodeDef {
+            name: name.into(),
+            kind,
+            parents,
+        });
         id
     }
 
@@ -203,7 +229,10 @@ impl BuiltColumnarTopology<'_> {
                     }
                     frames.insert(idx, out);
                 }
-                NodeKind::Sink { topic: sink_topic, codec } => {
+                NodeKind::Sink {
+                    topic: sink_topic,
+                    codec,
+                } => {
                     for batch in inputs {
                         for rec in codec.encode(&batch)? {
                             produced.push((sink_topic.clone(), rec));
@@ -298,8 +327,20 @@ mod tests {
         let second = built.run_batch("in", &mk(&[7, 2])).unwrap();
         check!(first.len() == 1);
         check!(second.len() == 1);
-        check!(PolarsIpcSerde.deserialize("", &first[0].1.value).unwrap().height() == 2);
-        check!(PolarsIpcSerde.deserialize("", &second[0].1.value).unwrap().height() == 1);
+        check!(
+            PolarsIpcSerde
+                .deserialize("", &first[0].1.value)
+                .unwrap()
+                .height()
+                == 2
+        );
+        check!(
+            PolarsIpcSerde
+                .deserialize("", &second[0].1.value)
+                .unwrap()
+                .height()
+                == 1
+        );
     }
 
     #[test]
