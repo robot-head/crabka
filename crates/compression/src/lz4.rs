@@ -98,4 +98,40 @@ mod tests {
         let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.len() == bomb.len());
     }
+
+    #[test]
+    fn decompress_at_exact_cap_succeeds() {
+        let z = compress(HELLO).unwrap();
+        // Output of exactly `max_output` bytes is allowed (cap check is
+        // `len > max_output`, not `>=`).
+        let back = decompress(&z, HELLO.len()).unwrap();
+        assert!(back.as_ref() == HELLO);
+        // One byte under the exact size is rejected.
+        assert!(matches!(
+            decompress(&z, HELLO.len() - 1),
+            Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
+        ));
+    }
+
+    #[test]
+    fn frame_uses_64kib_independent_blocks() {
+        // Compress a payload larger than 64 KiB so the block-size choice is
+        // observable in the frame header: our explicit `Max64KB` must stay
+        // 64 KiB rather than grow to an auto-selected larger block. This pins
+        // the `frame_info()` settings (a `Default::default()` FrameInfo would
+        // auto-pick a 256 KiB block for a payload this size).
+        let big = vec![0xCDu8; 128 * 1024];
+        let z = compress(&big).unwrap();
+        // LZ4 frame layout: [magic:4][FLG][BD]...
+        assert!(z[0..4] == [0x04, 0x22, 0x4D, 0x18]);
+        let flg = z[4];
+        let bd = z[5];
+        // BD bits 4..6 encode the block max size; value 4 == 64 KiB.
+        assert!((bd >> 4) & 0x7 == 4, "BD={bd:#04x}");
+        // FLG bit 5 = block-independence flag (we request Independent).
+        assert!((flg >> 5) & 1 == 1, "FLG={flg:#04x}");
+        // FLG bit 4 = per-block checksum, bit 2 = content checksum: both off.
+        assert!((flg >> 4) & 1 == 0, "FLG={flg:#04x}");
+        assert!((flg >> 2) & 1 == 0, "FLG={flg:#04x}");
+    }
 }

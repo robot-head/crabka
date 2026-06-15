@@ -150,4 +150,59 @@ mod tests {
         let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.len() == bomb.len());
     }
+
+    #[test]
+    fn decompress_at_exact_cap_succeeds() {
+        let z = compress(HELLO).unwrap();
+        // The cumulative per-chunk cap check is `out + chunk > max_output`
+        // (not `>=`), so a cap equal to the exact output size must pass.
+        let back = decompress(&z, HELLO.len()).unwrap();
+        assert!(back.as_ref() == HELLO);
+        // One byte under the exact size is rejected.
+        assert!(matches!(
+            decompress(&z, HELLO.len() - 1),
+            Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
+        ));
+    }
+
+    #[test]
+    fn compress_uses_32kib_chunks() {
+        // A payload between 1 KiB and 32 KiB must serialize as a SINGLE xerial
+        // chunk (chunk size is 32 * 1024). A smaller chunk size would split it
+        // into several length-prefixed chunks.
+        let payload = vec![0x5Au8; 4096];
+        let z = compress(&payload).unwrap();
+        let mut rest = &z[XERIAL_HEADER.len()..];
+        let mut chunks = 0;
+        while rest.len() >= 4 {
+            let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            rest = &rest[4 + len..];
+            chunks += 1;
+        }
+        assert!(chunks == 1, "expected one 32 KiB chunk, got {chunks}");
+    }
+
+    #[test]
+    fn decompress_bare_header_is_empty() {
+        // compress("") emits exactly the 16-byte xerial header and no chunks;
+        // decompressing it must succeed and yield empty. Boundary on the
+        // `data.len() < header` guard: a length equal to the header is valid.
+        let z = compress(b"").unwrap();
+        assert!(z.len() == XERIAL_HEADER.len());
+        let back = decompress(&z, 1024).unwrap();
+        assert!(back.is_empty());
+    }
+
+    #[test]
+    fn decompress_four_byte_chunk_header_reads_length() {
+        // With exactly a 4-byte chunk header present and no body, we must get
+        // PAST the "header truncated" guard (`rest.len() < 4` is false at 4)
+        // and fail on the missing *body* instead. Pins the `< 4` boundary.
+        let mut bytes = XERIAL_HEADER.to_vec();
+        bytes.extend_from_slice(&[0, 0, 0, 5]); // claim a 5-byte chunk, supply none
+        let Err(CompressionError::InvalidData(msg)) = decompress(&bytes, 1024) else {
+            panic!("expected InvalidData");
+        };
+        assert!(msg.contains("body"), "msg={msg}");
+    }
 }
