@@ -25,7 +25,7 @@ missing_panics_doc = "allow"
 # features). `polars` and `polars-arrow` MUST share the same version.
 polars = { version = "=0.54.4", default-features = false, features = ["lazy", "ipc", "dtype-full", "parquet", "strings", "json"] }
 polars-arrow = { version = "=0.54.4", default-features = false }
-arrow = { version = "54", default-features = false, features = ["ipc"] }
+arrow = { version = "59", default-features = false, features = ["ipc"] }
 columnar = "0.13"
 bytes = "1"
 thiserror = "2"
