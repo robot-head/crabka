@@ -16,6 +16,11 @@ ignore = [
     # operations (no PKINIT), so the network-observable timing leak does not
     # apply. The advisory has no fixed release available.
     "RUSTSEC-2023-0071",
+    # bincode is unmaintained (the team ceased development; v2.0.1 is considered
+    # feature-complete and "no safe upgrade is available"). This is an
+    # unmaintained notice, not a vulnerability. Pulled in transitively via
+    # `polars-utils` (the `polars` columnar-streams feature).
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]
@@ -42,6 +47,10 @@ exceptions = [
     # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
     # `network_client` feature, which we need for KDC communication.
     { allow = ["Unlicense"], crate = "portpicker" },
+    # xxhash-rust is BSL-1.0 (Boost, OSI-approved and FSF Free/Libre — a
+    # permissive, non-copyleft license). Pulled in transitively via polars
+    # (the `polars` columnar-streams feature).
+    { allow = ["BSL-1.0"], crate = "xxhash-rust" },
 ]
 confidence-threshold = 0.93
 
