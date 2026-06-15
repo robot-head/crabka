@@ -39,7 +39,21 @@ Add the client and pick the columnar features you need:
 crabka-client-streams = { version = "0.3.6", features = ["polars", "arrow"] }
 ```
 
-Round-tripping a typed value through a schema serde:
+Define a type, then round-trip it through a schema serde. Any `serde` type that
+also derives `schemars::JsonSchema` works as a JSON-Schema value:
+
+<!-- snippet: client-streams/examples/format_json.rs#json-type -->
+```rust
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+struct OrderEvent {
+    order_id: String,
+    user: String,
+    amount: f64,
+    currency: String,
+    ts_ms: i64,
+}
+```
+<!-- /snippet -->
 
 <!-- snippet: client-streams/examples/format_json.rs#json-roundtrip -->
 ```rust
@@ -94,6 +108,31 @@ topology
 ```
 <!-- /snippet -->
 
+### Columnar formats
+
+For vectorized workloads, values are self-describing Arrow IPC. `ArrowIpcSerde`
+round-trips an arrow-rs `RecordBatch` (and `PolarsIpcSerde` does the same for a
+Polars `DataFrame`):
+
+<!-- snippet: client-streams/examples/format_arrow.rs#arrow-roundtrip -->
+```rust
+let schema = Arc::new(Schema::new(vec![
+    Field::new("user", DataType::Utf8, false),
+    Field::new("amount_cents", DataType::Int64, false),
+]));
+let batch = RecordBatch::try_new(
+    schema,
+    vec![
+        Arc::new(StringArray::from(vec!["alice", "bob"])),
+        Arc::new(Int64Array::from(vec![850_i64, 900])),
+    ],
+)
+.unwrap();
+let bytes = ArrowIpcSerde.serialize("orders.arrow", &batch);
+let back = ArrowIpcSerde.deserialize("orders.arrow", &bytes).unwrap();
+```
+<!-- /snippet -->
+
 ## Worked pipeline: JSON → Protobuf → Arrow → Polars → summary Protobuf
 
 This pipeline ingests order events as JSON, normalizes them to a Protobuf
@@ -110,6 +149,49 @@ orders.arrow  --Arrow IPC----->  Stage C (Polars group-by)
 The full source is `crates/client-streams/examples/format_pipeline.rs`; it boots
 an in-process broker and Schema Registry and asserts the result, so it runs in
 CI as a test.
+
+The harness — an in-process broker plus a Schema Registry on a real HTTP port:
+
+<!-- snippet: client-streams/examples/format_pipeline.rs#setup -->
+```rust
+async fn boot() -> Boot {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+
+    // In-process Schema Registry over a real HTTP port.
+    let cancel = CancellationToken::new();
+    let cfg = RegistryConfig {
+        bootstrap: bootstrap.clone(),
+        schemas_topic: "_schemas".into(),
+        schemas_topic_rf: 1,
+        client_id: "format-pipeline-sr".into(),
+        advertised_url: "http://127.0.0.1:0".into(),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
+        security: SecurityConfig::default(),
+    };
+    let store = KafkaStore::start(&cfg, cancel.clone()).await.expect("sr start");
+    let app = rest::router(AppState { store });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind sr");
+    let sr_addr = listener.local_addr().expect("sr addr");
+    let serve_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let _ = rest::serve::serve_http(listener, app, serve_cancel).await;
+    });
+
+    Boot {
+        _broker: broker,
+        bootstrap,
+        registry_url: format!("http://{sr_addr}"),
+        cancel,
+        _dir: dir,
+    }
+}
+```
+<!-- /snippet -->
 
 The shared event type and the Arrow→Polars bridge codec:
 
