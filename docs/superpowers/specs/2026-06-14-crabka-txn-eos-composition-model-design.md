@@ -50,11 +50,22 @@ A single new `stateright` model `crates/broker/src/txn/eos_composition_model.rs`
 | coordinator commit/abort decision | `decide_phase1_transition`, `decide_end_txn_completion` (over `TxnEntry` / `TxnState::can_transition_to`) | `crates/broker/src/txn/decision.rs` |
 | `read_committed` visibility | `compute_visibility_window` (read-committed branch: `effective_lso = lso.min(hw)`) | `crates/broker/src/handlers/fetch.rs` |
 
-**Modeled (faithfully, per the real rule):** the **LSO** = the base offset of the oldest still-open
-transactional batch, else the log end (Kafka's `first-unstable-offset`); the **aborted-txn list**
-(`AbortedTxn{start_offset,last_offset,producer_id}`) recorded when a txn aborts; the `read_committed` visible
-set = batches with `last_offset < effective_lso` minus aborted batches (mirrors `TxnIndex::aborted_in_range`).
-Single leader ⇒ `hw = log_end` (fully replicated), so `effective_lso = lso` — the LSO is the visibility gate.
+**Modeled (faithful abstraction, NOT driving real code):** the **LSO** = the base offset of the oldest
+still-open transactional batch, else the log end (Kafka's `first-unstable-offset`; `Log::lso()`'s incremental
+maintenance is stored state, not a pure fn, so the rule is re-implemented); and the **abort filter** — a
+`Data` batch is hidden iff its transaction aborted. The abort filter is an *outcome-level* abstraction
+equivalent to the client-side `poll.rs` / `TxnIndex::aborted_in_range` range filtering **only under** the
+one-in-flight-txn-per-producer invariant this model enforces (it does **not** drive `aborted_in_range`'s
+overlap arithmetic). An **advancing HWM** (`hw <= log_end`, bumped by an `Ack` action modelling follower
+replication) lets an open txn's records sit above the watermark so `lso > hw` and the real
+`compute_visibility_window` clamp `effective_lso = lso.min(hw)` bites non-trivially (witness `hwm_clamp_active`)
+rather than acting as an identity pass-through.
+
+**Faithfulness scope (post adversarial review):** an adversarial review flagged the first draft as
+over-claiming. **NOT covered** by this model (left to the per-slice log / txn-index / fetch models): the
+`Log::lso()` maintenance internals, the `TxnIndex::aborted_in_range` overlap arithmetic, and the consumer
+`aborted_pids` state machine. The decision cores are driven only on their **Proceed** path (the fencing /
+idempotent-retry arms live in `decision_model.rs`, #523; a guard `unreachable!`s if they fire here).
 
 ## State & actions
 

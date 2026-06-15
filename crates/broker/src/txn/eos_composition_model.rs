@@ -1,17 +1,34 @@
-//! COMPOSITIONAL model of the exactly-once READ guarantee — the second
-//! end-to-end model (after the data-path composition). It composes the real
-//! txn-coordinator decision (`decide_phase1_transition` /
-//! `decide_end_txn_completion`) with the LSO mechanics and the real
-//! `read_committed` branch of `compute_visibility_window`. Single leader
-//! (`hw = log_end`), >= 2 interleaving transactional producers.
+//! COMPOSITIONAL model of the exactly-once READ visibility algebra — the second
+//! end-to-end model (after the data-path composition). Over a single partition
+//! with >= 2 interleaving transactional producers and an advancing HWM, it
+//! verifies that what a `read_committed` consumer may see — every offset below
+//! `effective_lso = min(lso, hw)`, minus aborted batches — is EXACTLY the
+//! committed records: no aborted record ever leaks, no still-open-transaction
+//! record is exposed, and nothing above the HWM is exposed. Because concurrent
+//! producers' batches interleave at the offset level, a committed txn can sit
+//! partly above the LSO (behind an older open txn) or above the HWM, so the
+//! guarantee is prefix-correctness, not whole-txn snapshot atomicity.
 //!
-//! Verifies that what a `read_committed` consumer can see — every offset below
-//! the LSO, minus aborted batches — is EXACTLY the committed records: no aborted
-//! record ever leaks, and no record of a still-open transaction is exposed.
-//! Because concurrent producers' batches interleave at the offset level, a
-//! committed txn can sit partly above the LSO (behind an older open txn), so the
-//! guarantee is prefix-correctness, not whole-txn snapshot atomicity. See the
-//! design spec.
+//! Scope — what is DRIVEN vs MODELED (an adversarial faithfulness review flagged
+//! the original framing as over-claiming):
+//!   - DRIVEN (real code): the EndTxn decision cores `decide_phase1_transition` /
+//!     `decide_end_txn_completion` on their Proceed path (the fencing / retry
+//!     arms are exercised by `decision_model.rs`, #523; a guard `unreachable!`s if
+//!     they ever fire here); and the real `read_committed` clamp of
+//!     `compute_visibility_window` (`effective_lso = lso.min(hw)`), which bites
+//!     non-trivially when an open txn's records sit above the HWM (witness
+//!     `hwm_clamp_active`).
+//!   - MODELED (faithful abstraction, NOT driving real code): the LSO rule
+//!     (Kafka's first-unstable-offset; `Log::lso()`'s incremental maintenance is
+//!     stored state, not a pure fn) and the abort filter (a Data batch is hidden
+//!     iff its txn aborted — equivalent to the client-side `poll.rs` /
+//!     `TxnIndex::aborted_in_range` range filtering ONLY under the one-in-flight-
+//!     txn-per-producer invariant this model enforces).
+//!   - NOT covered (left to the per-slice log / txn-index / fetch models): the
+//!     `Log::lso()` maintenance internals, `TxnIndex::aborted_in_range` overlap
+//!     arithmetic, and the consumer `aborted_pids` state machine.
+//!
+//! See the design spec.
 
 #![allow(
     clippy::cast_possible_wrap,
@@ -63,6 +80,11 @@ struct Prod {
 struct EosState {
     log: Vec<Batch>,
     prod: Vec<Prod>, // index = producer
+    /// High watermark = offsets replicated/durable so far (`hw <= log_end`),
+    /// advanced by `Ack`. An OPEN transaction's not-yet-replicated records can
+    /// push the LSO ABOVE the HWM, so the real `compute_visibility_window`
+    /// clamp `effective_lso = lso.min(hw)` genuinely bites (returns `hw`).
+    hw: i64,
 }
 
 struct EosModel {
@@ -116,22 +138,30 @@ fn lso(log: &[Batch]) -> i64 {
     min_open.unwrap_or(log.len() as i64)
 }
 
-/// The `read_committed` visible set, driving the REAL `compute_visibility_window`:
-/// `Data` batch offsets below `effective_lso` whose txn did NOT abort.
-fn visible(log: &[Batch]) -> Vec<i64> {
+/// The exclusive offset a `read_committed` consumer may see, driving the REAL
+/// `compute_visibility_window` (read-committed branch: `effective_lso =
+/// lso.min(hw)`). When an open txn's records sit above the HWM, `lso > hw` and
+/// the clamp returns `hw` — the consumer never reads above the watermark.
+fn effective_lso(log: &[Batch], hw: i64) -> i64 {
     let log_end = log.len() as i64;
     let l = lso(log);
     let vw = compute_visibility_window(
         false,   // consumer, not follower
         true,    // read_committed
         0,       // log_start
-        log_end, // hw = log_end (single leader, fully replicated)
+        hw,      // hw (may be < log_end: replication lag)
         l,       // lso
         log_end, // log_end
         0,       // fetch_offset
     );
-    let eff = vw.effective_lso; // read_committed branch: lso.min(hw) == l
-    (0..log_end)
+    vw.effective_lso // = lso.min(hw)
+}
+
+/// The `read_committed` visible set: `Data` batch offsets below `effective_lso`
+/// whose txn did NOT abort.
+fn visible(log: &[Batch], hw: i64) -> Vec<i64> {
+    let eff = effective_lso(log, hw);
+    (0..log.len() as i64)
         .filter(|&off| off < eff)
         .filter(|&off| {
             let b = log[off as usize];
@@ -147,6 +177,7 @@ enum Act {
     Begin(u8),     // producer p: -> Ongoing (new generation)
     Append(u8),    // producer p: append a Data batch to its open txn
     End(u8, bool), // producer p: commit? -> drive decision cores + append marker
+    Ack,           // a follower replicates one more offset: hw += 1
 }
 
 impl Model for EosModel {
@@ -163,10 +194,15 @@ impl Model for EosModel {
                     generation: 0,
                 })
                 .collect(),
+            hw: 0,
         }]
     }
 
     fn actions(&self, s: &Self::State, acts: &mut Vec<Self::Action>) {
+        // A follower replicating: advance the HWM toward the log end.
+        if s.hw < s.log.len() as i64 {
+            acts.push(Act::Ack);
+        }
         if s.log.len() >= self.max_log {
             return;
         }
@@ -244,12 +280,23 @@ impl Model for EosModel {
                         np.state = next_state.to_kafka_status();
                         np.epoch = response_epoch; // TV_2 bumps the epoch on completion
                     }
-                    CompletionDecision::AlreadyComplete { .. } | CompletionDecision::Reject(_) => {
-                        return None;
-                    }
+                    // This no-window single-`End` path always Proceeds (the epoch
+                    // is never bumped underneath it); the fencing / idempotent-retry
+                    // arms are exercised by `decision_model.rs` (#523). Guard so a
+                    // future change that makes them reachable surfaces loudly
+                    // rather than silently shrinking what GREEN means.
+                    other => unreachable!("no-window End must Proceed, got {other:?}"),
                 }
             }
+            Act::Ack => {
+                s.hw += 1; // a follower replicated one more offset
+            }
         }
+        // HWM never regresses and never passes the log end.
+        assert!(
+            s.hw >= last.hw && s.hw <= s.log.len() as i64,
+            "HWM out of range"
+        );
         // LSO is monotonic across every transition (offsets only grow; the
         // oldest-open base only advances). Assert it (cheap regression guard).
         assert!(lso(&s.log) >= lso(&last.log), "LSO regressed");
@@ -260,43 +307,44 @@ impl Model for EosModel {
         vec![
             // HEADLINE: every visible batch belongs to a COMMITTED txn — no
             // open/uncommitted and no aborted record is ever visible. Catches a
-            // real `compute_visibility_window` returning effective_lso ABOVE the
-            // LSO (which would expose open-txn data below it).
+            // real `compute_visibility_window` returning effective_lso ABOVE
+            // min(lso, hw) (which would expose open-txn or above-HWM data).
             Property::always("only_committed_visible", |_, s: &EosState| {
-                visible(&s.log).into_iter().all(|off| {
+                visible(&s.log, s.hw).into_iter().all(|off| {
                     let b = s.log[off as usize];
                     txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit)
                 })
             }),
-            // Every committed Data batch below the LSO IS visible — no committed
-            // record below the LSO is wrongly hidden. Catches effective_lso BELOW
-            // the LSO. With the headline: visible = exactly committed-below-LSO.
+            // Every committed Data batch below the effective LSO (= min(lso, hw))
+            // IS visible — no committed, durable, stable record is wrongly hidden.
+            // Catches effective_lso BELOW min(lso, hw). With the headline:
+            // visible = exactly committed-below-effective-LSO.
             Property::always("committed_prefix_complete", |_, s: &EosState| {
-                let v = visible(&s.log);
-                let l = lso(&s.log);
+                let v = visible(&s.log, s.hw);
+                let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().all(|(off, b)| {
                     !(b.kind == Kind::Data
-                        && (off as i64) < l
+                        && (off as i64) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit))
                         || v.contains(&(off as i64))
                 })
             }),
             // No aborted batch is ever visible (the abort-side all-or-nothing).
             Property::always("no_visible_aborted", |_, s: &EosState| {
-                visible(&s.log).into_iter().all(|off| {
+                visible(&s.log, s.hw).into_iter().all(|off| {
                     let b = s.log[off as usize];
                     txn_outcome(&s.log, b.producer, b.generation) != Some(Kind::Abort)
                 })
             }),
             // ----- non-vacuity witnesses -----
             Property::sometimes("committed_visible", |_, s: &EosState| {
-                !visible(&s.log).is_empty()
+                !visible(&s.log, s.hw).is_empty()
             }),
             Property::sometimes("aborted_filtered", |_, s: &EosState| {
-                let l = lso(&s.log);
+                let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().any(|(off, b)| {
                     b.kind == Kind::Data
-                        && (off as i64) < l
+                        && (off as i64) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Abort)
                 })
             }),
@@ -309,6 +357,13 @@ impl Model for EosModel {
                         && (off as i64) >= l
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit)
                 })
+            }),
+            // The visibility CORE actively clamps: the HWM holds the effective LSO
+            // BELOW the LSO (an open txn's records sit above the not-yet-replicated
+            // HWM). Proves `compute_visibility_window`'s `lso.min(hw)` is exercised
+            // non-trivially, not as an identity pass-through.
+            Property::sometimes("hwm_clamp_active", |_, s: &EosState| {
+                effective_lso(&s.log, s.hw) < lso(&s.log)
             }),
         ]
     }
