@@ -156,6 +156,22 @@ impl GroupState {
         self.dirty = true;
     }
 
+    /// The KIP-848 `OffsetCommit` fencing decision: a member may commit only with
+    /// its CURRENT member epoch. `Ok(())` accepts; otherwise the Kafka error code.
+    /// Note: partition ownership is deliberately NOT checked here (Kafka permits a
+    /// right-epoch member to commit any partition) — the epoch is the only fence,
+    /// so a zombie from before a rebalance (whose epoch the group has since bumped)
+    /// is rejected. Pure; extracted from the actor's `ValidateCommit` so the
+    /// consumer-group composition model can drive the real rule.
+    pub(crate) fn validate_commit_decision(&self, member_id: &str, epoch: i32) -> Result<(), i16> {
+        match self.members.get(member_id) {
+            None => Err(crate::codes::UNKNOWN_MEMBER_ID),
+            Some(m) if epoch < m.member_epoch => Err(crate::codes::STALE_MEMBER_EPOCH),
+            Some(m) if epoch > m.member_epoch => Err(crate::codes::FENCED_MEMBER_EPOCH),
+            Some(_) => Ok(()),
+        }
+    }
+
     pub fn add_or_update_member(&mut self, mut m: MemberState) {
         // Ensure the cached compiled regex matches the pattern the caller
         // supplied. Construction sites set `subscribed_topic_regex` via a

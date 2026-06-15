@@ -1,29 +1,36 @@
-//! COMPOSITIONAL model of consumer DELIVERY correctness through rebalances — the
-//! third compositional model (after data-path #539, txn/EOS #541). It reuses the
-//! proven driving machinery of `reconciler_model.rs` (#521) — rebuilding a real
-//! `GroupState` from a hashable projection and driving the REAL `step_heartbeat`
-//! / `reconcile_member` over join / leave / heartbeat / faithful-client moves —
-//! and adds an OFFSET layer: a per-partition committed offset + a fenced `Commit`.
+//! COMPOSITIONAL model of consumer-group offset-commit FENCING through rebalances
+//! — the third compositional model (after data-path #539, txn/EOS #541). It
+//! reuses the proven driving machinery of `reconciler_model.rs` (#521) —
+//! rebuilding a real `GroupState` and driving the REAL `step_heartbeat` /
+//! `reconcile_member` over join / leave / heartbeat / faithful-client moves — and
+//! composes it with the REAL `OffsetCommit` epoch-fence.
 //!
-//! Verifies that through any rebalance interleaving: no two members own the same
-//! partition (exclusivity — the real reconciliation's withholding), the committed
-//! offset never regresses, and only a partition's current owner can advance it,
-//! so a partition resumed by a new owner after a handoff continues from exactly
-//! its committed offset (no duplicate processing, no gap).
+//! Verifies the genuine consumer-group offset-integrity guarantee: through any
+//! rebalance interleaving, (a) no two members ever own the same partition
+//! (exclusivity — the real reconciliation's withholding, re-verified in the
+//! composed context), and (b) a member may commit ONLY with its CURRENT member
+//! epoch — a zombie from before a rebalance (whose epoch the reconciliation has
+//! since bumped) is fenced — so a stale/forward commit can never corrupt the
+//! committed offset.
 //!
-//! Scope — DRIVEN vs MODELED (stated up front, per the txn/EOS review lesson):
-//!   - DRIVEN (real code): the KIP-848 reconciliation engine via `step_heartbeat`
-//!     (which calls the real `GroupState::reconcile_member` / `install_target` /
-//!     epoch logic) over a real `GroupState` rebuilt each transition.
-//!   - MODELED (faithful abstraction): the offset-commit FENCING (the real
-//!     `validate_group_commit` is async / handle-based; the rule is *a member may
-//!     commit for a partition only while it currently owns it* — modeled as
-//!     `owns()` over the ground-truth client ledger) + the committed-offset store.
-//!   - NOT covered: the `__consumer_offsets` log persistence (data-path #539), the
-//!     classic rebalance protocol (`classic_state_model` #534).
+//! Scope — DRIVEN vs MODELED (stated up front, per the txn/EOS review which found
+//! the first draft over-claimed):
+//!   - DRIVEN (real code): the KIP-848 reconciliation engine via `step_heartbeat`,
+//!     AND the real `OffsetCommit` fence `GroupState::validate_commit_decision`
+//!     (extracted from the actor's `ValidateCommit`). The model drives the real
+//!     fence and cross-checks it against an INDEPENDENT oracle (the expected
+//!     epoch comparison + error codes) — a divergence is a real fence/regression
+//!     bug.
+//!   - NOT verified here (deliberately): NO-DUPLICATE / NO-GAP delivery — plain
+//!     consumer groups are AT-LEAST-ONCE (a zombie reprocesses until fenced);
+//!     exactly-once is the txn/EOS path (#541). The committed offset is a small
+//!     bounded counter, present only to witness accepted commits. The
+//!     `__consumer_offsets` log persistence (#539) and the classic protocol
+//!     (`classic_state_model` #534) are out of scope.
 //!
 //! Memory safety: run under the host memory watchdog while bounds are tuned.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -74,6 +81,17 @@ struct CgcState {
     committed: Vec<(i32, i64)>,            // MODELED per-partition committed offset, sorted
 }
 
+/// Which epoch a member presents on an `OffsetCommit`: its current epoch (the
+/// legitimate owner), one behind (a zombie from before the last rebalance), or
+/// one ahead (an impossible/forward epoch). The real fence must accept only
+/// `Current`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum EpochKind {
+    Current,
+    Stale,
+    Forward,
+}
+
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum CgcAction {
     Join(String),
@@ -81,7 +99,7 @@ enum CgcAction {
     Heartbeat(String),
     ClientAdd(String, i32),
     ClientRevoke(String, i32),
-    Commit(String, i32), // (member, partition) — fenced offset commit
+    Commit(String, i32, EpochKind), // (member, partition, presented-epoch) — fenced commit
 }
 
 #[derive(Debug)]
@@ -249,12 +267,19 @@ fn committed_of(s: &CgcState, part: i32) -> i64 {
         .find(|(p, _)| *p == part)
         .map_or(0, |(_, o)| *o)
 }
-/// Does member `id` currently own partition `part` (ground-truth ledger driven
-/// by the real reconciliation)?
-fn owns(s: &CgcState, id: &str, part: i32) -> bool {
-    s.client_owned
-        .iter()
-        .any(|(k, v)| k == id && v.contains(&part))
+/// INDEPENDENT oracle for the `OffsetCommit` fence: the expected decision for a
+/// member presenting `epoch`. Deliberately a different structure (`Ordering`)
+/// from the real `validate_commit_decision`'s if-guards, so driving the real fn
+/// and asserting equality is a genuine cross-check (a fence regression diverges).
+fn oracle_commit(g: &GroupState, id: &str, epoch: i32) -> Result<(), i16> {
+    match g.members.get(id) {
+        None => Err(crate::codes::UNKNOWN_MEMBER_ID),
+        Some(m) => match epoch.cmp(&m.member_epoch) {
+            Ordering::Less => Err(crate::codes::STALE_MEMBER_EPOCH),
+            Ordering::Greater => Err(crate::codes::FENCED_MEMBER_EPOCH),
+            Ordering::Equal => Ok(()),
+        },
+    }
 }
 
 fn hb_request(
@@ -308,6 +333,41 @@ fn assert_epoch_monotonic(pre: &CgcState, post: &GroupState) {
     }
 }
 
+/// Drive the REAL `OffsetCommit` epoch fence (`validate_commit_decision`) for the
+/// epoch `kind` the member presents, cross-check it against the independent
+/// oracle, and — only on accept (a current-epoch member) — advance the bounded
+/// committed offset. The member's CURRENT epoch is whatever the real
+/// reconciliation last set, so a `Stale` commit after a rebalance is a zombie and
+/// is fenced. Kafka does NOT check partition ownership here (at-least-once).
+fn do_commit(last: &CgcState, id: &str, part: i32, kind: EpochKind) -> Option<CgcState> {
+    let g = rebuild_group(last);
+    let cur = member(last, id).map(|m| m.member_epoch);
+    let epoch = match (cur, kind) {
+        (Some(e), EpochKind::Current) => e,
+        (Some(e), EpochKind::Stale) => e - 1,
+        (Some(e), EpochKind::Forward) => e + 1,
+        (None, _) => 0,
+    };
+    let real = g.validate_commit_decision(id, epoch);
+    let oracle = oracle_commit(&g, id, epoch);
+    assert_eq!(
+        real, oracle,
+        "OffsetCommit fence diverges from oracle: member={id} epoch={epoch}"
+    );
+    if real.is_err() {
+        return None; // fenced (stale/forward/unknown) — cannot touch the offset
+    }
+    let mut committed = committed_map(last);
+    let off = committed.entry(part).or_insert(0);
+    if *off >= MAX_OFFSET {
+        return None;
+    }
+    *off += 1;
+    let mut next = last.clone();
+    next.committed = committed.iter().map(|(&k, &v)| (k, v)).collect();
+    Some(next)
+}
+
 impl Model for CgcModel {
     type State = CgcState;
     type Action = CgcAction;
@@ -355,11 +415,14 @@ impl Model for CgcModel {
                     actions.push(CgcAction::ClientRevoke(m.id.clone(), tp));
                 }
             }
-            // Offset commit: offered for EVERY (member, partition) so the fence
-            // (not a precondition) is what's exercised; bounded by MAX_OFFSET.
+            // Offset commit: offered with EACH epoch kind (current / stale /
+            // forward) so the real epoch fence — not a precondition — is what's
+            // exercised; the committed counter is bounded by MAX_OFFSET.
             for part in 0..self.partitions {
                 if committed_of(state, part) < MAX_OFFSET {
-                    actions.push(CgcAction::Commit(m.id.clone(), part));
+                    for kind in [EpochKind::Current, EpochKind::Stale, EpochKind::Forward] {
+                        actions.push(CgcAction::Commit(m.id.clone(), part, kind));
+                    }
                 }
             }
         }
@@ -445,28 +508,7 @@ impl Model for CgcModel {
                 adv.insert(id, advertised_of(&step));
                 Some(project(&g, &owned, &adv, &committed))
             }
-            CgcAction::Commit(id, part) => {
-                // MODELED fencing: accept iff `id` currently owns `part` (the real
-                // validate_group_commit rejects a non-owner / stale-epoch member).
-                // A fenced commit is a no-op (drop the edge).
-                if !owns(last, &id, part) {
-                    return None;
-                }
-                let mut committed = committed;
-                let off = committed.entry(part).or_insert(0);
-                if *off >= MAX_OFFSET {
-                    return None;
-                }
-                *off += 1; // the owner consumes + commits the next record
-                let mut next = last.clone();
-                next.committed = committed.iter().map(|(&k, &v)| (k, v)).collect();
-                // No-offset-regression, per transition.
-                assert!(
-                    committed_of(&next, part) >= committed_of(last, part),
-                    "committed offset regressed for partition {part}"
-                );
-                Some(next)
-            }
+            CgcAction::Commit(id, part, kind) => do_commit(last, &id, part, kind),
         }
     }
 
@@ -504,18 +546,24 @@ impl Model for CgcModel {
                     true
                 },
             ),
-            // Committed offsets are non-negative + bounded — the offset store is
-            // never corrupted to an invalid value (per-transition monotonicity is
-            // asserted in the Commit arm).
-            Property::always("offsets_valid", |_, s: &CgcState| {
-                s.committed
-                    .iter()
-                    .all(|&(_, o)| (0..=MAX_OFFSET).contains(&o))
-            }),
+            // The real OffsetCommit epoch fence agrees with the independent oracle
+            // is enforced as a per-transition `assert_eq!` in the Commit arm (a
+            // divergence is a real `validate_commit_decision` regression). The
+            // value here is the COMPOSITION: the epochs that fence drives are set
+            // by the real reconciliation, so a zombie from before a rebalance is
+            // rejected — see the `member_epoch_advanced` witness.
+
             // ----- non-vacuity witnesses -----
-            // A partition's committed offset actually advanced (commits happen).
+            // A current-epoch commit was accepted (the fence's accept path fires).
             Property::sometimes("offset_advanced", |_, s: &CgcState| {
                 s.committed.iter().any(|&(_, o)| o > 0)
+            }),
+            // The reconciliation actually advanced a member's epoch past its first
+            // generation — so `Stale`/`Forward` commits are genuinely distinct from
+            // `Current` and the fence is exercised over non-trivial epochs (a real
+            // zombie scenario: a stale commit after a rebalance bumped the epoch).
+            Property::sometimes("member_epoch_advanced", |_, s: &CgcState| {
+                s.members.iter().any(|m| m.member_epoch >= 2)
             }),
             // A handoff state: a partition is in one member's target while another
             // member currently owns it (the baton is mid-pass).
@@ -531,15 +579,6 @@ impl Model for CgcModel {
                     }
                 }
                 false
-            }),
-            // The KEY composed witness: a partition has a committed offset AND has
-            // been handed to a member that is NOT its last owner — i.e. a new owner
-            // resumes from a committed offset left by a previous owner.
-            Property::sometimes("resume_after_handoff", |_, s: &CgcState| {
-                s.members.len() >= 2
-                    && s.committed.iter().any(|&(part, o)| {
-                        o > 0 && s.client_owned.iter().any(|(_, v)| v.contains(&part))
-                    })
             }),
         ]
     }

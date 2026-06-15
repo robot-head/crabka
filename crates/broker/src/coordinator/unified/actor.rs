@@ -440,12 +440,7 @@ async fn actor_loop(
                     }
                     GroupActorMessage::ValidateCommit { member_id, group_instance_id, generation_or_epoch, reply } => {
                         let result: Result<(), i16> = if let Some(s) = group.as_consumer() {
-                            match s.members.get(&member_id) {
-                                None => Err(codes::UNKNOWN_MEMBER_ID),
-                                Some(m) if generation_or_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
-                                Some(m) if generation_or_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
-                                Some(_) => Ok(()),
-                            }
+                            s.validate_commit_decision(&member_id, generation_or_epoch)
                         } else if let Some(s) = group.as_classic() {
                             match classic_ops::validate_commit(s, &member_id, group_instance_id.as_deref(), generation_or_epoch) {
                                 None => Ok(()),
