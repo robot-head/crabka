@@ -90,9 +90,13 @@ async fn produce_one(
         if err == 0 {
             return;
         }
-        // 3 = UNKNOWN_TOPIC_OR_PARTITION, 6 = NOT_LEADER_OR_FOLLOWER: both can
-        // appear transiently while metadata propagates / leadership settles.
-        if (err == 3 || err == 6) && attempt < 10 {
+        // 3 = UNKNOWN_TOPIC_OR_PARTITION, 6 = NOT_LEADER_OR_FOLLOWER,
+        // 100 = UNKNOWN_TOPIC_ID: all appear transiently while metadata — the
+        // topic's existence, its leadership, and its topic-id mapping — fans
+        // out across brokers right after CreateTopics. The producer sends by
+        // topic_id, so a target leader that hasn't yet applied the topic record
+        // answers UNKNOWN_TOPIC_ID until the metadata image catches up.
+        if (err == 3 || err == 6 || err == 100) && attempt < 10 {
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
