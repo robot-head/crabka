@@ -149,6 +149,91 @@ fn chunk_by_size(df: &DataFrame, cap: usize) -> Vec<DataFrame> {
     out
 }
 
+use crate::columnar::topology::row_bridge::RowBridge;
+use crate::processor::serde::SerdeAssociate;
+use std::marker::PhantomData;
+
+/// `BatchCodec` over ordinary row records: deserialize each `(key, value)` with
+/// the inner serdes, assemble payload columns via a [`RowBridge`], and attach the
+/// reserved metadata columns. `encode` reverses it (one record per row).
+pub struct RowCodec<K, V, KS, VS, B> {
+    #[allow(dead_code, reason = "retained for future typed-key reconstruction")]
+    key_serde: KS,
+    value_serde: VS,
+    bridge: B,
+    _kv: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V, KS, VS, B> RowCodec<K, V, KS, VS, B> {
+    /// Construct a `RowCodec` from its key/value serdes and a row bridge.
+    pub fn new(key_serde: KS, value_serde: VS, bridge: B) -> Self {
+        Self { key_serde, value_serde, bridge, _kv: PhantomData }
+    }
+}
+
+impl<K, V, KS, VS, B> BatchCodec for RowCodec<K, V, KS, VS, B>
+where
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
+    KS: Serde<K> + SerdeAssociate<Target = K>,
+    VS: Serde<V> + SerdeAssociate<Target = V>,
+    B: RowBridge<V>,
+{
+    fn decode(&self, records: &[ConsumedRecord]) -> Result<DataFrame, BatchError> {
+        let mut values = Vec::with_capacity(records.len());
+        for (i, rec) in records.iter().enumerate() {
+            values.push(
+                self.value_serde
+                    .deserialize("", &rec.value)
+                    .map_err(|e| BatchError(format!("row {i} value: {e}")))?,
+            );
+        }
+        let payload = self.bridge.rows_to_frame(&values)?;
+        let names: Vec<&str> = payload.get_column_names().iter().map(|s| s.as_str()).collect();
+        reject_reserved_payload_columns(&names)?;
+
+        let mut df = payload;
+        let key_vals: Vec<Option<Vec<u8>>> =
+            records.iter().map(|r| r.key.as_ref().map(|k| k.to_vec())).collect();
+        df.with_column(Column::new(COL_KEY.into(), key_vals))
+            .map_err(|e| BatchError(e.to_string()))?;
+        df.with_column(Column::new(
+            COL_TIMESTAMP.into(),
+            records.iter().map(|r| r.timestamp).collect::<Vec<i64>>(),
+        ))
+        .map_err(|e| BatchError(e.to_string()))?;
+        df.with_column(Column::new(
+            COL_PARTITION.into(),
+            records.iter().map(|r| r.partition).collect::<Vec<i32>>(),
+        ))
+        .map_err(|e| BatchError(e.to_string()))?;
+        df.with_column(Column::new(
+            COL_OFFSET.into(),
+            records.iter().map(|r| r.offset).collect::<Vec<i64>>(),
+        ))
+        .map_err(|e| BatchError(e.to_string()))?;
+        Ok(df)
+    }
+
+    fn encode(&self, df: &DataFrame) -> Result<Vec<ProduceRecord>, BatchError> {
+        let payload = drop_reserved_columns(df);
+        let rows: Vec<V> = self.bridge.frame_to_rows(&payload)?;
+        let keys = df.column(COL_KEY).ok();
+        let ts = df.column(COL_TIMESTAMP).ok();
+        let mut out = Vec::with_capacity(rows.len());
+        for (i, v) in rows.iter().enumerate() {
+            let value = self.value_serde.serialize("", v);
+            let key = keys
+                .and_then(|c| c.binary().ok())
+                .and_then(|c| c.get(i))
+                .map(Bytes::copy_from_slice);
+            let timestamp = ts.and_then(|c| c.i64().ok()).and_then(|c| c.get(i)).unwrap_or(0);
+            out.push(ProduceRecord { key, value, timestamp });
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +277,92 @@ mod tests {
         check!(out.len() == 1);
         let back = PolarsIpcSerde.deserialize("t", &out[0].value).unwrap();
         check!(back.height() == 3);
+    }
+
+    use crate::columnar::topology::row_bridge::JsonRowBridge;
+    use crate::processor::serde::StringSerde;
+    use std::marker::PhantomData;
+
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+    struct Txn {
+        user: String,
+        amount: i64,
+    }
+
+    struct JsonValueSerde<T>(PhantomData<fn() -> T>);
+    impl<T> Default for JsonValueSerde<T> {
+        fn default() -> Self {
+            Self(PhantomData)
+        }
+    }
+    impl<T: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static>
+        crate::processor::serde::Serde<T> for JsonValueSerde<T>
+    {
+        fn serialize(&self, _t: &str, v: &T) -> Bytes {
+            Bytes::from(serde_json::to_vec(v).unwrap())
+        }
+        fn deserialize(&self, _t: &str, b: &[u8]) -> Result<T, crate::processor::serde::SerdeError> {
+            serde_json::from_slice(b).map_err(|e| crate::processor::serde::SerdeError(e.to_string()))
+        }
+    }
+    impl<T: Send + Sync + 'static> crate::processor::serde::SerdeAssociate for JsonValueSerde<T> {
+        type Target = T;
+    }
+
+    #[test]
+    fn row_codec_assembles_and_explodes() {
+        let codec = RowCodec::<String, Txn, _, _, _>::new(
+            StringSerde,
+            JsonValueSerde::<Txn>::default(),
+            JsonRowBridge,
+        );
+        let recs = vec![
+            ConsumedRecord {
+                key: Some(Bytes::from_static(b"a")),
+                value: Bytes::from(serde_json::to_vec(&Txn { user: "a".into(), amount: 5 }).unwrap()),
+                timestamp: 1,
+                partition: 0,
+                offset: 0,
+            },
+            ConsumedRecord {
+                key: Some(Bytes::from_static(b"b")),
+                value: Bytes::from(serde_json::to_vec(&Txn { user: "b".into(), amount: 7 }).unwrap()),
+                timestamp: 2,
+                partition: 0,
+                offset: 1,
+            },
+        ];
+        let df = codec.decode(&recs).unwrap();
+        check!(df.height() == 2);
+        check!(df.column("amount").is_ok());
+        check!(df.column(COL_KEY).is_ok());
+
+        let out = codec.encode(&df).unwrap();
+        check!(out.len() == 2);
+        check!(out[0].key.as_deref() == Some(b"a".as_ref()));
+        let v0: Txn = serde_json::from_slice(&out[0].value).unwrap();
+        check!(v0 == Txn { user: "a".into(), amount: 5 });
+    }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn row_codec_round_trip_preserves_rows(users in proptest::collection::vec("[a-z]{1,4}", 1..8)) {
+            let codec = RowCodec::<String, Txn, _, _, _>::new(
+                StringSerde, JsonValueSerde::<Txn>::default(), JsonRowBridge,
+            );
+            let recs: Vec<ConsumedRecord> = users.iter().enumerate().map(|(i, u)| ConsumedRecord {
+                key: Some(Bytes::from(u.clone().into_bytes())),
+                value: Bytes::from(serde_json::to_vec(&Txn { user: u.clone(), amount: i64::try_from(i).unwrap() }).unwrap()),
+                timestamp: i64::try_from(i).unwrap(), partition: 0, offset: i64::try_from(i).unwrap(),
+            }).collect();
+            let df = codec.decode(&recs).unwrap();
+            let out = codec.encode(&df).unwrap();
+            prop_assert_eq!(out.len(), recs.len());
+            for (o, r) in out.iter().zip(&recs) {
+                prop_assert_eq!(o.key.as_deref(), r.key.as_deref());
+                prop_assert_eq!(o.timestamp, r.timestamp);
+            }
+        }
     }
 }

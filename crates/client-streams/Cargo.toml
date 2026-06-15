@@ -42,11 +42,12 @@ polars = { workspace = true, optional = true }
 polars-arrow = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 columnar = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [features]
 arrow = ["dep:arrow"]
 columnar = ["dep:columnar"]
-polars = ["dep:polars", "dep:polars-arrow"]
+polars = ["dep:polars", "dep:polars-arrow", "dep:serde_json"]
 
 [dev-dependencies]
 assert2 = { workspace = true }
@@ -55,6 +56,7 @@ crabka-broker = { version = "0.3.6", path = "../broker", features = ["test-helpe
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
+proptest = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
