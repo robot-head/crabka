@@ -67,6 +67,10 @@ required-features = ["arrow"]
 [[example]]
 name = "format_dsl"
 
+[[example]]
+name = "format_pipeline"
+required-features = ["polars", "arrow"]
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
