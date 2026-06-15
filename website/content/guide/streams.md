@@ -42,17 +42,56 @@ crabka-client-streams = { version = "0.3.6", features = ["polars", "arrow"] }
 Round-tripping a typed value through a schema serde:
 
 <!-- snippet: client-streams/examples/format_json.rs#json-roundtrip -->
-placeholder
+```rust
+let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+cache.seed_subject_id("orders.json-value", 1);
+let serde = SchemaSerde::new(JsonSerde::<OrderEvent>::value(&cache, false));
+
+let event = OrderEvent {
+    order_id: "o-1".into(),
+    user: "alice".into(),
+    amount: 5.0,
+    currency: "USD".into(),
+    ts_ms: 1,
+};
+let bytes = serde.serialize("orders.json", &event);
+let back: OrderEvent = serde.deserialize("orders.json", &bytes).unwrap();
+```
 <!-- /snippet -->
 
 The idiomatic high-level DSL wires types in via `DefaultSerde`:
 
 <!-- snippet: client-streams/examples/format_dsl.rs#dsl-defaultserde -->
-placeholder
+```rust
+impl DefaultSerde for OrderEvent {
+    type Serde = SchemaSerde<OrderEvent, JsonSerde<OrderEvent>>;
+}
+impl DefaultSerde for OrderProto {
+    type Serde = SchemaSerde<OrderProto, ProtobufSerde<OrderProto>>;
+}
+```
 <!-- /snippet -->
 
 <!-- snippet: client-streams/examples/format_dsl.rs#dsl-topology -->
-placeholder
+```rust
+let app = StreamsApp::builder()
+    .bootstrap("127.0.0.1:9092")
+    .application_id("orders-formats")
+    .schema_registry("http://127.0.0.1:8081")
+    .build();
+
+let topology = app.streams_builder();
+topology
+    .stream::<String, OrderEvent>(["orders.json"])
+    .map_values(|e: &OrderEvent| OrderProto {
+        order_id: e.order_id.clone(),
+        user: e.user.clone(),
+        amount_cents: (e.amount * 100.0).round() as i64,
+        currency: e.currency.to_uppercase(),
+        ts_ms: e.ts_ms,
+    })
+    .to("orders.proto");
+```
 <!-- /snippet -->
 
 ## Worked pipeline: JSON → Protobuf → Arrow → Polars → summary Protobuf
@@ -75,39 +114,178 @@ CI as a test.
 The shared event type and the Arrow→Polars bridge codec:
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#types -->
-placeholder
+```rust
+/// Raw order, ingested as JSON (JSON-Schema serde).
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct OrderEvent {
+    order_id: String,
+    user: String,
+    amount: f64,
+    currency: String,
+    ts_ms: i64,
+}
+```
 <!-- /snippet -->
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#arrow-codec -->
-placeholder
+```rust
+/// Source codec: each Kafka record value is an Arrow-IPC `RecordBatch`; decode
+/// them into one Polars `DataFrame` the columnar engine can process. Bridges
+/// arrow-rs -> polars explicitly (different Arrow memory libraries).
+struct ArrowBlobCodec;
+
+impl BatchCodec for ArrowBlobCodec {
+    fn decode(&self, records: &[ConsumedRecord]) -> Result<DataFrame, BatchError> {
+        let mut users: Vec<String> = Vec::new();
+        let mut cents: Vec<i64> = Vec::new();
+        for (i, rec) in records.iter().enumerate() {
+            let batch = ArrowIpcSerde
+                .deserialize("", &rec.value)
+                .map_err(|e| BatchError(format!("arrow decode rec {i}: {e}")))?;
+            let user_col = batch
+                .column_by_name("user")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or_else(|| BatchError("missing user column".into()))?;
+            let cent_col = batch
+                .column_by_name("amount_cents")
+                .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+                .ok_or_else(|| BatchError("missing amount_cents column".into()))?;
+            for row in 0..batch.num_rows() {
+                users.push(user_col.value(row).to_string());
+                cents.push(cent_col.value(row));
+            }
+        }
+        df!("user" => users, "amount_cents" => cents).map_err(|e| BatchError(e.to_string()))
+    }
+
+    fn encode(&self, _df: &DataFrame) -> Result<Vec<ProduceRecord>, BatchError> {
+        Err(BatchError("ArrowBlobCodec is source-only".into()))
+    }
+}
+```
 <!-- /snippet -->
 
 **Stage A — JSON → Protobuf**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-a-json-proto -->
-placeholder
+```rust
+// Stage A — JSON -> Protobuf: deserialize JSON, normalize, emit OrderProto.
+for v in drain(&bootstrap, "orders.json", "stage-a", events.len()).await {
+    let ev: OrderEvent = json_serde.deserialize("orders.json", &v).expect("json decode");
+    let proto = OrderProto {
+        order_id: ev.order_id,
+        user: ev.user,
+        amount_cents: (ev.amount * 100.0).round() as i64,
+        currency: ev.currency.to_uppercase(),
+        ts_ms: ev.ts_ms,
+    };
+    let bytes = proto_serde.serialize("orders.proto", &proto);
+    send_record(&producer, "orders.proto", bytes).await;
+}
+producer.flush().await.expect("flush proto");
+```
 <!-- /snippet -->
 
 **Stage B — Protobuf → Arrow**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-b-proto-arrow -->
-placeholder
+```rust
+// Stage B — Protobuf -> Arrow: collect rows into one arrow-rs RecordBatch.
+let mut users = Vec::new();
+let mut cents = Vec::new();
+for v in drain(&bootstrap, "orders.proto", "stage-b", events.len()).await {
+    let p: OrderProto = proto_serde.deserialize("orders.proto", &v).expect("proto decode");
+    users.push(p.user);
+    cents.push(p.amount_cents);
+}
+let schema = Arc::new(ArrowSchema::new(vec![
+    Field::new("user", ArrowDataType::Utf8, false),
+    Field::new("amount_cents", ArrowDataType::Int64, false),
+]));
+let batch = ::arrow::array::RecordBatch::try_new(
+    schema,
+    vec![Arc::new(StringArray::from(users)), Arc::new(Int64Array::from(cents))],
+)
+.expect("record batch");
+send_record(&producer, "orders.arrow", ArrowIpcSerde.serialize("orders.arrow", &batch)).await;
+producer.flush().await.expect("flush arrow");
+```
 <!-- /snippet -->
 
 **Stage C — Arrow → Polars (columnar group-by)**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-c-arrow-polars -->
-placeholder
+```rust
+// Stage C — Arrow -> Polars: group-by-user sum + count in the columnar engine.
+let consumed: Vec<ConsumedRecord> = drain(&bootstrap, "orders.arrow", "stage-c", 1)
+    .await
+    .into_iter()
+    .enumerate()
+    .map(|(i, v)| ConsumedRecord { key: None, value: v, timestamp: 0, partition: 0, offset: i as i64 })
+    .collect();
+
+let mut topo = ColumnarTopology::new();
+let src = topo.add_source("src", ["orders.arrow"], ArrowBlobCodec);
+let agg = topo.add_operator(
+    "agg",
+    BuiltinOp::GroupByAgg {
+        keys: vec![col("user")],
+        aggs: vec![
+            col("amount_cents").sum().alias("total_cents"),
+            col("amount_cents").count().alias("order_count"),
+        ],
+    },
+    src,
+);
+topo.add_sink("out", "orders.summary.df", BlobCodec::default(), agg);
+let built = topo.build().expect("build columnar");
+let produced = built.run_batch("orders.arrow", &consumed).expect("run_batch");
+```
 <!-- /snippet -->
 
 **Stage D — Polars → summary Protobuf**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#stage-d-polars-proto -->
-placeholder
+```rust
+// Stage D — Polars -> Protobuf: each aggregated row becomes an OrderSummary.
+for (_topic, rec) in produced {
+    let df = PolarsIpcSerde.deserialize("orders.summary.df", &rec.value).expect("polars decode");
+    let user_col = df.column("user").expect("user");
+    let total_col = df.column("total_cents").expect("total_cents");
+    let count_col = df
+        .column("order_count")
+        .expect("order_count")
+        .cast(&DataType::Int64)
+        .expect("cast count");
+    for i in 0..df.height() {
+        let summary = OrderSummary {
+            user: extract_str(user_col, i),
+            total_cents: extract_i64(total_col, i),
+            order_count: extract_i64(&count_col, i),
+        };
+        let bytes = summary_serde.serialize("orders.summary", &summary);
+        send_record(&producer, "orders.summary", bytes).await;
+    }
+}
+producer.flush().await.expect("flush summary");
+```
 <!-- /snippet -->
 
 **Verifying the rollup**
 
 <!-- snippet: client-streams/examples/format_pipeline.rs#assert -->
-placeholder
+```rust
+// Verify the per-user rollup off the wire.
+let mut by_user = BTreeMap::new();
+for v in drain(&bootstrap, "orders.summary", "verify", 2).await {
+    let s: OrderSummary = summary_serde.deserialize("orders.summary", &v).expect("summary decode");
+    by_user.insert(s.user.clone(), s);
+}
+let alice = by_user.get("alice").expect("alice summary");
+assert_eq!(alice.total_cents, 850, "alice total_cents");
+assert_eq!(alice.order_count, 2, "alice order_count");
+let bob = by_user.get("bob").expect("bob summary");
+assert_eq!(bob.total_cents, 900, "bob total_cents");
+assert_eq!(bob.order_count, 1, "bob order_count");
+```
 <!-- /snippet -->
