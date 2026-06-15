@@ -112,7 +112,7 @@ pub struct DeleteTopicRecord {
     pub name: String,
 }
 
-/// KIP-185 / `UnregisterBroker` (`api_key` 64). Marks a broker as
+/// KIP-919 / `UnregisterBroker` (`api_key` 64). Marks a broker as
 /// permanently unregistered: the admin operator confirms the broker is
 /// gone for good and asks the cluster to drop its registration entry
 /// from the metadata image. Subsequent `Metadata` responses no longer

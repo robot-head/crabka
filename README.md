@@ -395,6 +395,10 @@ is not exhaustive of every accepted KIP (Kafka has well over a thousand) — it
 covers the user-visible protocol, storage, replication, security, and operations
 KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of scope.
 
+For the full per-KIP breakdown — including partials with their remaining gaps,
+in-scope-but-unimplemented KIPs, and the deliberately out-of-scope set with
+rationale — see [`docs/KIP_MATRIX.md`](docs/KIP_MATRIX.md).
+
 ### Wire protocol & message format
 
 | KIP | Title | Status |
@@ -487,7 +491,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-516](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516) | Topic identifiers | ✅ |
 | [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430) | Authorized operations in describe responses | ✅ |
 | [KIP-664](https://cwiki.apache.org/confluence/display/KAFKA/KIP-664) | `DescribeProducers` / `ListTransactions` / `DescribeTransactions` admin APIs | ✅ |
-| [KIP-185](https://cwiki.apache.org/confluence/display/KAFKA/KIP-185) | `UnregisterBroker` admin API | ✅ |
+| [KIP-919](https://cwiki.apache.org/confluence/display/KAFKA/KIP-919) | `UnregisterBroker` admin API | ✅ |
 | [KIP-966](https://cwiki.apache.org/confluence/display/KAFKA/KIP-966) | `DescribeTopicPartitions` admin API | ✅ |
 
 ### Security & authentication

@@ -1381,7 +1381,7 @@ async fn handle_list_transactions_frame(
     ))
 }
 
-/// Decode + dispatch an `UnregisterBroker` (`api_key` 64, KIP-185) frame.
+/// Decode + dispatch an `UnregisterBroker` (`api_key` 64, KIP-919) frame.
 /// `Alter` on `Cluster`; Deny → `CLUSTER_AUTHORIZATION_FAILED`.
 async fn handle_unregister_broker_frame(
     broker: &Broker,
@@ -4178,7 +4178,7 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // DescribeProducers (61, KIP-664) is flexible from v0.
         61 => version >= owned::describe_producers_request::FLEXIBLE_MIN,
         63 => version >= owned::broker_heartbeat_request::FLEXIBLE_MIN,
-        // UnregisterBroker (64, KIP-185) — flexible from v0.
+        // UnregisterBroker (64, KIP-919) — flexible from v0.
         64 => version >= owned::unregister_broker_request::FLEXIBLE_MIN,
         // DescribeTransactions (65, KIP-664) and ListTransactions (66) — both flexible from v0.
         65 => version >= owned::describe_transactions_request::FLEXIBLE_MIN,
