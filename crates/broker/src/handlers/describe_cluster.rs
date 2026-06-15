@@ -22,6 +22,10 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
+/// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS (default),
+/// `2` = CONTROLLERS.
+const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
+
 // `async` for symmetry with other handlers that do await `controller.submit_change`;
 // DescribeCluster is read-only so it never suspends.
 #[allow(clippy::unused_async)]
@@ -73,7 +77,6 @@ pub(crate) async fn handle(
     // AdminClient can discover the controller quorum (and, via
     // `--bootstrap-controller`, dial it directly). `endpoint_type` is a v1+
     // field; on v0 it defaults to `1`, so the BROKERS branch is taken.
-    const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
     let brokers: Vec<DescribeClusterBroker> = if req.endpoint_type == ENDPOINT_TYPE_CONTROLLERS {
         image
             .voters()
