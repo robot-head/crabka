@@ -192,7 +192,8 @@ impl LeaderEpochCheckpoint {
 /// Pure core of [`LeaderEpochCheckpoint::epoch_and_offset_for`] over a raw slice,
 /// so it can be exhaustively + property-tested without a file. The method
 /// delegates to this. See `leader_epoch_model.rs` for the divergence-safety model.
-pub(crate) fn epoch_and_offset_for_entries(
+#[must_use]
+pub fn epoch_and_offset_for_entries(
     entries: &[EpochEntry],
     requested_epoch: i32,
     log_end_offset: i64,

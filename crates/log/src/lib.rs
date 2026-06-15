@@ -98,7 +98,9 @@ mod txn_index;
 
 pub use config::{CleanupPolicy, LogConfig};
 pub use error::LogError;
-pub use leader_epoch_checkpoint::{EpochEntry, LeaderEpochCheckpoint};
+pub use leader_epoch_checkpoint::{
+    EpochEntry, LeaderEpochCheckpoint, epoch_and_offset_for_entries,
+};
 sendfile_cfg! {
     pub use log::RawReadDesc;
 }
