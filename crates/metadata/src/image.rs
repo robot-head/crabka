@@ -863,7 +863,7 @@ impl MetadataImage {
             // image-level validate is unconditional Ok.
             | MetadataRecord::V1DelegationToken(_)
             | MetadataRecord::V1DeleteDelegationToken(_)
-            // UnregisterBroker (KIP-185 / api_key 64). The handler-side
+            // UnregisterBroker (KIP-919 / api_key 64). The handler-side
             // existence check + Cluster:Alter ACL gate provide all the
             // pre-validation we need; image-level apply is idempotent.
             | MetadataRecord::V1UnregisterBroker(_)

@@ -82,7 +82,7 @@ fn admin_apis() -> Vec<ApiVersion> {
         v!(assign_replicas_to_dirs_request),
         v!(describe_cluster_request),
         v!(broker_heartbeat_request),
-        // UnregisterBroker (KIP-185) — admin RPC to permanently drop a
+        // UnregisterBroker (KIP-919) — admin RPC to permanently drop a
         // broker registration from the cluster's metadata image.
         v!(unregister_broker_request),
         v!(alter_user_scram_credentials_request),
