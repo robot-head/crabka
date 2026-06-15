@@ -39,6 +39,7 @@ jobs:
       schema_registry: ${{ steps.filter.outputs.schema_registry }}
       broker_jvm: ${{ steps.filter.outputs.broker_jvm }}
       broker_integration: ${{ steps.filter.outputs.broker_integration }}
+      doc_examples: ${{ steps.filter.outputs.doc_examples }}
     steps:
       - uses: actions/checkout@v6
       - uses: dorny/paths-filter@v4
@@ -179,6 +180,21 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.config/nextest.toml'
+              - '.github/workflows/ci.yml'
+            doc_examples:
+              - 'crates/client-streams/**'
+              - 'crates/schema-serde/**'
+              - 'crates/schema-registry/**'
+              - 'crates/client-core/**'
+              - 'crates/client-admin/**'
+              - 'crates/client-producer/**'
+              - 'crates/client-consumer/**'
+              - 'crates/broker/**'
+              - 'crates/docgen/**'
+              - 'website/content/**'
+              - 'tools/test-doc-examples.sh'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -554,6 +570,26 @@ jobs:
           flags: schema-serde
           fail_ci_if_error: false
 
+  # Build & run every documented client-streams example, then verify the
+  # website snippets are in sync with their source (doc-drift guard). See
+  # tools/test-doc-examples.sh.
+  doc-examples:
+    needs: changes
+    if: ${{ needs.changes.outputs.doc_examples == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: doc-examples
+      - name: Build & run documented examples + snippet drift guard
+        run: ./tools/test-doc-examples.sh
+
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
   # and single-owner exactly-once dedup against an in-process Rust broker (no
   # Docker). The gateway's logic lives in `src/` but is exercised only by these
@@ -854,6 +890,7 @@ jobs:
       - log-integration
       - client-consumer-integration
       - client-streams-integration
+      - doc-examples
       - grpc-gateway-integration
       - schema-registry-integration
       - broker-jvm-acceptance

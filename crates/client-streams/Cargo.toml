@@ -57,10 +57,26 @@ required-features = ["polars"]
 name = "polars_pipeline"
 required-features = ["polars"]
 
+[[example]]
+name = "format_json"
+
+[[example]]
+name = "format_arrow"
+required-features = ["arrow"]
+
+[[example]]
+name = "format_dsl"
+
+[[example]]
+name = "format_pipeline"
+required-features = ["polars", "arrow"]
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
 crabka-broker = { version = "0.3.6", path = "../broker", features = ["test-helpers"] }
+crabka-schema-registry = { version = "0.3.6", path = "../schema-registry" }
+crabka-client-admin = { version = "0.3.6", path = "../client-admin" }
 hex = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }

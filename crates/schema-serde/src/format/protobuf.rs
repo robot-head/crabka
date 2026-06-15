@@ -125,7 +125,8 @@ fn message_index(descriptor: &prost_reflect::MessageDescriptor) -> Vec<i32> {
 pub(crate) mod print {
     use std::fmt::Write as _;
 
-    use prost_reflect::prost_types::FileDescriptorProto;
+    use prost_reflect::prost_types::field_descriptor_proto::Type;
+    use prost_reflect::prost_types::{FieldDescriptorProto, FileDescriptorProto};
 
     pub fn file_to_proto(file: &FileDescriptorProto) -> String {
         let mut out = String::new();
@@ -139,18 +140,44 @@ pub(crate) mod print {
             let msg_name = msg.name.as_deref().unwrap_or("");
             let _ = write!(out, "\nmessage {msg_name} {{\n");
             for field in &msg.field {
-                let type_str = field
-                    .type_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim_start_matches('.');
                 let field_name = field.name.as_deref().unwrap_or("");
                 let field_num = field.number.unwrap_or(0);
-                let _ = writeln!(out, "  {type_str} {field_name} = {field_num};");
+                let _ = writeln!(out, "  {} {field_name} = {field_num};", field_type(field));
             }
             out.push_str("}\n");
         }
         out
+    }
+
+    /// Render a field's `.proto` type token: a message/enum's (leading-dot-stripped)
+    /// `type_name`, or the proto3 keyword for a scalar `type`. Scalar fields carry
+    /// an empty `type_name` and a populated `type`, so keying off `type_name` alone
+    /// would emit no type at all (and produce unparseable `.proto` text).
+    fn field_type(field: &FieldDescriptorProto) -> String {
+        if let Some(name) = field.type_name.as_deref()
+            && !name.is_empty()
+        {
+            return name.trim_start_matches('.').to_string();
+        }
+        let scalar = match field.r#type.and_then(|t| Type::try_from(t).ok()) {
+            Some(Type::Double) => "double",
+            Some(Type::Float) => "float",
+            Some(Type::Int64) => "int64",
+            Some(Type::Uint64) => "uint64",
+            Some(Type::Int32) => "int32",
+            Some(Type::Fixed64) => "fixed64",
+            Some(Type::Fixed32) => "fixed32",
+            Some(Type::Bool) => "bool",
+            Some(Type::String) => "string",
+            Some(Type::Bytes) => "bytes",
+            Some(Type::Uint32) => "uint32",
+            Some(Type::Sfixed32) => "sfixed32",
+            Some(Type::Sfixed64) => "sfixed64",
+            Some(Type::Sint32) => "sint32",
+            Some(Type::Sint64) => "sint64",
+            _ => "",
+        };
+        scalar.to_string()
     }
 }
 
@@ -180,5 +207,62 @@ mod tests {
         check!(text.contains("package demo;"));
         check!(text.contains("message Order {"));
         check!(text.contains("id = 1;"));
+    }
+
+    #[test]
+    fn renders_scalar_field_types_as_proto3_keywords() {
+        // Real prost descriptors set `type` (not `type_name`) for scalars; the
+        // rendered `.proto` must name the type or the registry can't parse it.
+        // Exercise every proto3 scalar keyword (one field per `field_type` arm),
+        // plus the message-typed (`type_name`) branch.
+        use prost_reflect::prost_types::field_descriptor_proto::Type;
+        let scalars = [
+            (Type::Double, "double"),
+            (Type::Float, "float"),
+            (Type::Int64, "int64"),
+            (Type::Uint64, "uint64"),
+            (Type::Int32, "int32"),
+            (Type::Fixed64, "fixed64"),
+            (Type::Fixed32, "fixed32"),
+            (Type::Bool, "bool"),
+            (Type::String, "string"),
+            (Type::Bytes, "bytes"),
+            (Type::Uint32, "uint32"),
+            (Type::Sfixed32, "sfixed32"),
+            (Type::Sfixed64, "sfixed64"),
+            (Type::Sint32, "sint32"),
+            (Type::Sint64, "sint64"),
+        ];
+        let mut field = Vec::new();
+        for (i, (ty, kw)) in scalars.iter().enumerate() {
+            field.push(FieldDescriptorProto {
+                name: Some(format!("f_{kw}")),
+                number: Some(i32::try_from(i).unwrap() + 1),
+                r#type: Some(*ty as i32),
+                ..Default::default()
+            });
+        }
+        // Message-typed field: the renderer takes the `type_name` branch and
+        // strips the leading dot.
+        field.push(FieldDescriptorProto {
+            name: Some("nested".into()),
+            number: Some(100),
+            type_name: Some(".demo.Other".into()),
+            ..Default::default()
+        });
+        let file = FileDescriptorProto {
+            package: Some("demo".into()),
+            message_type: vec![DescriptorProto {
+                name: Some("AllScalars".into()),
+                field,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let text = file_to_proto(&file);
+        for (i, (_, kw)) in scalars.iter().enumerate() {
+            check!(text.contains(&format!("{kw} f_{kw} = {};", i + 1)));
+        }
+        check!(text.contains("demo.Other nested = 100;"));
     }
 }

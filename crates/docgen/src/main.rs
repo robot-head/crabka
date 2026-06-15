@@ -15,6 +15,15 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Sync fenced code blocks in website markdown from anchored source regions.
+    Snippets {
+        /// Website content dir to scan (default: website/content).
+        #[arg(long, default_value = "website/content")]
+        content: std::path::PathBuf,
+        /// Crates dir snippet paths are relative to (default: crates).
+        #[arg(long, default_value = "crates")]
+        crates: std::path::PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -22,6 +31,11 @@ fn main() -> anyhow::Result<()> {
         Command::All { out } => {
             crabka_docgen::emit::write_reference_tree(&out)?;
             eprintln!("wrote reference tree to {}", out.display());
+            Ok(())
+        }
+        Command::Snippets { content, crates } => {
+            let n = crabka_docgen::sync_snippets(&content, &crates)?;
+            eprintln!("synced snippets in {n} file(s)");
             Ok(())
         }
     }

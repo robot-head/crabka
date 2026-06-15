@@ -1,0 +1,18 @@
+syntax = "proto3";
+package demo;
+
+// Canonical order, produced by the JSON->proto stage.
+message OrderProto {
+  string order_id = 1;
+  string user = 2;
+  int64  amount_cents = 3;
+  string currency = 4;
+  int64  ts_ms = 5;
+}
+
+// Per-user rollup, produced by the Polars->proto stage.
+message OrderSummary {
+  string user = 1;
+  int64  total_cents = 2;
+  int64  order_count = 3;
+}
