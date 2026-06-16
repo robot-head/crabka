@@ -829,7 +829,7 @@ async fn serve_connection_stream<S>(
         // traffic; the exemption is documented in STATUS.md.
         let started = std::time::Instant::now();
         let api_key = peek_api_key(&frame).ok();
-        let response_bytes = match dispatch_one(&broker, &frame)
+        let mut response_bytes = match dispatch_one(&broker, &frame)
             .instrument(req_span.clone())
             .await
         {
@@ -849,9 +849,10 @@ async fn serve_connection_stream<S>(
         // Fetch (1) self-account inside their handlers so the request throttle
         // can be combined as max(request, byte-rate) into a single
         // throttle_time_ms + a single channel mute (KIP-219); they are skipped
-        // here to avoid double-charging. The remaining fall-through APIs carry
-        // no data/mutation quota to combine with, so the throttle is enforced
-        // (channel muted) but not yet surfaced in their throttle_time_ms.
+        // here to avoid double-charging. For the remaining fall-through APIs we
+        // surface the request throttle in the response's leading ThrottleTimeMs
+        // field (where present at this version, KIP-219) before muting the
+        // channel, instead of muting silently.
         let self_accounts = matches!(api_key, Some(0 | 1));
         if !self_accounts && let Some(principal) = auth.principal() {
             let client_id_str = peek_client_id(&frame).unwrap_or("");
@@ -864,6 +865,15 @@ async fn serve_connection_stream<S>(
                 elapsed_micros,
             );
             if delay > std::time::Duration::ZERO {
+                // KIP-219 throttle-then-respond: echo the request-quota throttle
+                // in the response's leading ThrottleTimeMs field before the
+                // channel mute, for APIs that carry it at the negotiated version.
+                if let (Some(key), Ok((_, version, _, _))) = (api_key, parse_request_header(&frame))
+                    && throttle_is_leading_field(key, version)
+                {
+                    let delay_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+                    response_bytes = patch_leading_throttle(response_bytes, key, version, delay_ms);
+                }
                 tokio::time::sleep(delay).await;
             }
         }
@@ -4251,6 +4261,46 @@ fn encode_response(api_key: i16, correlation_id: i32, body_flexible: bool, body:
     buf.freeze()
 }
 
+/// KIP-219 (throttle-then-respond): `true` when `api_key`'s response carries
+/// `ThrottleTimeMs` as its FIRST body field at `version`, so the dispatch loop
+/// can surface the request-quota throttle by patching that leading int32 in
+/// place. Boundaries are verified against the 4.x response schemas. APIs absent
+/// from this table keep the pre-KIP-219 behavior (throttle still enforced by the
+/// channel mute, just not echoed); Produce (0) / Fetch (1) self-account and
+/// never reach this path. `OffsetDelete` (47) is intentionally excluded — its
+/// leading field is `ErrorCode`, so patching would corrupt it.
+fn throttle_is_leading_field(api_key: i16, version: i16) -> bool {
+    match api_key {
+        // ListOffsets / JoinGroup / OffsetForLeaderEpoch
+        2 | 11 | 23 => version >= 2,
+        // Metadata / OffsetCommit / OffsetFetch
+        3 | 8 | 9 => version >= 3,
+        // FindCoordinator / Heartbeat / LeaveGroup / SyncGroup / DescribeGroups / ListGroups
+        10 | 12 | 13 | 14 | 15 | 16 => version >= 1,
+        // InitProducerId / DescribeCluster / ConsumerGroupHeartbeat (all 0+)
+        22 | 60 | 68 => true,
+        _ => false,
+    }
+}
+
+/// Patch the leading `ThrottleTimeMs` (int32) of an already-encoded response in
+/// place, raising it to `max(existing, delay_ms)`. The body begins right after
+/// the response header, whose length mirrors `encode_response`: 5 bytes when the
+/// body is flexible and the api is not `ApiVersions`, else 4. Callers must first
+/// confirm `throttle_is_leading_field`.
+fn patch_leading_throttle(resp: Bytes, api_key: i16, version: i16, delay_ms: i32) -> Bytes {
+    let header_v1 = handler_body_flexible(api_key, version) && api_key != API_VERSIONS_KEY;
+    let off = if header_v1 { 5 } else { 4 };
+    if resp.len() < off + 4 {
+        return resp;
+    }
+    let mut buf = BytesMut::from(resp.as_ref());
+    let existing = i32::from_be_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
+    let patched = existing.max(delay_ms);
+    buf[off..off + 4].copy_from_slice(&patched.to_be_bytes());
+    buf.freeze()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4291,6 +4341,57 @@ mod tests {
         let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
         // 4 byte corr_id + body, no tagged byte.
         assert!(out.len() == 4 + body.len());
+    }
+
+    #[test]
+    fn throttle_leading_field_table_matches_schemas() {
+        // Present-and-leading version boundaries (verified vs 4.x schemas).
+        assert!(!throttle_is_leading_field(11, 1)); // JoinGroup v1: no throttle
+        assert!(throttle_is_leading_field(11, 2)); // JoinGroup v2+: leading
+        assert!(!throttle_is_leading_field(3, 2)); // Metadata v2: no throttle
+        assert!(throttle_is_leading_field(3, 3)); // Metadata v3+
+        assert!(throttle_is_leading_field(12, 1)); // Heartbeat v1+
+        assert!(throttle_is_leading_field(68, 0)); // ConsumerGroupHeartbeat v0+
+        // OffsetDelete (47) leads with ErrorCode — must never be patched.
+        assert!(!throttle_is_leading_field(47, 0));
+        // Produce/Fetch self-account; ApiVersions is not in the table.
+        assert!(!throttle_is_leading_field(0, 9));
+        assert!(!throttle_is_leading_field(1, 13));
+        assert!(!throttle_is_leading_field(18, 3));
+    }
+
+    #[test]
+    fn patch_leading_throttle_sets_field_flexible_and_nonflexible() {
+        let read =
+            |b: &[u8], off: usize| i32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+
+        // Flexible response header (ConsumerGroupHeartbeat, flexible v0+):
+        // header = 5 bytes (corr_id + tagged byte); throttle int32 at offset 5.
+        let mut body = BytesMut::new();
+        body.put_i32(0); // ThrottleTimeMs = 0
+        let resp = encode_response(68, 7, true, &body);
+        let patched = patch_leading_throttle(resp, 68, 0, 250);
+        assert!(read(&patched, 5) == 250);
+        assert!(read(&patched, 0) == 7); // corr_id preserved
+
+        // Non-flexible response header (Metadata v3): header = 4 bytes.
+        let mut body = BytesMut::new();
+        body.put_i32(10); // existing throttle 10 < 250
+        let resp = encode_response(3, 9, false, &body);
+        let patched = patch_leading_throttle(resp, 3, 3, 250);
+        assert!(read(&patched, 4) == 250);
+        assert!(read(&patched, 0) == 9);
+    }
+
+    #[test]
+    fn patch_leading_throttle_keeps_existing_when_larger() {
+        // max(existing, delay): an already-larger throttle is not lowered.
+        let mut body = BytesMut::new();
+        body.put_i32(500);
+        let resp = encode_response(3, 1, false, &body);
+        let patched = patch_leading_throttle(resp, 3, 3, 100);
+        let v = i32::from_be_bytes([patched[4], patched[5], patched[6], patched[7]]);
+        assert!(v == 500);
     }
 
     #[test]
