@@ -15,6 +15,7 @@ pub enum ConfigKind {
     String,
     Bool,
     Integer,
+    UnsignedInteger,
     Float,
     DurationMillis,
     DurationMs,
@@ -31,6 +32,7 @@ impl ConfigKind {
             Self::String => "string",
             Self::Bool => "bool",
             Self::Integer => "integer",
+            Self::UnsignedInteger => "unsigned integer",
             Self::Float => "float",
             Self::DurationMillis | Self::DurationMs => "duration milliseconds",
             Self::StringList => "string list",
@@ -161,7 +163,7 @@ impl ConfigDef {
         self.reject_unknown_keys(&raw)?;
         self.validate_defaults(options)?;
 
-        let mut resolved = ResolvedConfig::default();
+        let mut resolved_config = ResolvedConfig::default();
         for key in self.keys.values() {
             let (value, is_default) = if let Some(value) = raw.get(&key.name).cloned() {
                 (Some(value), false)
@@ -179,7 +181,7 @@ impl ConfigDef {
 
             if key.kind == ConfigKind::Secret {
                 let secret = resolve_secret_value(&key.name, value, resolver, options).await?;
-                resolved.insert_secret(key.name.clone(), secret);
+                resolved_config.insert_secret(key.name.clone(), secret);
             } else if let Err(err) = validate_kind(&key.name, key.kind, &value) {
                 if is_default {
                     return Err(ConfigError::InvalidDefault {
@@ -189,11 +191,11 @@ impl ConfigDef {
                 }
                 return Err(err);
             } else {
-                resolved.insert_plain(key.name.clone(), value);
+                resolved_config.insert_plain(key.name.clone(), value);
             }
         }
 
-        Ok(resolved)
+        Ok(resolved_config)
     }
 
     fn reject_unknown_keys(&self, raw: &RawConfig) -> ConfigResult<()> {
@@ -231,8 +233,10 @@ fn validate_kind(key: &str, kind: ConfigKind, value: &Value) -> ConfigResult<()>
     let valid = match kind {
         ConfigKind::String => value.is_string(),
         ConfigKind::Bool => value.is_boolean(),
-        ConfigKind::Integer => value.as_i64().is_some(),
-        ConfigKind::DurationMillis | ConfigKind::DurationMs => value.as_u64().is_some(),
+        ConfigKind::Integer | ConfigKind::DurationMillis | ConfigKind::DurationMs => {
+            value.as_i64().is_some()
+        }
+        ConfigKind::UnsignedInteger => value.as_u64().is_some(),
         ConfigKind::Float => value.as_f64().is_some(),
         ConfigKind::StringList => value
             .as_array()
@@ -298,17 +302,16 @@ async fn resolve_secret_value(
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use serde_json::{Map, Value, json};
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::config::{ConfigError, EnvSecretResolver, ResolveOptions, SecretResolutionError};
 
     fn raw(entries: impl IntoIterator<Item = (&'static str, Value)>) -> RawConfig {
-        Map::from_iter(
-            entries
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value)),
-        )
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect()
     }
 
     #[tokio::test]
@@ -400,11 +403,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unsigned_integer_kind_accepts_u64_max() {
+        let def = ConfigDef::new("demo").required("limit", ConfigKind::UnsignedInteger);
+        let raw = raw([("limit", json!(u64::MAX))]);
+
+        let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
+
+        assert_eq!(resolved.get_u64("limit").unwrap(), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn unsigned_integer_kind_rejects_negative_values() {
+        let def = ConfigDef::new("demo").required("limit", ConfigKind::UnsignedInteger);
+        let raw = raw([("limit", json!(-1))]);
+
+        let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
+
+        assert!(
+            matches!(err, ConfigError::WrongType { key, expected: "unsigned integer" } if key == "limit")
+        );
+    }
+
+    #[tokio::test]
     async fn typed_getters_return_resolved_values() {
         let def = ConfigDef::new("demo")
             .required("name", ConfigKind::String)
             .required("enabled", ConfigKind::Bool)
             .required("limit", ConfigKind::Integer)
+            .required("unsigned_limit", ConfigKind::UnsignedInteger)
             .required("timeout_ms", ConfigKind::DurationMillis)
             .required("ratio", ConfigKind::Float)
             .required("topics", ConfigKind::StringList)
@@ -414,6 +440,7 @@ mod tests {
             ("name", json!("source-a")),
             ("enabled", json!(true)),
             ("limit", json!(42)),
+            ("unsigned_limit", json!(u64::MAX)),
             ("timeout_ms", json!(2500)),
             ("ratio", json!(0.75)),
             ("topics", json!(["alpha", "beta"])),
@@ -435,8 +462,9 @@ mod tests {
         assert_eq!(resolved.get_string("name").unwrap(), "source-a");
         assert!(resolved.get_bool("enabled").unwrap());
         assert_eq!(resolved.get_i64("limit").unwrap(), 42);
+        assert_eq!(resolved.get_u64("unsigned_limit").unwrap(), u64::MAX);
         assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);
-        assert_eq!(resolved.get_f64("ratio").unwrap(), 0.75);
+        assert!((resolved.get_f64("ratio").unwrap() - 0.75).abs() < f64::EPSILON);
         assert_eq!(
             resolved.get_string_list("topics").unwrap(),
             vec!["alpha".to_string(), "beta".to_string()]

@@ -1,5 +1,7 @@
 //! Connector configuration definitions, validation, and secret resolution.
 
+use std::time::Duration;
+
 mod def;
 mod error;
 mod resolved;
@@ -56,7 +58,7 @@ impl FromResolvedValue for i64 {
 }
 
 impl FromResolvedValue for u64 {
-    const KIND: ConfigKind = ConfigKind::Integer;
+    const KIND: ConfigKind = ConfigKind::UnsignedInteger;
 
     fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self> {
         config.get_u64(key)
@@ -105,7 +107,7 @@ macro_rules! impl_signed_integer_config {
                     let value = config.get_i64(key)?;
                     <$ty>::try_from(value).map_err(|_| ConfigError::WrongType {
                         key: key.into(),
-                        expected: "integer in range",
+                        expected: concat!("integer in range for ", stringify!($ty)),
                     })
                 }
             }
@@ -117,13 +119,13 @@ macro_rules! impl_unsigned_integer_config {
     ($($ty:ty),* $(,)?) => {
         $(
             impl FromResolvedValue for $ty {
-                const KIND: ConfigKind = ConfigKind::Integer;
+                const KIND: ConfigKind = ConfigKind::UnsignedInteger;
 
                 fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self> {
                     let value = config.get_u64(key)?;
                     <$ty>::try_from(value).map_err(|_| ConfigError::WrongType {
                         key: key.into(),
-                        expected: "unsigned integer in range",
+                        expected: concat!("unsigned integer in range for ", stringify!($ty)),
                     })
                 }
             }
@@ -138,6 +140,39 @@ impl FromResolvedValue for f32 {
     const KIND: ConfigKind = ConfigKind::Float;
 
     fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self> {
-        Ok(config.get_f64(key)? as f32)
+        let value = config.get_f64(key)?;
+        if !value.is_finite() || value < f64::from(f32::MIN) || value > f64::from(f32::MAX) {
+            return Err(ConfigError::WrongType {
+                key: key.into(),
+                expected: "float in range for f32",
+            });
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(value as f32)
+    }
+}
+
+impl<T: FromResolvedValue> FromResolvedValue for Option<T> {
+    const KIND: ConfigKind = T::KIND;
+
+    fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self> {
+        if config.contains_key(key) {
+            T::from_resolved_value(config, key).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl FromResolvedValue for Duration {
+    const KIND: ConfigKind = ConfigKind::DurationMillis;
+
+    fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self> {
+        let value = config.get_i64(key)?;
+        let millis = u64::try_from(value).map_err(|_| ConfigError::WrongType {
+            key: key.into(),
+            expected: "non-negative duration milliseconds",
+        })?;
+        Ok(Self::from_millis(millis))
     }
 }
