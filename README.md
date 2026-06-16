@@ -406,7 +406,7 @@ rationale — see [`docs/KIP_MATRIX.md`](docs/KIP_MATRIX.md).
 | [KIP-31](https://cwiki.apache.org/confluence/display/KAFKA/KIP-31) | Move to relative offsets in compressed message sets | ✅ |
 | [KIP-32](https://cwiki.apache.org/confluence/display/KAFKA/KIP-32) | Add timestamps to messages | ✅ |
 | [KIP-82](https://cwiki.apache.org/confluence/display/KAFKA/KIP-82) | Add record headers | ✅ |
-| [KIP-219](https://cwiki.apache.org/confluence/display/KAFKA/KIP-219) | Improve quota communication (throttle-then-respond) | ⚠️ |
+| [KIP-219](https://cwiki.apache.org/confluence/display/KAFKA/KIP-219) | Improve quota communication (throttle-then-respond) | ✅ |
 | [KIP-227](https://cwiki.apache.org/confluence/display/KAFKA/KIP-227) | Incremental fetch sessions | ✅ |
 | [KIP-482](https://cwiki.apache.org/confluence/display/KAFKA/KIP-482) | Optional tagged fields (flexible versions) | ✅ |
 | [KIP-511](https://cwiki.apache.org/confluence/display/KAFKA/KIP-511) | Collect & expose client name and version | ✅ |
