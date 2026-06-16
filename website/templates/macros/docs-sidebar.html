@@ -1,0 +1,100 @@
+{# LOCAL OVERRIDE of themes/adidoks/templates/macros/docs-sidebar.html.
+
+   Renders the FULL hierarchy of the current top-level section:
+     - the section's own (direct) pages, then
+     - each subsection as a collapsible <details>/<summary> group containing
+       its pages, then any deeper subsections as nested collapsible groups.
+
+   The group containing the current page (and all its ancestor groups) is
+   rendered <details open> and the current page link is marked `active`.
+   `current_section` is the first path segment (e.g. "reference"), passed in
+   from docs/page.html and docs/section.html.
+
+   Implementation note: Tera macro-definition files may not contain `import`
+   statements (top-level or inside a macro body), and `self::` resolves against
+   the *calling* template rather than this file — so true self-recursion isn't
+   available here. The reference tree is only ~2 levels deep (e.g.
+   Reference -> Operator (CRDs) -> [Kafka, KafkaUser, ...]), so this uses a
+   bounded, manually-nested 3-level expansion, which covers the real tree with
+   room to spare. The active-page detection (`__contains_current`) is shared by
+   inlining the same `starting_with` test at each level. #}
+
+{% macro docs_sidebar(current_section) %}
+<div class="col-lg-5 col-xl-4 docs-sidebar">
+  <nav class="docs-links" aria-label="Main navigation">
+    {# Build "<section>/_index.md". `trim_start_matches` binds tighter than `~`,
+       so normalise `current_section` first, then concatenate, to avoid the
+       precedence trap of trimming the literal instead of the variable. #}
+    {% set section_slug = current_section | trim_start_matches(pat="/") | trim_end_matches(pat="/") %}
+    {% set index_path = section_slug ~ "/_index.md" %}
+    {% set index = get_section(path=index_path) %}
+
+    <h3>{{ index.title }}</h3>
+
+    {# Direct pages of the top-level section. #}
+    {% if index.pages %}
+      <ul class="list-unstyled docs-sidebar-pages">
+        {% for page in index.pages %}
+          <li><a class="docs-link{% if current_url == page.permalink %} active{% endif %}" href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {# Level 1 subsections, each a collapsible group. #}
+    {% for s1_path in index.subsections %}
+      {% set s1 = get_section(path=s1_path) %}
+      {# A group opens when the current URL is the subsection itself or any
+         descendant of it (its permalink is a prefix of the current URL). #}
+      {% set s1_open = s1.permalink and current_url is starting_with(s1.permalink) %}
+      <details class="docs-sidebar-group docs-sidebar-depth-0"{% if s1_open %} open{% endif %}>
+        <summary class="docs-sidebar-summary">{{ s1.title }}</summary>
+        <div class="docs-sidebar-group-body">
+          {% if s1.pages %}
+            <ul class="list-unstyled docs-sidebar-pages">
+              {% for page in s1.pages %}
+                <li><a class="docs-link{% if current_url == page.permalink %} active{% endif %}" href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+
+          {# Level 2 subsections (nested collapsible groups). #}
+          {% for s2_path in s1.subsections %}
+            {% set s2 = get_section(path=s2_path) %}
+            {% set s2_open = s2.permalink and current_url is starting_with(s2.permalink) %}
+            <details class="docs-sidebar-group docs-sidebar-depth-1"{% if s2_open %} open{% endif %}>
+              <summary class="docs-sidebar-summary">{{ s2.title }}</summary>
+              <div class="docs-sidebar-group-body">
+                {% if s2.pages %}
+                  <ul class="list-unstyled docs-sidebar-pages">
+                    {% for page in s2.pages %}
+                      <li><a class="docs-link{% if current_url == page.permalink %} active{% endif %}" href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+                    {% endfor %}
+                  </ul>
+                {% endif %}
+
+                {# Level 3 subsections (deepest expanded level). #}
+                {% for s3_path in s2.subsections %}
+                  {% set s3 = get_section(path=s3_path) %}
+                  {% set s3_open = s3.permalink and current_url is starting_with(s3.permalink) %}
+                  <details class="docs-sidebar-group docs-sidebar-depth-2"{% if s3_open %} open{% endif %}>
+                    <summary class="docs-sidebar-summary">{{ s3.title }}</summary>
+                    <div class="docs-sidebar-group-body">
+                      {% if s3.pages %}
+                        <ul class="list-unstyled docs-sidebar-pages">
+                          {% for page in s3.pages %}
+                            <li><a class="docs-link{% if current_url == page.permalink %} active{% endif %}" href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+                          {% endfor %}
+                        </ul>
+                      {% endif %}
+                    </div>
+                  </details>
+                {% endfor %}
+              </div>
+            </details>
+          {% endfor %}
+        </div>
+      </details>
+    {% endfor %}
+  </nav>
+</div>
+{% endmacro %}

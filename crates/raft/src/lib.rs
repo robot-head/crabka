@@ -57,6 +57,8 @@ pub mod handshake;
 pub mod kraft;
 mod network;
 pub mod reconfig;
+#[cfg(feature = "scenarios")]
+pub mod scenarios;
 mod server;
 mod snapshot;
 mod types;

@@ -1,0 +1,12 @@
+{# Paired shortcode: {% mermaid() %}sequenceDiagram ...{% end %}
+
+   Emits the diagram source verbatim inside <pre class="mermaid">, which the
+   Mermaid runtime (loaded only on pages with extra.mermaid = true; see
+   templates/docs/page.html and templates/docs/section.html) finds and renders
+   client-side.
+
+   `body | safe` is required so diagram syntax such as `-->` and `&` is not
+   HTML-escaped into `--&gt;` before Mermaid parses it. #}
+<pre class="mermaid">
+{{ body | safe }}
+</pre>
