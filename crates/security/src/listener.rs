@@ -19,3 +19,21 @@ impl ListenerProtocol {
         matches!(self, Self::SaslPlaintext | Self::SaslSsl)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn tls_and_sasl_flags_per_protocol() {
+        assert!(!ListenerProtocol::Plaintext.requires_tls());
+        assert!(!ListenerProtocol::Plaintext.requires_sasl());
+        assert!(ListenerProtocol::Ssl.requires_tls());
+        assert!(!ListenerProtocol::Ssl.requires_sasl());
+        assert!(!ListenerProtocol::SaslPlaintext.requires_tls());
+        assert!(ListenerProtocol::SaslPlaintext.requires_sasl());
+        assert!(ListenerProtocol::SaslSsl.requires_tls());
+        assert!(ListenerProtocol::SaslSsl.requires_sasl());
+    }
+}

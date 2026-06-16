@@ -140,4 +140,15 @@ mod tests {
         assert!(AuthMethod::from_sasl(SaslMechanism::OAuthBearer) == AuthMethod::SaslOAuthBearer);
         assert!(AuthMethod::from_sasl(SaslMechanism::Gssapi) == AuthMethod::SaslGssapi);
     }
+
+    #[test]
+    fn principal_display_is_type_colon_name() {
+        let p = KafkaPrincipal {
+            principal_type: "User".into(),
+            name: "alice".into(),
+        };
+        assert!(p.to_string() == "User:alice");
+        // FromStr is the inverse.
+        assert!("User:alice".parse::<KafkaPrincipal>().unwrap() == p);
+    }
 }
