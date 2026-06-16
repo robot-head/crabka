@@ -17,6 +17,12 @@
 //!   [`SchemaConverter`] wraps the Confluent schema-registry serdes from
 //!   `crabka-schema-serde`.
 //!
+//! - [`ConnectorRuntime`] is the embeddable, single-process driver that owns a
+//!   `Source` + `Sink` pair and pipes records between them — polling, applying
+//!   bounded backpressure, coordinating source checkpoints with sink commits
+//!   through the transactional gate, and exposing pause/resume + graceful-drain
+//!   lifecycle hooks. No Connect worker protocol, no REST.
+//!
 //! The transport traits mirror the streams runtime I/O traits
 //! (`RecordFetcher` / `RecordProducer`) and the remote-storage
 //! `RemoteStorageManager` SPI; the converter layer mirrors Kafka Connect's
@@ -27,12 +33,16 @@
 pub mod convert;
 pub mod error;
 pub mod record;
+pub mod runtime;
 pub mod sink;
 pub mod source;
 
 pub use convert::{ByteIdentity, Converter, SchemaConverter};
 pub use error::ConnectError;
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
+pub use runtime::{
+    CheckpointStore, ConnectorHandle, ConnectorRuntime, InMemoryCheckpointStore, RuntimeState,
+};
 pub use sink::Sink;
 pub use source::Source;
 
