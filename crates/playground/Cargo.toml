@@ -1,0 +1,42 @@
+[package]
+name = "crabka-playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "WebAssembly bindings driving Crabka's deterministic KRaft consensus simulator in the browser"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-playground"
+readme = "README.md"
+keywords = ["kafka", "kraft", "raft", "consensus", "wasm"]
+categories = ["wasm", "simulation"]
+
+# NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
+# The workspace forbids `unsafe_code`, but `#[wasm_bindgen]` expands to the
+# `unsafe extern "C"` import/export shims every wasm-bindgen crate needs, so the
+# forbid would make the crate uncompilable. The Rust we hand-write here is safe;
+# only the generated glue is unsafe.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crabka-kraft-core = { version = "0.3.6", path = "../kraft-core", features = ["sim"] }
+wasm-bindgen = { workspace = true }
+serde_json = { workspace = true }
+console_error_panic_hook = "0.1"
+
+# `crabka-kraft-core` pulls `uuid` (with `v4`), which pulls `getrandom`. On
+# `wasm32-unknown-unknown` getrandom needs the JS-backed source selected
+# explicitly, or it refuses to compile. We never actually draw randomness (the
+# sim uses `Uuid::nil()`), but the symbol must still link, so wire up the
+# browser backend for the wasm target only — native builds of this rlib are
+# unaffected.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+# `uuid` v4 also gates its own randomness behind a wasm source feature; `js`
+# routes it through the browser's Web Crypto. (We never generate a v4 UUID — the
+# sim uses `Uuid::nil()` — but the code path must still compile.)
+uuid = { workspace = true, features = ["js"] }

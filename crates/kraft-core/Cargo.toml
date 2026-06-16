@@ -11,7 +11,7 @@ homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-kraft-core"
 readme = "README.md"
 keywords = ["kafka", "raft", "kraft", "consensus", "crabka"]
-categories = ["algorithms", "no-std::no-alloc"]
+categories = ["algorithms", "simulation"]
 
 [lints]
 workspace = true

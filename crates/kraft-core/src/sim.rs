@@ -17,8 +17,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::QuorumStateMachine;
 use crate::action::{Action, TimerKind};
+use crate::core::QuorumStateMachine;
 use crate::event::{Event, LogEnd};
 use crate::role::Role;
 use crate::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
@@ -244,13 +244,11 @@ fn consider(
 }
 
 fn make_voter_set(ids: &[NodeId]) -> crabka_voters::VoterSet {
-    crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| {
-        crabka_voters::Voter {
-            id,
-            directory_id: uuid::Uuid::nil(),
-            endpoints: Vec::new(),
-            kraft_version: crabka_voters::KRaftVersionRange::default(),
-        }
+    crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| crabka_voters::Voter {
+        id,
+        directory_id: uuid::Uuid::nil(),
+        endpoints: Vec::new(),
+        kraft_version: crabka_voters::KRaftVersionRange::default(),
     }))
 }
 
@@ -1148,7 +1146,10 @@ mod tests {
 
         step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
         sim.run_until_stable(10_000);
-        assert!(sim.leaders().len() == 1, "exactly one leader after bootstrap");
+        assert!(
+            sim.leaders().len() == 1,
+            "exactly one leader after bootstrap"
+        );
 
         let snap = sim.snapshot();
         assert!(snap.leaders.len() == 1);
@@ -1164,9 +1165,7 @@ mod tests {
         let old = sim.leaders()[0];
 
         sim.partition(old);
-        step_until(&mut sim, 10_000, |s| {
-            s.leaders().iter().any(|&l| l != old)
-        });
+        step_until(&mut sim, 10_000, |s| s.leaders().iter().any(|&l| l != old));
         sim.run_until_stable(10_000);
 
         sim.heal(old);

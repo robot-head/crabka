@@ -36,3 +36,8 @@ docs/superpowers/plans/
 /website/static/images/
 /website/static/charts/
 /website/public/
+
+# Generated WASM playground bundle (built by website/build-playground.sh).
+# The hand-written front-end (app.js, playground.css) stays tracked.
+/website/static/playground/crabka_playground.js
+/website/static/playground/crabka_playground_bg.wasm

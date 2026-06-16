@@ -700,13 +700,11 @@ mod tests {
         }
     }
     fn voters(ids: &[NodeId]) -> crabka_voters::VoterSet {
-        crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| {
-            crabka_voters::Voter {
-                id,
-                directory_id: uuid::Uuid::nil(),
-                endpoints: vec![],
-                kraft_version: crabka_voters::KRaftVersionRange::default(),
-            }
+        crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| crabka_voters::Voter {
+            id,
+            directory_id: uuid::Uuid::nil(),
+            endpoints: vec![],
+            kraft_version: crabka_voters::KRaftVersionRange::default(),
         }))
     }
     fn machine(me: NodeId, ids: &[NodeId]) -> QuorumStateMachine {
