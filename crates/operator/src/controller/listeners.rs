@@ -4678,7 +4678,10 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[remote_storage.gcs]"), "missing gcs block:\n{t}");
+        assert!(
+            t.contains("[remote_storage.gcs]"),
+            "missing gcs block:\n{t}"
+        );
         assert!(t.contains("bucket = \"b\""), "bucket:\n{t}");
         assert!(
             !t.contains("service_account_path"),

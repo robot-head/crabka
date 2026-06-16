@@ -3417,7 +3417,10 @@ mod tests {
             .iter()
             .find(|v| v.name == "gcs-credentials")
             .expect("gcs-credentials volume present");
-        let secret = vol.secret.as_ref().expect("gcs-credentials is a Secret volume");
+        let secret = vol
+            .secret
+            .as_ref()
+            .expect("gcs-credentials is a Secret volume");
         assert!(secret.secret_name.as_deref() == Some("crabka-gcs-creds"));
         let items = secret.items.as_ref().expect("projected items");
         assert!(items.len() == 1);
