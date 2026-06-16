@@ -776,6 +776,20 @@ pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
 /// path `keytab` under it yields `GSSAPI_KEYTAB_PATH`.
 pub(crate) const GSSAPI_KEYTAB_DIR: &str = "/etc/crabka/gssapi-keytab";
 
+/// KIP-405: fixed in-pod directory where the operator mounts an explicit
+/// GCS service-account JSON key Secret (file-based credentials). The
+/// Secret's projected item lands at `key.json` under this dir, so the
+/// broker TOML's `[remote_storage.gcs].service_account_path` points at
+/// `<GCS_CREDENTIALS_DIR>/key.json`. Only used when
+/// `gcs.credentials` is set; keyless Workload Identity / ADC mounts
+/// nothing.
+pub(crate) const GCS_CREDENTIALS_DIR: &str = "/etc/crabka/gcs-credentials";
+
+/// Projected filename for the GCS service-account JSON key under
+/// [`GCS_CREDENTIALS_DIR`]. The full `service_account_path` rendered into
+/// the broker TOML is `<GCS_CREDENTIALS_DIR>/<GCS_CREDENTIALS_FILE>`.
+pub(crate) const GCS_CREDENTIALS_FILE: &str = "key.json";
+
 /// Escape a string for embedding inside a TOML basic (double-quoted)
 /// string. Only `\` and `"` need escaping for our render — the operator
 /// rejects newlines and other control characters at CRD validation
@@ -3142,6 +3156,50 @@ pub fn render_broker_toml(
                 // are absent.
                 out.push('\n');
             }
+            crate::crd::kafka::TieredStorageType::Gcs => {
+                // Reconciler validation guarantees `gcs` is populated when
+                // `kind == Gcs`; if it isn't, we'd rather panic in unit tests
+                // than emit silently-broken TOML.
+                let gcs = ts
+                    .gcs
+                    .as_ref()
+                    .expect("TieredStorageType::Gcs requires spec.tieredStorage.gcs");
+                let _ = writeln!(out, "[remote_storage]");
+                let _ = writeln!(out);
+                let _ = writeln!(out, "[remote_storage.gcs]");
+                let _ = writeln!(out, "bucket = \"{}\"", toml_escape(&gcs.bucket));
+                if let Some(prefix) = &gcs.prefix {
+                    let _ = writeln!(out, "prefix = \"{}\"", toml_escape(prefix));
+                }
+                if let Some(endpoint) = &gcs.endpoint {
+                    let _ = writeln!(out, "endpoint = \"{}\"", toml_escape(endpoint));
+                }
+                if gcs.allow_http {
+                    let _ = writeln!(out, "allow_http = true");
+                }
+                // Credentials: unlike S3 (env vars), GCS credentials are a
+                // JSON key FILE and `object_store`'s GCS builder reads the
+                // path directly (it does NOT consult
+                // GOOGLE_APPLICATION_CREDENTIALS), so the path MUST be in the
+                // TOML. When `credentials` is set, the operator mounts the
+                // Secret as a file at `<GCS_CREDENTIALS_DIR>/key.json` (see
+                // `kafka_node_pool.rs`) and we point `service_account_path` at
+                // it. When absent, we render NO credential line — the broker
+                // pod uses keyless Workload Identity / ADC via the bound KSA.
+                if gcs.credentials.is_some() {
+                    let _ = writeln!(
+                        out,
+                        "service_account_path = \"{GCS_CREDENTIALS_DIR}/{GCS_CREDENTIALS_FILE}\""
+                    );
+                }
+                if let Some(mt) = gcs.multipart_threshold {
+                    let _ = writeln!(out, "multipart_threshold = {mt}");
+                }
+                if let Some(cs) = gcs.multipart_chunk_size {
+                    let _ = writeln!(out, "multipart_chunk_size = {cs}");
+                }
+                out.push('\n');
+            }
         }
 
         // KIP-405: `[remote_storage.kafka_metadata]` is ALWAYS emitted when
@@ -4011,6 +4069,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -4095,6 +4154,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
                 kind: crate::crd::kafka::MetadataManagerType::Topic,
                 topic: Some(crate::crd::kafka::TopicMetadataManagerSpec {
@@ -4162,6 +4222,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
                 kind: crate::crd::kafka::MetadataManagerType::InMemory,
                 topic: None,
@@ -4209,6 +4270,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -4249,6 +4311,7 @@ mod toml_rendering_tests {
         let ts = crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
                 kind: crate::crd::kafka::MetadataManagerType::default(),
                 topic: None,
@@ -4303,6 +4366,7 @@ mod toml_rendering_tests {
                 multipart_threshold: Some(4096),
                 multipart_chunk_size: Some(1024),
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -4383,6 +4447,7 @@ mod toml_rendering_tests {
                 region: "r".into(),
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -4454,6 +4519,7 @@ mod toml_rendering_tests {
                 prefix: Some(r#"weird"prefix\"#.into()),
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -4482,6 +4548,158 @@ mod toml_rendering_tests {
             .s3
             .expect("[remote_storage.s3]");
         assert!(s3.prefix.as_deref() == Some(r#"weird"prefix\"#));
+    }
+
+    /// GCS backend with an explicit service-account key Secret: the
+    /// `[remote_storage.gcs]` block must render verbatim non-credential
+    /// fields plus a `service_account_path` pointing at the mounted file.
+    #[test]
+    fn render_broker_toml_emits_remote_storage_gcs_with_credentials() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(crate::crd::kafka::GcsStorageSpec {
+                bucket: "crabka-tier".into(),
+                prefix: Some("cluster-a".into()),
+                endpoint: Some("http://fake-gcs.svc:4443".into()),
+                credentials: Some(crate::crd::kafka::GcsCredentials {
+                    service_account_key: crate::crd::kafka::SecretKeyRef {
+                        name: "crabka-gcs-creds".into(),
+                        key: Some("key.json".into()),
+                    },
+                }),
+                allow_http: true,
+                multipart_threshold: Some(4096),
+                multipart_chunk_size: Some(1024),
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+            &[],
+            "",
+        );
+        assert!(t.contains("[remote_storage]"), "missing block:\n{t}");
+        assert!(
+            t.contains("[remote_storage.gcs]"),
+            "missing gcs subtable:\n{t}"
+        );
+        assert!(t.contains("bucket = \"crabka-tier\""), "bucket:\n{t}");
+        assert!(t.contains("prefix = \"cluster-a\""), "prefix:\n{t}");
+        assert!(
+            t.contains("endpoint = \"http://fake-gcs.svc:4443\""),
+            "endpoint:\n{t}"
+        );
+        assert!(t.contains("allow_http = true"), "allow_http:\n{t}");
+        assert!(
+            t.contains("service_account_path = \"/etc/crabka/gcs-credentials/key.json\""),
+            "service_account_path:\n{t}"
+        );
+        assert!(t.contains("multipart_threshold = 4096"), "threshold:\n{t}");
+        assert!(t.contains("multipart_chunk_size = 1024"), "chunk:\n{t}");
+        // The Local-only `storage_dir` key must never appear for GCS.
+        assert!(
+            !t.contains("storage_dir"),
+            "GCS must not render storage_dir:\n{t}"
+        );
+        // Broker round-trip: the rendered TOML must parse into FileConfig.
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let gcs = parsed
+            .remote_storage
+            .expect("[remote_storage] round-trips")
+            .gcs
+            .expect("[remote_storage.gcs] round-trips");
+        assert!(gcs.bucket == "crabka-tier");
+        assert!(gcs.prefix.as_deref() == Some("cluster-a"));
+        assert!(gcs.endpoint.as_deref() == Some("http://fake-gcs.svc:4443"));
+        assert!(gcs.allow_http);
+        assert!(
+            gcs.service_account_path.as_deref() == Some("/etc/crabka/gcs-credentials/key.json")
+        );
+        assert!(gcs.multipart_threshold == Some(4096));
+        assert!(gcs.multipart_chunk_size == Some(1024));
+    }
+
+    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
+    /// NO `service_account_path` line may appear — the broker pod resolves
+    /// credentials from the bound KSA via the metadata server.
+    #[test]
+    fn render_broker_toml_gcs_keyless_omits_service_account_path() {
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(crate::crd::kafka::GcsStorageSpec {
+                bucket: "b".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+            &[],
+            "",
+        );
+        assert!(
+            t.contains("[remote_storage.gcs]"),
+            "missing gcs block:\n{t}"
+        );
+        assert!(t.contains("bucket = \"b\""), "bucket:\n{t}");
+        assert!(
+            !t.contains("service_account_path"),
+            "keyless GCS must not render service_account_path:\n{t}"
+        );
+        // Optional fields omitted → broker defaults apply.
+        assert!(!t.contains("prefix ="), "no prefix:\n{t}");
+        assert!(!t.contains("endpoint ="), "no endpoint:\n{t}");
+        assert!(!t.contains("allow_http"), "no allow_http:\n{t}");
+        let parsed: crabka_broker::file_config::FileConfig =
+            toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
+        let gcs = parsed
+            .remote_storage
+            .expect("[remote_storage] round-trips")
+            .gcs
+            .expect("[remote_storage.gcs] round-trips");
+        assert!(gcs.bucket == "b");
+        assert!(gcs.service_account_path.is_none());
     }
 
     #[test]

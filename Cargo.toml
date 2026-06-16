@@ -52,8 +52,9 @@ toml = "1.1"
 once_cell = "1"
 # `object_store` 0.13 is the Apache-stewarded multi-backend object-store
 # client used across the Rust data ecosystem (DataFusion, Polars, Delta-rs).
-# Crabka's S3-compatible RemoteStorageManager (KIP-405) is built on it.
-object_store = { version = "0.13", features = ["aws"] }
+# Crabka's S3-compatible and native-GCS RemoteStorageManagers (KIP-405) are
+# built on it.
+object_store = { version = "0.13", features = ["aws", "gcp"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 snap = "1"
 lz4_flex = { version = "0.13", default-features = false, features = ["frame"] }

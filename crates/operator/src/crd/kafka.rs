@@ -156,10 +156,11 @@ pub struct Krb5ConfSecretRef {
 /// KIP-405: cluster-wide tiered-storage configuration.
 ///
 /// The `type` discriminator picks the backend; per-backend tuning lives
-/// in the matching sibling field (`s3` for `Type = S3`, no extra field
-/// for `Local`). Mis-pairings — `type = "S3"` without `spec.s3`, or
-/// `type = "Local"` with `spec.s3` set — are rejected by the operator
-/// reconciler with a `TieredStorageInvalid` status condition.
+/// in the matching sibling field (`s3` for `Type = S3`, `gcs` for
+/// `Type = Gcs`, no extra field for `Local`). Mis-pairings — `type = "S3"`
+/// without `spec.s3`, `type = "Gcs"` without `spec.gcs`, or
+/// `type = "Local"` with `spec.s3` / `spec.gcs` set — are rejected by the
+/// operator reconciler with a `TieredStorageInvalid` status condition.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TieredStorage {
@@ -174,6 +175,16 @@ pub struct TieredStorage {
     /// (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3StorageSpec>,
+    /// GCS-backend tuning. Required when `kind == Gcs`, must be absent
+    /// otherwise. The struct mirrors `crabka_remote_storage::GcsConfig`
+    /// — non-credential fields are rendered verbatim into the broker
+    /// TOML's `[remote_storage.gcs]` block. Unlike S3 (env-var
+    /// credentials), an explicit service-account JSON key is mounted as a
+    /// FILE on the broker pod and surfaced to the broker via
+    /// `service_account_path` in the TOML; leaving credentials unset
+    /// selects keyless Workload Identity / ADC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcs: Option<GcsStorageSpec>,
     /// KIP-405: pick the
     /// `RemoteLogMetadataManager` the broker pods run. When absent (or set
     /// to `type: Topic`),
@@ -239,6 +250,12 @@ pub enum TieredStorageType {
     /// production RSM). Pair with a populated
     /// [`TieredStorage::s3`] for bucket / region / credentials.
     S3,
+    /// Native Google Cloud Storage via `S3RemoteStorage`'s GCS backend.
+    /// Pair with a populated [`TieredStorage::gcs`] for bucket / prefix /
+    /// credentials. Leaving `gcs.credentials` unset selects GKE Workload
+    /// Identity / Application Default Credentials (the keyless production
+    /// path); an explicit service-account JSON key is mounted as a file.
+    Gcs,
 }
 
 /// KIP-405: cluster-wide S3 backend configuration.
@@ -292,6 +309,66 @@ pub struct S3StorageSpec {
     pub multipart_chunk_size: Option<u64>,
 }
 
+/// KIP-405: cluster-wide native GCS backend configuration.
+///
+/// Mirrors `crabka_remote_storage::GcsConfig`. Non-credential fields are
+/// rendered verbatim into the broker config TOML's `[remote_storage.gcs]`
+/// block and parsed back into `crabka_remote_storage::GcsConfig`.
+///
+/// Credentials differ from S3: GCS credentials are a JSON key FILE, and
+/// `object_store`'s GCS builder reads the file path directly (it does NOT
+/// consult `GOOGLE_APPLICATION_CREDENTIALS`). So when [`Self::credentials`]
+/// is set, the operator mounts the referenced Secret as a file on the
+/// broker pod and renders its path into the TOML as `service_account_path`.
+/// When credentials are absent, the broker uses Workload Identity / ADC —
+/// the keyless GKE path — and no credential file or env is wired.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GcsStorageSpec {
+    /// GCS bucket name. Required.
+    pub bucket: String,
+    /// Optional key prefix inside the bucket. Lets multiple Crabka
+    /// clusters share a bucket without colliding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Optional custom GCS API base URL (e.g. for emulators / fakes).
+    /// When `None`, the standard Google Cloud Storage endpoint is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Optional explicit service-account credentials. When None, the
+    /// broker uses Workload Identity / ADC (the keyless GKE path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<GcsCredentials>,
+    /// Allow plaintext HTTP. Off by default; flip on for GCS emulators
+    /// running without TLS. Real GCS never needs this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_http: bool,
+    /// Override the single-PUT / multipart cutoff (bytes). When unset,
+    /// the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
+    /// (100 MiB). Lower in tests to exercise the multipart path on
+    /// small fixtures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_threshold: Option<u64>,
+    /// Override the per-part size for multipart uploads (bytes). When
+    /// unset, the broker uses
+    /// `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_chunk_size: Option<u64>,
+}
+
+/// KIP-405: GCS service-account credential.
+///
+/// A single [`SecretKeyRef`] to the Secret holding the service-account
+/// JSON key. When set, the operator mounts the Secret as a file on the
+/// broker pod and renders `service_account_path` into the broker TOML.
+/// Omit to use keyless Workload Identity / ADC.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GcsCredentials {
+    /// Reference to the Secret holding the service-account JSON key.
+    pub service_account_key: SecretKeyRef,
+}
+
 impl TieredStorage {
     /// KIP-405: shape-validate the tagged union.
     /// Returns the offending field's description on failure; the
@@ -301,23 +378,45 @@ impl TieredStorage {
     /// # Errors
     ///
     /// Fails when the discriminator and the sibling fields disagree
-    /// (e.g. `type=S3` without `s3`), or when the S3 spec is missing a
-    /// required field (`bucket`, `region`).
+    /// (e.g. `type=S3` without `s3`, `type=Gcs` without `gcs`, or a
+    /// backend set alongside the wrong discriminator), or when the
+    /// selected spec is missing a required field (S3: `bucket`,
+    /// `region`; GCS: `bucket`).
     pub fn validate(&self) -> Result<(), String> {
-        match (self.kind, &self.s3) {
-            (TieredStorageType::Local, Some(_)) => {
-                return Err("type=Local must not set `s3`".into());
+        match self.kind {
+            TieredStorageType::Local => {
+                if self.s3.is_some() {
+                    return Err("type=Local must not set `s3`".into());
+                }
+                if self.gcs.is_some() {
+                    return Err("type=Local must not set `gcs`".into());
+                }
             }
-            (TieredStorageType::S3, None) => {
-                return Err("type=S3 requires `s3` (bucket + region at minimum)".into());
-            }
-            (TieredStorageType::Local, None) => {}
-            (TieredStorageType::S3, Some(s3)) => {
+            TieredStorageType::S3 => {
+                if self.gcs.is_some() {
+                    return Err("type=S3 must not set `gcs`".into());
+                }
+                let s3 = self
+                    .s3
+                    .as_ref()
+                    .ok_or("type=S3 requires `s3` (bucket + region at minimum)")?;
                 if s3.bucket.trim().is_empty() {
                     return Err("s3.bucket is required and must be non-empty".into());
                 }
                 if s3.region.trim().is_empty() {
                     return Err("s3.region is required and must be non-empty".into());
+                }
+            }
+            TieredStorageType::Gcs => {
+                if self.s3.is_some() {
+                    return Err("type=Gcs must not set `s3`".into());
+                }
+                let gcs = self
+                    .gcs
+                    .as_ref()
+                    .ok_or("type=Gcs requires `gcs` (bucket at minimum)")?;
+                if gcs.bucket.trim().is_empty() {
+                    return Err("gcs.bucket is required and must be non-empty".into());
                 }
             }
         }
@@ -1237,6 +1336,7 @@ authorization:
                 multipart_threshold: Some(1024),
                 multipart_chunk_size: Some(512),
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1260,6 +1360,7 @@ authorization:
         let ok = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1268,6 +1369,7 @@ authorization:
         let bad = TieredStorage {
             kind: TieredStorageType::Local,
             s3: Some(S3StorageSpec::default()),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1282,6 +1384,7 @@ authorization:
         let missing_s3 = TieredStorage {
             kind: TieredStorageType::S3,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1294,6 +1397,7 @@ authorization:
                 region: "r".into(),
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1306,6 +1410,7 @@ authorization:
                 region: "  ".into(),
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         };
@@ -1318,6 +1423,81 @@ authorization:
                 region: "r".into(),
                 ..Default::default()
             }),
+            gcs: None,
+            metadata_manager: None,
+            persistence: None,
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    // ── GCS tiered storage CRD + validation ─────────
+
+    /// Full GCS wire shape (camelCase, nested `gcs.credentials`)
+    /// round-trips through serde and serializes with `type=Gcs` + `gcs`.
+    #[test]
+    fn tiered_storage_gcs_round_trips_through_json() {
+        let ts = TieredStorage {
+            kind: TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(GcsStorageSpec {
+                bucket: "b".into(),
+                prefix: Some("p".into()),
+                endpoint: Some("http://fake-gcs:4443".into()),
+                credentials: Some(GcsCredentials {
+                    service_account_key: SecretKeyRef {
+                        name: "gcs-creds".into(),
+                        key: Some("key.json".into()),
+                    },
+                }),
+                allow_http: true,
+                multipart_threshold: Some(1024),
+                multipart_chunk_size: Some(512),
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let j = serde_json::to_string(&ts).unwrap();
+        assert!(j.contains("\"type\":\"Gcs\""), "got: {j}");
+        assert!(j.contains("\"gcs\""), "got: {j}");
+        assert!(j.contains("\"serviceAccountKey\""), "got: {j}");
+        assert!(j.contains("\"allowHttp\":true"), "got: {j}");
+        assert!(j.contains("\"multipartThreshold\":1024"), "got: {j}");
+        let back: TieredStorage = serde_json::from_str(&j).unwrap();
+        assert!(back == ts);
+    }
+
+    #[test]
+    fn tiered_storage_validate_gcs_requires_gcs_and_non_empty_bucket() {
+        let missing_gcs = TieredStorage {
+            kind: TieredStorageType::Gcs,
+            s3: None,
+            gcs: None,
+            metadata_manager: None,
+            persistence: None,
+        };
+        let err = missing_gcs.validate().unwrap_err();
+        assert!(err.contains("type=Gcs requires `gcs`"), "got: {err}");
+
+        let missing_bucket = TieredStorage {
+            kind: TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(GcsStorageSpec {
+                bucket: "  ".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let err = missing_bucket.validate().unwrap_err();
+        assert!(err.contains("gcs.bucket is required"), "got: {err}");
+
+        let ok = TieredStorage {
+            kind: TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(GcsStorageSpec {
+                bucket: "b".into(),
+                ..Default::default()
+            }),
             metadata_manager: None,
             persistence: None,
         };
@@ -1325,10 +1505,60 @@ authorization:
     }
 
     #[test]
+    fn tiered_storage_validate_gcs_must_not_set_s3() {
+        let bad = TieredStorage {
+            kind: TieredStorageType::Gcs,
+            s3: Some(S3StorageSpec::default()),
+            gcs: Some(GcsStorageSpec {
+                bucket: "b".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let err = bad.validate().unwrap_err();
+        assert!(err.contains("type=Gcs must not set `s3`"), "got: {err}");
+    }
+
+    #[test]
+    fn tiered_storage_validate_local_and_s3_must_not_set_gcs() {
+        let local_with_gcs = TieredStorage {
+            kind: TieredStorageType::Local,
+            s3: None,
+            gcs: Some(GcsStorageSpec {
+                bucket: "b".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let err = local_with_gcs.validate().unwrap_err();
+        assert!(err.contains("type=Local must not set `gcs`"), "got: {err}");
+
+        let s3_with_gcs = TieredStorage {
+            kind: TieredStorageType::S3,
+            s3: Some(S3StorageSpec {
+                bucket: "b".into(),
+                region: "r".into(),
+                ..Default::default()
+            }),
+            gcs: Some(GcsStorageSpec {
+                bucket: "b".into(),
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        };
+        let err = s3_with_gcs.validate().unwrap_err();
+        assert!(err.contains("type=S3 must not set `gcs`"), "got: {err}");
+    }
+
+    #[test]
     fn metadata_manager_inmemory_with_topic_is_rejected() {
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(MetadataManagerSpec {
                 kind: MetadataManagerType::InMemory,
                 topic: Some(TopicMetadataManagerSpec {
@@ -1350,6 +1580,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(MetadataManagerSpec {
                 kind: MetadataManagerType::Topic,
                 topic: None,
@@ -1364,6 +1595,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(MetadataManagerSpec {
                 kind: MetadataManagerType::Topic,
                 topic: Some(TopicMetadataManagerSpec {
@@ -1383,6 +1615,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(MetadataManagerSpec {
                 kind: MetadataManagerType::Topic,
                 topic: Some(TopicMetadataManagerSpec {
@@ -1402,6 +1635,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: Some(MetadataManagerSpec {
                 kind: MetadataManagerType::Topic,
                 topic: Some(TopicMetadataManagerSpec {
@@ -1424,6 +1658,7 @@ authorization:
                 region: "r".into(),
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "50Gi".into(),
@@ -1440,6 +1675,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "  ".into(),
@@ -1456,6 +1692,7 @@ authorization:
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "100Gi".into(),

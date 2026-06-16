@@ -668,6 +668,82 @@ spec:
                   PVC support pairs with the production RLMM.
                 nullable: true
                 properties:
+                  gcs:
+                    description: |-
+                      GCS-backend tuning. Required when `kind == Gcs`, must be absent
+                      otherwise. The struct mirrors `crabka_remote_storage::GcsConfig`
+                      — non-credential fields are rendered verbatim into the broker
+                      TOML's `[remote_storage.gcs]` block. Unlike S3 (env-var
+                      credentials), an explicit service-account JSON key is mounted as a
+                      FILE on the broker pod and surfaced to the broker via
+                      `service_account_path` in the TOML; leaving credentials unset
+                      selects keyless Workload Identity / ADC.
+                    nullable: true
+                    properties:
+                      allowHttp:
+                        description: |-
+                          Allow plaintext HTTP. Off by default; flip on for GCS emulators
+                          running without TLS. Real GCS never needs this.
+                        type: boolean
+                      bucket:
+                        description: GCS bucket name. Required.
+                        type: string
+                      credentials:
+                        description: |-
+                          Optional explicit service-account credentials. When None, the
+                          broker uses Workload Identity / ADC (the keyless GKE path).
+                        nullable: true
+                        properties:
+                          serviceAccountKey:
+                            description: Reference to the Secret holding the service-account JSON key.
+                            properties:
+                              key:
+                                description: Key within the Secret's `data`. Defaults to `secret-key`.
+                                nullable: true
+                                type: string
+                              name:
+                                description: Secret name in the same namespace as the `Kafka` CR.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        required:
+                        - serviceAccountKey
+                        type: object
+                      endpoint:
+                        description: |-
+                          Optional custom GCS API base URL (e.g. for emulators / fakes).
+                          When `None`, the standard Google Cloud Storage endpoint is used.
+                        nullable: true
+                        type: string
+                      multipartChunkSize:
+                        description: |-
+                          Override the per-part size for multipart uploads (bytes). When
+                          unset, the broker uses
+                          `crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE` (16 MiB).
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      multipartThreshold:
+                        description: |-
+                          Override the single-PUT / multipart cutoff (bytes). When unset,
+                          the broker uses `crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`
+                          (100 MiB). Lower in tests to exercise the multipart path on
+                          small fixtures.
+                        format: uint64
+                        minimum: 0.0
+                        nullable: true
+                        type: integer
+                      prefix:
+                        description: |-
+                          Optional key prefix inside the bucket. Lets multiple Crabka
+                          clusters share a bucket without colliding.
+                        nullable: true
+                        type: string
+                    required:
+                    - bucket
+                    type: object
                   metadataManager:
                     description: |-
                       KIP-405: pick the
@@ -858,6 +934,7 @@ spec:
                     enum:
                     - Local
                     - S3
+                    - Gcs
                     type: string
                 required:
                 - type
