@@ -41,11 +41,10 @@
 //! [`ConnectorHandle`]. The handle [`pause`](ConnectorHandle::pause)s and
 //! [`resume`](ConnectorHandle::resume)s between intervals (an in-flight batch
 //! always commits before the loop parks), and
-//! [`shutdown`](ConnectorHandle::shutdown) performs a graceful drain: it stops
-//! accepting the parked state, processes every record currently available,
-//! commits + checkpoints it, then [`close`](Source::close)s both ends. These
-//! pause/resume + drain hooks are the seam a contact-window scheduler plugs
-//! into.
+//! [`shutdown`](ConnectorHandle::shutdown) performs a graceful drain: it commits
+//! one final bounded batch of whatever is immediately available, checkpoints it,
+//! then [`close`](Source::close)s both ends. These pause/resume + drain hooks are
+//! the seam a contact-window scheduler plugs into.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -321,8 +320,9 @@ impl ConnectorHandle {
         *self.state.borrow()
     }
 
-    /// Gracefully drain and stop: process every currently-available record,
-    /// commit + checkpoint it, close both ends, and await the loop's result.
+    /// Gracefully drain and stop: commit one final bounded batch of whatever is
+    /// immediately available, checkpoint it, close both ends, and await the
+    /// loop's result.
     ///
     /// # Errors
     ///
@@ -425,9 +425,13 @@ where
             }
         }
 
-        // Graceful drain: flush everything still available, then stop.
+        // Graceful drain: capture and commit one final bounded batch of
+        // whatever is immediately available, advancing the checkpoint, then
+        // stop. Each interval already commits atomically, so at most one batch
+        // can be pending; a single pass suffices and guarantees termination
+        // even for an unbounded source that never reports caught-up.
         let _ = self.state.send(RuntimeState::Draining);
-        while self.run_once().await? == Progress::Wrote {}
+        self.run_once().await?;
         Ok(())
     }
 
@@ -594,12 +598,14 @@ mod tests {
     }
 
     /// A sink that forwards every delivered value over a channel and records the
-    /// transactional bracket calls, so a test can assert on the gate.
+    /// transactional bracket calls + the size of each `put`, so a test can
+    /// assert on both the gate and the batch boundaries the loop chose.
     struct ChannelSink {
         tx: mpsc::UnboundedSender<Bytes>,
         transactional: bool,
         begins: Arc<AtomicUsize>,
         commits: Arc<AtomicUsize>,
+        puts: Arc<Mutex<Vec<usize>>>,
         staged: Vec<Bytes>,
     }
 
@@ -609,6 +615,7 @@ mod tests {
             &mut self,
             records: Vec<ConnectRecord<Bytes, Bytes>>,
         ) -> Result<(), ConnectError> {
+            self.puts.lock().unwrap().push(records.len());
             self.staged
                 .extend(records.into_iter().filter_map(|r| r.value));
             Ok(())
@@ -645,21 +652,38 @@ mod tests {
                 transactional,
                 begins: Arc::new(AtomicUsize::new(0)),
                 commits: Arc::new(AtomicUsize::new(0)),
+                puts: Arc::new(Mutex::new(Vec::new())),
                 staged: Vec::new(),
             },
             rx,
         )
     }
 
+    /// Receive `n` records, failing fast if any does not arrive promptly. The
+    /// bound is what makes a delivery-suppressing regression fail the test in
+    /// seconds rather than hang it — without it a no-op `put`/`commit` would
+    /// block `recv` forever.
     async fn collect(rx: &mut mpsc::UnboundedReceiver<Bytes>, n: usize) -> Vec<Bytes> {
         let mut out = Vec::new();
         for _ in 0..n {
-            out.push(rx.recv().await.expect("record delivered"));
+            let rec = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("record delivered within 5s")
+                .expect("sink channel stayed open");
+            out.push(rec);
         }
         out
     }
 
-    #[tokio::test]
+    /// Shut down with a bound, so a regression that makes the drain loop never
+    /// terminate fails the test fast instead of hanging it.
+    async fn shutdown(handle: ConnectorHandle) -> Result<(), ConnectError> {
+        tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+            .await
+            .expect("runtime shut down within 10s")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pipes_source_records_to_sink_in_order() {
         let (sink, mut rx) = channel_sink(false);
         let handle = ConnectorRuntime::new()
@@ -677,10 +701,10 @@ mod tests {
                 Bytes::from_static(b"c")
             ]
         );
-        handle.shutdown().await.unwrap();
+        shutdown(handle).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn transactional_sink_brackets_each_nonempty_commit() {
         let (sink, mut rx) = channel_sink(true);
         let begins = sink.begins.clone();
@@ -694,7 +718,7 @@ mod tests {
 
         let got = collect(&mut rx, 1).await;
         check!(got == vec![Bytes::from_static(b"x")]);
-        handle.shutdown().await.unwrap();
+        shutdown(handle).await.unwrap();
 
         // The one non-empty interval opened exactly one transaction and
         // committed it; idle backoff intervals opened none (begins == commits).
@@ -702,7 +726,7 @@ mod tests {
         check!(commits.load(Ordering::SeqCst) == 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn checkpoint_persists_and_restart_resumes_after_it() {
         let store = Arc::new(InMemoryCheckpointStore::default());
 
@@ -715,7 +739,7 @@ mod tests {
             .run()
             .unwrap();
         let _ = collect(&mut rx, 2).await;
-        handle.shutdown().await.unwrap();
+        shutdown(handle).await.unwrap();
 
         // The persisted checkpoint names the drained position.
         let saved = store.load().await.unwrap().expect("checkpoint saved");
@@ -733,11 +757,11 @@ mod tests {
             .unwrap();
         // Give the loop time to seek + poll a couple of backoff cycles.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle2.shutdown().await.unwrap();
+        shutdown(handle2).await.unwrap();
         check!(rx2.try_recv().is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_stops_polling_and_resume_restarts_it() {
         let polls = Arc::new(AtomicUsize::new(0));
         let (sink, _rx) = channel_sink(false);
@@ -765,10 +789,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(40)).await;
         // Polling resumed.
         check!(polls.load(Ordering::SeqCst) > paused_count);
-        handle.shutdown().await.unwrap();
+        shutdown(handle).await.unwrap();
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_without_source_or_sink_errors() {
         let no_sink = ConnectorRuntime::<Bytes, Bytes>::new()
             .add_source(VecSource::new(&[]))
@@ -806,7 +830,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delivery_failure_aborts_transaction_and_fails_runtime() {
         let aborts = Arc::new(AtomicUsize::new(0));
         let handle = ConnectorRuntime::new()
@@ -819,8 +843,240 @@ mod tests {
             .unwrap();
 
         // The loop fails on the first delivery; shutdown surfaces that error.
-        let result = handle.shutdown().await;
+        let result = shutdown(handle).await;
         check!(result.is_err());
         check!(aborts.load(Ordering::SeqCst) == 1);
+    }
+
+    /// A source whose `seek` always fails — to prove a restored checkpoint the
+    /// source cannot resume from fails the runtime at startup.
+    struct SeekFailSource;
+
+    #[async_trait]
+    impl Source<Bytes, Bytes> for SeekFailSource {
+        async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
+            Ok(None)
+        }
+        fn checkpoint(&self) -> Option<SourceOffset> {
+            None
+        }
+        async fn seek(&mut self, _offset: SourceOffset) -> Result<(), ConnectError> {
+            Err(ConnectError::Offset(
+                "upstream truncated past offset".into(),
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restored_checkpoint_seek_failure_fails_runtime() {
+        // A store with a saved offset triggers `seek` before the first poll.
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        store.save(&SourceOffset::default()).await.unwrap();
+
+        let handle = ConnectorRuntime::new()
+            .add_source(SeekFailSource)
+            .add_sink(channel_sink(false).0)
+            .checkpoint_store(store)
+            .run()
+            .unwrap();
+        check!(shutdown(handle).await.is_err());
+    }
+
+    /// A checkpoint store that fails the requested direction, to exercise the
+    /// runtime's load (startup) and save (post-commit) error paths.
+    struct FailingCheckpointStore {
+        fail_load: bool,
+    }
+
+    #[async_trait]
+    impl CheckpointStore for FailingCheckpointStore {
+        async fn save(&self, _offset: &SourceOffset) -> Result<(), ConnectError> {
+            if self.fail_load {
+                Ok(())
+            } else {
+                Err(ConnectError::Backend("save rejected".into()))
+            }
+        }
+        async fn load(&self) -> Result<Option<SourceOffset>, ConnectError> {
+            if self.fail_load {
+                Err(ConnectError::Backend("load rejected".into()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_load_error_fails_runtime_at_startup() {
+        let handle = ConnectorRuntime::new()
+            .add_source(VecSource::new(&[b"a"]))
+            .add_sink(channel_sink(false).0)
+            .checkpoint_store(Arc::new(FailingCheckpointStore { fail_load: true }))
+            .run()
+            .unwrap();
+        check!(shutdown(handle).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_save_error_after_commit_fails_runtime() {
+        // The batch is delivered, but persisting its checkpoint fails — the
+        // runtime must surface that rather than silently advancing.
+        let (sink, mut rx) = channel_sink(false);
+        let handle = ConnectorRuntime::new()
+            .add_source(VecSource::new(&[b"a"]))
+            .add_sink(sink)
+            .checkpoint_store(Arc::new(FailingCheckpointStore { fail_load: false }))
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+        check!(collect(&mut rx, 1).await == vec![Bytes::from_static(b"a")]);
+        check!(shutdown(handle).await.is_err());
+    }
+
+    /// A sink whose `close` fails, to prove a close error surfaces from an
+    /// otherwise-clean run.
+    struct CloseFailSink;
+
+    #[async_trait]
+    impl Sink<Bytes, Bytes> for CloseFailSink {
+        async fn put(
+            &mut self,
+            _records: Vec<ConnectRecord<Bytes, Bytes>>,
+        ) -> Result<(), ConnectError> {
+            Ok(())
+        }
+        async fn flush(&mut self) -> Result<(), ConnectError> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), ConnectError> {
+            Err(ConnectError::Backend("close rejected".into()))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_failure_surfaces_after_clean_run() {
+        let handle = ConnectorRuntime::new()
+            .add_source(VecSource::new(&[b"a"]))
+            .add_sink(CloseFailSink)
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+        // The run drains cleanly; closing the sink fails, so shutdown reports it.
+        check!(shutdown(handle).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_caught_up_interval_batches_all_available_records() {
+        // With a commit interval far larger than the run, a source that catches
+        // up mid-interval delivers everything it had in a SINGLE put — proving
+        // the loop polls until caught-up (not one record per interval) and that
+        // the deadline is in the future (`now + interval`), not the past.
+        let (sink, mut rx) = channel_sink(false);
+        let puts = sink.puts.clone();
+        let handle = ConnectorRuntime::new()
+            .add_source(VecSource::new(&[b"a", b"b", b"c"]))
+            .add_sink(sink)
+            .max_batch(100)
+            .commit_interval(Duration::from_secs(30))
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+        let _ = collect(&mut rx, 3).await;
+        shutdown(handle).await.unwrap();
+        check!(*puts.lock().unwrap() == vec![3]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn max_batch_caps_each_put() {
+        // A cap of 2 over four available records forces the loop to break the
+        // batch at the bound, so no put exceeds 2 (and every record still flows).
+        let (sink, mut rx) = channel_sink(false);
+        let puts = sink.puts.clone();
+        let handle = ConnectorRuntime::new()
+            .add_source(VecSource::new(&[b"a", b"b", b"c", b"d"]))
+            .add_sink(sink)
+            .max_batch(2)
+            .commit_interval(Duration::from_secs(30))
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+        let _ = collect(&mut rx, 4).await;
+        shutdown(handle).await.unwrap();
+        let sizes = puts.lock().unwrap().clone();
+        check!(sizes.iter().all(|&n| n <= 2));
+        check!(sizes.iter().sum::<usize>() == 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn idle_source_backs_off_between_polls() {
+        // A caught-up source must be polled on the backoff cadence, not spun on.
+        // Over ~250ms at a 50ms backoff that is a handful of polls; without the
+        // backoff it would be thousands.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (sink, _rx) = channel_sink(false);
+        let handle = ConnectorRuntime::new()
+            .add_source(CountingIdleSource {
+                polls: polls.clone(),
+            })
+            .add_sink(sink)
+            .poll_backoff(Duration::from_millis(50))
+            .run()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        check!(polls.load(Ordering::SeqCst) < 100);
+        shutdown(handle).await.unwrap();
+    }
+
+    /// A finite source that signals over a channel when it is closed, so a test
+    /// can observe that the loop reached its clean-shutdown path.
+    struct ClosingSource {
+        records: Vec<Bytes>,
+        pos: usize,
+        closed: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl Source<Bytes, Bytes> for ClosingSource {
+        async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
+            let Some(v) = self.records.get(self.pos).cloned() else {
+                return Ok(None);
+            };
+            self.pos += 1;
+            Ok(Some(ConnectRecord::new(None, Some(v))))
+        }
+        fn checkpoint(&self) -> Option<SourceOffset> {
+            None
+        }
+        async fn seek(&mut self, _offset: SourceOffset) -> Result<(), ConnectError> {
+            Ok(())
+        }
+        async fn close(&mut self) -> Result<(), ConnectError> {
+            let _ = self.closed.send(());
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_handle_drains_and_closes_the_source() {
+        // Dropping the handle without `shutdown` must still signal a graceful
+        // stop, so the loop drains, closes both ends, and does not run forever.
+        let (closed_tx, mut closed_rx) = mpsc::unbounded_channel();
+        let (sink, _rx) = channel_sink(false);
+        let handle = ConnectorRuntime::new()
+            .add_source(ClosingSource {
+                records: vec![Bytes::from_static(b"a")],
+                pos: 0,
+                closed: closed_tx,
+            })
+            .add_sink(sink)
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+
+        drop(handle);
+        tokio::time::timeout(Duration::from_secs(5), closed_rx.recv())
+            .await
+            .expect("source closed within 5s of dropping the handle")
+            .expect("close signal received");
     }
 }
