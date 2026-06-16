@@ -8,7 +8,7 @@
 # the CA bundle in the `demo-cluster-ca-cert` Secret (key `ca.crt`), which the
 # driver Job mounts and trusts. Clients dialing :9093 hit the TLS-encrypted
 # produce/fetch path (Strimzi serves it via the JVM SSL engine).
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: KafkaNodePool
 metadata:
   name: kafka
@@ -21,10 +21,14 @@ spec:
     - controller
     - broker
   storage:
-    type: persistent-claim
-    class: premium-rwo
-    size: 200Gi
-    deleteClaim: true
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        class: premium-rwo
+        size: 200Gi
+        deleteClaim: true
+        kraftMetadata: shared
   resources:
     requests:
       cpu: "2"
@@ -56,18 +60,15 @@ spec:
                   strimzi.io/pool-name: kafka
               topologyKey: kubernetes.io/hostname
 ---
-apiVersion: kafka.strimzi.io/v1beta2
+apiVersion: kafka.strimzi.io/v1
 kind: Kafka
 metadata:
   name: demo
   namespace: default
-  annotations:
-    strimzi.io/node-pools: enabled
-    strimzi.io/kraft: enabled
 spec:
   kafka:
-    version: 3.9.0
-    metadataVersion: 3.9-IV0
+    version: 4.2.0
+    metadataVersion: 4.2-IV1
     listeners:
       - name: plain
         port: 9092

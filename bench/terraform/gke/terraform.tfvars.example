@@ -8,7 +8,7 @@ project = "your-gcp-project" # the published run used "robot-head"
 # zone                      = "us-central1-b"
 # cluster_name              = "test-crabka-cluster"
 # broker_pool_machine_type  = "e2-standard-4"
-# broker_pool_node_count    = 3
+# broker_pool_node_count    = 6   # >= largest topology's broker count (6 for 6broker-rf3)
 # default_pool_machine_type = "e2-standard-2"
 # default_pool_node_count   = 3
 # node_disk_gb              = 100

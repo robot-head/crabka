@@ -31,9 +31,9 @@ variable "broker_pool_machine_type" {
 }
 
 variable "broker_pool_node_count" {
-  description = "Nodes in the broker pool. The 3 brokers `podAntiAffinity` one-per-node."
+  description = "Nodes in the broker pool. Brokers `podAntiAffinity` one-per-node, so this must be >= the broker count of the largest topology you run: 3 for `3broker-rf3`, 6 for the `6broker-rf3` high-partition matrix."
   type        = number
-  default     = 3
+  default     = 6
 }
 
 variable "default_pool_machine_type" {

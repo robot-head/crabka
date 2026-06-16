@@ -1,0 +1,20 @@
+# Fixed-rate latency at 100 partitions, RF=3, acks=all. Pace producers
+# below saturation so the percentiles aren't dominated by coordinated
+# omission, then measure p99 producer-ack + consumer end-to-end latency
+# while every record waits on replication across the 6-broker cluster.
+name: high-partition-latency
+mode_tag: cluster
+msg_size_bytes: 1024
+partitions: 100
+replication_factor: 3
+producers: 2
+consumers: 2
+mode:
+  kind: fixed_rate
+  msgs_per_sec: 20000
+acks: all
+compression: none
+linger_ms: 5
+batch_size: 16384
+warmup_s: 15
+duration_s: 120

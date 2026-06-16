@@ -17,10 +17,13 @@ results_dir := repo_root / "bench" / "results"
 
 # Default scenarios per mode (override by passing scenarios="a b c").
 ci_scenarios       := "small-msg-saturate fixed-rate-latency"
-cluster_scenarios  := "small-msg-saturate fixed-rate-latency large-msg fan-out mixed-acks failover"
+cluster_scenarios  := "small-msg-saturate fixed-rate-latency large-msg fan-out mixed-acks failover high-partition-saturate high-partition-latency high-partition-fanout"
 
 bench_driver_image := env_var_or_default("BENCH_DRIVER_IMAGE", "crabka-bench-driver:e2e")
-strimzi_version    := env_var_or_default("STRIMZI_VERSION", "0.46.0")
+strimzi_version    := env_var_or_default("STRIMZI_VERSION", "1.0.0")
+# How many times the averaged recipes repeat the matrix (each repeat is a
+# separate sample; the report averages them per (scenario, topology) cell).
+runs               := env_var_or_default("RUNS", "10")
 
 # ── Top-level ──────────────────────────────────────────────────────────────
 
@@ -38,11 +41,28 @@ bench-cluster: install-all
     just _run-matrix "3broker-rf3" "{{cluster_scenarios}}"
     just bench-report
 
-# Aggregate per-run JSON into a Markdown summary.
+# 6-broker cluster matrix repeated `runs` times (default 10) for averaging.
+# Each repeat tags its output files `-runNN` so nothing is clobbered; the
+# report then averages every metric per (scenario, topology) cell. Assumes a
+# kubeconfig context is set and the broker pool has >=6 nodes (the brokers
+# anti-affinity one-per-node).
+bench-cluster-6broker: install-all
+    for i in $(seq 1 {{runs}}); do \
+      export BENCH_RUN_TAG="$(printf -- '-run%02d' "$i")"; \
+      echo "═══ repeat $i / {{runs}} (tag $BENCH_RUN_TAG) ═══"; \
+      just _run-matrix "6broker-rf3" "{{cluster_scenarios}}"; \
+    done
+    just bench-report
+
+# Aggregate per-run JSON into a Markdown summary plus graph-ready CSVs:
+#   results.csv     one row per run (wide) — bars with run-to-run error bars
+#   timeseries.csv  long format (run × time-offset × metric) — values over time
 bench-report:
     cargo run --release -p crabka-bench-driver --bin crabka-bench-report -- \
         --input-dir {{results_dir}} \
-        --out {{results_dir}}/SUMMARY.md
+        --out {{results_dir}}/SUMMARY.md \
+        --csv {{results_dir}}/results.csv \
+        --timeseries-csv {{results_dir}}/timeseries.csv
 
 # Tear down operators and namespaces created by `just install-all`.
 bench-clean:

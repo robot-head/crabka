@@ -6,7 +6,7 @@
 # Usage: run-scenario.sh STACK SCENARIO TOPOLOGY [TLS]
 #   STACK     crabka|kafka
 #   SCENARIO  scenario file basename (without .yaml), under bench/scenarios/
-#   TOPOLOGY  1broker-rf1 | 3broker-rf3
+#   TOPOLOGY  1broker-rf1 | 3broker-rf3 | 6broker-rf3
 #   TLS       tls  → run the TLS-encrypted data path (4th positional arg, or
 #                    set BENCH_TLS=1 in the env). Omitted = plaintext (default).
 #
@@ -14,6 +14,9 @@
 #   BENCH_DRIVER_IMAGE   image ref for the driver Job (default crabka-bench-driver:e2e)
 #   BENCH_NAMESPACE      target namespace for the Kafka CR (default 'default')
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
+#   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
+#                        runs; set by run-matrix.sh so a 10× pass keeps all
+#                        per-iteration JSONs instead of overwriting one file
 #   BENCH_TLS            non-empty → TLS data path (equivalent to TLS=tls arg)
 
 set -euo pipefail
@@ -53,6 +56,7 @@ export BENCH_PARTITIONS BENCH_REPLICATION_FACTOR
 case "$TOPOLOGY" in
   1broker-rf1) BENCH_BROKER_COUNT=1 ;;
   3broker-rf3) BENCH_BROKER_COUNT=3 ;;
+  6broker-rf3) BENCH_BROKER_COUNT=6 ;;
   *) log "unknown topology '$TOPOLOGY'"; exit 2 ;;
 esac
 
@@ -75,13 +79,16 @@ RBAC_PATH="$REPO_ROOT/bench/manifests/driver/rbac.yaml"
 log "[$STACK/$SCENARIO/$TOPOLOGY] applying RBAC + Kafka CR"
 kubectl apply -f "$RBAC_PATH"
 
-T0=$(date +%s%3N)
+T0=$(date +%s%N)
 kubectl apply -f "$KAFKA_CR_PATH"
 
 log "[$STACK/$SCENARIO/$TOPOLOGY] waiting for Kafka Ready"
 elapsed=$(wait_kafka_ready "$STACK" 600)
-T_READY=$(date +%s%3N)
-STARTUP_MS=$(( T_READY - T0 ))
+T_READY=$(date +%s%N)
+# This WSL `date` ignores the %3N width spec and emits 19-digit epoch
+# *nanoseconds*, so the T_READY-T0 delta is in ns — convert to ms for the
+# report's startup_ms field. (`%s%N` is unambiguous: epoch seconds + 9-digit ns.)
+STARTUP_MS=$(( (T_READY - T0) / 1000000 ))
 log "[$STACK/$SCENARIO/$TOPOLOGY] Kafka Ready in ${elapsed}s (startup_ms=$STARTUP_MS)"
 
 log "[$STACK/$SCENARIO/$TOPOLOGY] applying KafkaTopic (partitions=$BENCH_PARTITIONS rf=$BENCH_REPLICATION_FACTOR)"
@@ -131,7 +138,10 @@ wait_job_complete "$JOB_NAME" "$job_timeout"
 
 # Pull the result JSON out of the (now-completed) driver pod logs.
 pod=$(kubectl get pod -n "$BENCH_NAMESPACE" -l "job-name=$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
-out_json="bench/results/${STACK}-${SCENARIO}-${TOPOLOGY}${BENCH_RUN_SUFFIX}.json"
+# BENCH_RUN_TAG (e.g. "-run07") is set by run-matrix.sh on the Nth repeat so
+# each iteration writes a distinct file instead of clobbering the previous one;
+# the report aggregator averages all runs that share a (scenario, topology).
+out_json="${BENCH_RESULTS_DIR}/${STACK}-${SCENARIO}-${TOPOLOGY}${BENCH_RUN_SUFFIX}${BENCH_RUN_TAG:-}.json"
 log "[$STACK/$SCENARIO/$TOPOLOGY] extracting results from logs of pod $pod → $out_json"
 
 kubectl logs -n "$BENCH_NAMESPACE" "$pod" -c driver | awk '/===RESULT_START===/{flag=1;next} /===RESULT_END===/{flag=0} flag' > "$out_json"
