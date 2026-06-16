@@ -48,16 +48,16 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
         let key_lit = syn::LitStr::new(&key, field_ident.span());
 
         if attrs.secret {
-            if type_info.is_option {
+            if attrs.required || !type_info.is_option {
+                def_steps.push(quote! {
+                    def = def.secret(#key_lit);
+                });
+            } else {
                 def_steps.push(quote! {
                     def = def.optional(
                         #key_lit,
                         <#ty as ::crabka_connect::FromResolvedValue>::KIND,
                     );
-                });
-            } else {
-                def_steps.push(quote! {
-                    def = def.secret(#key_lit);
                 });
             }
         } else if let Some(default) = attrs.default {
