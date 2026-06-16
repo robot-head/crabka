@@ -23,7 +23,9 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     visibility = ["//visibility:public"],
     deps = all_crate_deps(normal = True) + select({
-        "//:gssapi_enabled": ["@crates//:sspi"],
+        # sspi lives in its own from_specs repo (see //MODULE.bazel) because it's
+        # an optional git dep the default Cargo resolution prunes.
+        "//:gssapi_enabled": ["@crates_gssapi//:sspi"],
         "//conditions:default": [],
     }),
 )

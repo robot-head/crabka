@@ -48,23 +48,34 @@ bazel build @crabka//:client_minimal --//:gssapi=true   # or: --config=gssapi
 ```
 
 That flips `:gssapi_enabled`, which turns on the `sspi-keytab` feature and links
-the `sspi` crate in `//crates/security` and `//crates/client-core`.
+the `sspi` crate in `//crates/security` (and, transitively, `//crates/client-core`).
 
-## Status / caveats
+`sspi` is an *optional* dependency that nothing activates in the default Cargo
+resolution, so the main `from_cargo` splice prunes it (a single feature set can't
+both keep the default build lean and vendor the gated dep). It is instead vendored
+in its own `from_specs` repo, `@crates_gssapi`, straight from the pinned git
+revision — kept in sync with `[patch.crates-io]` / `Cargo.lock`. Its resolved
+lockfile is committed at `//bazel/gssapi:Cargo.gssapi.lock`; if the git rev in
+`Cargo.lock` changes, update the `rev` in `MODULE.bazel` to match.
 
-This scaffold was authored without a Bazel run (the sandbox blocks
-`bcr.bazel.build` and `static.crates.io`), so it has **not** been built end to
-end. Expect to iterate on first build with network access:
+## Two implementation notes
 
-1. **`MODULE.bazel.lock`** — generate and commit it on first resolve
-   (`bazel mod deps`). The `rules_rust` version is a best-effort pin; bump to the
-   latest release if resolution complains.
-2. **`//crates/protocol`** — the generated wire codecs are pulled in via
-   `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/..."))`. That env var
-   needs an absolute manifest dir under the Bazel sandbox; the generated/schema
-   trees are wired as `compile_data` and `CARGO_MANIFEST_DIR` is set in
-   `rustc_env`. If rustc can't find the files, switch those `include!`s to
-   sandbox-relative paths or route them through a `genrule`.
-3. **`@crates//:sspi`** — referencing an optional, default-disabled dependency
-   from crate_universe may need an explicit annotation (a `crate.annotation` /
-   feature opt-in in `MODULE.bazel`) so the alias is generated.
+* **`//crates/protocol` build script is not run under Bazel.** `build.rs` only
+  *validates* that the checked-in `generated/` sources match the `schemas/` SHAs
+  and emits no code, so it's dead weight here — the generated wire codecs are
+  consumed directly as `compile_data`. SHA drift is still caught by the Cargo
+  build and CI.
+* **`CARGO_MANIFEST_DIR`.** protocol's generated sources are pulled in via
+  `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/..."))`, which needs
+  an *absolute* manifest dir (a relative one resolves against each including
+  file's directory). `rustc_env` sets it to `$${pwd}/crates/protocol` — the `$$`
+  escapes Bazel's Make-variable pass so the literal `${pwd}` reaches rules_rust's
+  process_wrapper, which substitutes the absolute exec root at action time.
+
+## Sandbox note
+
+This was developed behind a proxy that blocks `bcr.bazel.build` and re-signs TLS
+with a private CA. The local-only `user.bazelrc` (gitignored) points Bazel at the
+GitHub mirror of the Bazel Central Registry and at a truststore that trusts the
+proxy CA. **Normal environments with BCR access do not need `user.bazelrc`.**
+Generate and commit `MODULE.bazel.lock` on first resolve in such an environment.

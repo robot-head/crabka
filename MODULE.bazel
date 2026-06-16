@@ -93,3 +93,30 @@ crate.from_cargo(
     ],
 )
 use_repo(crate, "crates")
+
+# ---------------------------------------------------------------------------
+# Opt-in GSSAPI/Kerberos dependency (@crates_gssapi).
+#
+# `sspi` is an *optional* dependency that no crate activates in the default Cargo
+# resolution, so the `from_cargo` splice above prunes it entirely (a single
+# feature set can't both keep the default build lean AND vendor the gated dep).
+# It is therefore vendored in its own repo via `from_specs`, straight from the
+# pinned git revision (kept in sync with [patch.crates-io] / Cargo.lock), and is
+# only referenced by //crates/security when //:gssapi is set.
+# ---------------------------------------------------------------------------
+crate.from_specs(
+    name = "crates_gssapi",
+    cargo_lockfile = "//bazel/gssapi:Cargo.gssapi.lock",
+)
+crate.spec(
+    package = "sspi",
+    git = "https://github.com/robot-head/sspi-rs.git",
+    rev = "5b7bfe73af338d5945150e8c71d19b4e71d9499a",
+    default_features = False,
+    features = [
+        "network_client",
+        "ring",
+    ],
+    repositories = ["crates_gssapi"],
+)
+use_repo(crate, "crates_gssapi")

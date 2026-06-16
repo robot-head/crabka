@@ -17,3 +17,6 @@ build --incompatible_strict_action_env
 build:gssapi --//:gssapi=true
 
 test --test_output=errors
+
+# Optional developer-local overrides (registry mirrors, remote cache, etc.).
+try-import %workspace%/user.bazelrc
