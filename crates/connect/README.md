@@ -13,6 +13,14 @@ and telemetry sink builds on.
   and from the raw `Bytes` that travel on the Kafka wire. Ships with
   [`ByteIdentity`] (byte-for-byte passthrough) and [`SchemaConverter`]
   (Confluent schema-registry serdes via `crabka-schema-serde`).
+- [`ConnectorRuntime`](src/runtime.rs) — the embeddable, single-process driver
+  that owns a `Source` + `Sink` pair and pipes records between them. It polls
+  into bounded batches (backpressure), brackets each non-empty commit in the
+  sink's transactional gate (lazy `begin` → `put` → `commit`), and advances the
+  source checkpoint only after the sink commit is durable. Built
+  programmatically — `ConnectorRuntime::new().add_source(…).add_sink(…).run()` —
+  and driven through a `ConnectorHandle` (`pause` / `resume` / graceful
+  `shutdown`). No Connect worker protocol, no REST: the single-binary edge shape.
 
 The transport traits mirror the Streams runtime I/O traits
 (`RecordFetcher` / `RecordProducer`) and the remote-storage `RemoteStorageManager`
