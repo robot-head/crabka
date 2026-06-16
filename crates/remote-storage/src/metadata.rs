@@ -415,6 +415,26 @@ mod tests {
     }
 
     #[test]
+    fn accessors_return_constructed_values() {
+        // max_timestamp_ms / segment_size_in_bytes accessors were never read
+        // back in the suite; pin them to distinct non-default values.
+        let md = RemoteLogSegmentMetadata::new(
+            seg_id(),
+            0,
+            100,
+            777, // max_timestamp_ms
+            5,
+            888,
+            4096, // segment_size_in_bytes
+            RemoteLogSegmentState::CopySegmentStarted,
+            epochs(),
+        )
+        .unwrap();
+        assert!(md.max_timestamp_ms() == 777);
+        assert!(md.segment_size_in_bytes() == 4096);
+    }
+
+    #[test]
     fn segment_state_valid_transitions() {
         use RemoteLogSegmentState::{
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,

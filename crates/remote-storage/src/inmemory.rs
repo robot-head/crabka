@@ -239,6 +239,17 @@ mod tests {
     }
 
     #[test]
+    fn list_by_epoch_returns_added_segment() {
+        let m = InmemoryRemoteLogMetadataManager::new();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
+        m.update_remote_log_segment_metadata(finish(10)).unwrap();
+        let listed = m.list_remote_log_segments_by_epoch(&tp(), 0).unwrap();
+        assert!(listed.len() == 1);
+        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
+    }
+
+    #[test]
     fn inmemory_read_outcomes_are_some_none_never_not_ready() {
         let m = InmemoryRemoteLogMetadataManager::new();
         m.add_remote_log_segment_metadata(started(10, 0, 99))
