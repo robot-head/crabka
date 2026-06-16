@@ -132,3 +132,173 @@ fn voter_ids(voters: u32) -> Vec<u64> {
     let n = u64::from(voters.clamp(1, 7));
     (1..=n).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn state(p: &Playground) -> Value {
+        serde_json::from_str(&p.state()).expect("state is valid JSON")
+    }
+    fn leaders(p: &Playground) -> Vec<u64> {
+        state(p)["leaders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect()
+    }
+    fn in_flight_len(p: &Playground) -> usize {
+        state(p)["in_flight"].as_array().unwrap().len()
+    }
+    /// Drive the bus/timers until `pred` holds (or a step budget is exhausted),
+    /// the way the JS animation loop does.
+    fn step_until(p: &mut Playground, pred: impl Fn(&Playground) -> bool) {
+        for _ in 0..20_000 {
+            if pred(p) {
+                return;
+            }
+            if !p.step() {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn clamps_voter_count() {
+        assert_eq!(voter_ids(0), vec![1]);
+        assert_eq!(voter_ids(3), vec![1, 2, 3]);
+        assert_eq!(voter_ids(99), vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn new_cluster_starts_leaderless_at_clock_zero() {
+        let pg = Playground::new(3);
+        let s = state(&pg);
+        assert_eq!(s["nodes"].as_array().unwrap().len(), 3);
+        assert_eq!(s["clock_ms"].as_u64().unwrap(), 0);
+        assert!(leaders(&pg).is_empty());
+        assert_eq!(s["step_count"].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn step_drives_a_bootstrap_election_to_one_leader() {
+        let mut pg = Playground::new(3);
+        step_until(&mut pg, |p| !leaders(p).is_empty());
+        pg.settle();
+        assert_eq!(leaders(&pg).len(), 1);
+        // The clock and timeline advanced as a side effect of stepping.
+        assert!(state(&pg)["clock_ms"].as_u64().unwrap() > 0);
+        assert!(state(&pg)["step_count"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn append_targets_the_leader_only_once_elected() {
+        let mut pg = Playground::new(3);
+        assert!(!pg.append(2), "no leader yet -> append is a no-op");
+        step_until(&mut pg, |p| !leaders(p).is_empty());
+        pg.settle();
+        let leader = leaders(&pg)[0];
+        let log_len = |p: &Playground| -> u64 {
+            state(p)["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"].as_u64() == Some(leader))
+                .unwrap()["log_len"]
+                .as_u64()
+                .unwrap()
+        };
+        let before = log_len(&pg);
+        assert!(pg.append(3));
+        assert_eq!(log_len(&pg), before + 3);
+    }
+
+    #[test]
+    fn partition_then_heal_keeps_one_leader() {
+        let mut pg = Playground::new(3);
+        step_until(&mut pg, |p| !leaders(p).is_empty());
+        pg.settle();
+        let old = leaders(&pg)[0];
+
+        pg.partition(old as u32);
+        // The partitioned leader shows as isolated.
+        let node = state(&pg)["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"].as_u64() == Some(old))
+            .cloned()
+            .unwrap();
+        assert_eq!(node["partitioned"].as_bool(), Some(true));
+
+        step_until(&mut pg, |p| leaders(p).iter().any(|&l| l != old));
+        pg.settle();
+        pg.heal(old as u32);
+        pg.settle();
+        assert_eq!(leaders(&pg).len(), 1, "exactly one leader after heal");
+    }
+
+    #[test]
+    fn drop_next_consumes_a_bus_message() {
+        let mut pg = Playground::new(3);
+        step_until(&mut pg, |p| in_flight_len(p) > 0);
+        let before = in_flight_len(&pg);
+        assert!(before > 0);
+        assert!(pg.drop_next());
+        assert_eq!(in_flight_len(&pg), before - 1);
+        // timeline_since exposes the recorded Drop step as JSON.
+        let count = state(&pg)["step_count"].as_u64().unwrap() as usize;
+        let tl: Value = serde_json::from_str(&pg.timeline_since(count - 1)).unwrap();
+        assert_eq!(
+            tl.as_array().unwrap().last().unwrap()["action"]["kind"],
+            "Drop"
+        );
+    }
+
+    #[test]
+    fn reorder_and_duplicate_replay_the_bus() {
+        let mut pg = Playground::new(3);
+        step_until(&mut pg, |p| in_flight_len(p) > 0);
+        // reorder delivers the currently-queued messages (back-to-front);
+        // delivering them can enqueue fresh responses, so the bus need not end
+        // empty — what we assert is that it drained the round it was given.
+        assert!(pg.reorder() >= 1, "reorder delivers the queued messages");
+
+        step_until(&mut pg, |p| in_flight_len(p) > 0);
+        assert!(pg.duplicate_next(), "duplicate replays the front message");
+    }
+
+    #[test]
+    fn empty_bus_faults_are_no_ops() {
+        // A freshly-constructed cluster has its election timers armed but no
+        // messages on the bus yet (nothing has been stepped).
+        let mut pg = Playground::new(3);
+        assert_eq!(in_flight_len(&pg), 0);
+        assert!(!pg.drop_next());
+        assert!(!pg.duplicate_next());
+        assert_eq!(pg.reorder(), 0);
+    }
+
+    #[test]
+    fn reset_rebuilds_the_cluster_back_at_clock_zero() {
+        let mut pg = Playground::new(3);
+        step_until(&mut pg, |p| !leaders(p).is_empty());
+        assert!(state(&pg)["clock_ms"].as_u64().unwrap() > 0);
+        pg.reset(5);
+        let s = state(&pg);
+        assert_eq!(s["nodes"].as_array().unwrap().len(), 5);
+        assert_eq!(s["clock_ms"].as_u64().unwrap(), 0);
+        assert_eq!(s["step_count"].as_u64().unwrap(), 0);
+        assert!(leaders(&pg).is_empty());
+    }
+
+    #[test]
+    fn five_voter_cluster_converges_to_one_leader() {
+        let mut pg = Playground::new(5);
+        step_until(&mut pg, |p| !leaders(p).is_empty());
+        pg.settle();
+        assert_eq!(leaders(&pg).len(), 1);
+    }
+}

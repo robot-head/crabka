@@ -52,4 +52,15 @@ exclude_re = [
     # extraction needs a running controller quorum (no unit-testable signal),
     # same rationale as the serve-loop/entrypoint globs above.
     "raft/src/server\\.rs.*describe_cluster_response_body",
+    # crabka-kraft-core's `sim` module is `#[cfg(feature = "sim")]` and that
+    # feature is OFF in the crate's default build. cargo-mutants tests a mutant
+    # in crabka-kraft-core against the crate's own default features, so the whole
+    # module is compiled out and every mutation in it is a no-op that always
+    # "survives" — the same default-feature-compiles-it-out case as the
+    # compression stubs above. The simulator's logic IS exercised: its unit tests
+    # run in the feature-enabled workspace test job (codecov covers the lines),
+    # the curated scenarios are driven by crabka-docgen, and the equivalent
+    # `crabka_playground::Playground::*` wrappers are mutation-tested (and caught)
+    # because that crate always enables `sim`.
+    "kraft-core/src/sim\\.rs",
 ]

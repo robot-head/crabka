@@ -1195,6 +1195,28 @@ mod tests {
     }
 
     #[test]
+    fn accessors_and_bus_faults_report_consistently() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        assert!(sim.voter_ids() == vec![1, 2, 3]);
+        assert!(sim.clock_ms() == 0);
+
+        // Pump until there is election traffic, then exercise the bus-replay faults.
+        while sim.in_flight().is_empty() && sim.step_once() {}
+        assert!(!sim.in_flight().is_empty());
+        assert!(sim.reorder() >= 1, "reorder delivers the queued round");
+
+        // The logical clock advances as timers fire.
+        sim.run_until_stable(10_000);
+        assert!(sim.clock_ms() > 0);
+
+        // duplicate_next is a no-op-safe replay when the bus has a message.
+        while sim.in_flight().is_empty() && sim.step_once() {}
+        if !sim.in_flight().is_empty() {
+            assert!(sim.duplicate_next());
+        }
+    }
+
+    #[test]
     fn append_targets_the_current_leader() {
         let mut sim = Sim::new(&[1, 2, 3]);
         // No leader yet -> append is a no-op.
