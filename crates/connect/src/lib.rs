@@ -51,6 +51,8 @@ pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
 pub use runtime::{
     CheckpointStore, ConnectorHandle, ConnectorRuntime, InMemoryCheckpointStore, RuntimeState,
 };
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 pub use sink::Sink;
 pub use source::Source;
 

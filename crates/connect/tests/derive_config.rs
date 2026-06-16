@@ -1,3 +1,5 @@
+#![cfg(feature = "derive")]
+
 use crabka_connect::{
     ConfigKind, ConnectorConfig, EnvSecretResolver, ResolveOptions, SecretString,
 };
@@ -30,7 +32,7 @@ async fn derive_builds_def_and_typed_config() {
     assert!(keys.contains(&("password", ConfigKind::Secret, true)));
     assert!(keys.contains(&("schema", ConfigKind::String, false)));
     assert!(keys.contains(&("max_batch", ConfigKind::UnsignedInteger, false)));
-    assert!(keys.contains(&("topics", ConfigKind::StringList, false)));
+    assert!(keys.contains(&("topics", ConfigKind::StringList, true)));
     assert!(keys.contains(&("omitted_note", ConfigKind::String, false)));
 
     let raw = serde_json::Map::from_iter([
