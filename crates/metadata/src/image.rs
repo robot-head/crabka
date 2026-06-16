@@ -2383,4 +2383,99 @@ mod tests {
         assert!(image.broker_epoch(5) == Some(99));
         assert!(image.broker_epoch(404) == None);
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+
+    #[test]
+    fn fresh_image_accessors() {
+        let id = Uuid::from_u128(0xABCD);
+        let image = MetadataImage::new(id);
+        assert!(image.cluster_id() == id); // not Uuid::default()
+        assert!(image.kraft_version() == 0); // fresh image has kraft_version 0
+    }
+
+    #[test]
+    fn broker_lookup_returns_registered_record() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 7,
+                broker_epoch: 1,
+                incarnation_id: Uuid::nil(),
+                host: "h".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
+        let b = image.broker(7).expect("registered broker resolvable");
+        assert!(b.node_id == 7);
+        assert!(image.broker(404).is_none());
+    }
+
+    #[test]
+    fn reapplying_topic_with_new_id_drops_stale_id_index() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        let old_id = Uuid::from_u128(1);
+        let new_id = Uuid::from_u128(2);
+        let topic = |id| {
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: id,
+                partitions: 1,
+                replication_factor: 1,
+            })
+        };
+        image.apply(&topic(old_id));
+        assert!(image.topic_by_id(&old_id).is_some());
+        // Re-apply the same NAME with a different id: the stale id index entry
+        // must be dropped (the `prev.topic_id != t.topic_id` guard).
+        image.apply(&topic(new_id));
+        assert!(image.topic_by_id(&new_id).is_some());
+        assert!(image.topic_by_id(&old_id).is_none());
+    }
+
+    #[test]
+    fn broker_throttle_rate_allows_zero() {
+        // A configured rate of 0 is a real (zero) value, distinct from absent
+        // or -1 (disabled). The cap check is `v < 0` (not `<=`), so 0 -> Some(0).
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 3,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("0".into()),
+        }));
+        assert!(image.broker_throttle_rate(3, ThrottleKind::Leader) == Some(0));
+    }
+
+    #[test]
+    fn dir_assignment_resizes_directories_to_replica_count() {
+        // KIP-858: a dir-assignment delta for a partition whose `directories`
+        // vec is shorter than `replicas` must grow it (to `replicas.len()`,
+        // nil-padded) before writing the reporting replica's slot. Without the
+        // resize the slot write would index out of bounds.
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 10,
+            replicas: vec![10, 20],
+            isr: vec![10, 20],
+            directories: vec![], // not yet reported
+            ..Default::default()
+        }));
+        let dir = Uuid::from_u128(0xD15);
+        image.apply(&MetadataRecord::V1PartitionDirAssignment(
+            crate::records::PartitionDirAssignmentRecord {
+                topic: "t".into(),
+                partition: 0,
+                replica: 10,
+                directory: dir,
+            },
+        ));
+        let pr = image.partition("t", 0).expect("partition present");
+        assert!(pr.directories.len() == 2);
+        assert!(pr.directories[0] == dir); // replica 10 is slot 0
+        assert!(pr.directories[1] == Uuid::nil()); // replica 20 still unassigned
+    }
 }

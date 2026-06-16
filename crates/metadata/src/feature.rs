@@ -501,4 +501,51 @@ mod tests {
                 == "4.0-IV0"
         );
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+    //
+    // Exercise the per-feature accessors the suite above never reads directly.
+    // Some sub-mutants are equivalent and intentionally left: a feature whose
+    // supported min is 0 makes "replace floor with 0" a no-op; group/streams
+    // `supported_range` and `default_level` mutated to their real `(0,1)` / `0`;
+    // `dependencies` `&[]` vs a leaked empty slice; and `validate_feature_
+    // dependencies -> Ok(())` (the live registry declares no dependencies).
+
+    #[test]
+    fn default_min_required_floor_is_supported_min() {
+        // group.version uses the default min_required_floor -> supported min (0).
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        assert!(feature("group.version").unwrap().min_required_floor(&img) == 0);
+    }
+
+    #[test]
+    fn metadata_version_min_required_floor_tracks_image() {
+        // The override returns the image's min_required_metadata_version.
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        let mv = feature("metadata.version").unwrap();
+        assert!(mv.min_required_floor(&img) == img.min_required_metadata_version());
+        // Empty image floor is METADATA_VERSION_MIN (7), distinct from 0/1/-1.
+        assert!(mv.min_required_floor(&img) == 7);
+    }
+
+    #[test]
+    fn plain_features_have_no_level_name() {
+        // Integer features use the default level_name -> None.
+        assert!(feature("group.version").unwrap().level_name(1).is_none());
+        assert!(
+            feature("transaction.version")
+                .unwrap()
+                .level_name(2)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn share_version_accessors() {
+        let f = feature("share.version").expect("registered");
+        assert!(f.name() == "share.version");
+        assert!(f.supported_range() == (0, 1));
+        // Opt-in (KIP-932 early access): never auto-enabled by any release.
+        assert!(f.default_level(25) == 0);
+    }
 }

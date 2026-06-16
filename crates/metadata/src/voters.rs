@@ -129,4 +129,19 @@ mod tests {
         let set = VoterSet::from_voters([sample(3), sample(1), sample(2)]);
         assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![1, 2, 3]);
     }
+
+    #[test]
+    fn accessors_reflect_contents() {
+        let set = VoterSet::from_voters([sample(1), sample(2)]);
+        assert!(set.len() == 2);
+        assert!(!set.is_empty());
+        assert!(set.get(1) == Some(&sample(1)));
+        assert!(set.get(99).is_none());
+        assert!(set.iter().count() == 2);
+
+        let empty = VoterSet::default();
+        assert!(empty.len() == 0);
+        assert!(empty.is_empty());
+        assert!(empty.iter().count() == 0);
+    }
 }
