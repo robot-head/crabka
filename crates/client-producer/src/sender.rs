@@ -5,28 +5,45 @@
 //! `Receiver` end of the wake channel (the `Producer` holds the
 //! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
 //! the `next_seq` map. On every linger tick or wake signal it walks the
-//! accumulators, seals + drains a batch from each, and builds a v2
-//! `RecordBatch` per partition (allocating its `base_sequence`). It then
-//! groups the drained batches by partition-**leader** and sends one
-//! `ProduceRequest` per leader via `Client::broker(id)` — falling back to the
-//! bootstrap `Client::send` when the leader is unknown — re-routing on
-//! `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`, and resolving each
-//! record's `oneshot::Sender` from the per-partition response.
+//! accumulators, seals + drains batches, and builds a v2 `RecordBatch` per
+//! batch (allocating its `base_sequence`). Each batch becomes its own
+//! single-partition `ProduceRequest`, sent via `Client::broker(id)` — falling
+//! back to the bootstrap `Client::send` when the leader is unknown — with all
+//! of a cycle's requests sent **concurrently** to keep every broker busy.
+//!
+//! ## Per-partition pipelining (idempotence-critical)
+//!
+//! Brokers stay busy because independent partitions send **concurrently** — up
+//! to [`SenderConfig::max_in_flight`] Produce requests overlap on the wire per
+//! drain cycle. But each *single* partition keeps **at most one** request in
+//! flight ([`MAX_IN_FLIGHT_PER_PARTITION`]): its next batch is not drained until
+//! the previous one is acked. That makes per-partition idempotent
+//! `base_sequence` ordering hold **by construction** — the broker never sees two
+//! outstanding sequences for one partition, so concurrently-issued requests
+//! cannot reach it out of `base_sequence` order and trip
+//! `OUT_OF_ORDER_SEQUENCE_NUMBER`.
+//!
+//! Recovery is correspondingly simple: a batch that fails (transport error,
+//! routing miss, or a defensive `OUT_OF_ORDER`) is parked in its partition's
+//! single **retry slot** and resent verbatim — same allocated `base_sequence`,
+//! same bytes, so a re-landed write is deduped by the broker via
+//! `DUPLICATE_SEQUENCE_NUMBER` — ahead of any new batch for that partition, on
+//! the next cycle. The retry slots persist across cycles (owned by [`run`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::Client;
 use crabka_compression::CompressionType;
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
+use crabka_protocol::owned::produce_response::ProduceResponse;
 use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordHeader};
 
@@ -36,6 +53,7 @@ use crate::error::ProducerError;
 use crate::producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata};
 use crate::record::RecordMetadata;
 use crate::transactional::TxnState;
+use crate::transport::ProduceTransport;
 
 /// Wire error codes referenced when interpreting `PartitionProduceResponse`.
 mod codes {
@@ -67,27 +85,80 @@ const BOOTSTRAP_LEADER: i32 = -1;
 /// multiple full request-timeouts here only slows failover recovery.
 const TRANSPORT_RETRIES: i32 = 1;
 
-/// Wall-clock budget for routing a batch to a reachable leader across one
-/// `send_to_leaders` cycle. Spans a typical failover leader re-election (the
-/// broker session timeout is single-digit seconds) with margin, then fails the
-/// still-unroutable batch so the caller's ack/`flush` resolves instead of
-/// hanging forever. The retry is iterative (no recursion), so this never grows
-/// the worker stack no matter how many rounds elapse.
+/// Wall-clock budget for routing a batch to a reachable leader, measured from
+/// its first send and preserved across resends. Spans a typical failover leader
+/// re-election (the broker session timeout is single-digit seconds) with
+/// margin, then fails the still-unroutable batch so the caller's ack/`flush`
+/// resolves instead of hanging forever. Enforced per cycle in
+/// [`collect_retries`] as a resend batch is about to be re-sent, so a batch that
+/// keeps bouncing between leaders gives up by ~30s rather than resending
+/// indefinitely.
 const ROUTING_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Maximum Produce requests in flight **per partition** at once.
+///
+/// Pinned to `1`: a partition's next batch is not sent until its previous batch
+/// is acked. This preserves idempotent per-partition `base_sequence` ordering
+/// *by construction* — the broker only ever sees one sequence outstanding for a
+/// partition, so there is no window in which concurrently-issued requests can
+/// reach the broker out of `base_sequence` order and trip
+/// `OUT_OF_ORDER_SEQUENCE_NUMBER`.
+///
+/// ## Why not `> 1` (same-partition pipelining)?
+///
+/// The previous design drained up to `max_in_flight` batches per partition and
+/// fired them via `futures::future::join_all`. But [`crabka_client_core::Client`]'s
+/// `send` writes the request frame **and** awaits its response in a single
+/// future; when several same-partition futures are polled concurrently their
+/// frame writes race on the connection's writer channel, so the broker can
+/// receive `base_sequence` 16 before 0. The broker rejects the gap with
+/// `OUT_OF_ORDER_SEQUENCE_NUMBER`, the producer resends — concurrently again —
+/// re-triggering the reorder. Under sustained load this livelocks: some batch
+/// never converges, its records' ack-oneshots never resolve, and the caller
+/// hangs.
+///
+/// True same-partition pipelining (`> 1`) requires a client-core API that
+/// guarantees **ordered frame writes** for a partition's in-flight requests
+/// (write 0, 1, 2 to the wire in order, then await their responses
+/// concurrently) — e.g. a pipelined `Connection::send_batch` or a write-then-await
+/// split. That is deferred; until it exists, one-in-flight-per-partition is the
+/// only ordering-safe option. Cross-partition pipelining is unaffected:
+/// independent partitions still send concurrently, bounded by
+/// [`SenderConfig::max_in_flight`].
+const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
+
+// The one-slot-per-partition pipeline (a single retry slot per partition, no
+// ordered drain) is only sound while a partition never has more than one request
+// outstanding. If this is ever raised above `1`, that model is insufficient — a
+// partition could have several outstanding sequences needing an ordered drain —
+// and the recovery path must be redesigned. Enforce the dependency at compile
+// time so the assumption can't silently drift.
+const _: () = assert!(
+    MAX_IN_FLIGHT_PER_PARTITION == 1,
+    "the one-slot retry model requires exactly one in-flight request per partition",
+);
 
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
 #[allow(clippy::type_complexity)] // accumulators map mirrors the Producer field; alias deferred.
 pub(crate) struct SenderConfig {
-    pub client: Client,
+    /// Broker-facing transport (real `Client` in production, a deterministic
+    /// in-process broker model in tests). See [`crate::transport`].
+    pub transport: Box<dyn ProduceTransport>,
     pub producer_id: i64,
     pub producer_epoch: i16,
     pub acks: Acks,
     pub compression: Compression,
     pub linger: Duration,
     pub request_timeout: Duration,
-    pub retries: i32,
     pub retry_backoff: Duration,
+    /// Maximum number of Produce requests fired **concurrently per drain
+    /// cycle**, across all partitions — the cross-partition / per-connection
+    /// pipelining bound (Kafka's `max.in.flight.requests.per.connection`).
+    /// Per-partition in-flight is separately pinned to
+    /// [`MAX_IN_FLIGHT_PER_PARTITION`] (`1`) for ordering; this bounds how many
+    /// *distinct partitions'* requests overlap on the wire at once.
+    pub max_in_flight: usize,
     pub metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
     /// Per-`(topic, partition)` leader-id cache, shared with the `Producer`.
     /// Populated from `Metadata` (see `Producer::partitions_for`); the sender
@@ -115,24 +186,44 @@ pub(crate) struct SenderConfig {
     pub txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
 }
 
+/// Mutable per-partition pipeline state, owned by [`run`] and threaded into
+/// every [`drain_once`] so it persists across drain cycles.
+///
+/// With [`MAX_IN_FLIGHT_PER_PARTITION`] pinned to `1`, the only state a
+/// partition can carry between cycles is a single failed batch awaiting a
+/// verbatim resend — there is never more than one request outstanding, so there
+/// is nothing to "drain" and no resend *set* to order. Hence exactly one slot
+/// per partition.
+#[derive(Default)]
+struct PipelineState {
+    /// Per-`(topic, partition)` retry slot: a batch that failed its last send
+    /// and must be resent verbatim (same `base_sequence`, same bytes) ahead of
+    /// any new batch for that partition. Already counted in `in_flight` (counted
+    /// when first drained from the accumulator), so it is NOT re-counted on
+    /// resend. Presence means the partition's single in-flight slot is occupied.
+    retry: HashMap<(String, i32), PreparedBatch>,
+}
+
 pub(crate) async fn run(mut cfg: SenderConfig) {
     let mut ticker = tokio::time::interval(cfg.linger.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut state = PipelineState::default();
 
     loop {
         tokio::select! {
             () = cfg.shutdown.cancelled() => break,
             _ = ticker.tick() => {
-                drain_once(&mut cfg).await;
+                drain_once(&mut cfg, &mut state).await;
             }
             _ = cfg.wake_rx.recv() => {
-                drain_once(&mut cfg).await;
+                drain_once(&mut cfg, &mut state).await;
             }
         }
     }
 
     // Drain anything left when we shut down so `close()` doesn't drop records.
-    drain_once(&mut cfg).await;
+    drain_once(&mut cfg, &mut state).await;
 }
 
 /// One drained partition's batch, prepared for sending: the encoded v2
@@ -140,48 +231,99 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
 /// the `PendingRecord`s whose oneshot acks the response resolves.
 ///
 /// The `record_batch` is built **once** (sequence allocated once) so a
-/// re-route or retry resends the identical bytes — preserving per-partition
+/// re-route or resend ships the identical bytes — preserving per-partition
 /// idempotent sequencing: the leader sees each partition's `base_sequence`
 /// exactly once, in increasing order, regardless of which broker it reaches.
 struct PreparedBatch {
     topic: String,
     partition: i32,
     topic_id: Uuid,
+    /// The allocated base sequence for this batch. Cached here (rather than
+    /// re-read from `record_batch.base_sequence`) so it is unambiguous for a
+    /// transactional batch and so debug logging can name the batch.
+    base_sequence: i32,
     record_batch: RecordBatch,
     records: Vec<PendingRecord>,
+    /// Wall-clock time the batch was first handed to the transport. Set on the
+    /// first send and preserved across resends so the routing-retry budget
+    /// (`ROUTING_RETRY_BUDGET`) is measured from the first attempt, not the
+    /// most recent — a batch that keeps failing to route gives up by ~30s.
+    first_sent: Option<Instant>,
 }
 
-/// Walk every accumulator, seal its current batch, pop one ready batch, build
-/// the per-partition `RecordBatch` (allocating its `base_sequence`), then group
-/// the prepared batches by partition-leader and send one `ProduceRequest` per
-/// leader. Notifies `flush_notify` when there was nothing to do — that's the
-/// signal `Producer::flush` waits on.
+/// One drain cycle. Builds the send list — each partition's pending resend
+/// first, then one newly-drained batch for each *idle* partition — sends every
+/// batch as its own single-partition `ProduceRequest` **concurrently**, then
+/// dispatches each [`BatchVerdict`] (ack / park-for-resend / terminal-fail /
+/// fence).
 ///
-/// **Per-partition ordering / idempotence.** Each `(topic, partition)`
-/// contributes at most ONE batch per drain cycle, and `drain_once` runs to
-/// completion (all per-leader sends + their bounded retries) before the next
-/// cycle. Sequences are allocated per-partition as each batch is built, so a
-/// partition's batches still reach its leader in strictly increasing
-/// `base_sequence` order with no gaps or reordering — routing changes only the
-/// destination broker, never the order or the allocated sequence.
-async fn drain_once(cfg: &mut SenderConfig) {
-    let keys: Vec<(String, i32)> = cfg.accumulators.iter().map(|e| e.key().clone()).collect();
+/// **Per-partition ordering / idempotence.** A partition contributes at most one
+/// batch per cycle: either its pending resend (held in [`PipelineState::retry`])
+/// *or* one new batch when idle, never both — the `occupied` set enforces the
+/// "never both". So the broker never sees two outstanding sequences for a
+/// partition, and a failing partition can never interleave a fresh batch ahead
+/// of its pending resend. Each batch's `record_batch` (hence `base_sequence`) is
+/// built once and resent verbatim, so the leader sees each sequence exactly
+/// once, in order — ordering preserved by construction.
+///
+/// `in_flight` accounting: `fetch_add` only when a NEW batch is drained from an
+/// accumulator (resends were counted when first drained); `fetch_sub` only when
+/// a batch reaches a terminal outcome (ack, terminal failure, fence, or routing
+/// budget exhausted). `flush_notify` is woken when `in_flight` hits zero and
+/// when there is nothing to send.
+async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
+    let now = Instant::now();
 
-    // 1. Drain one ready batch per partition and prepare it (build the v2
-    //    RecordBatch, allocating its base_sequence). `in_flight` is incremented
-    //    per drained batch while the accumulator lock is held, exactly as
-    //    before, so a concurrent `flush` never sees a batch that is neither in
-    //    the accumulator nor counted in flight. We decrement once per prepared
-    //    batch after its leader's request completes (success or failure).
-    let mut prepared: Vec<PreparedBatch> = Vec::new();
+    // 1. Resends first: each partition's single failed batch must precede any
+    //    new batch for that partition. `collect_retries` drains the retry slots
+    //    and returns batches whose routing budget elapsed, which we fail here
+    //    (their in-flight slot was counted at first drain, so `finish_in_flight`
+    //    once).
+    let (mut to_send, expired) = collect_retries(&mut state.retry, now);
+    for pb in expired {
+        fail_batch(
+            pb.records,
+            ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
+        );
+        finish_in_flight(cfg);
+    }
+
+    // A partition resending this cycle is "occupied": it must not also send a
+    // new batch (two same-partition requests on the wire could reorder and trip
+    // `OUT_OF_ORDER_SEQUENCE_NUMBER`). Its next batch waits in the accumulator
+    // until the resend acks and the slot frees.
+    let mut occupied: HashSet<(String, i32)> = to_send
+        .iter()
+        .map(|pb| (pb.topic.clone(), pb.partition))
+        .collect();
+
+    // 2. One new batch per idle partition. Across partitions we fan out
+    //    concurrently, but bound the cycle's total fan-out to `max_in_flight`
+    //    (the per-connection pipelining bound); partitions not reached this cycle
+    //    are picked up on the next linger tick (their retry slots carry forward,
+    //    so none is starved). `in_flight` is incremented per new batch while the
+    //    accumulator lock is held, so a concurrent `flush` never sees a batch
+    //    that is neither in the accumulator nor counted in flight.
+    let keys: Vec<(String, i32)> = cfg.accumulators.iter().map(|e| e.key().clone()).collect();
     for key in keys {
+        if to_send.len() >= cfg.max_in_flight {
+            break;
+        }
+        // A partition with a resend in flight keeps its one slot; skip it.
+        if occupied.contains(&key) {
+            continue;
+        }
         let acc = match cfg.accumulators.get(&key) {
             Some(a) => a.value().clone(),
             None => continue,
         };
-        let batch = {
+        // Seal the in-progress batch, then take a single ready batch.
+        {
             let mut a = acc.lock().await;
             a.seal_current();
+        }
+        let batch = {
+            let mut a = acc.lock().await;
             let b = a.ready.pop_front();
             if b.is_some() {
                 cfg.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -189,19 +331,103 @@ async fn drain_once(cfg: &mut SenderConfig) {
             b
         };
         let Some(batch) = batch else { continue };
-        prepared.push(prepare_batch(cfg, &key.0, key.1, batch).await);
+        let mut pb = prepare_batch(cfg, &key.0, key.1, batch).await;
+        pb.first_sent = Some(now);
+        occupied.insert(key);
+        to_send.push(pb);
     }
 
-    if prepared.is_empty() {
+    if to_send.is_empty() {
         cfg.flush_notify.notify_waiters();
         return;
     }
 
-    // 2. Group prepared batches by their partition leader, then send one
-    //    ProduceRequest per leader. `send_to_leaders` decrements `in_flight`
-    //    once per batch as each completes and wakes any `flush` waiter when the
-    //    last in-flight batch lands.
-    send_to_leaders(cfg, prepared).await;
+    // 3. Send every batch concurrently, then apply each verdict to its window.
+    send_batches(cfg, state, to_send).await;
+}
+
+/// Drain the per-partition retry slots into an ordered send list (one-slot
+/// model). Each partition holds **at most one** failed batch awaiting a verbatim
+/// resend; a batch whose routing budget ([`ROUTING_RETRY_BUDGET`], measured from
+/// its first send) has elapsed is split off into `expired` for the caller to
+/// fail instead of resending. Every resent batch keeps its allocated
+/// `base_sequence` and bytes (the broker dedups a re-landed write via
+/// `DUPLICATE_SEQUENCE_NUMBER`); `first_sent` is initialized defensively if unset.
+///
+/// Pure over the retry map (no `Client`, no I/O) so the budget-expiry logic is
+/// unit-testable without a broker.
+fn collect_retries(
+    retry: &mut HashMap<(String, i32), PreparedBatch>,
+    now: Instant,
+) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
+    let mut to_send: Vec<PreparedBatch> = Vec::new();
+    let mut expired: Vec<PreparedBatch> = Vec::new();
+
+    for (_key, mut pb) in retry.drain() {
+        if pb
+            .first_sent
+            .is_some_and(|t| now.duration_since(t) >= ROUTING_RETRY_BUDGET)
+        {
+            expired.push(pb);
+            continue;
+        }
+        if pb.first_sent.is_none() {
+            pb.first_sent = Some(now);
+        }
+        to_send.push(pb);
+    }
+
+    (to_send, expired)
+}
+
+/// Per-batch verdict consumed by [`send_batches`] in the one-slot model: the
+/// broker durably accepted it, it must be resent verbatim, it failed terminally
+/// with a server code, or it fatally fenced the producer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BatchVerdict {
+    /// Durably written (`NONE`) or already present (`DUPLICATE_SEQUENCE_NUMBER`).
+    Acked { base_offset: i64 },
+    /// Resend verbatim next cycle (transport failure, `OUT_OF_ORDER`, or routing).
+    Retry,
+    /// Terminal but non-fatal server error — fail the records with `Server(code)`.
+    Terminal(i16),
+    /// Fatal idempotence failure (`INVALID_PRODUCER_EPOCH`) — fence the producer.
+    Fence,
+}
+
+/// Classification of a per-partition `error_code`: either a direct
+/// [`BatchVerdict`], or [`Classification::Routing`] (`NOT_LEADER`/`UNKNOWN` — a
+/// retry, plus the leader-hint adoption / metadata refresh side effects applied
+/// by [`interpret_response`]). Kept separate so the pure code→verdict mapping is
+/// unit-testable without a `Client`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Classification {
+    Verdict(BatchVerdict),
+    Routing,
+}
+
+/// Map a per-partition `error_code` (and the broker's `base_offset`) to its
+/// [`Classification`]. Pure (no I/O).
+fn classify_verdict(error_code: i16, base_offset: i64) -> Classification {
+    match error_code {
+        // The broker durably wrote the batch (NONE) or already had it
+        // (DUPLICATE_SEQUENCE_NUMBER returns the same base_offset) — ack either.
+        codes::NONE | codes::DUPLICATE_SEQUENCE_NUMBER => {
+            Classification::Verdict(BatchVerdict::Acked { base_offset })
+        }
+        // A gap from an earlier failed send: resend this batch verbatim (same
+        // base_sequence) once the partition's slot is free. With one in-flight
+        // per partition this is rare, but handled identically to a transport
+        // failure for safety.
+        codes::OUT_OF_ORDER_SEQUENCE_NUMBER => Classification::Verdict(BatchVerdict::Retry),
+        codes::INVALID_PRODUCER_EPOCH => Classification::Verdict(BatchVerdict::Fence),
+        codes::NOT_LEADER_OR_FOLLOWER | codes::UNKNOWN_TOPIC_OR_PARTITION => {
+            Classification::Routing
+        }
+        // Any other code is terminal-but-not-fatal: fail the records with
+        // Server(code); never fence.
+        code => Classification::Verdict(BatchVerdict::Terminal(code)),
+    }
 }
 
 /// Resolve a partition's leader id from the cache. Returns [`BOOTSTRAP_LEADER`]
@@ -214,7 +440,7 @@ fn resolve_leader(cfg: &SenderConfig, topic: &str, partition: i32) -> i32 {
         .get(&(topic.to_string(), partition))
         .map(|e| *e.value())
     {
-        Some(id) if id >= 0 && cfg.client.knows_broker(id) => id,
+        Some(id) if id >= 0 && cfg.transport.knows_broker(id) => id,
         _ => BOOTSTRAP_LEADER,
     }
 }
@@ -258,80 +484,284 @@ async fn prepare_batch(
         topic: topic.to_string(),
         partition,
         topic_id,
+        base_sequence,
         record_batch,
         records: batch.records,
+        first_sent: None,
     }
 }
 
-/// Outcome of one [`send_leader_group`] call.
-struct LeaderSendOutcome {
-    /// Batches that came back mis-routed (`NOT_LEADER`/`UNKNOWN`) or whose
-    /// leader's connection failed — still in-flight, to be re-resolved.
-    reroute: Vec<PreparedBatch>,
-    /// A metadata refresh is required before the re-route can route correctly
-    /// (no usable inline leader hint, or the hinted leader's address is unknown).
+/// One batch's send result: the batch, its [`BatchVerdict`], and whether a
+/// metadata refresh is needed before any resend can route correctly.
+struct BatchSendResult {
+    pb: PreparedBatch,
+    verdict: BatchVerdict,
+    /// A metadata refresh is required before a resend can route correctly (the
+    /// partition came back mis-routed with no usable inline leader hint, or the
+    /// hinted leader's address is unknown).
     refresh_needed: bool,
 }
 
-/// Drive the prepared batches to their partition leaders, re-routing any that
-/// come back mis-routed or whose leader's connection failed (broker bounce /
-/// failover) until every batch reaches a terminal outcome (ack/fail) or the
-/// routing budget elapses.
+/// Send every batch in `to_send` as its own single-partition `ProduceRequest`,
+/// **concurrently**, then dispatch each [`BatchVerdict`]: ack the records, fail
+/// them terminally, park the batch in its partition's retry slot for a verbatim
+/// resend next cycle, or fence the producer.
 ///
-/// Iterative — it re-groups and re-resolves each round rather than recursing —
-/// so a partition whose leader takes several seconds to re-elect can be retried
-/// across the whole window without growing the worker stack.
-async fn send_to_leaders(cfg: &SenderConfig, mut prepared: Vec<PreparedBatch>) {
-    let deadline = std::time::Instant::now() + ROUTING_RETRY_BUDGET;
-    let mut round: i32 = 0;
-    loop {
-        // Group by leader id. Resolution is a synchronous registry lookup (no
-        // await), so the cache is read here and the per-leader sends happen
-        // below with no lock held across the `.await`. Sequential sends keep a
-        // single parked leader from starving the others past the per-request
-        // timeout, mirroring the consumer's poll.
-        let mut by_leader: HashMap<i32, Vec<PreparedBatch>> = HashMap::new();
-        for pb in prepared.drain(..) {
-            let leader = resolve_leader(cfg, &pb.topic, pb.partition);
-            by_leader.entry(leader).or_default().push(pb);
-        }
+/// Concurrency is cross-partition request pipelining: every batch in `to_send`
+/// is for a *distinct* partition ([`drain_once`]'s `occupied` set guarantees it),
+/// and the brokers are independent — so overlapping the round-trips keeps every
+/// broker busy without ever putting two same-partition requests on the wire, and
+/// per-partition ordering is undisturbed. Futures are polled on this one task
+/// (no spawn), so they share `&cfg` safely.
+async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Vec<PreparedBatch>) {
+    let results =
+        futures::future::join_all(to_send.into_iter().map(|pb| send_one_batch(cfg, pb))).await;
 
-        let mut to_reroute: Vec<PreparedBatch> = Vec::new();
-        let mut refresh_needed = false;
-        for (leader, batches) in by_leader {
-            let outcome = send_leader_group(cfg, leader, batches).await;
-            to_reroute.extend(outcome.reroute);
-            refresh_needed |= outcome.refresh_needed;
-        }
+    let mut needs_refresh = false;
+    let mut results = results.into_iter();
+    while let Some(res) = results.next() {
+        let BatchSendResult {
+            pb,
+            verdict,
+            refresh_needed,
+        } = res;
+        needs_refresh |= refresh_needed;
 
-        if to_reroute.is_empty() {
-            return;
-        }
-
-        round += 1;
-        if round > cfg.retries || std::time::Instant::now() >= deadline {
-            // Out of routing budget: fail the still-misrouted batches with the
-            // routing error so the caller sees a real Server error, and release
-            // each in-flight slot.
-            for pb in to_reroute {
-                fail_batch(
-                    pb.records,
-                    ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
+        match verdict {
+            // Durable: resolve the records with their offsets, free the slot.
+            BatchVerdict::Acked { base_offset } => ack_batch(cfg, pb, base_offset),
+            // Terminal server error: fail the records, free the slot.
+            BatchVerdict::Terminal(code) => terminal_fail_batch(cfg, pb, code),
+            // Retriable (transport / routing / defensive OUT_OF_ORDER): park in
+            // the partition's single retry slot, resent verbatim next cycle. The
+            // batch is still outstanding, so its in-flight slot stays counted —
+            // no `finish_in_flight` here.
+            BatchVerdict::Retry => {
+                tracing::debug!(
+                    topic = %pb.topic,
+                    partition = pb.partition,
+                    base_sequence = pb.base_sequence,
+                    "parking batch for verbatim resend",
                 );
-                finish_in_flight(cfg);
+                state.retry.insert((pb.topic.clone(), pb.partition), pb);
             }
-            return;
+            // Fatal idempotence failure. Fail this batch plus every batch we have
+            // not yet processed (their in-flight slots are counted, so they must
+            // be released), then fence the producer and stop sending.
+            BatchVerdict::Fence => {
+                let mut to_fail = vec![pb];
+                for r in results {
+                    to_fail.push(r.pb);
+                }
+                fence(cfg, state, to_fail);
+                return;
+            }
         }
+    }
 
-        // Learn the partition→leader map the cluster (re-)elected so the next
-        // round routes correctly, then back off to avoid a hot loop while a
-        // leader is mid-election. A pure hint adoption (refresh not needed)
-        // re-resolves immediately on the next round without a round-trip.
-        if refresh_needed {
-            update_leaders_from_metadata(cfg).await;
+    if needs_refresh {
+        update_leaders_from_metadata(cfg).await;
+    }
+}
+
+/// Ack a batch's records with their broker-assigned offsets and release its
+/// in-flight slot. `base_offset + offset_delta` is the per-record offset.
+fn ack_batch(cfg: &SenderConfig, pb: PreparedBatch, base_offset: i64) {
+    let partition = pb.partition;
+    for r in pb.records {
+        let _ = r.ack.send(Ok(RecordMetadata {
+            topic_index: 0,
+            partition,
+            offset: base_offset + i64::from(r.offset_delta),
+            timestamp_ms: r.timestamp_ms,
+        }));
+    }
+    finish_in_flight(cfg);
+}
+
+/// Terminally fail a batch the broker rejected with an unmodeled error code,
+/// resolving its records with `Server(code)` and releasing the in-flight slot.
+/// This is the single owner of the slot release for the batch.
+fn terminal_fail_batch(cfg: &SenderConfig, pb: PreparedBatch, code: i16) {
+    fail_batch(pb.records, ProducerError::Server(code));
+    finish_in_flight(cfg);
+}
+
+/// Fence the producer: mark `STATE_FENCED`, fail `to_fail` (this cycle's still-
+/// live batches), every batch parked in a retry slot, and everything in the
+/// accumulators with `FencedProducer`, releasing each in-flight slot. Called on
+/// a fatal idempotence failure (`INVALID_PRODUCER_EPOCH`).
+fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBatch>) {
+    cfg.state
+        .compare_exchange(
+            STATE_ACTIVE,
+            STATE_FENCED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .ok();
+
+    // Fail every batch from this cycle we were still holding.
+    for batch in to_fail {
+        fail_batch(batch.records, ProducerError::FencedProducer);
+        finish_in_flight(cfg);
+    }
+    // Fail everything parked in the retry slots; the producer is dead.
+    for (_, batch) in state.retry.drain() {
+        fail_batch(batch.records, ProducerError::FencedProducer);
+        finish_in_flight(cfg);
+    }
+
+    // Fail anything still sitting in the accumulators (current + ready) so no
+    // caller's oneshot hangs. We use try_lock to avoid blocking — a record
+    // being appended concurrently will observe STATE_FENCED on its next send.
+    for entry in cfg.accumulators.iter() {
+        if let Ok(mut a) = entry.value().try_lock() {
+            if let Some(b) = a.current.take() {
+                fail_batch(b.records, ProducerError::FencedProducer);
+            }
+            while let Some(b) = a.ready.pop_front() {
+                fail_batch(b.records, ProducerError::FencedProducer);
+            }
         }
-        tokio::time::sleep(cfg.retry_backoff).await;
-        prepared = to_reroute;
+    }
+}
+
+/// Send a single batch as its own single-partition `ProduceRequest`, resolving
+/// its transport/broker result to a [`BatchVerdict`]. The batch is returned
+/// alongside the verdict (the caller still owns its records). On a connection
+/// error the broker is evicted so a reconnect targets its current address.
+async fn send_one_batch(cfg: &SenderConfig, pb: PreparedBatch) -> BatchSendResult {
+    let leader = resolve_leader(cfg, &pb.topic, pb.partition);
+    let req = build_single_batch_request(cfg, &pb);
+
+    let route = if leader == BOOTSTRAP_LEADER {
+        None
+    } else {
+        Some(leader)
+    };
+
+    let mut attempts: i32 = 0;
+    let resp: ProduceResponse = loop {
+        attempts += 1;
+        let send = cfg.transport.send_produce(route, req.clone()).await;
+        match send {
+            Ok(r) => break r,
+            Err(e) => {
+                // The cached connection is likely dead (broker bounced / failed
+                // over). Evict it so a reconnect targets the broker's current
+                // address; never evict the shared bootstrap connection.
+                if leader != BOOTSTRAP_LEADER {
+                    cfg.transport.evict_broker(leader);
+                }
+                if attempts >= TRANSPORT_RETRIES {
+                    tracing::warn!(
+                        leader,
+                        partition = pb.partition,
+                        base_sequence = pb.base_sequence,
+                        error = %e,
+                        "produce to leader failed {attempts}×; will re-route",
+                    );
+                    // Transport failure → retry (park in the retry slot, resend
+                    // verbatim). Force a metadata refresh so the resend
+                    // re-resolves to whatever leader the cluster (re-)elected.
+                    return BatchSendResult {
+                        pb,
+                        verdict: BatchVerdict::Retry,
+                        refresh_needed: true,
+                    };
+                }
+                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; reconnecting");
+                tokio::time::sleep(cfg.retry_backoff).await;
+            }
+        }
+    };
+
+    interpret_response(cfg, pb, &resp)
+}
+
+/// Interpret a single-partition `ProduceResponse` into a [`BatchSendResult`].
+/// Applies the routing case's leader-hint side effects; the pure code→verdict
+/// mapping lives in [`classify_verdict`].
+fn interpret_response(
+    cfg: &SenderConfig,
+    pb: PreparedBatch,
+    resp: &ProduceResponse,
+) -> BatchSendResult {
+    let part_resp = resp
+        .responses
+        .iter()
+        .find(|t| t.name == pb.topic || (pb.topic_id != Uuid::ZERO && t.topic_id == pb.topic_id))
+        .and_then(|t| {
+            t.partition_responses
+                .iter()
+                .find(|p| p.index == pb.partition)
+        });
+
+    let Some(part_resp) = part_resp else {
+        // No matching partition in the response: treat as a retriable failure so
+        // the batch resends verbatim rather than being dropped. (The broker
+        // echoes the partition we sent, so this is rare.)
+        return BatchSendResult {
+            pb,
+            verdict: BatchVerdict::Retry,
+            refresh_needed: true,
+        };
+    };
+
+    match classify_verdict(part_resp.error_code, part_resp.base_offset) {
+        Classification::Verdict(verdict) => BatchSendResult {
+            pb,
+            verdict,
+            refresh_needed: false,
+        },
+        Classification::Routing => {
+            // Adopt any inline leader hint immediately; otherwise (or if the
+            // hinted leader's address is unknown) force a metadata refresh. The
+            // batch resends verbatim, so sequencing stays monotonic.
+            let hint = part_resp.current_leader.leader_id;
+            let refresh_needed = if hint >= 0 {
+                cfg.partition_leaders
+                    .insert((pb.topic.clone(), pb.partition), hint);
+                !cfg.transport.knows_broker(hint)
+            } else {
+                true
+            };
+            BatchSendResult {
+                pb,
+                verdict: BatchVerdict::Retry,
+                refresh_needed,
+            }
+        }
+    }
+}
+
+/// Build a single-partition, single-batch `ProduceRequest`. Transactional state
+/// is read from the batch's own attributes (set at build time), so the
+/// request-level `transactional_id` matches the batch exactly.
+fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> ProduceRequest {
+    let is_txn = pb.record_batch.attributes.is_transactional();
+    let req_txn_id = if is_txn {
+        cfg.transactional_id.clone()
+    } else {
+        None
+    };
+
+    ProduceRequest {
+        transactional_id: req_txn_id,
+        acks: cfg.acks.wire(),
+        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
+        topic_data: vec![TopicProduceData {
+            name: pb.topic.clone(),
+            topic_id: pb.topic_id,
+            partition_data: vec![PartitionProduceData {
+                index: pb.partition,
+                records: Some(pb.record_batch.clone().into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
     }
 }
 
@@ -339,7 +769,7 @@ async fn send_to_leaders(cfg: &SenderConfig, mut prepared: Vec<PreparedBatch>) {
 /// refresh also re-populates the pool's broker-address registry, so a leader
 /// re-elected onto a broker the pool hadn't dialed becomes routable.
 async fn update_leaders_from_metadata(cfg: &SenderConfig) {
-    if let Ok(md) = cfg.client.refresh_metadata().await {
+    if let Ok(md) = cfg.transport.refresh_metadata().await {
         for t in &md.topics {
             let Some(name) = &t.name else { continue };
             if t.error_code != 0 {
@@ -358,204 +788,6 @@ async fn update_leaders_from_metadata(cfg: &SenderConfig) {
 fn finish_in_flight(cfg: &SenderConfig) {
     if cfg.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
         cfg.flush_notify.notify_waiters();
-    }
-}
-
-/// Send one `ProduceRequest` carrying every batch routed to `leader`. Returns
-/// the batches that came back mis-routed (`NOT_LEADER_OR_FOLLOWER` /
-/// `UNKNOWN_TOPIC_OR_PARTITION`) or whose leader's connection failed, for the
-/// caller ([`send_to_leaders`]) to re-resolve and resend (same allocated
-/// `base_sequence`, so sequencing stays monotonic). Each batch's `in_flight`
-/// slot is released exactly once, when its terminal outcome (ack or failure) is
-/// reached; a re-routed batch stays held until then.
-#[allow(clippy::too_many_lines)] // single per-leader send+response state machine; splitting hurts readability
-async fn send_leader_group(
-    cfg: &SenderConfig,
-    leader: i32,
-    batches: Vec<PreparedBatch>,
-) -> LeaderSendOutcome {
-    // Frame a multi-topic ProduceRequest from the grouped batches. Partition
-    // data for the same topic is merged under one TopicProduceData entry.
-    let req = build_produce_request(cfg, &batches);
-
-    let mut attempts: i32 = 0;
-    let resp = loop {
-        attempts += 1;
-        let send = if leader == BOOTSTRAP_LEADER {
-            cfg.client.send(req.clone()).await
-        } else {
-            cfg.client.broker(leader).send(req.clone()).await
-        };
-        match send {
-            Ok(r) => break r,
-            Err(e) => {
-                // The cached connection is likely dead (broker bounced / failed
-                // over). Evict it so a reconnect targets the broker's current
-                // address; never evict the shared bootstrap connection.
-                if leader != BOOTSTRAP_LEADER {
-                    cfg.client.evict_broker(leader);
-                }
-                if attempts >= TRANSPORT_RETRIES {
-                    // Stop hammering this leader — hand the batches back for a
-                    // metadata-driven re-route to whatever leader the cluster
-                    // (re-)elected. In-flight slots stay held (still pending);
-                    // `send_to_leaders` bounds the overall routing budget.
-                    tracing::warn!(
-                        leader,
-                        error = %e,
-                        "produce to leader failed {attempts}×; re-routing",
-                    );
-                    return LeaderSendOutcome {
-                        reroute: batches,
-                        refresh_needed: true,
-                    };
-                }
-                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; reconnecting");
-                tokio::time::sleep(cfg.retry_backoff).await;
-            }
-        }
-    };
-
-    // Resolve each batch's per-partition response. Batches whose partition
-    // returned a routing error are collected for re-resolution; all others
-    // reach a terminal outcome here (and release their in-flight slot).
-    let mut to_reroute: Vec<PreparedBatch> = Vec::new();
-    let mut refresh_needed = false;
-    for pb in batches {
-        let part_resp = resp
-            .responses
-            .iter()
-            .find(|t| {
-                t.name == pb.topic || (pb.topic_id != Uuid::ZERO && t.topic_id == pb.topic_id)
-            })
-            .and_then(|t| {
-                t.partition_responses
-                    .iter()
-                    .find(|p| p.index == pb.partition)
-            });
-        let Some(part_resp) = part_resp else {
-            fail_batch(pb.records, ProducerError::Closed);
-            finish_in_flight(cfg);
-            continue;
-        };
-
-        match part_resp.error_code {
-            codes::NONE | codes::DUPLICATE_SEQUENCE_NUMBER => {
-                // DUPLICATE_SEQUENCE_NUMBER means the broker already committed
-                // this batch — same base_offset is returned, so we can ack the
-                // caller as if the original write succeeded.
-                let base_offset = part_resp.base_offset;
-                let partition = pb.partition;
-                for r in pb.records {
-                    let _ = r.ack.send(Ok(RecordMetadata {
-                        topic_index: 0,
-                        partition,
-                        offset: base_offset + i64::from(r.offset_delta),
-                        timestamp_ms: r.timestamp_ms,
-                    }));
-                }
-                finish_in_flight(cfg);
-            }
-            codes::OUT_OF_ORDER_SEQUENCE_NUMBER | codes::INVALID_PRODUCER_EPOCH => {
-                cfg.state
-                    .compare_exchange(
-                        STATE_ACTIVE,
-                        STATE_FENCED,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .ok();
-                fail_batch(pb.records, ProducerError::FencedProducer);
-                finish_in_flight(cfg);
-            }
-            codes::NOT_LEADER_OR_FOLLOWER | codes::UNKNOWN_TOPIC_OR_PARTITION => {
-                // Stale routing: we produced to a broker that doesn't lead this
-                // partition. Adopt any inline leader hint immediately; otherwise
-                // mark for a metadata refresh. Re-resolve + retry below. Do NOT
-                // release the in-flight slot — the batch is still outstanding
-                // (it carries the already-allocated base_sequence, which we
-                // resend verbatim so sequencing stays monotonic).
-                let hint = part_resp.current_leader.leader_id;
-                if hint >= 0 {
-                    cfg.partition_leaders
-                        .insert((pb.topic.clone(), pb.partition), hint);
-                    // Knowing the leader *id* isn't enough to route — we also
-                    // need its address. If the pool hasn't learned it, force a
-                    // metadata refresh below so the re-resolve can dial the
-                    // hinted leader instead of falling back to the bootstrap
-                    // connection, which would loop forever on NOT_LEADER.
-                    if !cfg.client.knows_broker(hint) {
-                        refresh_needed = true;
-                    }
-                } else {
-                    refresh_needed = true;
-                }
-                to_reroute.push(pb);
-            }
-            code => {
-                fail_batch(pb.records, ProducerError::Server(code));
-                finish_in_flight(cfg);
-            }
-        }
-    }
-
-    // Hand any mis-routed batches back to `send_to_leaders`, which re-resolves
-    // (refreshing metadata when needed) and resends them — iteratively, within
-    // a bounded budget — until they reach their leader or time out.
-    LeaderSendOutcome {
-        reroute: to_reroute,
-        refresh_needed,
-    }
-}
-
-/// Build a multi-topic `ProduceRequest` from a leader's grouped batches.
-/// Partitions of the same topic are merged under a single `TopicProduceData`.
-fn build_produce_request(cfg: &SenderConfig, batches: &[PreparedBatch]) -> ProduceRequest {
-    // Transactional state is uniform across a drain cycle's batches (the
-    // producer is either inside a txn or not). Derive the request-level
-    // transactional_id from whether any batch was stamped transactional.
-    let is_txn = batches
-        .iter()
-        .any(|b| b.record_batch.attributes.is_transactional());
-    let req_txn_id = if is_txn {
-        cfg.transactional_id.clone()
-    } else {
-        None
-    };
-
-    // Merge partition data by topic, preserving the order batches were drained.
-    let mut topic_order: Vec<String> = Vec::new();
-    let mut by_topic: HashMap<String, (Uuid, Vec<PartitionProduceData>)> = HashMap::new();
-    for pb in batches {
-        let entry = by_topic.entry(pb.topic.clone()).or_insert_with(|| {
-            topic_order.push(pb.topic.clone());
-            (pb.topic_id, Vec::new())
-        });
-        entry.1.push(PartitionProduceData {
-            index: pb.partition,
-            records: Some(pb.record_batch.clone().into()),
-            ..Default::default()
-        });
-    }
-    let topic_data: Vec<TopicProduceData> = topic_order
-        .into_iter()
-        .map(|name| {
-            let (topic_id, partition_data) = by_topic.remove(&name).expect("topic in order list");
-            TopicProduceData {
-                name,
-                topic_id,
-                partition_data,
-                ..Default::default()
-            }
-        })
-        .collect();
-
-    ProduceRequest {
-        transactional_id: req_txn_id,
-        acks: cfg.acks.wire(),
-        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
-        topic_data,
-        ..Default::default()
     }
 }
 
@@ -686,5 +918,720 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
             .and_then(clone_if_possible)
             .unwrap_or(ProducerError::Closed);
         let _ = r.ack.send(Err(e));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use tokio::sync::oneshot;
+
+    /// Build a `PreparedBatch` for `(topic, partition)` with `base_sequence` and
+    /// a single record, returning the batch and the record's ack receiver so a
+    /// test can observe how it resolves.
+    fn prepared(
+        topic: &str,
+        partition: i32,
+        base_sequence: i32,
+        first_sent: Option<Instant>,
+    ) -> (
+        PreparedBatch,
+        oneshot::Receiver<Result<RecordMetadata, ProducerError>>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let record = PendingRecord {
+            offset_delta: 0,
+            timestamp_ms: 0,
+            key: None,
+            value: None,
+            headers: Vec::new(),
+            ack: tx,
+        };
+        let pb = PreparedBatch {
+            topic: topic.to_string(),
+            partition,
+            topic_id: Uuid::ZERO,
+            base_sequence,
+            record_batch: RecordBatch {
+                base_offset: 0,
+                partition_leader_epoch: 0,
+                attributes: Attributes::default(),
+                last_offset_delta: 0,
+                base_timestamp: 0,
+                max_timestamp: 0,
+                producer_id: 1,
+                producer_epoch: 0,
+                base_sequence,
+                records: Vec::new(),
+            },
+            records: vec![record],
+            first_sent,
+        };
+        (pb, rx)
+    }
+
+    #[test]
+    fn classify_verdict_maps_codes() {
+        assert!(
+            classify_verdict(codes::NONE, 42)
+                == Classification::Verdict(BatchVerdict::Acked { base_offset: 42 })
+        );
+        // DUPLICATE is acked like a success (broker already wrote it).
+        assert!(
+            classify_verdict(codes::DUPLICATE_SEQUENCE_NUMBER, 7)
+                == Classification::Verdict(BatchVerdict::Acked { base_offset: 7 })
+        );
+        assert!(
+            classify_verdict(codes::OUT_OF_ORDER_SEQUENCE_NUMBER, 0)
+                == Classification::Verdict(BatchVerdict::Retry)
+        );
+        assert!(
+            classify_verdict(codes::INVALID_PRODUCER_EPOCH, 0)
+                == Classification::Verdict(BatchVerdict::Fence)
+        );
+        assert!(classify_verdict(codes::NOT_LEADER_OR_FOLLOWER, 0) == Classification::Routing);
+        assert!(classify_verdict(codes::UNKNOWN_TOPIC_OR_PARTITION, 0) == Classification::Routing);
+        // An arbitrary server error (MESSAGE_TOO_LARGE = 10) is terminal-but-not-
+        // fatal: fail the records with Server(10), never fence.
+        assert!(classify_verdict(10, 0) == Classification::Verdict(BatchVerdict::Terminal(10)));
+    }
+
+    #[test]
+    fn collect_retries_splits_expired_and_drains_map() {
+        // Two partitions, each holding one retry batch (one slot per partition).
+        // The batch past its routing budget is split off as expired; the recent
+        // one is returned to send. The map is fully drained either way.
+        let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
+        let long_ago = Instant::now()
+            .checked_sub(ROUTING_RETRY_BUDGET + Duration::from_secs(1))
+            .expect("instant in range");
+        let (old, _rx_old) = prepared("t", 0, 0, Some(long_ago));
+        let (recent, _rx_recent) = prepared("t", 1, 16, Some(Instant::now()));
+        retry.insert(("t".to_string(), 0), old);
+        retry.insert(("t".to_string(), 1), recent);
+
+        let (to_send, expired) = collect_retries(&mut retry, Instant::now());
+
+        assert!(expired.len() == 1);
+        assert!(expired[0].base_sequence == 0);
+        assert!(to_send.len() == 1);
+        assert!(to_send[0].base_sequence == 16);
+        assert!(retry.is_empty());
+    }
+
+    #[test]
+    fn collect_retries_sets_first_sent_when_unset() {
+        let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
+        let (pb, _rx) = prepared("t", 0, 0, None);
+        retry.insert(("t".to_string(), 0), pb);
+
+        let now = Instant::now();
+        let (to_send, expired) = collect_retries(&mut retry, now);
+
+        assert!(expired.is_empty());
+        assert!(to_send.len() == 1);
+        assert!(to_send[0].first_sent == Some(now));
+    }
+}
+
+/// Deterministic in-process integration harness.
+///
+/// Drives the real [`run`] sender loop against a [`MockTransport`] that models a
+/// broker's per-partition idempotent sequencing — no socket, no real `Client`.
+/// Used to reproduce (and then guard against) the same-partition pipelining hang
+/// described in the module docs.
+#[cfg(test)]
+mod harness {
+    use super::*;
+    use assert2::assert;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::AtomicI64;
+    use tokio::sync::oneshot;
+
+    use crabka_client_core::ClientError;
+    use crabka_protocol::owned::metadata_response::MetadataResponse;
+    use crabka_protocol::owned::produce_request::{
+        PartitionProduceData, ProduceRequest, TopicProduceData,
+    };
+    use crabka_protocol::owned::produce_response::{
+        PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+    };
+    use crabka_protocol::records::{Attributes, Record, RecordBatch};
+
+    use crate::accumulator::Accumulator;
+    use crate::producer::STATE_ACTIVE;
+    use crate::transactional::TxnState;
+
+    /// Per-`(topic, partition)` accumulator map (mirrors the production type).
+    type AccumulatorMap = Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>;
+
+    /// Adapter so a sender can own a `Box<dyn ProduceTransport>` while the test
+    /// keeps a clone of the same `Arc<MockTransport>` to inspect.
+    struct ArcTransport(Arc<MockTransport>);
+
+    #[async_trait::async_trait]
+    impl ProduceTransport for ArcTransport {
+        async fn send_produce(
+            &self,
+            leader: Option<i32>,
+            req: ProduceRequest,
+        ) -> Result<ProduceResponse, ClientError> {
+            self.0.send_produce(leader, req).await
+        }
+        fn evict_broker(&self, id: i32) {
+            self.0.evict_broker(id);
+        }
+        fn knows_broker(&self, id: i32) -> bool {
+            self.0.knows_broker(id)
+        }
+        async fn refresh_metadata(&self) -> Result<MetadataResponse, ClientError> {
+            self.0.refresh_metadata().await
+        }
+    }
+
+    /// Per-partition broker sequencing state.
+    #[derive(Default)]
+    struct PartitionState {
+        /// Next `base_sequence` the broker will accept (strictly increasing, no
+        /// gaps), à la Kafka idempotent producer.
+        expected: i32,
+        /// Running log-end offset; each accepted batch is assigned the current
+        /// value as its `base_offset`, then advanced by the record count.
+        next_offset: i64,
+        /// `base_sequence -> base_offset` for sequences already accepted, so a
+        /// resend of a written batch can be answered `DUPLICATE_SEQUENCE_NUMBER`
+        /// with its original offset (the broker dedups; the sender maps to ack).
+        accepted: HashMap<i32, i64>,
+    }
+
+    /// A broker model with faithful per-partition idempotent sequencing.
+    ///
+    /// `reorder_delay`: when non-zero, `send_produce` sleeps for
+    /// `reorder_delay * (REORDER_SPREAD - min(base_sequence, REORDER_SPREAD))`
+    /// before applying the broker logic, so that several *concurrently issued*
+    /// same-partition requests complete **higher-`base_sequence`-first** — a
+    /// lower sequence waits longer. This deterministically models the
+    /// on-the-wire write race the old `join_all` same-partition pipelining
+    /// suffered. With at most one same-partition request in flight (the fix),
+    /// only one request is ever outstanding per partition, so the staggered
+    /// delay cannot reorder anything and the broker sees a clean increasing
+    /// sequence.
+    struct MockTransport {
+        partitions: StdMutex<HashMap<(String, i32), PartitionState>>,
+        /// Arrival order of `(topic, partition, base_sequence)` as the broker
+        /// *applied* them (post-delay), for assertions / debugging.
+        arrivals: StdMutex<Vec<(String, i32, i32)>>,
+        reorder_delay: Duration,
+        /// Total Produce requests applied (lets a test bound livelock churn).
+        applied: AtomicUsize,
+        /// One-shot transport error: the next send to this `base_sequence`
+        /// returns `Err(Disconnected)` exactly once, then is cleared.
+        fail_once_seq: StdMutex<Option<i32>>,
+        offsets_seen: AtomicI64,
+    }
+
+    /// Caps the per-request reorder stagger to a bounded number of delay units
+    /// so the total sleep stays small (`reorder_delay * REORDER_SPREAD` worst
+    /// case) while still completing higher sequences ahead of lower ones within
+    /// a single concurrent `join_all` poll.
+    const REORDER_SPREAD: i32 = 32;
+
+    impl MockTransport {
+        fn new(reorder_delay: Duration) -> Arc<Self> {
+            Arc::new(Self {
+                partitions: StdMutex::new(HashMap::new()),
+                arrivals: StdMutex::new(Vec::new()),
+                reorder_delay,
+                applied: AtomicUsize::new(0),
+                fail_once_seq: StdMutex::new(None),
+                offsets_seen: AtomicI64::new(0),
+            })
+        }
+
+        fn fail_once_on(self: &Arc<Self>, seq: i32) {
+            *self.fail_once_seq.lock().unwrap() = Some(seq);
+        }
+
+        fn applied_count(self: &Arc<Self>) -> usize {
+            self.applied.load(Ordering::Relaxed)
+        }
+
+        /// Apply one single-partition, single-batch `ProduceRequest` to the
+        /// broker model and synthesize the matching `ProduceResponse`.
+        fn apply(&self, req: &ProduceRequest) -> ProduceResponse {
+            let topic = &req.topic_data[0];
+            let part = &topic.partition_data[0];
+            let batch = part
+                .records
+                .as_ref()
+                .and_then(|p| p.as_v2())
+                .and_then(|b| b.first())
+                .expect("single v2 record batch");
+            let base_sequence = batch.base_sequence;
+            let count = i32::try_from(batch.records.len().max(1)).unwrap_or(1);
+            let key = (topic.name.clone(), part.index);
+
+            self.arrivals
+                .lock()
+                .unwrap()
+                .push((topic.name.clone(), part.index, base_sequence));
+            self.applied.fetch_add(1, Ordering::Relaxed);
+
+            let mut parts = self.partitions.lock().unwrap();
+            let st = parts.entry(key).or_default();
+
+            let (error_code, base_offset) = if base_sequence == st.expected {
+                // In-order: accept, assign offset, advance.
+                let base_offset = st.next_offset;
+                st.accepted.insert(base_sequence, base_offset);
+                st.next_offset += i64::from(count);
+                st.expected = st.expected.wrapping_add(count);
+                self.offsets_seen.fetch_max(base_offset, Ordering::Relaxed);
+                (codes::NONE, base_offset)
+            } else if let Some(&prev) = st.accepted.get(&base_sequence) {
+                // Already written (a resend of a durable batch): dedup.
+                (codes::DUPLICATE_SEQUENCE_NUMBER, prev)
+            } else {
+                // A gap: a lower sequence hasn't been accepted yet.
+                (codes::OUT_OF_ORDER_SEQUENCE_NUMBER, -1)
+            };
+
+            ProduceResponse {
+                responses: vec![TopicProduceResponse {
+                    name: topic.name.clone(),
+                    topic_id: topic.topic_id,
+                    partition_responses: vec![PartitionProduceResponse {
+                        index: part.index,
+                        error_code,
+                        base_offset,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProduceTransport for MockTransport {
+        async fn send_produce(
+            &self,
+            _leader: Option<i32>,
+            req: ProduceRequest,
+        ) -> Result<ProduceResponse, ClientError> {
+            // One-shot injected transport error.
+            {
+                let batch_seq = req.topic_data[0].partition_data[0]
+                    .records
+                    .as_ref()
+                    .and_then(|p| p.as_v2())
+                    .and_then(|b| b.first())
+                    .map(|b| b.base_sequence);
+                let mut guard = self.fail_once_seq.lock().unwrap();
+                if let (Some(target), Some(seq)) = (*guard, batch_seq)
+                    && target == seq
+                {
+                    *guard = None;
+                    drop(guard);
+                    return Err(ClientError::Disconnected);
+                }
+            }
+
+            // Reorder model: higher base_sequence completes first when several
+            // same-partition requests are issued concurrently.
+            if !self.reorder_delay.is_zero() {
+                let seq = req.topic_data[0].partition_data[0]
+                    .records
+                    .as_ref()
+                    .and_then(|p| p.as_v2())
+                    .and_then(|b| b.first())
+                    .map_or(0, |b| b.base_sequence);
+                let units = u32::try_from(REORDER_SPREAD - seq.min(REORDER_SPREAD)).unwrap_or(0);
+                tokio::time::sleep(self.reorder_delay * units).await;
+            }
+
+            Ok(self.apply(&req))
+        }
+
+        fn evict_broker(&self, _broker_id: i32) {}
+
+        fn knows_broker(&self, _broker_id: i32) -> bool {
+            // Force the BOOTSTRAP_LEADER path so no per-broker routing is needed.
+            false
+        }
+
+        async fn refresh_metadata(&self) -> Result<MetadataResponse, ClientError> {
+            Ok(MetadataResponse::default())
+        }
+    }
+
+    /// Shared handles a test needs to drive and observe a sender.
+    struct Harness {
+        accumulators: AccumulatorMap,
+        next_seq: Arc<DashMap<(String, i32), i32>>,
+        wake_tx: tokio::sync::mpsc::Sender<()>,
+        flush_notify: Arc<Notify>,
+        in_flight: Arc<AtomicUsize>,
+        shutdown: CancellationToken,
+        transport: Arc<MockTransport>,
+        handle: tokio::task::JoinHandle<()>,
+    }
+
+    /// Spawn a sender backed by `transport`, with `max_in_flight` and a fast
+    /// linger so the loop spins quickly.
+    fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
+        let accumulators: AccumulatorMap = Arc::new(DashMap::new());
+        let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(64);
+        let flush_notify = Arc::new(Notify::new());
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let shutdown = CancellationToken::new();
+        let metadata_cache = Arc::new(Mutex::new(HashMap::new()));
+        let partition_leaders = Arc::new(DashMap::new());
+        let state = Arc::new(AtomicU8::new(STATE_ACTIVE));
+
+        // Box the same Arc<MockTransport> for the sender; keep a clone for the
+        // test to inspect.
+        let cfg = SenderConfig {
+            transport: Box::new(ArcTransport(transport.clone())),
+            producer_id: 1,
+            producer_epoch: 0,
+            acks: Acks::All,
+            compression: Compression::None,
+            linger: Duration::from_millis(1),
+            request_timeout: Duration::from_secs(5),
+            retry_backoff: Duration::from_millis(1),
+            max_in_flight,
+            metadata_cache,
+            partition_leaders,
+            accumulators: accumulators.clone(),
+            next_seq: next_seq.clone(),
+            state,
+            wake_rx,
+            flush_notify: flush_notify.clone(),
+            in_flight: in_flight.clone(),
+            shutdown: shutdown.clone(),
+            transactional_id: None,
+            txn_state: Arc::new(Mutex::new(TxnState::Uninitialized)),
+            txn_pid_epoch: Arc::new(Mutex::new((1, 0))),
+        };
+
+        let handle = tokio::spawn(run(cfg));
+        Harness {
+            accumulators,
+            next_seq,
+            wake_tx,
+            flush_notify,
+            in_flight,
+            shutdown,
+            transport,
+            handle,
+        }
+    }
+
+    /// Append `n` records to `(topic, partition)`, each in its own batch (so the
+    /// sender allocates distinct `base_sequence`s and may pipeline them),
+    /// returning the ack receivers. We force one-record-per-batch by sealing
+    /// after each append.
+    async fn produce_burst(
+        h: &Harness,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
+        let key = (topic.to_string(), partition);
+        let acc = h
+            .accumulators
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(16 * 1024))))
+            .value()
+            .clone();
+
+        let mut rxs = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut a = acc.lock().await;
+            let rx = match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0) {
+                crate::accumulator::AppendResult::Appended(rx) => rx,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            // Seal so each record becomes its own ready batch with a distinct
+            // base_sequence — maximizing same-partition pipelining pressure.
+            a.seal_current();
+            rxs.push(rx);
+        }
+        let _ = h.wake_tx.try_send(());
+        rxs
+    }
+
+    async fn shutdown(h: Harness) {
+        h.shutdown.cancel();
+        let _ = h.handle.await;
+    }
+
+    /// THE REGRESSION TEST for the same-partition pipelining hang.
+    ///
+    /// Burst many single-record batches at ONE partition through the real sender
+    /// loop, against a broker that enforces strict per-partition sequencing AND a
+    /// reorder model that completes *concurrently issued* same-partition requests
+    /// higher-`base_sequence`-first (modeling the on-the-wire write race the old
+    /// `join_all` same-partition pipelining suffered).
+    ///
+    /// With one-in-flight-per-partition (the fix) a partition only ever has one
+    /// request outstanding, so the staggered transport delay cannot reorder
+    /// anything: the broker sees `base_sequence` 0,1,2,… exactly once each, every
+    /// record acks `Ok` with offsets in order, and there is **zero retry churn**
+    /// (exactly `N` broker applies). The `applied == N` assertion is the teeth:
+    /// the old multi-in-flight design fed reordered concurrent requests to the
+    /// broker, drew `OUT_OF_ORDER_SEQUENCE_NUMBER`, drained, and resent — so it
+    /// applied strictly more than `N` (and, under sustained load on a cluster,
+    /// churned long enough that the caller's time-boxed window saw a record's
+    /// ack-oneshot still unresolved — the reported hang).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn single_partition_burst_all_acks_resolve_in_order() {
+        const N: usize = 40;
+        let transport = MockTransport::new(Duration::from_millis(2));
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rxs = produce_burst(&h, "t", 0, N).await;
+
+        let mut offsets = Vec::with_capacity(N);
+        for (i, rx) in rxs.into_iter().enumerate() {
+            let md = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .unwrap_or_else(|_| panic!("record {i} ack-oneshot never resolved (HANG)"))
+                .expect("oneshot sender dropped")
+                .expect("record must be acked Ok, not failed");
+            assert!(md.partition == 0);
+            offsets.push(md.offset);
+        }
+
+        // Offsets must be the clean increasing sequence 0..N — proof the broker
+        // saw each base_sequence exactly once, in order.
+        let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
+        assert!(offsets == expected);
+        // Zero churn: with one in-flight per partition there is never an
+        // out-of-order arrival, so the broker applies each batch exactly once.
+        assert!(
+            h.transport.applied_count() == N,
+            "expected exactly {N} applies (no resend churn), got {}",
+            h.transport.applied_count()
+        );
+
+        shutdown(h).await;
+    }
+
+    /// Cross-partition pipelining still works concurrently and all acks resolve.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn multi_partition_burst_all_acks_resolve() {
+        const PARTS: i32 = 6;
+        const PER: usize = 10;
+        let transport = MockTransport::new(Duration::from_millis(1));
+        let h = spawn_sender(transport.clone(), 5);
+
+        let mut all = Vec::new();
+        for p in 0..PARTS {
+            let rxs = produce_burst(&h, "t", p, PER).await;
+            all.push((p, rxs));
+        }
+
+        for (p, rxs) in all {
+            let mut offsets = Vec::new();
+            for (i, rx) in rxs.into_iter().enumerate() {
+                let md = tokio::time::timeout(Duration::from_secs(10), rx)
+                    .await
+                    .unwrap_or_else(|_| panic!("part {p} record {i} never resolved (HANG)"))
+                    .expect("oneshot dropped")
+                    .expect("must be acked Ok");
+                assert!(md.partition == p);
+                offsets.push(md.offset);
+            }
+            let expected: Vec<i64> = (0..i64::try_from(PER).unwrap()).collect();
+            assert!(offsets == expected, "partition {p} offsets out of order");
+        }
+
+        shutdown(h).await;
+    }
+
+    /// A one-shot transport error mid-stream must NOT drop or reorder: the failed
+    /// batch is resent (broker dedups via DUPLICATE if it had landed, or accepts
+    /// it fresh), all acks resolve, offsets stay a clean increasing run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn transport_error_mid_stream_recovers_in_order() {
+        const N: usize = 12;
+        let transport = MockTransport::new(Duration::ZERO);
+        // Fail the batch at base_sequence 3 exactly once.
+        transport.fail_once_on(3);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rxs = produce_burst(&h, "t", 0, N).await;
+
+        let mut offsets = Vec::with_capacity(N);
+        for (i, rx) in rxs.into_iter().enumerate() {
+            let md = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .unwrap_or_else(|_| panic!("record {i} never resolved after transport error"))
+                .expect("oneshot dropped")
+                .expect("must be acked Ok after recovery");
+            offsets.push(md.offset);
+        }
+        let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
+        assert!(offsets == expected);
+
+        // in_flight must fully drain back to zero (it lags the last ack-oneshot
+        // by the `finish_in_flight` decrement, so poll via `flush_notify`).
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while h.in_flight.load(Ordering::Acquire) != 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(20), h.flush_notify.notified())
+                    .await;
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "in_flight never settled to zero");
+        let _ = &transport;
+        shutdown(h).await;
+    }
+
+    /// `flush_notify` fires and `in_flight` returns to zero once the burst drains.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_flight_drains_to_zero() {
+        let transport = MockTransport::new(Duration::from_millis(1));
+        let h = spawn_sender(transport.clone(), 5);
+        let rxs = produce_burst(&h, "t", 0, 20).await;
+        for rx in rxs {
+            let _ = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .expect("no hang")
+                .expect("oneshot")
+                .expect("acked");
+        }
+        // `in_flight` is decremented just AFTER a batch's ack-oneshots are sent
+        // (see `ack_batch`), so it can briefly lag the last `rx.await`. Wait for
+        // it to settle to zero via `flush_notify`, mirroring `Producer::flush`.
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while h.in_flight.load(Ordering::Acquire) != 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(20), h.flush_notify.notified())
+                    .await;
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "in_flight never settled to zero");
+        // And the broker applied each batch exactly once (no churn).
+        assert!(h.transport.applied_count() == 20);
+        let _ = &h.next_seq;
+        shutdown(h).await;
+    }
+
+    /// Mechanism proof: issuing several same-partition requests CONCURRENTLY (as
+    /// the old `send_batches` did via `join_all`) against the staggered-reorder
+    /// broker makes the broker apply them higher-`base_sequence`-first, so every
+    /// request except the lowest draws `OUT_OF_ORDER_SEQUENCE_NUMBER`. This is
+    /// the gap-and-resend trigger the fix eliminates by never issuing more than
+    /// one same-partition request at a time. (Pure transport-level check; no
+    /// sender loop — it isolates the reorder mechanism.)
+    ///
+    /// Uses paused virtual time so the staggered sleeps order the arrivals
+    /// deterministically (no reliance on the OS scheduler).
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_same_partition_sends_reorder_and_trip_out_of_order() {
+        let transport = MockTransport::new(Duration::from_millis(5));
+
+        // Build single-partition Produce requests for base_sequences 0,1,2,3,4.
+        let make_req = |base_sequence: i32| ProduceRequest {
+            acks: -1,
+            topic_data: vec![TopicProduceData {
+                name: "t".to_string(),
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(
+                        RecordBatch {
+                            attributes: Attributes::default(),
+                            base_sequence,
+                            records: vec![Record {
+                                attributes: 0,
+                                timestamp_delta: 0,
+                                offset_delta: 0,
+                                key: None,
+                                value: Some(bytes::Bytes::from_static(b"x")),
+                                headers: vec![],
+                            }],
+                            ..Default::default()
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // Fire all five concurrently — exactly what the buggy join_all did.
+        let results =
+            futures::future::join_all((0..5).map(|s| transport.send_produce(None, make_req(s))))
+                .await;
+
+        // The lowest (0) is accepted; every higher one trips OUT_OF_ORDER because
+        // it reached the broker ahead of 0.
+        let codes: Vec<i16> = results
+            .into_iter()
+            .map(|r| r.expect("no transport error").responses[0].partition_responses[0].error_code)
+            .collect();
+        assert!(codes[0] == codes::NONE);
+        for c in &codes[1..] {
+            assert!(*c == codes::OUT_OF_ORDER_SEQUENCE_NUMBER);
+        }
+
+        // Arrivals were applied highest-first (the reorder), confirming the race.
+        let arrivals: Vec<i32> = transport
+            .arrivals
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, _, s)| *s)
+            .collect();
+        assert!(arrivals == vec![4, 3, 2, 1, 0]);
+    }
+
+    /// A partition with a batch pending resend must NOT also send its next batch
+    /// in the same cycle — otherwise, under a broker that reorders concurrent
+    /// same-partition requests, the new batch could overtake the resend and trip
+    /// `OUT_OF_ORDER_SEQUENCE_NUMBER` churn. A one-shot transport error parks one
+    /// batch for resend mid-stream; with the reorder model active we still expect
+    /// each batch applied exactly once (no churn) and offsets in a clean run.
+    /// This guards the "ordering preserved by construction" property of the
+    /// one-slot-per-partition pipeline against a same-partition send race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn retry_does_not_race_new_batch_under_reorder() {
+        const N: usize = 16;
+        let transport = MockTransport::new(Duration::from_millis(2));
+        // Fail the batch at base_sequence 5 once: it parks for resend while
+        // later batches are still queued behind it.
+        transport.fail_once_on(5);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rxs = produce_burst(&h, "t", 0, N).await;
+        let mut offsets = Vec::with_capacity(N);
+        for (i, rx) in rxs.into_iter().enumerate() {
+            let md = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .unwrap_or_else(|_| panic!("record {i} never resolved"))
+                .expect("oneshot dropped")
+                .expect("acked Ok");
+            offsets.push(md.offset);
+        }
+        let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
+        assert!(offsets == expected);
+        // The failed send errored at the transport before the broker applied it,
+        // so each of the N batches is applied exactly once: a new batch never
+        // raced (and reordered ahead of) the pending resend.
+        assert!(
+            h.transport.applied_count() == N,
+            "expected exactly {N} applies (no churn), got {}",
+            h.transport.applied_count()
+        );
+
+        shutdown(h).await;
     }
 }

@@ -24,10 +24,12 @@ crabka-protocol = { version = "0.3.6", path = "../protocol", default-features = 
 crabka-client-core = { version = "0.3.6", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.6", path = "../client-consumer" }
 crabka-compression = { version = "0.3.6", path = "../compression" }
+async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
