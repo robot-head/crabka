@@ -248,6 +248,19 @@ mod tests {
     }
 
     #[test]
+    fn fetch_single_byte_range_start_equals_end() {
+        let remote = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let rsm = LocalTieredStorage::new(remote.path());
+        let md = metadata(10);
+        rsm.copy_log_segment_data(&md, &sample_data(src.path(), false))
+            .unwrap();
+        // Inclusive [3, 3] is a valid single-byte range -> "3". (The guard is
+        // `end < start`, not `<=`/`==`, so an equal start/end must succeed.)
+        assert!(rsm.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
+    }
+
+    #[test]
     fn fetch_each_index_type() {
         let remote = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
