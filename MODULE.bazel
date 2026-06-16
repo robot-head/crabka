@@ -1,0 +1,95 @@
+"""Crabka — Bazel module (bzlmod).
+
+Bazel is the client-focused build path. It produces the lean Kafka client
+libraries via `rust_library` targets that draw their third-party dependencies
+from `crate_universe`, which reads the *same* `Cargo.toml` / `Cargo.lock` that
+Cargo uses. Cargo stays the source of truth; nothing here forks the dep set.
+
+Re-exported targets (see //:BUILD.bazel):
+    @crabka//:client_producer   @crabka//:client_consumer
+    @crabka//:client_admin      @crabka//:client_core
+    @crabka//:schema_serde      @crabka//:protocol
+    @crabka//:security          @crabka//:compression
+    @crabka//:metadata
+    @crabka//:client_minimal    # lean facade: no polars/arrow/jsonschema,
+                                # GSSAPI (`sspi`) gated behind --//:gssapi
+"""
+
+module(
+    name = "crabka",
+    version = "0.3.6",
+)
+
+bazel_dep(name = "rules_rust", version = "0.61.0")
+bazel_dep(name = "bazel_skylib", version = "1.7.1")
+
+# ---------------------------------------------------------------------------
+# Rust toolchain — pinned to the workspace channel (rust-toolchain.toml).
+# ---------------------------------------------------------------------------
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.96.0"],
+)
+use_repo(rust, "rust_toolchains")
+register_toolchains("@rust_toolchains//:all")
+
+# ---------------------------------------------------------------------------
+# Third-party crates, spliced straight from the Cargo workspace.
+#
+# `crate_universe` needs *every* workspace member's manifest to reconstruct the
+# workspace before resolving against Cargo.lock, so all members are listed —
+# even the ones that don't yet have hand-written BUILD targets. In-scope client
+# crates own their Cargo.toml in their own package (`//crates/<x>:Cargo.toml`);
+# the remaining members are exported en masse from `//crates:BUILD.bazel`
+# (`//crates:<x>/Cargo.toml`).
+#
+# The `sspi` GSSAPI dependency is a git patch (see [patch.crates-io] in the root
+# Cargo.toml); crate_universe vendors it from the pinned git revision in
+# Cargo.lock. It is only *linked* when //:gssapi is set (see //crates/security).
+# ---------------------------------------------------------------------------
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    manifests = [
+        "//:Cargo.toml",
+        # In-scope client crates (own BUILD package).
+        "//crates/client-core:Cargo.toml",
+        "//crates/client-producer:Cargo.toml",
+        "//crates/client-consumer:Cargo.toml",
+        "//crates/client-admin:Cargo.toml",
+        "//crates/schema-serde:Cargo.toml",
+        "//crates/protocol:Cargo.toml",
+        "//crates/security:Cargo.toml",
+        "//crates/compression:Cargo.toml",
+        "//crates/metadata:Cargo.toml",
+        "//crates/voters:Cargo.toml",
+        # Remaining workspace members (exported from //crates:BUILD.bazel).
+        "//crates:authz/Cargo.toml",
+        "//crates:bench-driver/Cargo.toml",
+        "//crates:broker/Cargo.toml",
+        "//crates:cli/Cargo.toml",
+        "//crates:client-streams/Cargo.toml",
+        "//crates:connect/Cargo.toml",
+        "//crates:docgen/Cargo.toml",
+        "//crates:grpc-gateway/Cargo.toml",
+        "//crates:integration-tests/Cargo.toml",
+        "//crates:kafka-tap/Cargo.toml",
+        "//crates:kraft-core/Cargo.toml",
+        "//crates:log/Cargo.toml",
+        "//crates:log-iobench/Cargo.toml",
+        "//crates:logfmt/Cargo.toml",
+        "//crates:operator/Cargo.toml",
+        "//crates:playground/Cargo.toml",
+        "//crates:protocol-codegen/Cargo.toml",
+        "//crates:raft/Cargo.toml",
+        "//crates:rebalancer/Cargo.toml",
+        "//crates:records-legacy/Cargo.toml",
+        "//crates:remote-storage/Cargo.toml",
+        "//crates:remote-storage-topic/Cargo.toml",
+        "//crates:schema-registry/Cargo.toml",
+        "//crates:telemetry/Cargo.toml",
+    ],
+)
+use_repo(crate, "crates")

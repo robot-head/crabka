@@ -1,0 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+# Lean client facade. See lib.rs for the rationale; re-exported as
+# @crabka//:client_minimal from //:BUILD.bazel.
+#
+# Its dependency closure is intentionally small: producer/consumer/admin/core +
+# Avro/Protobuf serdes, with no polars/arrow/jsonschema. GSSAPI rides along only
+# when //:gssapi is set (the gate lives on //crates/client-core).
+rust_library(
+    name = "client_minimal",
+    srcs = ["lib.rs"],
+    crate_name = "crabka_client_minimal",
+    crate_root = "lib.rs",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//crates/client-admin",
+        "//crates/client-consumer",
+        "//crates/client-core",
+        "//crates/client-producer",
+        "//crates/schema-serde",
+    ],
+)

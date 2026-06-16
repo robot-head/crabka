@@ -1,0 +1,55 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+# Manifest is consumed by crate_universe (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+# build.rs only *validates* that the checked-in `generated/` sources match the
+# `schemas/` SHAs — it emits no code. It still needs the schema + generated trees
+# on disk (it reads them via env!("CARGO_MANIFEST_DIR")).
+cargo_build_script(
+    name = "build_script",
+    srcs = ["build.rs"],
+    data = glob([
+        "schemas/**",
+        "generated/**",
+    ]),
+    edition = "2024",
+    visibility = ["//visibility:private"],
+)
+
+rust_library(
+    name = "protocol",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    # The generated wire-codec sources are pulled in at compile time via
+    # `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/...))`.
+    compile_data = glob([
+        "generated/**",
+        "schemas/**",
+    ]),
+    crate_name = "crabka_protocol",
+    # Codec features forwarded to crabka-compression. `arbitrary` (fuzzing
+    # helper) is intentionally left off for the client build.
+    crate_features = [
+        "gzip",
+        "snappy",
+        "lz4",
+        "zstd",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    # NOTE: the `include!(env!("CARGO_MANIFEST_DIR"))` pattern above needs an
+    # absolute manifest dir under the Bazel sandbox; verify on first build with
+    # network access and, if rustc can't find the generated files, switch those
+    # includes to sandbox-relative paths or feed them through a genrule.
+    rustc_env = {
+        "CARGO_MANIFEST_DIR": "crates/protocol",
+    },
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True) + [
+        ":build_script",
+        "//crates/compression",
+    ],
+)

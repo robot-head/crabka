@@ -1,6 +1,11 @@
 target/
 .cargo/config.toml
 **/*.rs.bk
+
+# Bazel convenience symlinks + local user settings
+/bazel-*
+user.bazelrc
+MODULE.bazel.lock
 .idea/
 .vscode/
 *.iml
