@@ -1,0 +1,121 @@
+//! The converter layer: bridge a connector's typed payload `T` to and from the
+//! raw [`Bytes`] that travel on the Kafka wire.
+//!
+//! Sources and sinks work in the connector's domain types; the runtime applies
+//! a [`Converter`] to each of a record's key and value to cross the wire
+//! boundary. Two converters ship here:
+//!
+//! - [`ByteIdentity`] — `T = Bytes`, a byte-for-byte passthrough that preserves
+//!   exact wire bytes (the Kafka-compatibility constraint that always matters).
+//! - [`SchemaConverter`] — bridges the Confluent schema-registry serdes from
+//!   `crabka-schema-serde`, so a connector can read and write typed Avro /
+//!   Protobuf / JSON records.
+
+use std::sync::Arc;
+
+use bytes::Bytes;
+use crabka_schema_serde::format::{SchemaDeserializer, SchemaSerializer};
+
+use crate::error::ConnectError;
+
+/// Bridges a connector's typed payload `T` to and from wire [`Bytes`].
+///
+/// `topic` is passed to both directions so schema-aware converters can derive
+/// their registry subject (`<topic>-key` / `<topic>-value`); byte-oriented
+/// converters ignore it. Mirrors Kafka Connect's `Converter`.
+pub trait Converter<T>: Send + Sync + 'static {
+    /// Encode `value` to its on-wire bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError::Convert`] if the value cannot be serialized.
+    fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, ConnectError>;
+
+    /// Decode on-wire `bytes` back into `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError::Convert`] if the bytes cannot be deserialized.
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, ConnectError>;
+}
+
+/// A byte-for-byte passthrough converter: `T = Bytes`.
+///
+/// `serialize` clones the bytes through unchanged (a cheap `Bytes` refcount
+/// bump) and `deserialize` copies the input into an owned `Bytes`. Use this for
+/// connectors that move opaque records without touching the payload, where
+/// preserving exact wire bytes is the point.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ByteIdentity;
+
+impl Converter<Bytes> for ByteIdentity {
+    fn serialize(&self, _topic: &str, value: &Bytes) -> Result<Bytes, ConnectError> {
+        Ok(value.clone())
+    }
+
+    fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<Bytes, ConnectError> {
+        Ok(Bytes::copy_from_slice(bytes))
+    }
+}
+
+/// A schema-registry-backed converter: serializes via a [`SchemaSerializer`]
+/// and deserializes via a [`SchemaDeserializer`] from `crabka-schema-serde`.
+///
+/// Pair one format serde's serializer and deserializer (e.g. an `AvroSerde`'s)
+/// to read and write typed records framed in the Confluent wire format
+/// (`magic | schema_id | body`). The schema-serde error is surfaced as
+/// [`ConnectError::Convert`].
+pub struct SchemaConverter<T> {
+    serializer: Arc<dyn SchemaSerializer<T>>,
+    deserializer: Arc<dyn SchemaDeserializer<T>>,
+}
+
+impl<T> SchemaConverter<T> {
+    /// Build a converter from a schema serializer and deserializer for `T`.
+    pub fn new(
+        serializer: Arc<dyn SchemaSerializer<T>>,
+        deserializer: Arc<dyn SchemaDeserializer<T>>,
+    ) -> Self {
+        Self {
+            serializer,
+            deserializer,
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Converter<T> for SchemaConverter<T> {
+    fn serialize(&self, topic: &str, value: &T) -> Result<Bytes, ConnectError> {
+        self.serializer
+            .serialize(topic, value)
+            .map_err(|e| ConnectError::Convert(e.to_string()))
+    }
+
+    fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, ConnectError> {
+        self.deserializer
+            .deserialize(topic, bytes)
+            .map_err(|e| ConnectError::Convert(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::check;
+
+    #[test]
+    fn byte_identity_serialize_preserves_bytes() {
+        let c = ByteIdentity;
+        let v = Bytes::from_static(b"\x00\x01\xff payload");
+        let out = c.serialize("t", &v).unwrap();
+        check!(out == v);
+    }
+
+    #[test]
+    fn byte_identity_round_trips() {
+        let c = ByteIdentity;
+        let original = b"\xde\xad\xbe\xef";
+        let decoded = c.deserialize("t", original).unwrap();
+        let encoded = c.serialize("t", &decoded).unwrap();
+        check!(encoded.as_ref() == original);
+    }
+}
