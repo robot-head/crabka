@@ -17,6 +17,7 @@ pub enum ConfigKind {
     Integer,
     Float,
     DurationMillis,
+    DurationMs,
     StringList,
     Json,
     Secret,
@@ -31,7 +32,7 @@ impl ConfigKind {
             Self::Bool => "bool",
             Self::Integer => "integer",
             Self::Float => "float",
-            Self::DurationMillis => "duration milliseconds",
+            Self::DurationMillis | Self::DurationMs => "duration milliseconds",
             Self::StringList => "string list",
             Self::Json => "json value",
             Self::Secret => "secret reference",
@@ -231,7 +232,7 @@ fn validate_kind(key: &str, kind: ConfigKind, value: &Value) -> ConfigResult<()>
         ConfigKind::String => value.is_string(),
         ConfigKind::Bool => value.is_boolean(),
         ConfigKind::Integer => value.as_i64().is_some(),
-        ConfigKind::DurationMillis => value.as_u64().is_some(),
+        ConfigKind::DurationMillis | ConfigKind::DurationMs => value.as_u64().is_some(),
         ConfigKind::Float => value.as_f64().is_some(),
         ConfigKind::StringList => value
             .as_array()
@@ -447,6 +448,20 @@ mod tests {
         assert_eq!(
             resolved.get_secret("password").unwrap().expose_secret(),
             "literal-secret"
+        );
+    }
+
+    #[tokio::test]
+    async fn duration_ms_spelling_remains_supported() {
+        let def = ConfigDef::new("demo").required("timeout_ms", ConfigKind::DurationMs);
+        let raw = raw([("timeout_ms", json!(2500))]);
+
+        let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
+
+        assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);
+        assert_eq!(
+            ConfigKind::DurationMs.expected(),
+            ConfigKind::DurationMillis.expected()
         );
     }
 
