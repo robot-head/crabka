@@ -1050,17 +1050,19 @@ mod harness {
     use tokio::sync::oneshot;
 
     use crabka_client_core::ClientError;
-    use crabka_protocol::owned::metadata_response::MetadataResponse;
+    use crabka_protocol::owned::metadata_response::{
+        MetadataResponse, MetadataResponsePartition, MetadataResponseTopic,
+    };
     use crabka_protocol::owned::produce_request::{
         PartitionProduceData, ProduceRequest, TopicProduceData,
     };
     use crabka_protocol::owned::produce_response::{
-        PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+        LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
     };
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
     use crate::accumulator::Accumulator;
-    use crate::producer::STATE_ACTIVE;
+    use crate::producer::{STATE_ACTIVE, STATE_FENCED, TopicMetadata};
     use crate::transactional::TxnState;
 
     /// Per-`(topic, partition)` accumulator map (mirrors the production type).
@@ -1128,7 +1130,41 @@ mod harness {
         /// One-shot transport error: the next send to this `base_sequence`
         /// returns `Err(Disconnected)` exactly once, then is cleared.
         fail_once_seq: StdMutex<Option<i32>>,
+        /// One-shot injected broker response, keyed by `base_sequence`. The next
+        /// send to that sequence returns a synthesized `ProduceResponse` (custom
+        /// name / `topic_id` / error code / offset / leader hint) once, then is
+        /// cleared. Drives terminal, routing, and topic-correlation paths.
+        inject_once: StdMutex<Option<Inject>>,
+        /// `broker_id`s passed to `evict_broker`, in order.
+        evicted: StdMutex<Vec<i32>>,
+        /// `timeout_ms` of the most recent Produce request the broker received.
+        last_timeout_ms: AtomicI64,
+        /// Response `refresh_metadata` returns (default empty).
+        refresh_response: StdMutex<MetadataResponse>,
+        /// Broker ids the transport claims to have a dialable address for
+        /// (drives [`resolve_leader`]). Empty by default → every send falls back
+        /// to the bootstrap connection, as the original harness assumed.
+        known_brokers: StdMutex<HashSet<i32>>,
+        /// The `leader` argument of every `send_produce` call, in order, so a
+        /// test can assert how a batch was routed.
+        sent_leaders: StdMutex<Vec<Option<i32>>>,
+        /// Count of `refresh_metadata` calls, so a test can assert the sender
+        /// refreshed after a routing/transport failure.
+        refreshes: AtomicUsize,
         offsets_seen: AtomicI64,
+    }
+
+    /// A one-shot synthesized broker response, keyed by `base_sequence`.
+    /// `name`/`topic_id` of `None` echo the request's; `leader_hint >= 0` sets
+    /// the partition response's `current_leader`.
+    #[derive(Clone)]
+    struct Inject {
+        seq: i32,
+        name: Option<String>,
+        topic_id: Option<Uuid>,
+        error_code: i16,
+        base_offset: i64,
+        leader_hint: i32,
     }
 
     /// Caps the per-request reorder stagger to a bounded number of delay units
@@ -1145,12 +1181,68 @@ mod harness {
                 reorder_delay,
                 applied: AtomicUsize::new(0),
                 fail_once_seq: StdMutex::new(None),
+                inject_once: StdMutex::new(None),
+                evicted: StdMutex::new(Vec::new()),
+                last_timeout_ms: AtomicI64::new(0),
+                refresh_response: StdMutex::new(MetadataResponse::default()),
+                known_brokers: StdMutex::new(HashSet::new()),
+                sent_leaders: StdMutex::new(Vec::new()),
+                refreshes: AtomicUsize::new(0),
                 offsets_seen: AtomicI64::new(0),
             })
         }
 
         fn fail_once_on(self: &Arc<Self>, seq: i32) {
             *self.fail_once_seq.lock().unwrap() = Some(seq);
+        }
+
+        /// Make the next send to `seq` return a `ProduceResponse` carrying
+        /// `error_code` (echoing the request's topic, no leader hint), once.
+        fn inject_code_once(self: &Arc<Self>, seq: i32, error_code: i16) {
+            self.inject(Inject {
+                seq,
+                name: None,
+                topic_id: None,
+                error_code,
+                base_offset: -1,
+                leader_hint: -1,
+            });
+        }
+
+        /// Arm a fully-specified one-shot injected response.
+        fn inject(self: &Arc<Self>, inject: Inject) {
+            *self.inject_once.lock().unwrap() = Some(inject);
+        }
+
+        /// `broker_id`s the sender asked to evict, in order.
+        fn evicted(self: &Arc<Self>) -> Vec<i32> {
+            self.evicted.lock().unwrap().clone()
+        }
+
+        /// `timeout_ms` carried by the most recent Produce request.
+        fn last_timeout_ms(self: &Arc<Self>) -> i64 {
+            self.last_timeout_ms.load(Ordering::Relaxed)
+        }
+
+        /// Set the `MetadataResponse` returned by `refresh_metadata`.
+        fn set_refresh_response(self: &Arc<Self>, md: MetadataResponse) {
+            *self.refresh_response.lock().unwrap() = md;
+        }
+
+        /// Mark `id` as a broker the transport can dial (so `resolve_leader`
+        /// routes to it instead of the bootstrap connection).
+        fn add_known_broker(self: &Arc<Self>, id: i32) {
+            self.known_brokers.lock().unwrap().insert(id);
+        }
+
+        /// The `leader` argument of every `send_produce` call, in order.
+        fn sent_leaders(self: &Arc<Self>) -> Vec<Option<i32>> {
+            self.sent_leaders.lock().unwrap().clone()
+        }
+
+        /// How many times the sender refreshed cluster metadata.
+        fn refresh_count(self: &Arc<Self>) -> usize {
+            self.refreshes.load(Ordering::Relaxed)
         }
 
         fn applied_count(self: &Arc<Self>) -> usize {
@@ -1218,17 +1310,22 @@ mod harness {
     impl ProduceTransport for MockTransport {
         async fn send_produce(
             &self,
-            _leader: Option<i32>,
+            leader: Option<i32>,
             req: ProduceRequest,
         ) -> Result<ProduceResponse, ClientError> {
+            self.sent_leaders.lock().unwrap().push(leader);
+            self.last_timeout_ms
+                .store(i64::from(req.timeout_ms), Ordering::Relaxed);
+
+            let batch_seq = req.topic_data[0].partition_data[0]
+                .records
+                .as_ref()
+                .and_then(|p| p.as_v2())
+                .and_then(|b| b.first())
+                .map(|b| b.base_sequence);
+
             // One-shot injected transport error.
             {
-                let batch_seq = req.topic_data[0].partition_data[0]
-                    .records
-                    .as_ref()
-                    .and_then(|p| p.as_v2())
-                    .and_then(|b| b.first())
-                    .map(|b| b.base_sequence);
                 let mut guard = self.fail_once_seq.lock().unwrap();
                 if let (Some(target), Some(seq)) = (*guard, batch_seq)
                     && target == seq
@@ -1239,31 +1336,67 @@ mod harness {
                 }
             }
 
+            // One-shot injected broker response (terminal / routing / correlation).
+            {
+                let inj = {
+                    let mut guard = self.inject_once.lock().unwrap();
+                    match (guard.as_ref(), batch_seq) {
+                        (Some(i), Some(seq)) if i.seq == seq => guard.take(),
+                        _ => None,
+                    }
+                };
+                if let Some(inj) = inj {
+                    let topic = &req.topic_data[0];
+                    let part = &topic.partition_data[0];
+                    let current_leader = if inj.leader_hint >= 0 {
+                        LeaderIdAndEpoch {
+                            leader_id: inj.leader_hint,
+                            ..Default::default()
+                        }
+                    } else {
+                        LeaderIdAndEpoch::default()
+                    };
+                    return Ok(ProduceResponse {
+                        responses: vec![TopicProduceResponse {
+                            name: inj.name.unwrap_or_else(|| topic.name.clone()),
+                            topic_id: inj.topic_id.unwrap_or(topic.topic_id),
+                            partition_responses: vec![PartitionProduceResponse {
+                                index: part.index,
+                                error_code: inj.error_code,
+                                base_offset: inj.base_offset,
+                                current_leader,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    });
+                }
+            }
+
             // Reorder model: higher base_sequence completes first when several
             // same-partition requests are issued concurrently.
             if !self.reorder_delay.is_zero() {
-                let seq = req.topic_data[0].partition_data[0]
-                    .records
-                    .as_ref()
-                    .and_then(|p| p.as_v2())
-                    .and_then(|b| b.first())
-                    .map_or(0, |b| b.base_sequence);
-                let units = u32::try_from(REORDER_SPREAD - seq.min(REORDER_SPREAD)).unwrap_or(0);
+                let units =
+                    u32::try_from(REORDER_SPREAD - batch_seq.unwrap_or(0).min(REORDER_SPREAD))
+                        .unwrap_or(0);
                 tokio::time::sleep(self.reorder_delay * units).await;
             }
 
             Ok(self.apply(&req))
         }
 
-        fn evict_broker(&self, _broker_id: i32) {}
+        fn evict_broker(&self, broker_id: i32) {
+            self.evicted.lock().unwrap().push(broker_id);
+        }
 
-        fn knows_broker(&self, _broker_id: i32) -> bool {
-            // Force the BOOTSTRAP_LEADER path so no per-broker routing is needed.
-            false
+        fn knows_broker(&self, broker_id: i32) -> bool {
+            self.known_brokers.lock().unwrap().contains(&broker_id)
         }
 
         async fn refresh_metadata(&self) -> Result<MetadataResponse, ClientError> {
-            Ok(MetadataResponse::default())
+            self.refreshes.fetch_add(1, Ordering::Relaxed);
+            Ok(self.refresh_response.lock().unwrap().clone())
         }
     }
 
@@ -1271,6 +1404,9 @@ mod harness {
     struct Harness {
         accumulators: AccumulatorMap,
         next_seq: Arc<DashMap<(String, i32), i32>>,
+        partition_leaders: Arc<DashMap<(String, i32), i32>>,
+        metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
+        state: Arc<AtomicU8>,
         wake_tx: tokio::sync::mpsc::Sender<()>,
         flush_notify: Arc<Notify>,
         in_flight: Arc<AtomicUsize>,
@@ -1280,16 +1416,27 @@ mod harness {
     }
 
     /// Spawn a sender backed by `transport`, with `max_in_flight` and a fast
-    /// linger so the loop spins quickly.
+    /// 1ms linger so the loop spins quickly.
     fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
+        spawn_sender_with(transport, max_in_flight, Duration::from_millis(1))
+    }
+
+    /// Spawn a sender with an explicit `linger`. A long linger lets a test
+    /// observe wake-triggered drains in isolation (no empty linger-tick drains).
+    fn spawn_sender_with(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Duration,
+    ) -> Harness {
         let accumulators: AccumulatorMap = Arc::new(DashMap::new());
         let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
         let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(64);
         let flush_notify = Arc::new(Notify::new());
         let in_flight = Arc::new(AtomicUsize::new(0));
         let shutdown = CancellationToken::new();
-        let metadata_cache = Arc::new(Mutex::new(HashMap::new()));
-        let partition_leaders = Arc::new(DashMap::new());
+        let metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let partition_leaders: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
         let state = Arc::new(AtomicU8::new(STATE_ACTIVE));
 
         // Box the same Arc<MockTransport> for the sender; keep a clone for the
@@ -1300,15 +1447,15 @@ mod harness {
             producer_epoch: 0,
             acks: Acks::All,
             compression: Compression::None,
-            linger: Duration::from_millis(1),
+            linger,
             request_timeout: Duration::from_secs(5),
             retry_backoff: Duration::from_millis(1),
             max_in_flight,
-            metadata_cache,
-            partition_leaders,
+            metadata_cache: metadata_cache.clone(),
+            partition_leaders: partition_leaders.clone(),
             accumulators: accumulators.clone(),
             next_seq: next_seq.clone(),
-            state,
+            state: state.clone(),
             wake_rx,
             flush_notify: flush_notify.clone(),
             in_flight: in_flight.clone(),
@@ -1322,6 +1469,9 @@ mod harness {
         Harness {
             accumulators,
             next_seq,
+            partition_leaders,
+            metadata_cache,
+            state,
             wake_tx,
             flush_notify,
             in_flight,
@@ -1360,6 +1510,41 @@ mod harness {
             // base_sequence — maximizing same-partition pipelining pressure.
             a.seal_current();
             rxs.push(rx);
+        }
+        let _ = h.wake_tx.try_send(());
+        rxs
+    }
+
+    /// Append `n` records to `(topic, partition)` as a SINGLE batch (no seal
+    /// between appends), returning the ack receivers in append order. The sender
+    /// seals the batch on its next drain, so the records share one
+    /// `base_sequence` with `offset_delta` 0..n-1 — exercising the per-record
+    /// offset arithmetic (`base_offset + offset_delta`).
+    async fn produce_single_batch(
+        h: &Harness,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
+        let key = (topic.to_string(), partition);
+        let acc = h
+            .accumulators
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(16 * 1024))))
+            .value()
+            .clone();
+
+        let mut rxs = Vec::with_capacity(n);
+        {
+            let mut a = acc.lock().await;
+            for _ in 0..n {
+                let rx = match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0)
+                {
+                    crate::accumulator::AppendResult::Appended(rx) => rx,
+                    crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+                };
+                rxs.push(rx);
+            }
         }
         let _ = h.wake_tx.try_send(());
         rxs
@@ -1489,7 +1674,12 @@ mod harness {
         })
         .await;
         assert!(drained.is_ok(), "in_flight never settled to zero");
-        let _ = &transport;
+        // A transport failure forces a metadata refresh so the resend re-resolves
+        // the leader; the sender must have refreshed at least once.
+        assert!(
+            h.transport.refresh_count() >= 1,
+            "transport failure must trigger a metadata refresh"
+        );
         shutdown(h).await;
     }
 
@@ -1632,6 +1822,384 @@ mod harness {
             h.transport.applied_count()
         );
 
+        shutdown(h).await;
+    }
+
+    /// Routing decision (`resolve_leader`): a partition whose cached leader is a
+    /// known (dialable) broker is sent to that broker; a partition whose leader
+    /// is unknown (or whose address the pool can't dial) falls back to the
+    /// bootstrap connection. Drives the real sender so the `leader` argument
+    /// handed to the transport is observed directly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn routes_to_known_leader_else_bootstrap() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(5); // 5 is dialable; 7 is not.
+        let h = spawn_sender(transport.clone(), 5);
+
+        // Partition 0 → leader 5 (known): must route to Some(5).
+        h.partition_leaders.insert(("t".to_string(), 0), 5);
+        // Partition 1 → leader 7 (unknown address): must fall back to bootstrap.
+        h.partition_leaders.insert(("t".to_string(), 1), 7);
+
+        let rx0 = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let rx1 = produce_burst(&h, "t", 1, 1).await.pop().expect("one rx");
+        for (i, rx) in [rx0, rx1].into_iter().enumerate() {
+            let _ = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .unwrap_or_else(|_| panic!("record {i} never resolved"))
+                .expect("oneshot dropped")
+                .expect("acked Ok");
+        }
+
+        let leaders = h.transport.sent_leaders();
+        assert!(
+            leaders.contains(&Some(5)),
+            "known leader 5 must be routed to explicitly, got {leaders:?}"
+        );
+        assert!(
+            leaders.contains(&None),
+            "unknown leader must fall back to bootstrap (None), got {leaders:?}"
+        );
+        assert!(
+            !leaders.contains(&Some(7)),
+            "unknown-address leader 7 must never be dialed, got {leaders:?}"
+        );
+
+        shutdown(h).await;
+    }
+
+    /// A terminal-but-not-fatal server error (an unmodeled code) fails the record
+    /// with `Server(code)` and releases its in-flight slot — it must not fence,
+    /// hang, or be retried forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_server_error_fails_record() {
+        const MESSAGE_TOO_LARGE: i16 = 10;
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, MESSAGE_TOO_LARGE);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let res = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved (HANG)")
+            .expect("oneshot dropped");
+        let err = res.expect_err("terminal error must fail the record, not ack it");
+        assert!(
+            matches!(err, ProducerError::Server(MESSAGE_TOO_LARGE)),
+            "expected Server(10), got {err:?}"
+        );
+
+        // The slot is released: in_flight drains back to zero.
+        let drained = tokio::time::timeout(Duration::from_secs(5), async {
+            while h.in_flight.load(Ordering::Acquire) != 0 {
+                let _ = tokio::time::timeout(Duration::from_millis(20), h.flush_notify.notified())
+                    .await;
+            }
+        })
+        .await;
+        assert!(drained.is_ok(), "in_flight never settled to zero");
+
+        shutdown(h).await;
+    }
+
+    /// A batch with several records assigns each record `base_offset +
+    /// offset_delta`. The other tests use one record per batch, where
+    /// `offset_delta` is always 0; this pins the per-record offset arithmetic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn multi_record_batch_offsets_use_base_plus_delta() {
+        const N: usize = 4;
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rxs = produce_single_batch(&h, "t", 0, N).await;
+        let mut offsets = Vec::with_capacity(N);
+        for (i, rx) in rxs.into_iter().enumerate() {
+            let md = tokio::time::timeout(Duration::from_secs(10), rx)
+                .await
+                .unwrap_or_else(|_| panic!("record {i} never resolved"))
+                .expect("oneshot dropped")
+                .expect("acked Ok");
+            assert!(md.partition == 0);
+            offsets.push(md.offset);
+        }
+        // One batch at base_offset 0, records at deltas 0..N-1 → offsets 0,1,2,3.
+        // Under `base_offset - offset_delta` these would be 0,-1,-2,-3.
+        let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
+        assert!(offsets == expected, "got {offsets:?}");
+
+        shutdown(h).await;
+    }
+
+    /// A fatal `INVALID_PRODUCER_EPOCH` fences the producer: the record fails with
+    /// `FencedProducer` and the shared state flips to `STATE_FENCED`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_producer_epoch_fences_producer() {
+        const INVALID_PRODUCER_EPOCH: i16 = 47;
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, INVALID_PRODUCER_EPOCH);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let err = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved (HANG)")
+            .expect("oneshot dropped")
+            .expect_err("a fatal epoch error must fail the record, not ack it");
+        assert!(
+            matches!(err, ProducerError::FencedProducer),
+            "expected FencedProducer, got {err:?}"
+        );
+        assert!(
+            h.state.load(Ordering::Acquire) == STATE_FENCED,
+            "the producer must be fenced after a fatal idempotence error"
+        );
+
+        shutdown(h).await;
+    }
+
+    /// A transport failure to a *known* leader evicts that broker's connection so
+    /// a reconnect targets its current address; the batch then resends and acks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transport_error_evicts_known_leader() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(5);
+        transport.fail_once_on(0);
+        let h = spawn_sender(transport.clone(), 5);
+        h.partition_leaders.insert(("t".to_string(), 0), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok after recovery");
+
+        assert!(
+            h.transport.evicted().contains(&5),
+            "a transport error to known leader 5 must evict it, got {:?}",
+            h.transport.evicted()
+        );
+
+        shutdown(h).await;
+    }
+
+    /// On `NOT_LEADER_OR_FOLLOWER` with an inline `current_leader` hint to a
+    /// *known* broker, the sender adopts the hint — routes the resend there and
+    /// updates its leader cache — WITHOUT a metadata refresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn not_leader_adopts_known_inline_hint_without_refresh() {
+        const NOT_LEADER_OR_FOLLOWER: i16 = 6;
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(5);
+        transport.add_known_broker(8);
+        transport.inject(Inject {
+            seq: 0,
+            name: None,
+            topic_id: None,
+            error_code: NOT_LEADER_OR_FOLLOWER,
+            base_offset: -1,
+            leader_hint: 8,
+        });
+        let h = spawn_sender(transport.clone(), 5);
+        h.partition_leaders.insert(("t".to_string(), 0), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok after re-route");
+
+        let leaders = h.transport.sent_leaders();
+        assert!(
+            leaders.contains(&Some(5)),
+            "first send routes to current leader 5, got {leaders:?}"
+        );
+        assert!(
+            leaders.contains(&Some(8)),
+            "the resend must adopt the inline hint 8, got {leaders:?}"
+        );
+        assert!(
+            h.partition_leaders
+                .get(&("t".to_string(), 0))
+                .map(|e| *e.value())
+                == Some(8),
+            "the leader cache must be updated to the hinted leader 8"
+        );
+        assert!(
+            h.transport.refresh_count() == 0,
+            "a known inline hint must not trigger a metadata refresh"
+        );
+
+        shutdown(h).await;
+    }
+
+    /// The sender correlates a Produce response to its batch by `topic_id` when
+    /// the response's topic NAME differs (Kafka v13+ omits the name). The injected
+    /// response carries the matching `topic_id` and a distinctive offset.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn correlates_response_by_topic_id_when_name_differs() {
+        let topic_id = Uuid([7u8; 16]);
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject(Inject {
+            seq: 0,
+            name: Some(String::new()), // name does NOT match "t"
+            topic_id: Some(topic_id),  // but topic_id does
+            error_code: codes::NONE,
+            base_offset: 42,
+            leader_hint: -1,
+        });
+        let h = spawn_sender(transport.clone(), 5);
+        // Give "t" a non-zero topic_id so the batch carries it.
+        h.metadata_cache.lock().await.insert(
+            "t".to_string(),
+            TopicMetadata {
+                num_partitions: 1,
+                topic_id,
+            },
+        );
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let md = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok via topic_id correlation");
+        // The injected response's base_offset (42) proves the sender matched by
+        // topic_id; failing to correlate would resend and ack at the broker's 0.
+        assert!(
+            md.offset == 42,
+            "expected offset 42 from the topic_id-correlated response, got {}",
+            md.offset
+        );
+
+        shutdown(h).await;
+    }
+
+    /// `&&` (not `||`) gates the `topic_id` fallback: a response whose name does
+    /// NOT match and whose `topic_id` is ZERO must NOT be (mis)correlated. The
+    /// batch has no `topic_id` (ZERO), so only an exact name match binds a
+    /// response — a
+    /// wrong-name response forces a resend.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn does_not_correlate_mismatched_name_with_zero_topic_id() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject(Inject {
+            seq: 0,
+            name: Some("other".to_string()), // wrong name
+            topic_id: Some(Uuid::ZERO),      // zero topic_id
+            error_code: codes::NONE,
+            base_offset: 99, // a bogus offset that must NOT be adopted
+            leader_hint: -1,
+        });
+        let h = spawn_sender(transport.clone(), 5);
+        // No metadata → the batch's topic_id is ZERO.
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let md = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok after resend");
+        // Correct code ignores the mismatched response and resends, acking at the
+        // broker's real offset 0 — never the bogus 99 the wrong response carried.
+        assert!(
+            md.offset == 0,
+            "a name-mismatched, zero-topic_id response must not be correlated; got {}",
+            md.offset
+        );
+
+        shutdown(h).await;
+    }
+
+    /// `update_leaders_from_metadata` adopts leaders only from HEALTHY topics
+    /// (`error_code == 0`). A transport error triggers a refresh whose response
+    /// advertises a new leader for a healthy topic; the cache picks it up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_adopts_leader_for_healthy_topic() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(9);
+        transport.fail_once_on(0); // transport error → forces a metadata refresh
+        transport.set_refresh_response(MetadataResponse {
+            topics: vec![MetadataResponseTopic {
+                error_code: 0,
+                name: Some("t".to_string()),
+                partitions: vec![MetadataResponsePartition {
+                    error_code: 0,
+                    partition_index: 0,
+                    leader_id: 9,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok after refresh + resend");
+
+        assert!(
+            h.partition_leaders
+                .get(&("t".to_string(), 0))
+                .map(|e| *e.value())
+                == Some(9),
+            "a healthy topic's advertised leader (9) must be adopted from the refresh"
+        );
+
+        shutdown(h).await;
+    }
+
+    /// The Produce request carries the configured `request_timeout` as
+    /// `timeout_ms` (5s → 5000ms on the wire).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_carries_configured_timeout() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender(transport.clone(), 5);
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .expect("record never resolved")
+            .expect("oneshot dropped")
+            .expect("acked Ok");
+
+        assert!(
+            h.transport.last_timeout_ms() == 5000,
+            "produce request must carry the configured 5000ms timeout, got {}",
+            h.transport.last_timeout_ms()
+        );
+
+        shutdown(h).await;
+    }
+
+    /// `finish_in_flight` notifies flush waiters exactly when `in_flight` reaches
+    /// zero. With a long linger the only drains are wake-triggered, so this
+    /// notify is the only one a registered waiter can receive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_in_flight_notifies_when_drained() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, Duration::from_secs(30));
+
+        // Let the immediate first (empty) linger-tick drain pass, then register a
+        // flush waiter; from here only finish_in_flight can notify it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let flush = h.flush_notify.clone();
+        let watcher = tokio::spawn(async move { flush.notified().await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
+        let fired = tokio::time::timeout(Duration::from_secs(3), watcher).await;
+        assert!(
+            fired.is_ok(),
+            "finish_in_flight must notify flush waiters when in_flight reaches zero"
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
         shutdown(h).await;
     }
 }
