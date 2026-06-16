@@ -107,3 +107,58 @@ pub trait Sink<K, V>: Send + Sync + 'static {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    use super::*;
+
+    /// A sink that takes every default — at-least-once, no transactions.
+    #[derive(Default)]
+    struct DefaultSink {
+        durable: usize,
+        buffered: usize,
+    }
+
+    #[async_trait]
+    impl Sink<Bytes, Bytes> for DefaultSink {
+        async fn put(
+            &mut self,
+            records: Vec<ConnectRecord<Bytes, Bytes>>,
+        ) -> Result<(), ConnectError> {
+            self.buffered += records.len();
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> Result<(), ConnectError> {
+            self.durable += self.buffered;
+            self.buffered = 0;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn default_sink_is_not_transactional() {
+        // A sink that doesn't opt in must report `false`, so the runtime drives
+        // it at-least-once and never calls begin/abort.
+        check!(!DefaultSink::default().supports_transactions());
+    }
+
+    #[tokio::test]
+    async fn default_commit_makes_buffered_records_durable() {
+        // The default `commit` delegates to `flush`.
+        let mut sink = DefaultSink::default();
+        sink.put(vec![ConnectRecord::new(
+            None,
+            Some(Bytes::from_static(b"x")),
+        )])
+        .await
+        .unwrap();
+        sink.commit().await.unwrap();
+        check!(sink.durable == 1);
+        check!(sink.buffered == 0);
+    }
+}

@@ -101,6 +101,38 @@ impl<T: Send + Sync + 'static> Converter<T> for SchemaConverter<T> {
 mod tests {
     use super::*;
     use assert2::check;
+    use crabka_schema_serde::SchemaSerdeError;
+
+    /// A serde whose output encodes its inputs, so a test can prove
+    /// [`SchemaConverter`] forwards to it rather than fabricating a value.
+    struct FakeSerde;
+
+    impl SchemaSerializer<String> for FakeSerde {
+        fn serialize(&self, topic: &str, value: &String) -> Result<Bytes, SchemaSerdeError> {
+            Ok(Bytes::from(format!("{topic}:{value}")))
+        }
+    }
+
+    impl SchemaDeserializer<String> for FakeSerde {
+        fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<String, SchemaSerdeError> {
+            String::from_utf8(bytes.to_vec()).map_err(|e| SchemaSerdeError::Wire(e.to_string()))
+        }
+    }
+
+    #[test]
+    fn schema_converter_serialize_forwards_to_inner_serde() {
+        let conv = SchemaConverter::new(Arc::new(FakeSerde), Arc::new(FakeSerde));
+        let out = conv.serialize("topic", &"hello".to_owned()).unwrap();
+        // A non-empty, input-derived payload — not the empty `Bytes::default()`.
+        check!(out == Bytes::from_static(b"topic:hello"));
+    }
+
+    #[test]
+    fn schema_converter_deserialize_forwards_to_inner_serde() {
+        let conv = SchemaConverter::new(Arc::new(FakeSerde), Arc::new(FakeSerde));
+        let value = conv.deserialize("topic", b"world").unwrap();
+        check!(value == "world");
+    }
 
     #[test]
     fn byte_identity_serialize_preserves_bytes() {
