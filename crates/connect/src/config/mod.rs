@@ -1,4 +1,43 @@
 //! Connector configuration definitions, validation, and secret resolution.
+//!
+//! ```no_run
+//! # #[cfg(not(feature = "derive"))]
+//! # fn main() {}
+//!
+//! # #[cfg(feature = "derive")]
+//! # mod example {
+//! use crabka_connect::{
+//!     ConfigDef, ConnectorConfig, EnvSecretResolver, SecretString,
+//! };
+//! use serde_json::json;
+//!
+//! #[derive(ConnectorConfig)]
+//! struct ExampleConfig {
+//!     #[config(required)]
+//!     database_url: String,
+//!     #[config(secret)]
+//!     password: SecretString,
+//!     #[config(default = "public")]
+//!     schema: String,
+//! }
+//!
+//! # async fn build() -> crabka_connect::ConfigResult<ExampleConfig> {
+//! let raw: serde_json::Map<String, serde_json::Value> = serde_json::Map::from_iter([
+//!     ("database_url".to_string(), json!("postgres://localhost/app")),
+//!     (
+//!         "password".to_string(),
+//!         json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
+//!     ),
+//! ]);
+//! let def: ConfigDef = ExampleConfig::config_def();
+//! let resolved = def.resolve(raw, &EnvSecretResolver).await?;
+//! let config: ExampleConfig = ConnectorConfig::from_resolved(&resolved)?;
+//! Ok(config)
+//! # }
+//! # }
+//! # #[cfg(feature = "derive")]
+//! # fn main() {}
+//! ```
 
 use std::time::Duration;
 

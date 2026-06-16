@@ -25,3 +25,42 @@ and telemetry sink builds on.
 The transport traits mirror the Streams runtime I/O traits
 (`RecordFetcher` / `RecordProducer`) and the remote-storage `RemoteStorageManager`
 SPI; the converter layer mirrors Kafka Connect's `Converter`.
+
+## Connector configuration
+
+Connector implementations can declare a ConfigDef-style schema and derive typed
+config extraction:
+
+```rust
+use crabka_connect::{
+    ConfigDef, ConnectorConfig, EnvSecretResolver, SecretString,
+};
+use serde_json::json;
+
+#[derive(ConnectorConfig)]
+struct PostgresSourceConfig {
+    #[config(required)]
+    database_url: String,
+    #[config(secret)]
+    password: SecretString,
+    #[config(default = "public")]
+    schema: String,
+}
+
+# async fn build() -> crabka_connect::ConfigResult<PostgresSourceConfig> {
+let raw: serde_json::Map<String, serde_json::Value> = serde_json::Map::from_iter([
+    ("database_url".to_string(), json!("postgres://localhost/app")),
+    (
+        "password".to_string(),
+        json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
+    ),
+]);
+let def: ConfigDef = PostgresSourceConfig::config_def();
+let resolved = def.resolve(raw, &EnvSecretResolver).await?;
+let config: PostgresSourceConfig = ConnectorConfig::from_resolved(&resolved)?;
+Ok(config)
+# }
+```
+
+Secret fields resolve through `SecretResolver` implementations and are redacted
+by `Debug` and `Display`.
