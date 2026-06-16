@@ -142,13 +142,13 @@ impl FieldAttrs {
                 }
                 Err(meta.error("unsupported config attribute"))
             })?;
-        }
 
-        if out.secret && out.default.is_some() {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "secret fields cannot declare defaults",
-            ));
+            if out.secret && out.default.is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "secret fields cannot declare defaults",
+                ));
+            }
         }
 
         Ok(out)
