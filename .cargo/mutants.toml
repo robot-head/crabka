@@ -83,4 +83,10 @@ exclude_re = [
     # `crabka_playground::Playground::*` wrappers are mutation-tested (and caught)
     # because that crate always enables `sim`.
     "kraft-core/src/sim\\.rs",
+    # `AddPartitionsToTxn`'s start-timestamp stamp (`txnStartTimestamp` on the
+    # edge into Ongoing) is reaper-supporting bookkeeping: its only observable
+    # effect is *when* the (excluded) idle-transaction reaper measures the
+    # timeout from, so no unit test can kill a mutation of it. The function's
+    # actual add-partition logic is covered by the broker txn integration suite.
+    "add_partitions_to_txn\\.rs.*process_one_txn",
 ]
