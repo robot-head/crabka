@@ -1,0 +1,19 @@
+# crabka-connect
+
+The connector-framework SPI for Crabka: the keystone traits every CDC source
+and telemetry sink builds on.
+
+- [`Source<K, V>`](src/source.rs) — pull records out of an external system one
+  at a time (`poll`), snapshot the read position (`checkpoint`), and restore it
+  on restart (`seek`).
+- [`Sink<K, V>`](src/sink.rs) — push records into an external system in batches
+  (`put`), durably commit them (`flush`), and optionally gate writes behind a
+  transaction for exactly-once delivery (`begin` / `commit` / `abort`).
+- [`Converter<T>`](src/convert.rs) — bridge a connector's typed payload `T` to
+  and from the raw `Bytes` that travel on the Kafka wire. Ships with
+  [`ByteIdentity`] (byte-for-byte passthrough) and [`SchemaConverter`]
+  (Confluent schema-registry serdes via `crabka-schema-serde`).
+
+The transport traits mirror the Streams runtime I/O traits
+(`RecordFetcher` / `RecordProducer`) and the remote-storage `RemoteStorageManager`
+SPI; the converter layer mirrors Kafka Connect's `Converter`.

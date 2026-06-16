@@ -2008,6 +2008,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-connect"
+version = "0.3.6"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "bytes",
+ "crabka-schema-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "crabka-docgen"
 version = "0.3.6"
 dependencies = [
