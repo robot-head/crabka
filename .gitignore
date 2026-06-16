@@ -1,4 +1,5 @@
 target/
+.cargo/config.toml
 **/*.rs.bk
 .idea/
 .vscode/
@@ -41,3 +42,8 @@ docs/superpowers/plans/
 # The hand-written front-end (app.js, playground.css) stays tracked.
 /website/static/playground/crabka_playground.js
 /website/static/playground/crabka_playground_bg.wasm
+
+
+# Cargo mutant output
+mutants.out
+mutants.out.old
