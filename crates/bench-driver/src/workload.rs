@@ -25,8 +25,34 @@ use crate::payload;
 use crate::prom::PromClient;
 use crate::rate::Pacer;
 use crate::scenario::{
-    Disturbance, LoadMode, ModeTag, Resource, RunOutput, Scenario, Stack, Throughput, Topology,
+    BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
+    Throughput, Topology,
 };
+
+/// Width of one time-series sample bucket. The measurement window is split
+/// into fixed `SAMPLE_INTERVAL_MS` slices; each producer/consumer task tallies
+/// per-slice counts + a per-slice latency histogram locally (no shared locks
+/// on the hot path), and `run()` merges them into the `samples` series.
+const SAMPLE_INTERVAL_MS: u64 = 2000;
+
+/// The fixed sampling grid, shared (by Copy) with every task so all tasks
+/// bucket into the same slices.
+#[derive(Clone, Copy)]
+struct Grid {
+    /// When the measurement window begins (warmup end).
+    meas_start: Instant,
+    interval_ms: u64,
+    /// Number of slices covering the measurement window.
+    n: usize,
+}
+
+impl Grid {
+    /// Slice index for an event observed at `now`, clamped into `[0, n-1]`.
+    fn idx(&self, now: Instant) -> usize {
+        let elapsed_ms = now.saturating_duration_since(self.meas_start).as_millis() as u64;
+        ((elapsed_ms / self.interval_ms) as usize).min(self.n.saturating_sub(1))
+    }
+}
 
 /// Parameters wired in from `main` / CLI. Distinct from `Scenario` because
 /// the scenario YAML describes *what* to run, while this struct describes
@@ -90,6 +116,17 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let wallclock_start = Utc::now().timestamp_millis();
     let t_start = Instant::now();
 
+    // Time-series sampling grid: split the measurement window into fixed
+    // slices. Computed up front (meas_start is t_start + warmup) so it can be
+    // handed to each task at spawn time.
+    let interval_ms = SAMPLE_INTERVAL_MS;
+    let n_intervals = (scenario.duration_s * 1000).div_ceil(interval_ms).max(1) as usize;
+    let grid = Grid {
+        meas_start: t_start + Duration::from_secs(scenario.warmup_s),
+        interval_ms,
+        n: n_intervals,
+    };
+
     let mut notes: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -142,7 +179,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let sid = cfg.scenario_id;
         let sec = security.clone();
         prod_set.spawn(async move {
-            run_producer(i, s, bootstrap, topic, sid, stop, first_ack, sec).await
+            run_producer(i, s, bootstrap, topic, sid, stop, first_ack, sec, grid).await
         });
     }
 
@@ -155,7 +192,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let stop = stop.clone();
         let sid = cfg.scenario_id;
         let sec = security.clone();
-        cons_set.spawn(async move { run_consumer(i, s, bootstrap, topic, sid, stop, sec).await });
+        cons_set
+            .spawn(async move { run_consumer(i, s, bootstrap, topic, sid, stop, sec, grid).await });
     }
 
     // ── Failover orchestrator task ──────────────────────────────────────────
@@ -198,6 +236,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let mut prod_dropped = 0u64;
     let mut earliest_recovery_ms = 0u64;
     let mut max_spike_us = 0u64;
+    let mut prod_iv_msgs = vec![0u64; n_intervals];
+    let mut prod_iv_hist: Vec<Histogram<u64>> = (0..n_intervals).map(|_| hist::new()).collect();
     while let Some(j) = prod_set.join_next().await {
         match j {
             Ok(t) => {
@@ -205,6 +245,14 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
                 prod_msgs += t.msgs;
                 prod_bytes += t.bytes;
                 prod_dropped += t.dropped;
+                for iv in 0..n_intervals {
+                    if let Some(m) = t.interval_msgs.get(iv) {
+                        prod_iv_msgs[iv] += *m;
+                    }
+                    if let Some(h) = t.interval_hist.get(iv) {
+                        prod_iv_hist[iv].add(h).ok();
+                    }
+                }
                 if t.latency_spike_max_us > max_spike_us {
                     max_spike_us = t.latency_spike_max_us;
                 }
@@ -224,12 +272,22 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let mut cons_hist = hist::new();
     let mut cons_msgs = 0u64;
     let mut cons_bytes = 0u64;
+    let mut cons_iv_msgs = vec![0u64; n_intervals];
+    let mut cons_iv_hist: Vec<Histogram<u64>> = (0..n_intervals).map(|_| hist::new()).collect();
     while let Some(j) = cons_set.join_next().await {
         match j {
             Ok(t) => {
                 cons_hist.add(&t.latency).ok();
                 cons_msgs += t.msgs;
                 cons_bytes += t.bytes;
+                for iv in 0..n_intervals {
+                    if let Some(m) = t.interval_msgs.get(iv) {
+                        cons_iv_msgs[iv] += *m;
+                    }
+                    if let Some(h) = t.interval_hist.get(iv) {
+                        cons_iv_hist[iv].add(h).ok();
+                    }
+                }
                 if !t.error.is_empty() {
                     errors.push(t.error);
                 }
@@ -237,6 +295,26 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             Err(e) => errors.push(format!("consumer-task-panic: {e}")),
         }
     }
+
+    // Assemble the client-side time series from the merged per-slice tallies.
+    let interval_s = interval_ms as f64 / 1000.0;
+    let pctl = |h: &Histogram<u64>, q: f64| {
+        if h.is_empty() {
+            0.0
+        } else {
+            h.value_at_quantile(q) as f64 / 1000.0
+        }
+    };
+    let samples: Vec<Sample> = (0..n_intervals)
+        .map(|iv| Sample {
+            t_offset_ms: iv as u64 * interval_ms,
+            producer_msgs_per_sec: prod_iv_msgs[iv] as f64 / interval_s,
+            consumer_msgs_per_sec: cons_iv_msgs[iv] as f64 / interval_s,
+            producer_p50_ms: pctl(&prod_iv_hist[iv], 0.50),
+            producer_p99_ms: pctl(&prod_iv_hist[iv], 0.99),
+            consumer_e2e_p99_ms: pctl(&cons_iv_hist[iv], 0.99),
+        })
+        .collect();
 
     let wallclock_end = Utc::now().timestamp_millis();
     let duration_s = scenario.duration_s.max(1) as f64;
@@ -263,6 +341,28 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     } else {
         notes.push("prometheus-url-not-set".into());
         Resource::default()
+    };
+
+    // Broker resource *time series* for graphing — a Prometheus range query
+    // over the whole wallclock window (warmup + measurement), at the 15s scrape
+    // step. Separate from the instant `resource` aggregate above. Queried now,
+    // before teardown, so the series is well within Prometheus' retention.
+    let broker_samples: Vec<BrokerSample> = if let Some(url) = &cfg.prometheus_url {
+        match PromClient::new(url) {
+            Ok(c) => c
+                .capture_resource_series(
+                    cfg.stack,
+                    &cfg.namespace,
+                    wallclock_start as f64 / 1000.0,
+                    wallclock_end as f64 / 1000.0,
+                    15,
+                )
+                .await
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
     };
 
     let disturbance = if failover_active {
@@ -309,6 +409,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         first_ack_ms,
         errors,
         notes,
+        samples,
+        broker_samples,
     })
 }
 
@@ -324,6 +426,10 @@ struct ProducerOut {
     recovery_unix_ms: u64,
     latency_spike_max_us: u64,
     error: String,
+    /// Per-slice (see [`Grid`]) measurement-window tallies. Empty on a build
+    /// failure; `run()` merges by index with bounds checks.
+    interval_msgs: Vec<u64>,
+    interval_hist: Vec<Histogram<u64>>,
 }
 
 struct ConsumerOut {
@@ -331,6 +437,8 @@ struct ConsumerOut {
     msgs: u64,
     bytes: u64,
     error: String,
+    interval_msgs: Vec<u64>,
+    interval_hist: Vec<Histogram<u64>>,
 }
 
 fn bytes_to_mb(bytes: u64) -> f64 {
@@ -363,6 +471,8 @@ fn empty_output(
         first_ack_ms: 0,
         errors,
         notes,
+        samples: Vec::new(),
+        broker_samples: Vec::new(),
     }
 }
 
@@ -378,6 +488,7 @@ async fn run_producer(
     stop: Arc<AtomicU8>,
     first_ack: Arc<AtomicU64>,
     security: Option<ClientSecurity>,
+    grid: Grid,
 ) -> ProducerOut {
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
@@ -390,6 +501,13 @@ async fn run_producer(
         .enable_idempotence(enable_idempotence)
         .linger(Duration::from_millis(scenario.linger_ms))
         .batch_size(scenario.batch_size)
+        // The producer pipelines one in-flight request PER PARTITION and uses
+        // this value as the cross-partition fan-out cap (how many distinct
+        // partitions it services concurrently per drain cycle). The default (5)
+        // throttles topics with more partitions than that — our scenarios run 6
+        // to 100 partitions — so raise it well past the max partition count to
+        // keep every partition's pipeline busy.
+        .max_in_flight_per_connection(128)
         // A produce to a healthy broker completes in low single-digit ms, so a
         // 10s ceiling never trips under normal load — but it bounds how long a
         // send to a *killed* leader blocks before the client re-routes, so the
@@ -413,12 +531,16 @@ async fn run_producer(
                 recovery_unix_ms: 0,
                 latency_spike_max_us: 0,
                 error: format!("producer-{idx}-build: {e:#}"),
+                interval_msgs: Vec::new(),
+                interval_hist: Vec::new(),
             };
         }
     };
 
     let mut tmpl = payload::template(scenario.msg_size_bytes);
     let mut meas_hist = hist::new();
+    let mut iv_msgs = vec![0u64; grid.n];
+    let mut iv_hist: Vec<Histogram<u64>> = (0..grid.n).map(|_| hist::new()).collect();
     let mut meas_msgs = 0u64;
     let mut meas_bytes = 0u64;
     let mut dropped = 0u64;
@@ -460,6 +582,9 @@ async fn run_producer(
                         hist::record_us(&mut meas_hist, us);
                         meas_msgs += 1;
                         meas_bytes += scenario.msg_size_bytes as u64;
+                        let iv = grid.idx(Instant::now());
+                        iv_msgs[iv] += 1;
+                        hist::record_us(&mut iv_hist[iv], us);
                         if kill_observed && recovery_unix_ms == 0 {
                             recovery_unix_ms = Utc::now().timestamp_millis() as u64;
                         }
@@ -566,11 +691,14 @@ async fn run_producer(
         recovery_unix_ms,
         latency_spike_max_us,
         error,
+        interval_msgs: iv_msgs,
+        interval_hist: iv_hist,
     }
 }
 
 // ── Consumer task ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)] // bench task fan-out: each arg is an independent per-task input
 async fn run_consumer(
     idx: usize,
     scenario: Scenario,
@@ -579,6 +707,7 @@ async fn run_consumer(
     scenario_id: u64,
     stop: Arc<AtomicU8>,
     security: Option<ClientSecurity>,
+    grid: Grid,
 ) -> ConsumerOut {
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match Consumer::builder()
@@ -601,11 +730,15 @@ async fn run_consumer(
                 msgs: 0,
                 bytes: 0,
                 error: format!("consumer-{idx}-build: {e:#}"),
+                interval_msgs: Vec::new(),
+                interval_hist: Vec::new(),
             };
         }
     };
 
     let mut meas_hist = hist::new();
+    let mut iv_msgs = vec![0u64; grid.n];
+    let mut iv_hist: Vec<Histogram<u64>> = (0..grid.n).map(|_| hist::new()).collect();
     let mut meas_msgs = 0u64;
     let mut meas_bytes = 0u64;
     let mut error = String::new();
@@ -618,6 +751,7 @@ async fn run_consumer(
             Ok(records) => {
                 let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
                 let phase = stop.load(Ordering::Relaxed);
+                let iv = grid.idx(Instant::now());
                 for r in records {
                     if let Some(val) = &r.value {
                         let bytes = val.len() as u64;
@@ -627,6 +761,8 @@ async fn run_consumer(
                                 hist::record_us(&mut meas_hist, latency_us);
                                 meas_msgs += 1;
                                 meas_bytes += bytes;
+                                iv_msgs[iv] += 1;
+                                hist::record_us(&mut iv_hist[iv], latency_us);
                             }
                         } else if phase == STATE_MEASURING {
                             // Non-bench record (e.g. left over from a prior
@@ -650,6 +786,8 @@ async fn run_consumer(
         msgs: meas_msgs,
         bytes: meas_bytes,
         error,
+        interval_msgs: iv_msgs,
+        interval_hist: iv_hist,
     }
 }
 

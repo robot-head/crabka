@@ -236,6 +236,37 @@ pub struct Topology {
     pub broker_count: u32,
 }
 
+/// One time-series sample of client-side throughput + latency over a fixed
+/// interval (default 2s) of the measurement window. Lets the report graph
+/// values *over the test* rather than only end-of-run aggregates. The
+/// latency percentiles are per-interval (this window only), not cumulative,
+/// so a latency-vs-time curve shows real movement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Sample {
+    /// Milliseconds since the measurement window started.
+    pub t_offset_ms: u64,
+    pub producer_msgs_per_sec: f64,
+    pub consumer_msgs_per_sec: f64,
+    /// Interval producer-ack latency (this window only), milliseconds.
+    pub producer_p50_ms: f64,
+    pub producer_p99_ms: f64,
+    /// Interval consumer end-to-end p99 latency (this window only), ms.
+    pub consumer_e2e_p99_ms: f64,
+}
+
+/// One time-series sample of broker resource usage, scraped from Prometheus
+/// as a range query over the run window (default 15s step = the scrape
+/// interval). Covers the full wallclock window (warmup + measurement).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BrokerSample {
+    /// Milliseconds since `wallclock_start_unix_ms`.
+    pub t_offset_ms: u64,
+    /// Summed CPU usage across broker pods, in cores.
+    pub cpu_cores: f64,
+    /// Summed working-set memory across broker pods, in bytes.
+    pub mem_working_set_bytes: u64,
+}
+
 /// One run = one scenario × one stack. Written by the driver, read by
 /// the report aggregator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +293,13 @@ pub struct RunOutput {
     pub errors: Vec<String>,
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Per-interval client throughput + latency over the measurement window.
+    /// Empty for runs produced before time-series sampling existed.
+    #[serde(default)]
+    pub samples: Vec<Sample>,
+    /// Per-interval broker CPU/memory over the run window (Prometheus range).
+    #[serde(default)]
+    pub broker_samples: Vec<BrokerSample>,
 }
 
 #[cfg(test)]
@@ -384,6 +422,8 @@ mode:
             first_ack_ms: 42,
             errors: vec![],
             notes: vec!["test".into()],
+            samples: vec![],
+            broker_samples: vec![],
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunOutput = serde_json::from_str(&s).unwrap();
