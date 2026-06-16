@@ -2,12 +2,13 @@
 //! queries at scenario end to capture resource usage on the broker pods
 //! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use crate::scenario::{Resource, Stack};
+use crate::scenario::{BrokerSample, Resource, Stack};
 
 pub struct PromClient {
     base_url: String,
@@ -70,6 +71,110 @@ impl PromClient {
             }
         }
         Ok(had.then_some(sum))
+    }
+
+    /// Execute a `PromQL` range query, summing across all returned series per
+    /// timestamp. Returns `(unix_seconds, value)` points on the step grid.
+    pub async fn query_range_sum(
+        &self,
+        query: &str,
+        start_s: f64,
+        end_s: f64,
+        step_s: u64,
+    ) -> Result<Vec<(f64, f64)>> {
+        let url = format!("{}/api/v1/query_range", self.base_url);
+        let start = format!("{start_s}");
+        let end = format!("{end_s}");
+        let step = format!("{step_s}s");
+        let body: PromResp = self
+            .http
+            .get(&url)
+            .query(&[
+                ("query", query),
+                ("start", start.as_str()),
+                ("end", end.as_str()),
+                ("step", step.as_str()),
+            ])
+            .send()
+            .await
+            .with_context(|| format!("GET {url} (range) query={query}"))?
+            .error_for_status()
+            .with_context(|| "prometheus non-2xx (range)")?
+            .json()
+            .await
+            .context("decode prometheus range json")?;
+
+        if body.status != "success" {
+            return Err(anyhow!(
+                "prometheus range query failed: status={} err={:?}",
+                body.status,
+                body.error
+            ));
+        }
+        let Some(data) = body.data else {
+            return Ok(Vec::new());
+        };
+        // Sum across series per timestamp (keyed by ms to dedupe float ts).
+        let mut by_ts: BTreeMap<u64, f64> = BTreeMap::new();
+        for r in &data.result {
+            if let Some(vals) = &r.values {
+                for (ts, v) in vals {
+                    if let Ok(parsed) = v.parse::<f64>() {
+                        *by_ts.entry((ts * 1000.0).round() as u64).or_insert(0.0) += parsed;
+                    }
+                }
+            }
+        }
+        Ok(by_ts
+            .into_iter()
+            .map(|(ts_ms, v)| (ts_ms as f64 / 1000.0, v))
+            .collect())
+    }
+
+    /// Capture a broker CPU/memory **time series** over `[start_s, end_s]` for
+    /// graphing values over the test. CPU is a 1-minute `rate()` (in cores),
+    /// memory is the summed working set. Aligned onto a single `step_s` grid;
+    /// `t_offset_ms` is relative to `start_s`.
+    pub async fn capture_resource_series(
+        &self,
+        stack: Stack,
+        namespace: &str,
+        start_s: f64,
+        end_s: f64,
+        step_s: u64,
+    ) -> Result<Vec<BrokerSample>> {
+        let pod_re = format!("{}.*", stack.broker_pod_regex().trim_start_matches('^'));
+        let cpu_q = format!(
+            "sum(rate(container_cpu_usage_seconds_total{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}}[1m]))"
+        );
+        let mem_q = format!(
+            "sum(container_memory_working_set_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",id=~\".*slice\"}})"
+        );
+        let cpu = self
+            .query_range_sum(&cpu_q, start_s, end_s, step_s)
+            .await
+            .unwrap_or_default();
+        let mem = self
+            .query_range_sum(&mem_q, start_s, end_s, step_s)
+            .await
+            .unwrap_or_default();
+
+        let start_ms = (start_s * 1000.0).round() as u64;
+        let mut by_ts: BTreeMap<u64, (f64, u64)> = BTreeMap::new();
+        for (ts, v) in cpu {
+            by_ts.entry((ts * 1000.0).round() as u64).or_default().0 = v;
+        }
+        for (ts, v) in mem {
+            by_ts.entry((ts * 1000.0).round() as u64).or_default().1 = v as u64;
+        }
+        Ok(by_ts
+            .into_iter()
+            .map(|(ts_ms, (cpu_cores, mem))| BrokerSample {
+                t_offset_ms: ts_ms.saturating_sub(start_ms),
+                cpu_cores,
+                mem_working_set_bytes: mem,
+            })
+            .collect())
     }
 
     /// Capture broker resource usage for the given stack over a window
@@ -175,6 +280,9 @@ struct PromResult {
     /// portion as a JSON string. The timestamp is f64 in seconds.
     #[serde(default)]
     value: Option<(f64, String)>,
+    /// Matrix (range-query) payload: `[[ts, "val"], ...]`.
+    #[serde(default)]
+    values: Option<Vec<(f64, String)>>,
 }
 
 #[cfg(test)]

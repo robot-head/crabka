@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 # Renovate: datasource=github-releases depName=strimzi/strimzi-kafka-operator
-STRIMZI_VERSION="${STRIMZI_VERSION:-0.46.0}"
+STRIMZI_VERSION="${STRIMZI_VERSION:-1.0.0}"
 
 log "installing Strimzi $STRIMZI_VERSION → namespace strimzi-system, watching '$BENCH_NAMESPACE'"
 

@@ -48,7 +48,7 @@ just -f bench/justfile bench-ci
 This:
 1. Builds the bench-driver OCI image via melange/apko.
 2. Creates a `crabka-bench` KinD cluster (`kindest/node:v1.30.0`).
-3. Installs Strimzi (`0.46.0`) + Crabka + a minimal Prometheus.
+3. Installs Strimzi (`1.0.0`, running Apache Kafka `4.2.0`) + Crabka + a minimal Prometheus.
 4. Runs `small-msg-saturate` and `fixed-rate-latency` against both
    stacks at 1 broker / RF=1.
 5. Aggregates per-run JSON into `bench/results/SUMMARY.md`.
@@ -63,6 +63,30 @@ just -f bench/justfile bench-cluster
 This runs the full scenario matrix (including `failover` and `large-msg`)
 at 3 brokers / RF=3. Plan for ~2 hours of runtime, plus storage for
 PersistentVolumeClaims.
+
+### 6-broker topology + averaged runs
+
+The `6broker-rf3` topology spreads 6 brokers per stack across a 6-node
+`beefy-pool` (the broker `podAntiAffinity` is one-per-node, so the pool
+**must** have ≥6 nodes — bump `broker_pool_node_count` in
+[`terraform/gke/`](./terraform/gke)). It is what the high-partition
+scenarios are designed for: 100 partitions at RF=3 actually fan replication
+out across the larger cluster.
+
+To smooth out cloud noise, repeat the whole matrix and average. `RUNS`
+(default 10) controls the repeat count; each repeat tags its output files
+`-runNN` so nothing is clobbered, and the report aggregator averages all
+runs that share a `(scenario, topology)` cell:
+
+```bash
+# 10× the 6-broker matrix from WSL, then aggregate the averaged report.
+RUNS=10 bash bench/run-matrix.sh 6broker-rf3
+just -f bench/justfile bench-report
+```
+
+The report shows each cell as the mean across its runs with a `(±N%)`
+coefficient-of-variation marker. Budget accordingly: 9 scenarios × 2 stacks
+× 10 runs is a long, PVC-heavy campaign.
 
 Need a cluster? [`bench/terraform/gke/`](./terraform/gke) provisions the exact
 GKE cluster the published [Crabka vs Strimzi](https://robot-head.github.io/crabka/benchmarks/crabka-vs-strimzi/)
@@ -89,9 +113,12 @@ just -f bench/justfile bench-report
 | `fixed-rate-latency`   | CI      | 1 KiB   | 6  | 1 | 120 s  | coordinated-omission-free p99 |
 | `large-msg`            | cluster | 100 KiB | 6  | 1 | 60 s   | MB/s ceiling, lz4 |
 | `fan-out`              | cluster | 1 KiB   | 24 | 1 | 120 s  | 4 prod × 4 cons in one group |
-| `mixed-acks-all`       | cluster | 1 KiB   | 6  | 1 | 120 s  | acks=all under fixed rate |
-| `failover`             | cluster | 1 KiB   | 12 | 3 | 180 s  | kill leader @ t=60 s, RF=3 |
-| `endurance`            | cluster | 1 KiB   | 24 | 1 | 1800 s | 30-min soak |
+| `mixed-acks-all`       | cluster | 1 KiB   | 6   | 1 | 120 s  | acks=all under fixed rate |
+| `failover`             | cluster | 1 KiB   | 12  | 3 | 180 s  | kill leader @ t=60 s, RF=3 |
+| `high-partition-saturate` | cluster | 100 B | 100 | 3 | 60 s  | throughput ceiling at 100 partitions, RF=3, 4 prod |
+| `high-partition-latency`  | cluster | 1 KiB | 100 | 3 | 120 s | fixed-rate p99 at 100 partitions, acks=all, RF=3 |
+| `high-partition-fanout`   | cluster | 1 KiB | 100 | 3 | 120 s | 4 prod × 4 cons rebalance at 100 partitions, RF=3 |
+| `endurance`            | cluster | 1 KiB   | 24  | 1 | 1800 s | 30-min soak |
 
 Scenarios with `mode_tag: cluster` are auto-skipped when the cluster
 doesn't have 3 broker replicas; the driver writes `"notes":
@@ -101,16 +128,38 @@ doesn't have 3 broker replicas; the driver writes `"notes":
 
 ```
 bench/results/
-  crabka-small-msg-saturate-1broker-rf1.json
+  crabka-small-msg-saturate-1broker-rf1.json          # single run, no tag
   kafka-small-msg-saturate-1broker-rf1.json
+  crabka-high-partition-saturate-6broker-rf3-run01.json  # 10× averaged run
+  crabka-high-partition-saturate-6broker-rf3-run02.json
   ...
-  SUMMARY.md
+  SUMMARY.md       # human-readable means ± CV
+  results.csv      # one row per run (wide) — bars with error bars
+  timeseries.csv   # long format (run × time-offset × metric) — values over time
 ```
 
 Each `*.json` is one `RunOutput` (see `crates/bench-driver/src/scenario.rs`).
-The Markdown summary groups by scenario name and renders crabka-vs-kafka
-columns with a `ratio` column (higher-is-better for throughput,
-lower-is-better for latency/resource).
+Repeated runs of one cell carry a `-runNN` filename tag. The Markdown summary
+groups by `(scenario name, broker_count)`, **averages every metric across all
+runs in a cell**, and renders crabka-vs-kafka columns with a `ratio` column
+(higher-is-better for throughput, lower-is-better for latency/resource) plus a
+`(±N%)` coefficient-of-variation marker on multi-run cells.
+
+### Time-series (values over the test)
+
+Each `RunOutput` also carries two per-run time series, so you can graph values
+*during* a run instead of just end-of-run aggregates:
+
+- `samples[]` — client throughput (producer/consumer msgs/s) and **per-interval**
+  latency (producer-ack p50/p99, consumer-e2e p99) sampled every 2 s of the
+  measurement window. Tallied locally per task (no hot-path locks) and merged.
+- `broker_samples[]` — broker CPU (cores) and working-set memory over the whole
+  run window, pulled as a Prometheus **range** query at cell end (15 s step).
+
+`bench-report --timeseries-csv` flattens these into a tidy long CSV
+(`scenario,stack,broker_count,partitions,replication_factor,run_tag,t_offset_ms,metric,value`)
+— filter by `metric` and group by `(scenario, stack, run_tag)` to plot lines.
+`--csv` writes the per-run aggregate table.
 
 ## Honest gaps
 
@@ -153,8 +202,8 @@ showing.
 ## Files
 
 - `crates/bench-driver/` — Rust load driver + report aggregator.
-- `bench/manifests/strimzi/` — Strimzi Kafka CR (1- and 3-broker), KafkaTopic, JMX exporter ConfigMap.
-- `bench/manifests/crabka/` — Crabka Kafka + KafkaNodePool (1- and 3-broker), KafkaTopic.
+- `bench/manifests/strimzi/` — Strimzi Kafka CR (1-, 3-, and 6-broker), KafkaTopic, JMX exporter ConfigMap.
+- `bench/manifests/crabka/` — Crabka Kafka + KafkaNodePool (1-, 3-, and 6-broker), KafkaTopic.
 - `bench/manifests/prom/prometheus.yaml` — minimal in-cluster Prometheus with cAdvisor + broker `/metrics` scrapes.
 - `bench/manifests/driver/` — driver Job template + RBAC for the failover scenario.
 - `bench/scenarios/` — YAML scenario definitions.

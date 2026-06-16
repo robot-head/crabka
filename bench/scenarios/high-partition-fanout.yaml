@@ -1,0 +1,19 @@
+# Many partitions (100) + 4 producers × 4 consumers in one group, RF=3.
+# Stresses partition distribution and consumer-group rebalance at scale
+# while writes replicate across the 6-broker cluster. If Crabka's
+# consumer rebalance has bugs they tend to surface here as stalled msgs/s.
+name: high-partition-fanout
+mode_tag: cluster
+msg_size_bytes: 1024
+partitions: 100
+replication_factor: 3
+producers: 4
+consumers: 4
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 16384
+warmup_s: 15
+duration_s: 120

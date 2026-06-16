@@ -7,8 +7,9 @@
 //
 //   - `default-pool` (e2-standard-2 × 3) — system pods, both operators,
 //     Prometheus, and the driver Job;
-//   - `beefy-pool`   (e2-standard-4 × 3) — the 3 brokers, one per node (a
-//     broker requests 2-4 vCPU, so it gets a 4-vCPU node to itself).
+//   - `beefy-pool`   (e2-standard-4 × `broker_pool_node_count`, default 6) —
+//     one broker per node (a broker requests 2-4 vCPU, so it gets a 4-vCPU
+//     node to itself); default 6 sizes the `6broker-rf3` high-partition matrix.
 //
 // This mirrors the live `test-crabka-cluster` in `robot-head/us-central1-b`;
 // `tofu plan` against that cluster (after importing it into local state)
@@ -94,8 +95,9 @@ resource "google_container_node_pool" "default" {
 }
 
 # ── beefy-pool ───────────────────────────────────────────────────────────────
-// The 3 brokers, one per node. e2-standard-4 (4 vCPU) holds one broker
-// (2-4 vCPU request/limit) plus the node's system daemons.
+// One broker per node (the brokers anti-affinity one-per-node), so size this
+// to the largest topology you run: 6 for `6broker-rf3`. e2-standard-4 (4 vCPU)
+// holds one broker (2-4 vCPU request/limit) plus the node's system daemons.
 
 resource "google_container_node_pool" "beefy" {
   name       = "beefy-pool"

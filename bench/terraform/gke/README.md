@@ -16,15 +16,17 @@ A single-zone GKE **Standard** cluster sized to match the published run:
 
 | | |
 |---|---|
-| `beefy-pool` | `e2-standard-4` × 3 (4 vCPU / 16 GiB) — the 3 brokers, one per node |
+| `beefy-pool` | `e2-standard-4` × `broker_pool_node_count` (default 6, 4 vCPU / 16 GiB) — one broker per node; 6 sizes the `6broker-rf3` high-partition matrix |
 | `default-pool` | `e2-standard-2` × 3 (2 vCPU / 8 GiB) — system pods, both operators, Prometheus, the driver Job |
 | Image | `COS_CONTAINERD` — ships the `tls` kernel module Linux kTLS needs |
 | Storage | GCE PD CSI driver → the `premium-rwo` (pd-ssd) StorageClass the broker CRs request (200 GiB PVC per broker) |
 | Layout | a broker requests 2-4 vCPU, so it lands on a 4-vCPU `beefy-pool` node by itself; the lighter workloads pack onto `default-pool` |
 
-This mirrors the live `test-crabka-cluster` in `robot-head/us-central1-b` exactly:
+This mirrors the live `test-crabka-cluster` in `robot-head/us-central1-b`:
 `tofu plan` (or `terraform plan`) reports **no drift** after importing that
-cluster + its two node pools into local state. `premium-rwo` is a built-in GKE
+cluster + its two node pools into local state, provided `broker_pool_node_count`
+is set to the live `beefy-pool` size (the default is now 6 for the 6-broker
+matrix — set it to 3 to match a 3-node pool). `premium-rwo` is a built-in GKE
 StorageClass once the PD CSI driver is enabled (this module enables it), so
 there is nothing extra to apply for storage.
 

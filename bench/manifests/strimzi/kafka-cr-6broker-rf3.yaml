@@ -7,7 +7,7 @@ metadata:
   labels:
     strimzi.io/cluster: demo
 spec:
-  replicas: 3
+  replicas: 6
   roles:
     - controller
     - broker
@@ -41,8 +41,9 @@ spec:
                     operator: In
                     values:
                       - beefy-pool
-        # Spread the 3 Strimzi brokers across distinct nodes (parity with the
-        # crabka pool's anti-affinity) so the comparison is fair.
+        # Spread the 6 Strimzi brokers across distinct nodes (parity with the
+        # crabka pool's anti-affinity) so the comparison is fair. Requires a
+        # 6-node beefy-pool.
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
             - labelSelector:
