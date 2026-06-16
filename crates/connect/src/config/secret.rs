@@ -1,4 +1,5 @@
 use std::env;
+use std::error::Error;
 use std::fmt;
 
 use async_trait::async_trait;
@@ -56,6 +57,7 @@ pub struct ResolveOptions {
 
 /// Errors raised by a secret provider while resolving a reference.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SecretResolutionError {
     /// The reference names a provider this resolver does not support.
     #[error("unsupported secret reference provider `{provider}`")]
@@ -67,6 +69,14 @@ pub enum SecretResolutionError {
         name: String,
         #[source]
         source: env::VarError,
+    },
+
+    /// A provider-specific resolver failure.
+    #[error("secret provider failed: {message}")]
+    Provider {
+        message: String,
+        #[source]
+        source: Option<Box<dyn Error + Send + Sync>>,
     },
 }
 
@@ -180,5 +190,19 @@ mod tests {
             err,
             SecretResolutionError::UnsupportedReference { provider: "vault" }
         ));
+    }
+
+    #[test]
+    fn provider_error_carries_message_and_optional_source() {
+        let err = SecretResolutionError::Provider {
+            message: "vault token expired".into(),
+            source: Some(Box::new(env::VarError::NotPresent)),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "secret provider failed: vault token expired"
+        );
+        assert!(std::error::Error::source(&err).is_some());
     }
 }
