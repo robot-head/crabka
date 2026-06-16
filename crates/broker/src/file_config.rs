@@ -1481,6 +1481,28 @@ max_connections_per_ip = 8
     }
 
     #[test]
+    fn apply_to_reads_two_phase_commit_enable_from_server_properties() {
+        use crate::config::BrokerConfig;
+
+        // KIP-939: the `transaction.two.phase.commit.enable` server property
+        // flips the cluster 2PC gate on; absent / "false" leaves it off.
+        let on: FileConfig = toml::from_str(
+            "[server_properties]\n\"transaction.two.phase.commit.enable\" = \"true\"\n",
+        )
+        .unwrap();
+        let mut cfg = BrokerConfig::default();
+        assert!(!cfg.transaction_two_phase_commit_enable); // default
+        on.apply_to(&mut cfg).unwrap();
+        assert!(cfg.transaction_two_phase_commit_enable);
+
+        // Omitted → unchanged (stays at the default false).
+        let absent: FileConfig = toml::from_str("broker_id = 0").unwrap();
+        let mut cfg2 = BrokerConfig::default();
+        absent.apply_to(&mut cfg2).unwrap();
+        assert!(!cfg2.transaction_two_phase_commit_enable);
+    }
+
+    #[test]
     fn apply_to_resolves_multi_voter_quorum_in_order() {
         use crate::config::BrokerConfig;
 

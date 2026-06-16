@@ -893,7 +893,10 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A large feature PR's diff can generate dozens of mutants; with the cold
+    # workspace baseline build (~40 min) plus ~5 min/mutant, 90 min was not
+    # enough headroom. 180 min keeps the incremental gate viable for big PRs.
+    timeout-minutes: 180
     env:
       # Run nextest under the `ci` profile so the test-group serialization in
       # .config/nextest.toml applies (the fixed-port broker / schema-registry

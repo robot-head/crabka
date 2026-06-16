@@ -582,6 +582,8 @@ mod tests {
             AclOperation::DescribeConfigs,
             AclOperation::AlterConfigs,
             AclOperation::IdempotentWrite,
+            // KIP-939: TWO_PHASE_COMMIT (wire byte 15).
+            AclOperation::TwoPhaseCommit,
         ] {
             assert!(wire_to_operation(operation_to_wire(op)).unwrap() == op);
         }

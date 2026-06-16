@@ -354,6 +354,30 @@ mod tests {
     }
 
     #[test]
+    fn acl_entry_from_admin_maps_two_phase_commit() {
+        // KIP-939: the admin→metadata ACL conversion must carry TwoPhaseCommit
+        // through (it is the operation a 2PC grant on a TransactionalId uses).
+        let admin = crabka_client_admin::AclEntry {
+            resource_type: crabka_client_admin::ResourceType::TransactionalId,
+            resource_name: "my-txn".into(),
+            pattern_type: crabka_client_admin::PatternType::Literal,
+            principal: "User:flink".into(),
+            host: "*".into(),
+            operation: crabka_client_admin::AclOperation::TwoPhaseCommit,
+            permission_type: crabka_client_admin::PermissionType::Allow,
+        };
+        let meta = acl_entry_from_admin(admin);
+        assert_eq!(
+            meta.operation,
+            crabka_metadata::AclOperation::TwoPhaseCommit
+        );
+        assert_eq!(
+            meta.resource_type,
+            crabka_metadata::ResourceType::TransactionalId
+        );
+    }
+
+    #[test]
     fn register_is_write_on_topic_subject() {
         assert_eq!(
             t("POST", "/subjects/orders-value/versions"),

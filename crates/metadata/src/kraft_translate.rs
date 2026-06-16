@@ -1273,6 +1273,22 @@ mod tests {
     }
 
     #[test]
+    fn access_control_entry_two_phase_commit_round_trips() {
+        // KIP-939: TWO_PHASE_COMMIT (wire byte 15) must survive the
+        // record↔wire round-trip on a TransactionalId resource.
+        let rec = MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::TransactionalId,
+            resource_name: "my-txn".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:flink".into(),
+            host: "*".into(),
+            operation: AclOperation::TwoPhaseCommit,
+            permission_type: PermissionType::Allow,
+        });
+        round_trip(&rec, &img());
+    }
+
+    #[test]
     fn access_control_entry_prefixed_deny_round_trips() {
         let rec = MetadataRecord::V1AccessControlEntry(AclEntry {
             resource_type: ResourceType::DelegationToken,
