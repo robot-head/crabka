@@ -16,7 +16,7 @@ pub enum ConfigKind {
     Bool,
     Integer,
     Float,
-    DurationMs,
+    DurationMillis,
     StringList,
     Json,
     Secret,
@@ -31,7 +31,7 @@ impl ConfigKind {
             Self::Bool => "bool",
             Self::Integer => "integer",
             Self::Float => "float",
-            Self::DurationMs => "duration milliseconds",
+            Self::DurationMillis => "duration milliseconds",
             Self::StringList => "string list",
             Self::Json => "json value",
             Self::Secret => "secret reference",
@@ -40,6 +40,7 @@ impl ConfigKind {
 }
 
 /// One connector configuration field definition.
+#[non_exhaustive]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ConfigKey {
     pub name: String,
@@ -157,6 +158,7 @@ impl ConfigDef {
         options: ResolveOptions,
     ) -> ConfigResult<ResolvedConfig> {
         self.reject_unknown_keys(&raw)?;
+        self.validate_defaults(options)?;
 
         let mut resolved = ResolvedConfig::default();
         for key in self.keys.values() {
@@ -202,14 +204,34 @@ impl ConfigDef {
         }
         Ok(())
     }
+
+    fn validate_defaults(&self, options: ResolveOptions) -> ConfigResult<()> {
+        for key in self.keys.values() {
+            let Some(default) = &key.default else {
+                continue;
+            };
+            let result = if key.kind == ConfigKind::Secret {
+                validate_secret_default(default, options)
+            } else {
+                validate_kind(&key.name, key.kind, default).map_err(|err| err.to_string())
+            };
+            if let Err(err) = result {
+                return Err(ConfigError::InvalidDefault {
+                    key: key.name.clone(),
+                    reason: err,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_kind(key: &str, kind: ConfigKind, value: &Value) -> ConfigResult<()> {
     let valid = match kind {
         ConfigKind::String => value.is_string(),
         ConfigKind::Bool => value.is_boolean(),
-        ConfigKind::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
-        ConfigKind::DurationMs => value.as_u64().is_some(),
+        ConfigKind::Integer => value.as_i64().is_some(),
+        ConfigKind::DurationMillis => value.as_u64().is_some(),
         ConfigKind::Float => value.as_f64().is_some(),
         ConfigKind::StringList => value
             .as_array()
@@ -226,6 +248,19 @@ fn validate_kind(key: &str, kind: ConfigKind, value: &Value) -> ConfigResult<()>
             expected: kind.expected(),
         })
     }
+}
+
+fn validate_secret_default(value: &Value, options: ResolveOptions) -> Result<(), String> {
+    if value.is_string() {
+        if options.allow_literal_secrets {
+            return Ok(());
+        }
+        return Err("literal secret strings are disabled".into());
+    }
+
+    serde_json::from_value::<SecretRef>(value.clone())
+        .map(|_| ())
+        .map_err(|source| source.to_string())
 }
 
 async fn resolve_secret_value(
@@ -342,12 +377,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn defaults_are_validated_even_when_raw_value_is_supplied() {
+        let def = ConfigDef::new("demo").default("topics", ConfigKind::StringList, json!(["a", 7]));
+        let raw = raw([("topics", json!(["user"]))]);
+
+        let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
+
+        assert!(matches!(err, ConfigError::InvalidDefault { key, .. } if key == "topics"));
+    }
+
+    #[tokio::test]
+    async fn integer_kind_rejects_values_outside_i64_range() {
+        let def = ConfigDef::new("demo").required("limit", ConfigKind::Integer);
+        let raw = raw([("limit", json!(i64::MAX as u64 + 1))]);
+
+        let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
+
+        assert!(
+            matches!(err, ConfigError::WrongType { key, expected: "integer" } if key == "limit")
+        );
+    }
+
+    #[tokio::test]
     async fn typed_getters_return_resolved_values() {
         let def = ConfigDef::new("demo")
             .required("name", ConfigKind::String)
             .required("enabled", ConfigKind::Bool)
             .required("limit", ConfigKind::Integer)
-            .required("timeout_ms", ConfigKind::DurationMs)
+            .required("timeout_ms", ConfigKind::DurationMillis)
             .required("ratio", ConfigKind::Float)
             .required("topics", ConfigKind::StringList)
             .required("metadata", ConfigKind::Json)
