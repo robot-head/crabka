@@ -42,6 +42,7 @@ invented to pad a one-row-per-integer table.
 | KIP-74 | Fetch response size limit (`max_bytes` / `partition_max_bytes`) | fetch handler honors limits |
 | KIP-82 | Add record headers | README |
 | KIP-110 | Zstandard compression codec (message format v2 only) | `compression` |
+| KIP-219 | Improve quota communication (throttle-then-respond) | dispatch loop patches leading `ThrottleTimeMs` |
 | KIP-227 | Incremental fetch sessions | fetch-session cache + forget/merge model |
 | KIP-394 | Require `member.id` for initial JoinGroup | README |
 | KIP-464 | `CreateTopics` with broker-default partitions / replication factor | schema `CreateTopicsRequest` v4 |
@@ -216,7 +217,6 @@ invented to pad a one-row-per-integer table.
 
 | KIP / area | Done | What's left for full parity |
 |------------|------|-----------------------------|
-| **KIP-219** — throttle-then-respond quota comms | Byte-rate (Produce/Fetch) sets `throttle_time_ms` and mutes the channel for the delay; request-quota combined on the data plane | Uniform `throttle_time_ms` + mute coverage across *every* minor response path. README keeps it ⚠️ conservatively; core behavior is in place. |
 | **KIP-778** — KRaft-to-KRaft upgrades | `metadata.version` level model (7–25), runtime enforcement, bootstrap/format, operator ordered roll + MV bump | Full online **`metadata.version` downgrade** (lossy record-level downgrade) semantics, and JVM-validated mixed-version rolling up/down-grade orchestration. |
 | **KIP-939** — 2PC participation | `InitProducerId`/`InitProducerIdResponse` v6 (`keepPreparedTxn`) decoded byte-exactly | Coordinator-side 2PC semantics (prepared-txn retention, external transaction-manager flow). Currently wire-level only. |
 | **KIP-1071** — streams rebalance protocol | **Broker side fully done**: `StreamsGroupHeartbeat` / `StreamsGroupDescribe`, topology ingestion, internal repartition/changelog topic creation, active/standby/warmup assignment with changelog catch-up, `__consumer_offsets` persistence, `streams.version` gate. Rust client DSL/runtime/state-stores/joins/windows/suppress/IQv2/EOS are broad. | (a) `crabka-client-streams` is **not** a full JVM Kafka Streams library replacement; (b) **live classic↔streams group migration is not wired**. |
