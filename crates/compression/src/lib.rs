@@ -161,4 +161,12 @@ mod tests {
             Err(CompressionError::TooLarge { limit: 3 })
         ));
     }
+
+    #[test]
+    fn passthrough_none_decompress_at_exact_cap() {
+        // Boundary: input of exactly `max_output` bytes is allowed (the cap
+        // check is `len > max_output`, not `>=`).
+        let out = decompress(CompressionType::None, b"abcdef", 6).unwrap();
+        assert!(out.as_ref() == b"abcdef");
+    }
 }

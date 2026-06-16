@@ -52,6 +52,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - '.config/nextest.toml'
+              - '.cargo/mutants.toml'
               - '.github/workflows/ci.yml'
             jvm_differential:
               - 'crates/protocol/**'
@@ -879,6 +880,66 @@ jobs:
           flags: operator-integration
           fail_ci_if_error: false
 
+  # Incremental mutation testing (https://mutants.rs): generate mutants ONLY for
+  # the lines this PR changes (`--in-diff`) and check the suite kills them — a
+  # stronger signal than line coverage, since a surviving mutant means a changed
+  # line runs but nothing asserts on its behaviour. Mutating the whole 30-crate
+  # workspace would take hours, so we scope to the diff. PR-only: `--in-diff`
+  # needs a base branch to diff against, so this is skipped on push to main
+  # (skipped != failure, so the gatekeeper still passes). cargo-mutants tests
+  # only the mutated package by default, so a typical PR runs one or two crates'
+  # nextest suites. Runner, timeouts, and exclusions live in .cargo/mutants.toml.
+  mutants:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Run nextest under the `ci` profile so the test-group serialization in
+      # .config/nextest.toml applies (the fixed-port broker / schema-registry
+      # binaries must not run concurrently within a single mutant's test run).
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so we can diff the PR head against its base branch.
+          fetch-depth: 0
+      # Building every crate + rerunning the mutated crate's nextest suite per
+      # mutant fills the runner's ~14 GB free disk; reclaim the unused
+      # preinstalled SDKs like the other heavy Linux jobs do.
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mutants
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,nextest
+      - name: Compute PR diff
+        # `base...HEAD` (three-dot) diffs from the merge base, so only this PR's
+        # own changes feed `--in-diff`. fetch-depth: 0 above makes the base
+        # branch's history available locally.
+        run: |
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          git diff "origin/${{ github.base_ref }}...HEAD" | tee git.diff
+      - name: Mutants
+        # --no-shuffle gives deterministic ordering (stable logs across reruns);
+        # -vV surfaces per-mutant build/test output. test_tool=nextest plus the
+        # timeouts and exclusions come from .cargo/mutants.toml.
+        run: cargo mutants --no-shuffle -vV --in-diff git.diff
+      - name: Archive mutants.out
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-incremental.out
+          path: mutants.out
+
   gatekeeper-ci:
     needs:
       - changes
@@ -896,6 +957,7 @@ jobs:
       - broker-jvm-acceptance
       - broker-integration
       - operator-integration
+      - mutants
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 1

@@ -25,6 +25,21 @@ cargo test --workspace
 cargo test --workspace -- --include-ignored
 ```
 
+## Mutation testing
+
+CI runs [cargo-mutants](https://mutants.rs) on each pull request, but only on the
+lines the PR changes (`--in-diff`). A surviving mutant means a changed line runs
+but no test asserts on its behaviour — a stronger signal than line coverage, and
+a surviving mutant fails the build. Reproduce a run locally with:
+
+```bash
+cargo install cargo-mutants
+git diff origin/main...HEAD | tee git.diff
+cargo mutants --in-diff git.diff
+```
+
+Settings (nextest runner, timeouts, excluded paths) live in `.cargo/mutants.toml`.
+
 ## Regenerate code after editing schemas
 
 ```bash

@@ -80,4 +80,18 @@ mod tests {
         let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.len() == bomb.len());
     }
+
+    #[test]
+    fn decompress_at_exact_cap_succeeds() {
+        let z = compress(HELLO).unwrap();
+        // Output of exactly `max_output` bytes is allowed (cap check is
+        // `len > max_output`, not `>=`).
+        let back = decompress(&z, HELLO.len()).unwrap();
+        assert!(back.as_ref() == HELLO);
+        // One byte under the exact size is rejected.
+        assert!(matches!(
+            decompress(&z, HELLO.len() - 1),
+            Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
+        ));
+    }
 }
