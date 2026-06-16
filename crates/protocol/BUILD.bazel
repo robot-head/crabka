@@ -1,23 +1,14 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
 
-# build.rs only *validates* that the checked-in `generated/` sources match the
-# `schemas/` SHAs — it emits no code. It still needs the schema + generated trees
-# on disk (it reads them via env!("CARGO_MANIFEST_DIR")).
-cargo_build_script(
-    name = "build_script",
-    srcs = ["build.rs"],
-    data = glob([
-        "schemas/**",
-        "generated/**",
-    ]),
-    edition = "2024",
-    visibility = ["//visibility:private"],
-)
+# NOTE: protocol's build.rs is intentionally NOT run under Bazel. It only
+# *validates* that the checked-in `generated/` sources match the `schemas/`
+# SHAs (a dev/CI guard) and emits no code, so it is dead weight here — the
+# generated wire codecs are consumed directly as `compile_data` below. SHA
+# drift is still caught by the Cargo build and CI.
 
 rust_library(
     name = "protocol",
@@ -40,16 +31,20 @@ rust_library(
     ],
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    # NOTE: the `include!(env!("CARGO_MANIFEST_DIR"))` pattern above needs an
-    # absolute manifest dir under the Bazel sandbox; verify on first build with
-    # network access and, if rustc can't find the generated files, switch those
-    # includes to sandbox-relative paths or feed them through a genrule.
+    # The generated sources are pulled in via
+    # `include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/..."))`, which
+    # needs an *absolute* manifest dir (a relative one resolves against each
+    # including file's directory and doubles the path). rules_rust's
+    # process_wrapper substitutes `${pwd}` with the absolute exec root at action
+    # time, so this points CARGO_MANIFEST_DIR at the in-sandbox package dir where
+    # `compile_data` stages generated/ and schemas/.
+    # `$$` escapes Bazel's Make-variable pass so the literal `${pwd}` reaches
+    # the process_wrapper, which substitutes the absolute exec root.
     rustc_env = {
-        "CARGO_MANIFEST_DIR": "crates/protocol",
+        "CARGO_MANIFEST_DIR": "$${pwd}/crates/protocol",
     },
     visibility = ["//visibility:public"],
     deps = all_crate_deps(normal = True) + [
-        ":build_script",
         "//crates/compression",
     ],
 )
