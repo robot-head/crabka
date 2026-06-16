@@ -334,6 +334,27 @@ pub struct BrokerConfig {
     /// ISR. Matches Kafka's `auto.leader.rebalance.enable`.
     pub auto_leader_rebalance_enable: bool,
 
+    /// KIP-939: cluster-wide gate for two-phase-commit (2PC) participation.
+    /// When `false` (the default, matching Kafka's
+    /// `transaction.two.phase.commit.enable`), an `InitProducerId` carrying
+    /// `enable2Pc=true` is rejected with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED`
+    /// regardless of ACLs. When `true`, a producer additionally holding the
+    /// `TWO_PHASE_COMMIT` ACL on its transactional id may open a transaction
+    /// that the coordinator never auto-aborts on timeout (the external
+    /// transaction manager owns the commit/abort decision). Settable via
+    /// `[server_properties] "transaction.two.phase.commit.enable"`.
+    pub transaction_two_phase_commit_enable: bool,
+
+    /// KIP-98 / KIP-939: how often the idle-transaction reaper scans for
+    /// `Ongoing` transactions whose timeout has elapsed and aborts them (2PC
+    /// transactions are never reaped). Mirrors Kafka's
+    /// `transaction.abort.timed.out.transaction.cleanup.interval.ms` (10s).
+    /// `Duration::ZERO` disables the reaper entirely (no background task
+    /// spawned) — the default in `for_tests` so unit/integration tests aren't
+    /// disturbed by a background abort; tests that exercise the reaper set it
+    /// explicitly low.
+    pub txn_abort_cleanup_interval: std::time::Duration,
+
     /// KIP-848 next-gen consumer group protocol configuration. Controls
     /// which rebalance protocols are advertised, session/heartbeat
     /// timeout bounds, and the set of enabled server-side assignors.
@@ -636,6 +657,9 @@ impl BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
+            transaction_two_phase_commit_enable: false, // tests opt in explicitly
+            // Reaper disabled in tests; suites that exercise it set it low.
+            txn_abort_cleanup_interval: std::time::Duration::ZERO,
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),
@@ -902,6 +926,11 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
+            // KIP-939: 2PC participation is opt-in, matching Kafka's default.
+            transaction_two_phase_commit_enable: false,
+            // KIP-98/KIP-939 idle-transaction reaper cadence (Kafka's
+            // `transaction.abort.timed.out.transaction.cleanup.interval.ms`).
+            txn_abort_cleanup_interval: std::time::Duration::from_secs(10),
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),

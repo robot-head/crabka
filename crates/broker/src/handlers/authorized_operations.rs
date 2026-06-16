@@ -22,7 +22,7 @@
 //! | Group            | Read, Describe, Delete                                            |
 //! | Cluster          | Create, Alter, Describe, ClusterAction, AlterConfigs,             |
 //! |                  | DescribeConfigs, IdempotentWrite                                  |
-//! | TransactionalId  | Describe, Write                                                   |
+//! | TransactionalId  | Describe, Write, TwoPhaseCommit                                    |
 //! | DelegationToken  | Describe                                                          |
 
 use std::net::SocketAddr;
@@ -63,7 +63,13 @@ pub fn supported_operations(resource_type: ResourceType) -> &'static [AclOperati
             AclOperation::DescribeConfigs,
             AclOperation::IdempotentWrite,
         ],
-        ResourceType::TransactionalId => &[AclOperation::Describe, AclOperation::Write],
+        ResourceType::TransactionalId => &[
+            AclOperation::Describe,
+            AclOperation::Write,
+            // KIP-939: 2PC participation is a grantable TransactionalId
+            // permission, so it surfaces in the authorized-operations bitfield.
+            AclOperation::TwoPhaseCommit,
+        ],
         ResourceType::DelegationToken => &[AclOperation::Describe],
     }
 }

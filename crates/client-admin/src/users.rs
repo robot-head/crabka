@@ -69,6 +69,8 @@ pub enum AclOperation {
     DescribeConfigs,
     AlterConfigs,
     IdempotentWrite,
+    /// KIP-939: 2PC participation permission on a `TransactionalId`.
+    TwoPhaseCommit,
 }
 
 /// A concrete (non-filter) ACL entry — every field populated. Matches
@@ -499,6 +501,7 @@ fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::DescribeConfigs => 10,
         AclOperation::AlterConfigs => 11,
         AclOperation::IdempotentWrite => 12,
+        AclOperation::TwoPhaseCommit => 15,
     }
 }
 
@@ -515,6 +518,7 @@ fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
         10 => Ok(AclOperation::DescribeConfigs),
         11 => Ok(AclOperation::AlterConfigs),
         12 => Ok(AclOperation::IdempotentWrite),
+        15 => Ok(AclOperation::TwoPhaseCommit),
         _ => Err(AdminError::Protocol(format!(
             "unknown ACL operation discriminant: {b}",
         ))),
@@ -578,6 +582,8 @@ mod tests {
             AclOperation::DescribeConfigs,
             AclOperation::AlterConfigs,
             AclOperation::IdempotentWrite,
+            // KIP-939: TWO_PHASE_COMMIT (wire byte 15).
+            AclOperation::TwoPhaseCommit,
         ] {
             assert!(wire_to_operation(operation_to_wire(op)).unwrap() == op);
         }

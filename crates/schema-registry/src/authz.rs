@@ -264,6 +264,7 @@ fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::Ac
         AO::DescribeConfigs => MAO::DescribeConfigs,
         AO::AlterConfigs => MAO::AlterConfigs,
         AO::IdempotentWrite => MAO::IdempotentWrite,
+        AO::TwoPhaseCommit => MAO::TwoPhaseCommit,
     };
     let permission_type = match e.permission_type {
         Perm::Allow => MPerm::Allow,
@@ -350,6 +351,30 @@ mod tests {
         ] {
             assert_eq!(t(m, p), None, "{m} {p} should have no authz target");
         }
+    }
+
+    #[test]
+    fn acl_entry_from_admin_maps_two_phase_commit() {
+        // KIP-939: the admin→metadata ACL conversion must carry TwoPhaseCommit
+        // through (it is the operation a 2PC grant on a TransactionalId uses).
+        let admin = crabka_client_admin::AclEntry {
+            resource_type: crabka_client_admin::ResourceType::TransactionalId,
+            resource_name: "my-txn".into(),
+            pattern_type: crabka_client_admin::PatternType::Literal,
+            principal: "User:flink".into(),
+            host: "*".into(),
+            operation: crabka_client_admin::AclOperation::TwoPhaseCommit,
+            permission_type: crabka_client_admin::PermissionType::Allow,
+        };
+        let meta = acl_entry_from_admin(admin);
+        assert_eq!(
+            meta.operation,
+            crabka_metadata::AclOperation::TwoPhaseCommit
+        );
+        assert_eq!(
+            meta.resource_type,
+            crabka_metadata::ResourceType::TransactionalId
+        );
     }
 
     #[test]

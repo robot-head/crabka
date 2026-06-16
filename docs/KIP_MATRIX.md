@@ -218,7 +218,7 @@ invented to pad a one-row-per-integer table.
 | KIP / area | Done | What's left for full parity |
 |------------|------|-----------------------------|
 | **KIP-778** — KRaft-to-KRaft upgrades | `metadata.version` level model (7–25), runtime enforcement, bootstrap/format, operator ordered roll + MV bump | Full online **`metadata.version` downgrade** (lossy record-level downgrade) semantics, and JVM-validated mixed-version rolling up/down-grade orchestration. |
-| **KIP-939** — 2PC participation | `InitProducerId`/`InitProducerIdResponse` v6 (`keepPreparedTxn`) decoded byte-exactly | Coordinator-side 2PC semantics (prepared-txn retention, external transaction-manager flow). Currently wire-level only. |
+| **KIP-939** — 2PC participation | `InitProducerId` v6 `enable2Pc` fully wired: cluster gate (`transaction.two.phase.commit.enable`) + `TWO_PHASE_COMMIT` ACL, 2PC transactions persisted with the no-timeout sentinel and **never** auto-aborted by the idle-transaction reaper (the reaper itself is new; KIP-98 timeout). `keepPreparedTxn` returns `UNSUPPORTED_VERSION` (matches Kafka, where it is still unstable). Safety proven by an exhaustive `stateright` model (`txn::two_pc_model`). | Prepared-txn **retention/recovery** flow (`keepPreparedTxn` → `OngoingTxnProducerId/Epoch`) once Kafka stabilises it; remote-led abort-marker fan-out from the reaper. |
 | **KIP-1071** — streams rebalance protocol | **Broker side fully done**: `StreamsGroupHeartbeat` / `StreamsGroupDescribe`, topology ingestion, internal repartition/changelog topic creation, active/standby/warmup assignment with changelog catch-up, `__consumer_offsets` persistence, `streams.version` gate. Rust client DSL/runtime/state-stores/joins/windows/suppress/IQv2/EOS are broad. | (a) `crabka-client-streams` is **not** a full JVM Kafka Streams library replacement; (b) **live classic↔streams group migration is not wired**. |
 | **KIP-405** — tiered storage *segment-data* interop | `__remote_log_metadata` records byte-exact with JVM `RemoteLogMetadataSerde`; copy/read/retention; RLMM snapshots | Shared `RemoteStorageManager` object layout + **producer-snapshot upload** not yet validated against JVM `LocalTieredStorageManager`, so segment-level mixing in a mixed JVM+Crabka cluster is not claimed. |
 | Operator — Ingress / Route listeners | Internal / NodePort / LoadBalancer listeners done | Ingress / Route external-listener types only partially wired. |
@@ -253,8 +253,8 @@ invented to pad a one-row-per-integer table.
 Several KIPs in §1 are present as **byte-exact codec support** in
 `crates/protocol/schemas/*.json` — every request/response version negotiates and
 round-trips against the JVM — even where the broker *handler* semantics lag the
-wire. Notable cases where schema support is ahead of full behavior: **KIP-939**
-(2PC) and parts of the tiered `ListOffsets` variants (KIP-1005 / 1023 / 1075).
+wire. Notable cases where schema support is ahead of full behavior: parts of
+the tiered `ListOffsets` variants (KIP-1005 / 1023 / 1075).
 Those are flagged in §2/§3 rather than claimed as full feature parity on the
 strength of schema presence alone.
 

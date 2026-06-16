@@ -201,6 +201,7 @@ fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::DescribeConfigs => 10,
         AclOperation::AlterConfigs => 11,
         AclOperation::IdempotentWrite => 12,
+        AclOperation::TwoPhaseCommit => 15,
     }
 }
 
@@ -217,6 +218,7 @@ fn operation_from_wire(b: i8) -> Result<AclOperation, TranslateError> {
         10 => Ok(AclOperation::DescribeConfigs),
         11 => Ok(AclOperation::AlterConfigs),
         12 => Ok(AclOperation::IdempotentWrite),
+        15 => Ok(AclOperation::TwoPhaseCommit),
         other => Err(TranslateError::Invalid {
             field: "acl operation",
             detail: format!("unknown wire byte {other}"),
@@ -1265,6 +1267,22 @@ mod tests {
             principal: "User:alice".into(),
             host: "*".into(),
             operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        });
+        round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn access_control_entry_two_phase_commit_round_trips() {
+        // KIP-939: TWO_PHASE_COMMIT (wire byte 15) must survive the
+        // record↔wire round-trip on a TransactionalId resource.
+        let rec = MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::TransactionalId,
+            resource_name: "my-txn".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:flink".into(),
+            host: "*".into(),
+            operation: AclOperation::TwoPhaseCommit,
             permission_type: PermissionType::Allow,
         });
         round_trip(&rec, &img());

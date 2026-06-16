@@ -45,6 +45,10 @@ pub enum AclOperation {
     DescribeConfigs,
     AlterConfigs,
     IdempotentWrite,
+    /// KIP-939: permission to participate in two-phase commit (2PC) on a
+    /// `TransactionalId`. Required (in addition to `Write`) for an
+    /// `InitProducerId` carrying `enable2Pc=true`. Kafka wire discriminant 15.
+    TwoPhaseCommit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

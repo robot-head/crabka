@@ -271,6 +271,7 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
                     "DescribeConfigs" => AclOperation::DescribeConfigs,
                     "AlterConfigs" => AclOperation::AlterConfigs,
                     "IdempotentWrite" => AclOperation::IdempotentWrite,
+                    "TwoPhaseCommit" => AclOperation::TwoPhaseCommit,
                     other => return Err(format!("unknown operation: {other}")),
                 });
             }
@@ -872,6 +873,7 @@ mod tests {
             ("DescribeConfigs", AclOperation::DescribeConfigs),
             ("AlterConfigs", AclOperation::AlterConfigs),
             ("IdempotentWrite", AclOperation::IdempotentWrite),
+            ("TwoPhaseCommit", AclOperation::TwoPhaseCommit),
         ] {
             let spec =
                 format!("principal=User:u,host=*,operation={s},permission=Allow,resource=Topic:t");

@@ -29,6 +29,11 @@ exclude_globs = [
     "crates/grpc-gateway/src/bin/**",
     "crates/schema-registry/src/bin/**",
     "crates/operator/src/run.rs",
+    # KIP-939 idle-transaction reaper background task: a `tokio::interval` run
+    # loop + `current_image`/leader-refresh orchestration. Pure serve-loop glue
+    # (same rationale as `operator/src/run.rs`); its decision core lives in
+    # `txn/two_pc.rs` and is mutation-tested + model-checked there.
+    "crates/broker/src/txn/expiration.rs",
     "crates/*/tests/**",
     "crates/*/benches/**",
 ]
@@ -52,6 +57,21 @@ exclude_re = [
     # extraction needs a running controller quorum (no unit-testable signal),
     # same rationale as the serve-loop/entrypoint globs above.
     "raft/src/server\\.rs.*describe_cluster_response_body",
+    # KIP-939 idle-transaction reaper: aborting a timed-out transaction is
+    # coordinator engine-IO (it needs a live `__transaction_state` partition,
+    # the producer-id allocator, and marker fan-out to partition leaders), so it
+    # is only exercised by the in-process broker integration suites, not by unit
+    # tests — same rationale as `describe_cluster_response_body`. The reaper's
+    # *decision* (`should_abort_idle_txn`, which skips 2PC) is fully
+    # mutation-tested in `txn/two_pc.rs` and exhaustively model-checked in
+    # `txn::two_pc_model`.
+    "broker/src/txn/coordinator\\.rs.*(sweep_expired|dispatch_local_abort_markers)",
+    # `Broker::start_with_listeners` is the broker startup serve-loop: ~1.5k
+    # lines of task-spawn / listener-bind / supervision wiring with no
+    # unit-testable signal (exercised end-to-end by every in-process broker
+    # test). The KIP-939 reaper spawn-guard lives here; like the other
+    # serve-loop entrypoints above, mutate the spawned code, not the wiring.
+    "broker/src/broker\\.rs.*start_with_listeners",
     # crabka-kraft-core's `sim` module is `#[cfg(feature = "sim")]` and that
     # feature is OFF in the crate's default build. cargo-mutants tests a mutant
     # in crabka-kraft-core against the crate's own default features, so the whole
@@ -63,4 +83,10 @@ exclude_re = [
     # `crabka_playground::Playground::*` wrappers are mutation-tested (and caught)
     # because that crate always enables `sim`.
     "kraft-core/src/sim\\.rs",
+    # `AddPartitionsToTxn`'s start-timestamp stamp (`txnStartTimestamp` on the
+    # edge into Ongoing) is reaper-supporting bookkeeping: its only observable
+    # effect is *when* the (excluded) idle-transaction reaper measures the
+    # timeout from, so no unit test can kill a mutation of it. The function's
+    # actual add-partition logic is covered by the broker txn integration suite.
+    "add_partitions_to_txn\\.rs.*process_one_txn",
 ]

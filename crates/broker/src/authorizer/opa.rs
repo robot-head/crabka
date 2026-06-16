@@ -303,6 +303,7 @@ fn operation_str(op: AclOperation) -> &'static str {
         AclOperation::DescribeConfigs => "DescribeConfigs",
         AclOperation::AlterConfigs => "AlterConfigs",
         AclOperation::IdempotentWrite => "IdempotentWrite",
+        AclOperation::TwoPhaseCommit => "TwoPhaseCommit",
     }
 }
 
@@ -338,6 +339,16 @@ mod tests {
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
+    }
+
+    /// The OPA input's `operation` string must be the Strimzi-compatible name,
+    /// including KIP-939's `TwoPhaseCommit`. Pins the mapping so a regression
+    /// (or a blanket mutation of `operation_str`) is caught.
+    #[test]
+    fn operation_str_maps_kafka_names() {
+        assert!(operation_str(AclOperation::Read) == "Read");
+        assert!(operation_str(AclOperation::Write) == "Write");
+        assert!(operation_str(AclOperation::TwoPhaseCommit) == "TwoPhaseCommit");
     }
 
     fn host() -> SocketAddr {

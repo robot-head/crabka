@@ -707,7 +707,16 @@ impl FileConfig {
         {
             cfg.max_connections_per_ip = max;
         }
-        // `[server_properties]` is intentionally ignored.
+        // `[server_properties]` is intentionally ignored, except for the
+        // handful of recognized Kafka broker properties below.
+        // KIP-939: `transaction.two.phase.commit.enable` (default false).
+        if cfg.transaction_two_phase_commit_enable == defaults.transaction_two_phase_commit_enable
+            && let Some(v) = self
+                .server_properties
+                .get("transaction.two.phase.commit.enable")
+        {
+            cfg.transaction_two_phase_commit_enable = v.trim().eq_ignore_ascii_case("true");
+        }
         if let Some(proto) = self.controller_listener_protocol
             && cfg.controller_listener_protocol == defaults.controller_listener_protocol
         {
@@ -1469,6 +1478,28 @@ max_connections_per_ip = 8
         // Omitted → unchanged from the (unlimited) BrokerConfig default.
         assert!(cfg.max_connections == usize::MAX);
         assert!(cfg.max_connections_per_ip == usize::MAX);
+    }
+
+    #[test]
+    fn apply_to_reads_two_phase_commit_enable_from_server_properties() {
+        use crate::config::BrokerConfig;
+
+        // KIP-939: the `transaction.two.phase.commit.enable` server property
+        // flips the cluster 2PC gate on; absent / "false" leaves it off.
+        let on: FileConfig = toml::from_str(
+            "[server_properties]\n\"transaction.two.phase.commit.enable\" = \"true\"\n",
+        )
+        .unwrap();
+        let mut cfg = BrokerConfig::default();
+        assert!(!cfg.transaction_two_phase_commit_enable); // default
+        on.apply_to(&mut cfg).unwrap();
+        assert!(cfg.transaction_two_phase_commit_enable);
+
+        // Omitted → unchanged (stays at the default false).
+        let absent: FileConfig = toml::from_str("broker_id = 0").unwrap();
+        let mut cfg2 = BrokerConfig::default();
+        absent.apply_to(&mut cfg2).unwrap();
+        assert!(!cfg2.transaction_two_phase_commit_enable);
     }
 
     #[test]
