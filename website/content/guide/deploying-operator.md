@@ -62,7 +62,8 @@ cluster.
 
 ## Deploying
 
-This guide walks you through deploying the Crabka Kubernetes Operator to a Kubernetes cluster and deploying a Kafka-compatible broker cluster.
+This guide walks you through deploying the Crabka Kubernetes Operator to a
+Kubernetes cluster and then creating a Kafka-compatible broker cluster.
 
 ## Prerequisites
 
@@ -82,7 +83,8 @@ kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/promethe
 
 ## 2. Install Crabka Custom Resource Definitions (CRDs)
 
-The operator manages Crabka clusters through Custom Resources. Apply the CRDs from the `deploy/crds` directory:
+The operator manages Crabka clusters through Custom Resources. Apply the CRDs
+from the `deploy/crds` directory:
 
 ```bash
 kubectl apply -f deploy/crds/
@@ -93,7 +95,7 @@ This registers the following CRDs in your cluster:
 - `KafkaNodePool` (nodes/storage/resource pools)
 - `KafkaTopic` (topic management)
 - `KafkaUser` (SASL/mTLS user credentials)
-- `KafkaRebalance` ( Cruise-Control-like partition rebalancing)
+- `KafkaRebalance` (Cruise-Control-like partition rebalancing)
 - `SchemaRegistry` (Schema Registry service)
 - `KafkaGrpcGateway` (gRPC / Connect-RPC gateway)
 
@@ -131,7 +133,8 @@ If your operator or broker container images are hosted in a private registry (su
 
 ## 4. Run a Kafka-compatible Broker
 
-Once the operator is running, deploy a single-broker cluster by applying a `Kafka` resource and a corresponding `KafkaNodePool` resource:
+Once the operator is running, deploy a single-broker cluster by applying a
+`Kafka` resource and a corresponding `KafkaNodePool` resource:
 
 ```yaml
 # kafka-cluster.yaml

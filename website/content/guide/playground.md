@@ -50,7 +50,7 @@ The seam that makes this possible already existed in the engine: the consensus
 state machine is a pure, sans-IO `on_event(event, log, now) -> [Action]`
 function — it never reads the clock, opens a socket, or writes to disk. The same
 deterministic multi-node simulator the integration tests and the
-[generated failure diagrams](/reference/concepts/failure-scenarios/) use is what
+[generated failure diagrams](../../reference/concepts/failure-scenarios/) use is what
 this page drives, only here *you* supply the events.
 
 To reach the browser, that core was lifted out of the async engine into a
@@ -65,4 +65,4 @@ production.
 
 For the same partition, reordering, and duplication scenarios rendered as
 curated, generated sequence diagrams, see the
-[failure-scenario reference](/reference/concepts/failure-scenarios/).
+[failure-scenario reference](../../reference/concepts/failure-scenarios/).

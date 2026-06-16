@@ -181,8 +181,7 @@ pub struct FileRemoteStorageConfig {
     /// Native Google Cloud Storage backend parameters. Omit to use
     /// `storage_dir` or `[remote_storage.s3]`.
     pub gcs: Option<FileRemoteStorageGcsConfig>,
-    /// Opt-in to the topic-backed
-    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
+    /// Opt-in to the topic-backed `RemoteLogMetadataManager`.
     /// When absent, the broker uses the in-memory fixture.
     pub kafka_metadata: Option<FileKafkaRlmmConfig>,
 }

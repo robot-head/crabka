@@ -57,9 +57,10 @@ spec:
   schemasTopicReplicationFactor: 3
 ```
 
-The operator creates a Deployment + a ClusterIP Service
-(`sr-sr.<ns>.svc.cluster.local:8081`) + a headless Service for write
-forwarding. See the [SchemaRegistry CRD reference](/reference/operator/schemaregistry/).
+The operator creates a Deployment, a ClusterIP Service
+(`sr-sr.<ns>.svc.cluster.local:8081`), and a headless Service for write
+forwarding. The generated [SchemaRegistry CRD reference](../../reference/operator/schemaregistry/)
+lists every field.
 
 ## Standalone (Helm, external broker)
 
