@@ -275,4 +275,59 @@ mod tests {
         // No structural representation of headers in v0/v1.
         assert!(recs.len() == 3);
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+    //
+    // The round-trips above unwrap compression transparently and never assert
+    // the v2 batch's sentinel/offset fields, so they pass through a flat-vs-
+    // compressed swap and through sentinel/arithmetic flips. These pin them.
+
+    #[test]
+    fn down_convert_gzip_emits_compressed_wrapper() {
+        // A gzip v2 batch must down-convert to a COMPRESSED wrapper, not a flat
+        // (uncompressed) set: deleting the Gzip|Snappy|Lz4 arm would fall
+        // through to the flat encoder, which still round-trips but is wrong.
+        use bytes::Buf;
+        let bytes = v2_to_legacy(&v2_batch(CompressionType::Gzip), Magic::V1).unwrap();
+        let mut cur: &[u8] = &bytes;
+        let _offset = cur.get_i64();
+        let size = cur.get_i32() as usize;
+        let msg = crate::message::Message::decode_from(&mut cur, size).unwrap();
+        assert!(msg.compression() == CompressionType::Gzip);
+    }
+
+    #[test]
+    fn up_convert_empty_set_returns_sentinels() {
+        let rb = legacy_to_v2(&[]).unwrap();
+        assert!(rb.records.is_empty());
+        assert!(rb.base_offset == 0);
+        assert!(rb.partition_leader_epoch == -1);
+        assert!(rb.producer_id == -1);
+        assert!(rb.producer_epoch == -1);
+        assert!(rb.base_sequence == -1);
+    }
+
+    #[test]
+    fn up_convert_v0_timestamps_default_to_minus_one() {
+        // v0 carries no timestamps, so base/max timestamp fall back to -1.
+        let v2 = v2_batch(CompressionType::None);
+        let legacy_bytes = v2_to_legacy(&v2, Magic::V0).unwrap();
+        let round = legacy_to_v2(&legacy_bytes).unwrap();
+        assert!(round.base_timestamp == -1);
+        assert!(round.max_timestamp == -1);
+    }
+
+    #[test]
+    fn up_convert_sets_offsets_and_sentinels() {
+        // Offsets 1000..=1002 -> last_offset_delta = 1002 - 1000 = 2, and the
+        // producer/leader-epoch sentinels are -1.
+        let v2 = v2_batch(CompressionType::None);
+        let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
+        let round = legacy_to_v2(&legacy_bytes).unwrap();
+        assert!(round.last_offset_delta == 2);
+        assert!(round.partition_leader_epoch == -1);
+        assert!(round.producer_id == -1);
+        assert!(round.producer_epoch == -1);
+        assert!(round.base_sequence == -1);
+    }
 }

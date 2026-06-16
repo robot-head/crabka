@@ -344,4 +344,170 @@ mod tests {
             assert!(compression_from_attrs(bits).unwrap() == c);
         }
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+    //
+    // The round-trip tests above pass through any arithmetic flip that cancels
+    // between encode and decode, and never exercise the malformed/boundary
+    // paths. The tests below pin exact bit layouts, the timestamp sentinel, and
+    // the precise `needed` byte counts / error variants on truncated input.
+    //
+    // A few mutants here are genuinely equivalent and intentionally left alone:
+    //   - `attrs_with_compression` line `(byte & !MASK) | code`: `| -> ^` is a
+    //     no-op because the two operands are bit-disjoint.
+    //   - `encoded_len() - 4` in `encode_into` only sizes a `Vec::with_capacity`
+    //     hint; the output bytes are identical regardless.
+
+    #[test]
+    fn attribute_bit_constants() {
+        // `1 << 3`; a `>>` flip would zero the timestamp-type bit.
+        assert!(attrs::TIMESTAMP_TYPE_BIT == 0b0000_1000);
+        assert!(attrs::COMPRESSION_MASK == 0b0000_0111);
+    }
+
+    #[test]
+    fn attrs_with_compression_exact_codes() {
+        assert!(attrs_with_compression(0, CompressionType::None) == 0);
+        assert!(attrs_with_compression(0, CompressionType::Gzip) == 1);
+        assert!(attrs_with_compression(0, CompressionType::Snappy) == 2);
+        assert!(attrs_with_compression(0, CompressionType::Lz4) == 3);
+    }
+
+    #[test]
+    fn attrs_with_compression_replaces_low_bits_keeps_high() {
+        // Overwriting an existing codec replaces (not ORs) the low 3 bits.
+        assert!(attrs_with_compression(3 /* lz4 */, CompressionType::Gzip) == 1);
+        // The timestamp-type bit (bit 3) is preserved across the rewrite.
+        let ts = attrs::TIMESTAMP_TYPE_BIT;
+        assert!(attrs_with_compression(ts, CompressionType::Gzip) == ts | 1);
+        assert!(attrs_with_compression(ts, CompressionType::None) == ts);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot carry zstd")]
+    fn attrs_with_compression_panics_on_zstd() {
+        let _ = attrs_with_compression(0, CompressionType::Zstd);
+    }
+
+    #[test]
+    fn v1_missing_timestamp_encodes_minus_one() {
+        let m = Message {
+            magic: Magic::V1,
+            attributes: 0,
+            timestamp: None,
+            key: None,
+            value: None,
+        };
+        let mut buf = BytesMut::new();
+        m.encode_into(&mut buf);
+        let mut cur: &[u8] = &buf[..];
+        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
+        assert!(decoded.timestamp == Some(-1));
+    }
+
+    #[test]
+    fn empty_key_is_some_not_null() {
+        // len == 0 is an empty (non-null) field; only len == -1 is null.
+        let m = Message {
+            magic: Magic::V0,
+            attributes: 0,
+            timestamp: None,
+            key: Some(Bytes::new()),
+            value: Some(Bytes::from_static(b"v")),
+        };
+        let mut buf = BytesMut::new();
+        m.encode_into(&mut buf);
+        let mut cur: &[u8] = &buf[..];
+        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
+        assert!(decoded.key == Some(Bytes::new()));
+        assert!(decoded.value == Some(Bytes::from_static(b"v")));
+    }
+
+    // Build a frame: crc(4) | magic | attrs | trailing, with a valid CRC.
+    fn frame_with_body(magic: u8, attrs: u8, trailing: &[u8]) -> Vec<u8> {
+        let mut body = vec![magic, attrs];
+        body.extend_from_slice(trailing);
+        let crc = crc32fast::hash(&body);
+        let mut frame = crc.to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
+    }
+
+    #[test]
+    fn decode_buffer_shorter_than_frame_reports_needed() {
+        // 4 bytes available, frame claims 10: needed = 10 - 4 = 6.
+        let data = [0u8; 4];
+        let mut cur: &[u8] = &data;
+        let err = Message::decode_from(&mut cur, 10).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 6 }));
+    }
+
+    #[test]
+    fn decode_rejects_frame_below_minimum() {
+        // frame_size 5 (< 6) is malformed; buffer has >= 5 bytes.
+        let data = [0u8; 5];
+        let mut cur: &[u8] = &data;
+        assert!(matches!(
+            Message::decode_from(&mut cur, 5),
+            Err(LegacyRecordsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn decode_min_size_frame_parses_past_guard() {
+        // A 6-byte frame clears the `< 6` guard (6 < 6 false) and then fails on
+        // the missing key-length field -> Truncated, not Malformed. This
+        // distinguishes `<` from `<=` at the boundary.
+        let frame = frame_with_body(0, 0, &[]);
+        assert!(frame.len() == 6);
+        let mut cur: &[u8] = &frame;
+        let err = Message::decode_from(&mut cur, 6).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { .. }));
+    }
+
+    #[test]
+    fn decode_v1_truncated_timestamp_reports_needed() {
+        // magic+attrs then only 4 of the 8 timestamp bytes: needed = 8 - 4 = 4.
+        let frame = frame_with_body(1, 0, &[0u8; 4]);
+        let fs = frame.len();
+        let mut cur: &[u8] = &frame;
+        let err = Message::decode_from(&mut cur, fs).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+    }
+
+    #[test]
+    fn decode_v1_timestamp_present_then_missing_kv() {
+        // Full 8 timestamp bytes but no key/value: clears the `< 8` timestamp
+        // guard (8 < 8 false) and fails on the missing key length (needed 4),
+        // not the guard's own needed (0). Distinguishes `<` from `<=`.
+        let frame = frame_with_body(1, 0, &[0u8; 8]);
+        let fs = frame.len();
+        let mut cur: &[u8] = &frame;
+        let err = Message::decode_from(&mut cur, fs).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+    }
+
+    #[test]
+    fn decode_truncated_key_length_reports_needed() {
+        // V0 frame with only 1 byte where the 4-byte key length is expected:
+        // needed = 4 - 1 = 3.
+        let frame = frame_with_body(0, 0, &[0xAA]);
+        let fs = frame.len();
+        let mut cur: &[u8] = &frame;
+        let err = Message::decode_from(&mut cur, fs).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
+    }
+
+    #[test]
+    fn decode_truncated_key_body_reports_needed() {
+        // V0 frame: key length = 5 but only 2 body bytes present.
+        // needed = 5 - 2 = 3.
+        let mut trailing = 5i32.to_be_bytes().to_vec();
+        trailing.extend_from_slice(&[0xAA, 0xBB]);
+        let frame = frame_with_body(0, 0, &trailing);
+        let fs = frame.len();
+        let mut cur: &[u8] = &frame;
+        let err = Message::decode_from(&mut cur, fs).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
+    }
 }
