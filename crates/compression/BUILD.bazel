@@ -1,0 +1,23 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+# Manifest is consumed by crate_universe (see //MODULE.bazel).
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "compression",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "crabka_compression",
+    # All codecs on by default (matches the crate's Cargo `default` feature).
+    crate_features = [
+        "gzip",
+        "snappy",
+        "lz4",
+        "zstd",
+    ],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True),
+)

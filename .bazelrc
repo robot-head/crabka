@@ -1,0 +1,19 @@
+# Crabka Bazel configuration.
+#
+# Bazel is a *secondary*, client-focused build path: it produces the lean Kafka
+# client libraries (producer/consumer/admin/core + serdes) for embedders who
+# want a slim dependency closure. Cargo remains the source of truth for the
+# full workspace; Bazel reads the same Cargo.toml / Cargo.lock via crate_universe.
+
+# bzlmod is the only dependency-resolution path (no legacy WORKSPACE).
+common --enable_bzlmod
+
+# Keep the action environment hermetic so build-script outputs are reproducible.
+build --incompatible_strict_action_env
+
+# GSSAPI/Kerberos (the `sspi` git dependency) is OFF by default. Turn it on with:
+#   bazel build //:client_minimal --//:gssapi=true
+# A convenience config for the same:
+build:gssapi --//:gssapi=true
+
+test --test_output=errors
