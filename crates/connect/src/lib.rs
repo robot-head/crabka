@@ -44,6 +44,8 @@ pub use config::{
     SecretResolutionError, SecretResolver, SecretString,
 };
 pub use convert::{ByteIdentity, Converter, SchemaConverter};
+#[cfg(feature = "derive")]
+pub use crabka_connect_derive::ConnectorConfig;
 pub use error::ConnectError;
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
 pub use runtime::{

@@ -2031,12 +2031,22 @@ dependencies = [
  "assert2",
  "async-trait",
  "bytes",
+ "crabka-connect-derive",
  "crabka-schema-serde",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "crabka-connect-derive"
+version = "0.3.6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

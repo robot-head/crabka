@@ -1,0 +1,22 @@
+[package]
+name = "crabka-connect-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Derive macros for crabka-connect connector configuration"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-connect-derive"
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }

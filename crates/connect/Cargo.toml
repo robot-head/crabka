@@ -16,11 +16,16 @@ categories = ["api-bindings", "asynchronous"]
 [lints]
 workspace = true
 
+[features]
+default = ["derive"]
+derive = ["dep:crabka-connect-derive"]
+
 [dependencies]
 # The schema-registry serdes back the schema-aware converter. Only the
 # format-agnostic `SchemaSerializer`/`SchemaDeserializer` traits are needed
 # here, so no format feature (avro/protobuf/json) is enabled.
 crabka-schema-serde = { version = "0.3.6", path = "../schema-serde" }
+crabka-connect-derive = { version = "0.3.6", path = "../connect-derive", optional = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
