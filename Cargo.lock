@@ -1933,6 +1933,7 @@ name = "crabka-client-producer"
 version = "0.3.6"
 dependencies = [
  "assert2",
+ "async-trait",
  "bon",
  "bytes",
  "crabka-client-consumer",
@@ -1941,6 +1942,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-security",
  "dashmap",
+ "futures",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

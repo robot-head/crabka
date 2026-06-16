@@ -62,6 +62,7 @@ mod producer;
 mod record;
 mod sender;
 mod transactional;
+mod transport;
 
 pub use compression::Compression;
 pub use crabka_client_consumer::ConsumerGroupMetadata;

@@ -19,6 +19,7 @@ use crate::partitioner::UniformStickyPartitioner;
 use crate::producer::{Acks, Producer};
 use crate::sender;
 use crate::transactional::TxnState;
+use crate::transport::ClientTransport;
 
 /// Retriable cold-coordinator error codes for `InitProducerId`. The broker is
 /// loading its coordinator state (`14`), the coordinator is not yet available
@@ -166,15 +167,15 @@ impl Producer {
         let txn_pid_epoch = Arc::new(Mutex::new((-1i64, -1i16)));
 
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
-            client: client.clone(),
+            transport: Box::new(ClientTransport::new(client.clone())),
             producer_id,
             producer_epoch,
             acks,
             compression,
             linger,
             request_timeout,
-            retries,
             retry_backoff,
+            max_in_flight: max_in_flight_per_connection,
             metadata_cache: metadata_cache.clone(),
             partition_leaders: partition_leaders.clone(),
             accumulators: accumulators.clone(),
