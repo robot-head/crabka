@@ -90,4 +90,4 @@ Prometheus metrics on `:9404`. Point any Kafka client or `kafka-topics.sh
 
 For a real cluster, you do not run these commands by hand — the Kubernetes
 operator formats, configures, and rolls brokers for you from a handful of CRDs.
-See [Deploying the Operator](/guide/deploying-operator/).
+See [Deploying the Operator](../deploying-operator/).

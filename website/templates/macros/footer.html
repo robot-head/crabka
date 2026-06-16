@@ -1,0 +1,31 @@
+{% macro footer() %}
+<footer class="footer text-muted">
+  <div class="container">
+    <div class="row">
+      <div class="col-lg-8 order-last order-lg-first">
+        <ul class="list-inline">
+          {% if config.extra.footer.info %}
+            <li class="list-inline-item">{{ config.extra.footer.info | default(value="Built with Zola") | safe }}</li>
+          {% else %}
+            <li class="list-inline-item">Built with <a href="https://www.getzola.org/">Zola</a></li>
+          {% endif %}
+        </ul>
+      </div>
+      <div class="col-lg-8 order-first order-lg-last text-lg-end">
+        <ul class="list-inline">
+          {% if config.extra.footer.nav %}
+            {% for val in config.extra.footer.nav %}
+              {% if val.url is starting_with("http://") or val.url is starting_with("https://") %}
+                {% set href = val.url %}
+              {% else %}
+                {% set href = get_url(path=val.url, trailing_slash=true) %}
+              {% endif %}
+              <li class="list-inline-item"><a href="{{ href | safe }}">{{ val.name }}</a></li>
+            {% endfor %}
+          {% endif %}
+        </ul>
+      </div>
+    </div>
+  </div>
+</footer>
+{% endmacro %}

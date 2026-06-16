@@ -3,14 +3,14 @@ title = "Crabka"
 sort_by = "weight"
 
 [extra]
-lead = "A Rust reimplementation of Apache Kafka. Byte-for-byte wire compatible and KRaft-native — <strong>matching its throughput</strong> on <strong>a fraction of the memory</strong>, and no JVM to babysit."
-url = "/guide/introduction/"
+lead = "A native-Rust Kafka-compatible broker and toolkit. Crabka speaks the Kafka wire protocol byte-for-byte, runs KRaft without a JVM, and keeps the operator, clients, schema registry, gateway, and rebalancer in one workspace."
+url = "/guide/overview/"
 url_button = "Get started"
 url2 = "/benchmarks/crabka-vs-strimzi/"
 url2_button = "See the benchmarks"
 repo_url = "https://github.com/robot-head/crabka"
 repo_license = "Apache 2.0"
-repo_version = "v0.3.0"
+repo_version = "v0.3.6"
 
 # --- Headline numbers (rendered as the stat band under the hero). ---
 # Sourced from /benchmarks/crabka-vs-strimzi/ — an operator-managed,
@@ -18,12 +18,12 @@ repo_version = "v0.3.0"
 [[extra.list]]
 icon = "zap"
 title = "Kafka-class throughput"
-content = 'Matches or beats a like-for-like <strong>Strimzi</strong> cluster on produce-and-consume — winning multi-producer fan-out — at <strong>1.6–3.0×</strong> the messages per CPU-core.'
+content = 'Matches or beats a like-for-like <strong>Strimzi</strong> cluster on key produce-and-consume workloads, including multi-producer fan-out, at <strong>1.6–3.0×</strong> the messages per CPU-core.'
 
 [[extra.list]]
 icon = "feather"
 title = "≈ a tenth of the memory"
-content = "A Crabka broker's working set sits in the <strong>low hundreds of MiB</strong> against Strimzi's <strong>2.5–5.5 GiB</strong> — 9–37× lighter. No GC pauses, no heap to tune."
+content = "A Crabka broker's working set sits in the <strong>low hundreds of MiB</strong> against Strimzi's <strong>2.5–5.5 GiB</strong>. No GC pauses, no heap to tune."
 
 [[extra.list]]
 icon = "clock"
@@ -33,7 +33,7 @@ content = "Cold start to first ack in <strong>1–2 s</strong> — no JVM warmup
 [[extra.list]]
 icon = "check-circle"
 title = "Byte-for-byte compatible"
-content = 'Speaks the Kafka wire protocol exactly. Your existing clients and the JVM <code>kafka-*.sh</code> tools work unmodified.'
+content = 'Speaks the Kafka wire protocol exactly. Existing clients and the JVM <code>kafka-*.sh</code> tools work unmodified.'
 
 # --- Crabka vs Apache Kafka comparison table. ---
 [[extra.compare]]
@@ -44,7 +44,7 @@ crabka = "Native binary — no JVM, no GC"
 [[extra.compare]]
 feature = "Broker memory"
 kafka = "2.5–5.5 GiB"
-crabka = "<strong>114–622 MiB</strong>"
+crabka = "<strong>114–622 MiB measured</strong>"
 
 [[extra.compare]]
 feature = "Cold start to ready"
@@ -84,7 +84,7 @@ crabka = "<code>kafka-*.sh</code>, unmodified"
 [[extra.compare]]
 feature = "Operator & rebalancer"
 kafka = "Strimzi + Cruise Control (separate)"
-crabka = "Built in"
+crabka = "Crabka operator + rebalancer"
 
 [[extra.compare]]
 feature = "License"
@@ -105,7 +105,7 @@ content = 'Async Rust on <code>tokio</code>. No JVM, no GC pauses, and <code>uns
 [[extra.features]]
 icon = "box"
 title = "Single static binary"
-content = "No JDK, no ZooKeeper, no separate controller process. One binary to ship, run, and operate."
+content = "No JDK and no ZooKeeper. Run a broker/controller process as a native binary, or let the Kubernetes operator manage it."
 
 [[extra.features]]
 icon = "layers"
@@ -120,7 +120,7 @@ content = "TLS via <code>rustls</code>; SASL/SCRAM-256/512, PLAIN, OAUTHBEARER (
 [[extra.features]]
 icon = "grid"
 title = "Batteries included"
-content = "Native producer, consumer, and admin clients, a Kubernetes operator, and an automated rebalancer — all in one workspace."
+content = "Native producer, consumer, admin, and streams clients, Schema Registry, a gateway, Kubernetes operator, and automated rebalancer — all in one workspace."
 
 # --- Top navigation. ---
 [[extra.menu.main]]
@@ -143,9 +143,10 @@ weight = 20
 +++
 
 Crabka is a Rust reimplementation of Apache Kafka. It speaks the Kafka wire
-protocol byte-for-byte, runs its metadata quorum on KRaft, and ships native
-Rust clients, a Kubernetes operator, and a Cruise-Control-equivalent
-rebalancer — all without a JVM.
+protocol byte-for-byte, stores records in Kafka-compatible logs, runs metadata
+through KRaft, and ships the surrounding operational pieces in the same
+workspace: native Rust clients, Schema Registry, a gRPC / Connect-RPC gateway,
+a Kubernetes operator, and a Cruise-Control-equivalent rebalancer.
 
 With Kafka parity now broad and validated against the JVM, Crabka is in
 **beta**: greenfield and pre-1.0, ready for evaluation and non-critical

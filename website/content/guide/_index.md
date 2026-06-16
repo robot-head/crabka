@@ -5,4 +5,5 @@ weight = 10
 template = "docs/section.html"
 +++
 
-Narrative documentation: what Crabka is and how to get started.
+Start here for the product-shaped docs: what Crabka is, how to run it, how the
+pieces fit together, and where to go when you need the generated reference.
