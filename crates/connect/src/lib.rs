@@ -30,6 +30,7 @@
 //! value is a tombstone), an optional timestamp, and ordered headers — see
 //! [`ConnectRecord`].
 
+pub mod config;
 pub mod convert;
 pub mod error;
 pub mod record;
@@ -37,6 +38,11 @@ pub mod runtime;
 pub mod sink;
 pub mod source;
 
+pub use config::{
+    ConfigDef, ConfigError, ConfigKey, ConfigKind, ConfigResult, ConnectorConfig,
+    EnvSecretResolver, RawConfig, ResolveOptions, ResolvedConfig, SecretRef, SecretResolver,
+    SecretString,
+};
 pub use convert::{ByteIdentity, Converter, SchemaConverter};
 pub use error::ConnectError;
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
