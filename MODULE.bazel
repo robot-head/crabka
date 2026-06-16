@@ -111,7 +111,7 @@ crate.from_specs(
 crate.spec(
     package = "sspi",
     git = "https://github.com/robot-head/sspi-rs.git",
-    rev = "5b7bfe73af338d5945150e8c71d19b4e71d9499a",
+    rev = "80bdedf387da7341b95ff947d3bf68f48a0bc404",
     default_features = False,
     features = [
         "network_client",
