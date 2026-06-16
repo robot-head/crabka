@@ -2,7 +2,65 @@
 title = "Deploying the Operator"
 weight = 25
 template = "docs/page.html"
+
+[extra]
+mermaid = true
 +++
+
+## What the operator is and why you'd want it
+
+The Crabka Operator is a single Kubernetes controller process that turns a
+handful of declarative Custom Resources into a running, self-healing Kafka
+cluster. You describe the cluster you want in YAML; the operator formats data
+directories, generates and rotates the CA and TLS material, writes ConfigMaps
+and Secrets, creates the Services clients connect through, and rolls brokers
+when their spec changes. You never run `crabka format` or hand-edit broker
+config — the operator owns that lifecycle.
+
+It is its own project, purpose-built for Crabka. It is not a Strimzi plugin or
+a fork: it speaks directly to Crabka's native KRaft broker and knows about
+Crabka-specific concerns like the rebalancer and the schema registry.
+
+### One operator, many clusters, dynamic size
+
+A single operator process watches the whole set of namespaces it is granted and
+reconciles every Crabka resource it finds. A cluster's size is **dynamic**: a
+`Kafka` resource owns one or more `KafkaNodePool`s, each pool is a StatefulSet
+of brokers (one broker per pod) labeled `crabka.io/cluster=<name>`, and the
+cluster's broker count is simply the sum of replica counts across its pools.
+Scale by editing a pool's `replicas` or adding another pool — the operator
+reconciles the StatefulSets to match.
+
+### The CRDs at a glance
+
+| CRD | What it declares |
+| --- | --- |
+| `Kafka` | A broker cluster: version, cluster-wide config, the owning resource for Services/ConfigMap/Secrets/CA |
+| `KafkaNodePool` | A StatefulSet of brokers (roles, replicas, storage, resources) bound to a cluster |
+| `KafkaTopic` | A topic and its configuration |
+| `KafkaUser` | SCRAM / mTLS credentials, ACLs, and quotas for a principal |
+| `KafkaRebalance` | A Cruise-Control-equivalent partition rebalance request |
+| `SchemaRegistry` | A Confluent-compatible schema registry bound to a cluster |
+| `KafkaGrpcGateway` | A gRPC / Connect-RPC gateway in front of the cluster |
+
+### Operator architecture
+
+{% mermaid() %}
+flowchart TD
+  Operator[Operator process] -->|watches| CRDs[Kafka / NodePool / Topic / User / Rebalance / SchemaRegistry]
+  CRDs --> Recon[Per-resource reconcilers]
+  Recon --> Pools[KafkaNodePool reconciler]
+  Pools --> STS[StatefulSets — one broker per pod]
+  Recon --> Cluster[Kafka reconciler]
+  Cluster --> Svc[Cluster Service]
+  Cluster --> CM[ConfigMap]
+  Cluster --> Sec[Secrets + CA]
+{% end %}
+
+The rest of this page walks through actually deploying the operator and a first
+cluster.
+
+## Deploying
 
 This guide walks you through deploying the Crabka Kubernetes Operator to a Kubernetes cluster and deploying a Kafka-compatible broker cluster.
 

@@ -47,6 +47,15 @@ mod tests {
     use assert2::assert;
 
     #[test]
+    fn secret_bytes_accessors() {
+        let s = SecretBytes::new(Bytes::from_static(b"abc"));
+        assert!(s.as_bytes() == b"abc");
+        assert!(s.len() == 3);
+        assert!(!s.is_empty());
+        assert!(SecretBytes::new(Bytes::new()).is_empty());
+    }
+
+    #[test]
     fn hmac_is_deterministic_for_same_inputs() {
         let h1 = compute_token_hmac(b"k", "tok-1");
         let h2 = compute_token_hmac(b"k", "tok-1");

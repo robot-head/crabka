@@ -22,6 +22,7 @@ serde-wincode = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 crabka-protocol = { version = "0.3.6", path = "../protocol", default-features = false }
+crabka-voters = { version = "0.3.6", path = "../voters" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 crabka-security = { workspace = true }

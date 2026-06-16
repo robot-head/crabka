@@ -1,7 +1,7 @@
 //! Outputs from the consensus state machine. They are pure side-effect
 //! descriptions executed by the engine.
 
-use crate::kraft::types::{LeaderEpoch, LogOffsetMetadata, NodeId, SimInstant};
+use crate::types::{LeaderEpoch, LogOffsetMetadata, NodeId, SimInstant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TimerKind {

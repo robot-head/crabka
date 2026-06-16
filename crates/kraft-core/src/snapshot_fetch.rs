@@ -7,7 +7,7 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::kraft::types::NodeId;
+use crate::types::NodeId;
 
 /// Snapshot identity: (`end_offset` exclusive, epoch). Matches KIP-630 `SnapshotId`.
 pub type SnapshotId = (i64, i32);

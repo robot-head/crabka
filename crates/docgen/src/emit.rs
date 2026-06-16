@@ -11,6 +11,22 @@ pub fn page_front_matter(title: &str, weight: u32, body: &str) -> String {
     )
 }
 
+/// Front matter for a docs page that also needs an `[extra]` table — e.g. a
+/// page that opts into Mermaid rendering via `extra.mermaid = true`. The
+/// `extra_toml` is the raw body of the `[extra]` table (one `key = value` per
+/// line, no surrounding `[extra]` header).
+#[must_use]
+pub fn page_front_matter_with_extra(
+    title: &str,
+    weight: u32,
+    extra_toml: &str,
+    body: &str,
+) -> String {
+    format!(
+        "+++\ntitle = \"{title}\"\nweight = {weight}\ntemplate = \"docs/page.html\"\n\n[extra]\n{extra_toml}\n+++\n\n{body}"
+    )
+}
+
 /// Front matter for a docs section index (uses the `AdiDoks` docs section layout).
 #[must_use]
 pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
@@ -26,12 +42,14 @@ pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
 /// Returns an error if any directory cannot be created or any file cannot be
 /// written.
 pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
-    use crate::{broker, operator};
+    use crate::{broker, operator, scenarios};
     use std::fs;
     let op_dir = out_dir.join("operator");
     let br_dir = out_dir.join("broker");
+    let concepts_dir = out_dir.join("concepts");
     fs::create_dir_all(&op_dir)?;
     fs::create_dir_all(&br_dir)?;
+    fs::create_dir_all(&concepts_dir)?;
     fs::write(
         out_dir.join("_index.md"),
         section_front_matter(
@@ -74,6 +92,24 @@ pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
     fs::write(
         br_dir.join("protocol-apis.md"),
         page_front_matter("Protocol APIs", 30, &broker::protocol_apis_md()),
+    )?;
+    fs::write(
+        concepts_dir.join("_index.md"),
+        section_front_matter(
+            "Concepts",
+            40,
+            "How Crabka's consensus core behaves under failures, illustrated with \
+             diagrams generated from the simulator itself.",
+        ),
+    )?;
+    fs::write(
+        concepts_dir.join("failure-scenarios.md"),
+        page_front_matter_with_extra(
+            "Failure Scenarios",
+            10,
+            "mermaid = true",
+            &scenarios::failure_scenarios_md(),
+        ),
     )?;
     Ok(())
 }

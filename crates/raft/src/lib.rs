@@ -57,6 +57,12 @@ pub mod handshake;
 pub mod kraft;
 mod network;
 pub mod reconfig;
+/// The deterministic `KRaft` failure-scenario simulator with trace recording,
+/// re-exported from the leaf [`crabka_kraft_core::sim`] module. `crabka-docgen`
+/// runs [`scenarios::scenarios`] in-process to render the failure-scenario
+/// slideshow.
+#[cfg(feature = "scenarios")]
+pub use crabka_kraft_core::sim as scenarios;
 mod server;
 mod snapshot;
 mod types;

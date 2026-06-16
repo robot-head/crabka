@@ -54,7 +54,12 @@ pub mod kraft_translate;
 pub mod metadata_version;
 mod records;
 pub mod transaction_version;
-pub mod voters;
+
+/// KIP-853 voter-set value types, re-exported from the [`crabka_voters`] leaf
+/// crate. Kept as `crabka_metadata::voters` so existing call sites are
+/// unchanged; the types live in their own crypto-free crate so the consensus
+/// core can compile to WebAssembly.
+pub use crabka_voters as voters;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;

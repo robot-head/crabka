@@ -1670,6 +1670,41 @@ mod introspection_tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    // --- pure temporal/claim helpers (no IdP/JWKS fixtures needed) ----------
+
+    #[test]
+    fn temporal_claims_exp_boundary_is_inclusive() {
+        // now - skew == exp_ms is NOT expired (the guard is `>`, not `>=`).
+        let claims = json!({ "exp": 10 }); // exp_ms = 10_000
+        assert!(check_temporal_claims(&claims, 10_000, 0).is_ok());
+        assert!(check_temporal_claims(&claims, 10_001, 0).is_err());
+    }
+
+    #[test]
+    fn temporal_claims_iat_and_nbf_future_rejected() {
+        // iat: at the boundary it's valid; issued in the future is rejected.
+        let iat = json!({ "iat": 10 }); // iat_ms = 10_000
+        assert!(check_temporal_claims(&iat, 10_000, 0).is_ok());
+        assert!(check_temporal_claims(&iat, 9_999, 0).is_err());
+        // nbf (not-before): same shape.
+        let nbf = json!({ "nbf": 10 });
+        assert!(check_temporal_claims(&nbf, 10_000, 0).is_ok());
+        assert!(check_temporal_claims(&nbf, 9_999, 0).is_err());
+    }
+
+    #[test]
+    fn numeric_date_fractional_seconds_to_ms() {
+        // Fractional NumericDate path: 10.5 s -> 10_500 ms (pins the `* 1000`).
+        assert!(numeric_date_ms(&json!({ "k": 10.5 }), "k") == Some(10_500));
+    }
+
+    #[test]
+    fn audience_contains_array_membership() {
+        // `aud` array membership: `any(a == expected)` (kills `==` -> `!=`).
+        assert!(audience_contains(&json!({ "aud": ["svc-a"] }), "svc-a"));
+        assert!(!audience_contains(&json!({ "aud": ["svc-a"] }), "svc-b"));
+    }
+
     /// Per-token canned responses. `introspect` returns the entry for
     /// the matching token (or a Transport error if absent so a test can
     /// exercise the transport-error path).

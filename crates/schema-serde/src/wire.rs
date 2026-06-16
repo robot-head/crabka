@@ -157,4 +157,46 @@ mod tests {
         check!(idx == vec![1, 0]);
         check!(body == b"pb");
     }
+
+    #[test]
+    fn strip_header_accepts_minimum_5_byte_frame() {
+        // Exactly 5 bytes = magic + id with an empty body. The guard is
+        // `len < 5`, so a 5-byte frame must decode (not be rejected as short).
+        let (id, body) = decode(&[0x00, 0x00, 0x00, 0x01, 0x02]).unwrap();
+        check!(id == 0x0102);
+        check!(body.is_empty());
+    }
+
+    #[test]
+    fn varint_zigzag_round_trips() {
+        // Single- and multi-byte encodings plus zigzag sign handling, end to
+        // end through put_varint/read_varint. Multi-byte values exercise the
+        // continuation-bit and shift logic; negatives exercise the zigzag.
+        let values: [i64; 17] = [
+            0,
+            1,
+            -1,
+            63,
+            64,
+            -64,
+            127,
+            128,
+            -128,
+            300,
+            -300,
+            8192,
+            -8192,
+            i64::from(i32::MAX),
+            i64::from(i32::MIN),
+            1 << 40,
+            -(1 << 40),
+        ];
+        for v in values {
+            let mut buf = BytesMut::new();
+            put_varint(&mut buf, v);
+            let (decoded, rest) = read_varint(&buf).expect("varint decodes");
+            check!(decoded == v, "round-trip {v}");
+            check!(rest.is_empty(), "no trailing bytes for {v}");
+        }
+    }
 }

@@ -277,6 +277,31 @@ mod tests {
     }
 
     #[test]
+    fn list_by_epoch_returns_matching_segments() {
+        let mut c = RemoteLogMetadataCache::default();
+        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
+        c.update(&finish(10)).unwrap();
+        let listed = c.list_by_epoch(0);
+        assert!(listed.len() == 1);
+        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(c.list_by_epoch(7).is_empty(), "unknown epoch -> empty");
+    }
+
+    #[test]
+    fn deindex_removes_epoch_slot() {
+        let mut c = RemoteLogMetadataCache::default();
+        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
+        c.update(&finish(10)).unwrap();
+        assert!(c.highest_offset_for_epoch(0) == Some(99));
+        // DeleteSegmentStarted deindexes the epoch slot (but the metadata is
+        // still present until DeleteSegmentFinished). highest_offset_for_epoch
+        // reads the epoch index directly, so it must now miss.
+        c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
+            .unwrap();
+        assert!(c.highest_offset_for_epoch(0).is_none());
+    }
+
+    #[test]
     fn offset_lookup_respects_epoch() {
         let mut c = RemoteLogMetadataCache::default();
         // One segment spanning two epochs: epoch 0 owns [0,49], epoch 1 owns [50,99].

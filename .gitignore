@@ -31,7 +31,13 @@ docs/superpowers/plans/
 /website/content/reference/broker/server-config.md
 /website/content/reference/broker/topic-configs.md
 /website/content/reference/broker/protocol-apis.md
+/website/content/reference/concepts/
 /website/static/api/
 /website/static/images/
 /website/static/charts/
 /website/public/
+
+# Generated WASM playground bundle (built by website/build-playground.sh).
+# The hand-written front-end (app.js, playground.css) stays tracked.
+/website/static/playground/crabka_playground.js
+/website/static/playground/crabka_playground_bg.wasm

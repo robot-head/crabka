@@ -1,0 +1,308 @@
+/* Interactive KRaft consensus playground styles.
+ *
+ * Self-contained: scoped under #crabka-playground so it can't bleed into the
+ * rest of the docs theme. Light-mode defaults with body.dark overrides (the
+ * AdiDoks theme toggles dark mode via a `dark` class on <body>). */
+
+#crabka-playground {
+  --cp-accent: #ff5a1f;
+  --cp-accent-deep: #e24a00;
+  --cp-bg: #fbfaf8;
+  --cp-panel: #ffffff;
+  --cp-border: #e7e3dc;
+  --cp-text: #2b2b2b;
+  --cp-muted: #7a756c;
+  --cp-leader: #f5a623;
+  --cp-follower: #2e9e5b;
+  --cp-candidate: #e8772e;
+  --cp-prospective: #c9a227;
+  --cp-observer: #3b82c4;
+  --cp-idle: #9b958b;
+  --cp-msg: #8a8378;
+
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid var(--cp-border);
+  border-radius: 12px;
+  background: var(--cp-bg);
+  color: var(--cp-text);
+  font-size: 0.92rem;
+}
+
+body.dark #crabka-playground {
+  --cp-bg: #1c1b1a;
+  --cp-panel: #262422;
+  --cp-border: #3a3733;
+  --cp-text: #e9e6e0;
+  --cp-muted: #a39d92;
+  --cp-leader: #f7b73a;
+  --cp-follower: #45c178;
+  --cp-candidate: #f08a44;
+  --cp-prospective: #d8b743;
+  --cp-observer: #5aa0e0;
+  --cp-idle: #8a847a;
+  --cp-msg: #aaa498;
+}
+
+#crabka-playground .cp-controls,
+#crabka-playground .cp-faults {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.6rem;
+}
+
+#crabka-playground .cp-faults {
+  padding-top: 0.5rem;
+  border-top: 1px dashed var(--cp-border);
+}
+
+#crabka-playground .cp-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--cp-muted);
+  font-weight: 700;
+  margin-right: 0.15rem;
+}
+
+#crabka-playground .cp-btn,
+#crabka-playground .cp-select {
+  font: inherit;
+  font-size: 0.86rem;
+  padding: 0.34rem 0.7rem;
+  border-radius: 7px;
+  border: 1px solid var(--cp-border);
+  background: var(--cp-panel);
+  color: var(--cp-text);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease,
+    transform 0.05s ease;
+}
+
+#crabka-playground .cp-btn:hover {
+  border-color: var(--cp-accent);
+  color: var(--cp-accent-deep);
+}
+
+#crabka-playground .cp-btn:active {
+  transform: translateY(1px);
+}
+
+#crabka-playground .cp-btn.cp-primary,
+#crabka-playground .cp-btn.cp-active {
+  background: var(--cp-accent);
+  border-color: var(--cp-accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+#crabka-playground .cp-btn.cp-primary:hover,
+#crabka-playground .cp-btn.cp-active:hover {
+  background: var(--cp-accent-deep);
+  border-color: var(--cp-accent-deep);
+  color: #fff;
+}
+
+/* Stage: diagram + timeline side by side. */
+#crabka-playground .cp-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 0.9rem;
+  align-items: stretch;
+}
+
+@media (max-width: 720px) {
+  #crabka-playground .cp-stage {
+    grid-template-columns: 1fr;
+  }
+}
+
+#crabka-playground .cp-diagram-wrap,
+#crabka-playground .cp-timeline-wrap {
+  background: var(--cp-panel);
+  border: 1px solid var(--cp-border);
+  border-radius: 10px;
+  padding: 0.6rem;
+}
+
+#crabka-playground .cp-diagram {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Status line under the diagram. */
+#crabka-playground .cp-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin-top: 0.4rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--cp-border);
+  font-size: 0.82rem;
+  color: var(--cp-muted);
+}
+
+#crabka-playground .cp-status b {
+  color: var(--cp-text);
+  font-weight: 600;
+}
+
+/* Timeline log. */
+#crabka-playground .cp-timeline {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+}
+
+#crabka-playground .cp-event {
+  display: grid;
+  grid-template-columns: 1.1rem 3.2rem 1fr;
+  gap: 0.3rem;
+  align-items: baseline;
+  padding: 0.18rem 0.1rem;
+  border-bottom: 1px solid var(--cp-border);
+}
+
+#crabka-playground .cp-event:last-child {
+  border-bottom: none;
+}
+
+#crabka-playground .cp-event-icon {
+  color: var(--cp-accent);
+  text-align: center;
+}
+
+#crabka-playground .cp-event-clock {
+  color: var(--cp-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+}
+
+/* Cluster nodes. */
+#crabka-playground .cp-node-bg {
+  fill: var(--cp-panel);
+  stroke: var(--cp-idle);
+  stroke-width: 2.5;
+  transition: stroke 0.15s ease, fill 0.15s ease;
+}
+
+#crabka-playground .cp-node-id {
+  font-size: 15px;
+  font-weight: 700;
+  fill: var(--cp-text);
+}
+
+#crabka-playground .cp-node-role {
+  font-size: 11px;
+  fill: var(--cp-muted);
+}
+
+#crabka-playground .cp-node-log {
+  font-size: 9.5px;
+  fill: var(--cp-muted);
+}
+
+#crabka-playground .cp-node-cut {
+  font-size: 16px;
+  fill: var(--cp-accent-deep);
+}
+
+#crabka-playground .cp-leader .cp-node-bg {
+  stroke: var(--cp-leader);
+  stroke-width: 4;
+}
+#crabka-playground .cp-follower .cp-node-bg {
+  stroke: var(--cp-follower);
+}
+#crabka-playground .cp-candidate .cp-node-bg {
+  stroke: var(--cp-candidate);
+  stroke-dasharray: 4 3;
+}
+#crabka-playground .cp-prospective .cp-node-bg {
+  stroke: var(--cp-prospective);
+  stroke-dasharray: 2 3;
+}
+#crabka-playground .cp-observer .cp-node-bg {
+  stroke: var(--cp-observer);
+}
+#crabka-playground .cp-partitioned {
+  opacity: 0.42;
+}
+#crabka-playground .cp-partitioned .cp-node-bg {
+  stroke-dasharray: 3 4;
+}
+
+/* In-flight messages. */
+#crabka-playground .cp-msg-path {
+  fill: none;
+  stroke: var(--cp-msg);
+  stroke-width: 1.8;
+  opacity: 0.85;
+}
+
+#crabka-playground .cp-arrow-tip {
+  fill: var(--cp-msg);
+}
+
+#crabka-playground .cp-msg-label {
+  font-size: 8.5px;
+  fill: var(--cp-text);
+  paint-order: stroke;
+  stroke: var(--cp-panel);
+  stroke-width: 2.4px;
+  stroke-linejoin: round;
+}
+
+/* Legend. */
+#crabka-playground .cp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.9rem;
+  margin-top: 0.7rem;
+  font-size: 0.78rem;
+  color: var(--cp-muted);
+}
+
+#crabka-playground .cp-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+#crabka-playground .cp-legend-item .cp-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  display: inline-block;
+}
+
+#crabka-playground .cp-leader { color: var(--cp-leader); }
+#crabka-playground .cp-follower { color: var(--cp-follower); }
+#crabka-playground .cp-candidate { color: var(--cp-candidate); }
+#crabka-playground .cp-prospective { color: var(--cp-prospective); }
+#crabka-playground .cp-observer { color: var(--cp-observer); }
+#crabka-playground .cp-idle { color: var(--cp-idle); }
+
+#crabka-playground .cp-hint {
+  margin: 0.7rem 0 0;
+  font-size: 0.8rem;
+  color: var(--cp-muted);
+  line-height: 1.5;
+}
+
+#crabka-playground .cp-error {
+  color: var(--cp-accent-deep);
+  font-size: 0.88rem;
+}
+
+/* Before the script upgrades it, show nothing jarring. */
+#crabka-playground:not(.cp-ready) .cp-fallback {
+  color: var(--cp-muted);
+}

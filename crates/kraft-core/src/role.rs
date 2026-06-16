@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::kraft::types::{NodeId, SimInstant};
+use crate::types::{NodeId, SimInstant};
 
 /// Per-follower replication progress tracked by a leader (for HWM).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]

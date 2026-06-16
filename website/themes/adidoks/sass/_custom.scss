@@ -402,3 +402,92 @@ body.dark {
   // The CTA band already reads as a dark slate; keep it consistent.
   .ck-cta { background: darken($body-bg-dark, 1.5%); }
 }
+
+// =============================================================================
+// Mermaid diagrams (client-side, opt-in via front matter extra.mermaid = true)
+// =============================================================================
+.mermaid {
+  display: block;
+  margin: 1.5rem auto;
+  max-width: 100%;
+  overflow-x: auto;
+  text-align: center;
+
+  // Hide the raw diagram source until Mermaid swaps in the rendered SVG.
+  // (Mermaid adds [data-processed] to the <pre> once it has rendered.)
+  &:not([data-processed]) { visibility: hidden; }
+
+  svg { max-width: 100%; height: auto; }
+}
+
+// =============================================================================
+// Collapsible, nested reference sidebar (docs_sidebar macro)
+// =============================================================================
+.docs-sidebar-group {
+  margin: 0;
+
+  // The collapsible heading. Styled to read like the existing <h3> section
+  // labels but with a disclosure caret and clickable affordance.
+  > .docs-sidebar-summary {
+    cursor: pointer;
+    list-style: none; // suppress the default browser triangle
+    text-transform: uppercase;
+    font-size: $font-size-base;
+    font-weight: $headings-font-weight;
+    color: $body-color;
+    margin: 0.5rem 0 0.25rem 0;
+    padding: 0.5rem 0 0 0;
+    user-select: none;
+    display: flex;
+    align-items: center;
+
+    &::-webkit-details-marker { display: none; } // Safari default triangle
+
+    // Custom caret that rotates when the group is open.
+    &::before {
+      content: "";
+      flex: 0 0 auto;
+      width: 0;
+      height: 0;
+      margin-right: 0.45rem;
+      border-style: solid;
+      border-width: 0.3rem 0 0.3rem 0.42rem;
+      border-color: transparent transparent transparent currentColor;
+      transition: transform 0.15s ease;
+    }
+
+    &:hover { color: $link-color; }
+  }
+
+  &[open] > .docs-sidebar-summary::before { transform: rotate(90deg); }
+}
+
+// Indent the contents of each group so nesting depth reads visually.
+.docs-sidebar-group-body {
+  margin-left: 0.55rem;
+  padding-left: 0.7rem;
+  border-left: 1px solid $gray-200;
+}
+
+// Tighten the page lists inside groups (the top-level list keeps theme spacing).
+.docs-sidebar-group .docs-sidebar-pages { margin-bottom: 0.25rem; }
+
+// Active page highlight: a subtle left accent in the brand colour, consistent
+// with the theme's existing `.docs-link.active` colour treatment.
+.docs-sidebar a.docs-link.active {
+  color: $link-color;
+  font-weight: 600;
+}
+
+// Dark-mode variants.
+body.dark {
+  .docs-sidebar-group > .docs-sidebar-summary {
+    color: $body-color-dark;
+
+    &:hover { color: $link-color-dark; }
+  }
+
+  .docs-sidebar-group-body { border-left-color: $border-dark; }
+
+  .docs-sidebar a.docs-link.active { color: $link-color-dark; }
+}

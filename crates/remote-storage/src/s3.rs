@@ -466,6 +466,22 @@ mod tests {
         assert!(dbg.contains("us-east-1"));
     }
 
+    #[test]
+    fn multipart_size_constants() {
+        // Pin the multipart threshold/part-size (mutants flip the `*` in the
+        // `N * 1024 * 1024` products to `+`/`/`).
+        assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600); // 100 MiB
+        assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216); // 16 MiB
+    }
+
+    #[test]
+    fn storage_debug_is_nonempty() {
+        // The S3RemoteStorage Debug impl must render something (a `fmt`
+        // replaced with `Ok(())` would print nothing).
+        let dbg = format!("{:?}", rsm(None));
+        assert!(dbg.contains("S3RemoteStorage"));
+    }
+
     fn sample_metadata(id: u128) -> RemoteLogSegmentMetadata {
         RemoteLogSegmentMetadata::new(
             RemoteLogSegmentId::new(
@@ -532,6 +548,23 @@ mod tests {
             assert!(store.fetch_log_segment(&md, 2, Some(5)).unwrap() == b"2345");
             // Open-ended from 7 -> "789".
             assert!(store.fetch_log_segment(&md, 7, None).unwrap() == b"789");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_single_byte_range_start_equals_end() {
+        let store = rsm(None);
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(10);
+        tokio::task::spawn_blocking(move || {
+            store
+                .copy_log_segment_data(&md, &sample_data(src.path(), false))
+                .unwrap();
+            // Inclusive [3, 3] is a valid single-byte range -> "3" (the guard
+            // is `end < start_position`, not `<=`/`==`).
+            assert!(store.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
         })
         .await
         .unwrap();

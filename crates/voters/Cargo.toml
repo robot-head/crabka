@@ -1,0 +1,28 @@
+[package]
+name = "crabka-voters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "KIP-853 voter-set value types for Crabka (id, directory-id, endpoints, kraft.version)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-voters"
+readme = "README.md"
+keywords = ["kafka", "kraft", "raft", "voters", "crabka"]
+categories = ["data-structures"]
+
+[lints]
+workspace = true
+
+# A pure value-type leaf crate: no IO, no async, no crypto. This keeps it
+# buildable for `wasm32-unknown-unknown` so the deterministic consensus core
+# (which embeds a `VoterSet` in its `QuorumState`) can compile to WebAssembly
+# for the in-browser playground without dragging in the rest of the stack.
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }

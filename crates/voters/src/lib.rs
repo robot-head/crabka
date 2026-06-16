@@ -1,10 +1,19 @@
 //! KIP-853 voter set value types: a voter is (id, directory-id, endpoints, kraft.version range).
+//!
+//! This is a pure value-type leaf crate — no IO, no async, no crypto — so it
+//! compiles for `wasm32-unknown-unknown`. `crabka-metadata` re-exports it as
+//! its `voters` module, and the deterministic consensus core
+//! (`crabka-kraft-core`) embeds a [`VoterSet`] in its quorum state.
+
+#![doc(html_root_url = "https://docs.rs/crabka-voters/0.3.6")]
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use crate::NodeId;
+/// A broker/controller node id (Kafka's `int32`, widened to `u64` here because
+/// ids only ever count up from 1).
+pub type NodeId = u64;
 
 /// A single listener endpoint advertised by a voter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -128,5 +137,20 @@ mod tests {
     fn ids_are_sorted() {
         let set = VoterSet::from_voters([sample(3), sample(1), sample(2)]);
         assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn accessors_reflect_contents() {
+        let set = VoterSet::from_voters([sample(1), sample(2)]);
+        assert!(set.len() == 2);
+        assert!(!set.is_empty());
+        assert!(set.get(1) == Some(&sample(1)));
+        assert!(set.get(99).is_none());
+        assert!(set.iter().count() == 2);
+
+        let empty = VoterSet::default();
+        assert!(empty.len() == 0);
+        assert!(empty.is_empty());
+        assert!(empty.iter().count() == 0);
     }
 }

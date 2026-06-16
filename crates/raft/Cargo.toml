@@ -16,7 +16,15 @@ categories = ["algorithms", "database-implementations"]
 [lints]
 workspace = true
 
+[features]
+# Promotes the deterministic KRaft consensus simulator into the library with
+# trace recording, so `crabka-docgen` can run it in-process and render failure
+# scenarios. Off by default — it carries no production code path. Re-exported
+# from the leaf core crate as `crabka_raft::scenarios`.
+scenarios = ["crabka-kraft-core/sim"]
+
 [dependencies]
+crabka-kraft-core = { version = "0.3.6", path = "../kraft-core" }
 crabka-metadata = { version = "0.3.6", path = "../metadata" }
 crabka-log = { version = "0.3.6", path = "../log" }
 crabka-protocol = { version = "0.3.6", path = "../protocol", default-features = false }

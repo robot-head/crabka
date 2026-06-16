@@ -5,13 +5,19 @@
 {% endblock body %}
 
 {% block header %}
-  {# Derive the top-level section from the page path (e.g. "guide" or "reference") #}
-  {% set path_parts = page.path | split(pat="/") %}
+  {# Derive the top-level section from the page path (e.g. "guide" or "reference").
+     page.path is "/guide/overview/", so strip the leading slash before splitting
+     or `first` would be the empty string. #}
+  {% set path_parts = page.path | trim_start_matches(pat="/") | split(pat="/") %}
   {% set current_section = path_parts | first %}
   {{ macros_header::header(current_section=current_section)}}
 {% endblock header %}
 
 {% block content %}
+{# Re-derive current_section here: Tera `set` in the header block is not visible
+   in this sibling block. Strip the leading slash before splitting. #}
+{% set path_parts = page.path | trim_start_matches(pat="/") | split(pat="/") %}
+{% set current_section = path_parts | first %}
 <div class="wrap container" role="document">
   <div class="content">
     <div class="row flex-xl-nowrap">
@@ -29,4 +35,16 @@
     </div>
   </div>
 </div>
+{# Mermaid: opt in per-page with `extra.mermaid = true` in front matter.
+   Served from a vendored copy under static/js/ (see static/js/README.md for the
+   pinned version and how to refresh it) — the docs have no third-party runtime
+   dependency. Runs at the end of the content block, after the
+   <pre class="mermaid"> elements emitted by the mermaid shortcode exist. #}
+{% if page.extra.mermaid %}
+<script src="{{ get_url(path='js/mermaid.min.js') | safe }}"></script>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+  mermaid.run();
+</script>
+{% endif %}
 {% endblock content %}
