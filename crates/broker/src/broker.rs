@@ -2841,6 +2841,11 @@ impl Broker {
                         BrokerError::Startup(format!("remote_storage.s3 builder failed: {e}"))
                     })?,
                 ),
+                crate::config::RemoteStorageBackend::Gcs(cfg) => Arc::new(
+                    crabka_remote_storage::S3RemoteStorage::from_gcs_config(&cfg).map_err(|e| {
+                        BrokerError::Startup(format!("remote_storage.gcs builder failed: {e}"))
+                    })?,
+                ),
             };
             // `[remote_storage.kafka_metadata]` opts in to
             // the topic-backed RLMM. We can't construct it inline

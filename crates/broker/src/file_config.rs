@@ -168,9 +168,9 @@ pub struct FileConfig {
 /// TOML shape of `[remote_storage]`. Maps to
 /// [`crate::BrokerConfig::remote_storage_backend`].
 ///
-/// Exactly one of `storage_dir` (local filesystem) or `[remote_storage.s3]`
-/// (S3-compatible object store) should be set. Setting both errors at
-/// load time.
+/// Exactly one of `storage_dir` (local filesystem), `[remote_storage.s3]`
+/// (S3-compatible object store), or `[remote_storage.gcs]` (native Google
+/// Cloud Storage) should be set. Setting more than one errors at load time.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageConfig {
@@ -178,6 +178,9 @@ pub struct FileRemoteStorageConfig {
     pub storage_dir: Option<String>,
     /// S3-compatible backend parameters. Omit to use `storage_dir`.
     pub s3: Option<FileRemoteStorageS3Config>,
+    /// Native Google Cloud Storage backend parameters. Omit to use
+    /// `storage_dir` or `[remote_storage.s3]`.
+    pub gcs: Option<FileRemoteStorageGcsConfig>,
     /// Opt-in to the topic-backed
     /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
     /// When absent, the broker uses the in-memory fixture.
@@ -265,6 +268,77 @@ impl std::fmt::Debug for FileRemoteStorageS3Config {
             .field("endpoint", &self.endpoint)
             .field("access_key_id", &redact(&self.access_key_id))
             .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("allow_http", &self.allow_http)
+            .field("multipart_threshold", &self.multipart_threshold)
+            .field("multipart_chunk_size", &self.multipart_chunk_size)
+            .finish()
+    }
+}
+
+/// TOML shape of `[remote_storage.gcs]`. Maps to
+/// [`crabka_remote_storage::GcsConfig`].
+///
+/// Omitting all credential fields (`service_account_path`,
+/// `service_account_key`, `application_credentials_path`) selects GKE
+/// Workload Identity / Application Default Credentials (keyless) — the
+/// primary production path.
+#[derive(Clone, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileRemoteStorageGcsConfig {
+    /// GCS bucket name.
+    pub bucket: String,
+    /// Optional key prefix inside the bucket (lets multiple clusters
+    /// share a bucket).
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Path to a service-account JSON key file. Omit (along with the
+    /// other credential fields) to use Workload Identity / ADC.
+    #[serde(default)]
+    pub service_account_path: Option<String>,
+    /// Inline service-account JSON key. Omit (along with the other
+    /// credential fields) to use Workload Identity / ADC.
+    #[serde(default)]
+    pub service_account_key: Option<String>,
+    /// Path to an Application Default Credentials JSON file. Omit (along
+    /// with the other credential fields) to use Workload Identity / ADC.
+    #[serde(default)]
+    pub application_credentials_path: Option<String>,
+    /// Optional custom GCS API base URL (for emulators / fakes).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Allow plaintext HTTP (off-by-default; required by emulators
+    /// running without TLS).
+    #[serde(default)]
+    pub allow_http: bool,
+    /// Optional override of the multipart-upload threshold (bytes). When
+    /// `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD`]
+    /// applies. Operators typically leave this alone; lower it to force
+    /// multipart on smaller segments for testing.
+    #[serde(default)]
+    pub multipart_threshold: Option<u64>,
+    /// Optional override of the per-part multipart chunk size (bytes).
+    /// When `None`, [`crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE`]
+    /// applies.
+    #[serde(default)]
+    pub multipart_chunk_size: Option<usize>,
+}
+
+impl std::fmt::Debug for FileRemoteStorageGcsConfig {
+    /// Redacts the credential fields so a stray `{:?}` / tracing call never
+    /// leaks them. Mirrors the hand-written `Debug` on
+    /// [`crabka_remote_storage::GcsConfig`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
+        f.debug_struct("FileRemoteStorageGcsConfig")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("service_account_path", &redact(&self.service_account_path))
+            .field("service_account_key", &redact(&self.service_account_key))
+            .field(
+                "application_credentials_path",
+                &redact(&self.application_credentials_path),
+            )
+            .field("endpoint", &self.endpoint)
             .field("allow_http", &self.allow_http)
             .field("multipart_threshold", &self.multipart_threshold)
             .field("multipart_chunk_size", &self.multipart_chunk_size)
@@ -957,43 +1031,62 @@ impl FileConfig {
         }
 
         // `[remote_storage]` enables tiered storage broker-
-        // wide. Either `storage_dir` (local filesystem) or
-        // `[remote_storage.s3]` (S3-compatible object store) selects the
-        // backend. Both set → error.
+        // wide. Exactly one of `storage_dir` (local filesystem),
+        // `[remote_storage.s3]` (S3-compatible object store), or
+        // `[remote_storage.gcs]` (native Google Cloud Storage) selects the
+        // backend. More than one set → error.
         if let Some(rs) = &self.remote_storage {
-            match (&rs.storage_dir, &rs.s3) {
-                (Some(_), Some(_)) => {
-                    return Err(FileConfigError::InvalidConfig(
-                        "[remote_storage] cannot set both `storage_dir` (local) \
-                         and `[remote_storage.s3]` (object store)"
-                            .into(),
-                    ));
-                }
-                (Some(dir), None) => {
-                    cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Local {
-                        dir: std::path::PathBuf::from(dir),
-                    });
-                }
-                (None, Some(s3)) => {
-                    cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::S3(
-                        crabka_remote_storage::S3Config {
-                            bucket: s3.bucket.clone(),
-                            region: s3.region.clone(),
-                            prefix: s3.prefix.clone(),
-                            endpoint: s3.endpoint.clone(),
-                            access_key_id: s3.access_key_id.clone(),
-                            secret_access_key: s3.secret_access_key.clone(),
-                            allow_http: s3.allow_http,
-                            multipart_threshold: s3
-                                .multipart_threshold
-                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD),
-                            multipart_chunk_size: s3
-                                .multipart_chunk_size
-                                .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE),
-                        },
-                    ));
-                }
-                (None, None) => {}
+            let set_count = usize::from(rs.storage_dir.is_some())
+                + usize::from(rs.s3.is_some())
+                + usize::from(rs.gcs.is_some());
+            if set_count > 1 {
+                return Err(FileConfigError::InvalidConfig(
+                    "[remote_storage] cannot set both/more than one of `storage_dir` \
+                     (local), `[remote_storage.s3]` (object store), and \
+                     `[remote_storage.gcs]` (Google Cloud Storage)"
+                        .into(),
+                ));
+            }
+            if let Some(dir) = &rs.storage_dir {
+                cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Local {
+                    dir: std::path::PathBuf::from(dir),
+                });
+            } else if let Some(s3) = &rs.s3 {
+                cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::S3(
+                    crabka_remote_storage::S3Config {
+                        bucket: s3.bucket.clone(),
+                        region: s3.region.clone(),
+                        prefix: s3.prefix.clone(),
+                        endpoint: s3.endpoint.clone(),
+                        access_key_id: s3.access_key_id.clone(),
+                        secret_access_key: s3.secret_access_key.clone(),
+                        allow_http: s3.allow_http,
+                        multipart_threshold: s3
+                            .multipart_threshold
+                            .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD),
+                        multipart_chunk_size: s3
+                            .multipart_chunk_size
+                            .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE),
+                    },
+                ));
+            } else if let Some(gcs) = &rs.gcs {
+                cfg.remote_storage_backend = Some(crate::config::RemoteStorageBackend::Gcs(
+                    crabka_remote_storage::GcsConfig {
+                        bucket: gcs.bucket.clone(),
+                        prefix: gcs.prefix.clone(),
+                        service_account_path: gcs.service_account_path.clone(),
+                        service_account_key: gcs.service_account_key.clone(),
+                        application_credentials_path: gcs.application_credentials_path.clone(),
+                        endpoint: gcs.endpoint.clone(),
+                        allow_http: gcs.allow_http,
+                        multipart_threshold: gcs
+                            .multipart_threshold
+                            .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD),
+                        multipart_chunk_size: gcs
+                            .multipart_chunk_size
+                            .unwrap_or(crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE),
+                    },
+                ));
             }
 
             // KIP-405: topic-backed RLMM is the default whenever tiered storage
@@ -2095,6 +2188,120 @@ region = "us-east-1"
         let rendered = err.to_string();
         assert!(
             rendered.contains("cannot set both"),
+            "expected backend-conflict error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn remote_storage_gcs_section_parses() {
+        let toml = r#"
+[remote_storage.gcs]
+bucket = "crabka-prod"
+prefix = "cluster-a"
+endpoint = "http://fake-gcs:4443"
+allow_http = true
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::Gcs(g)) => {
+                assert!(g.bucket == "crabka-prod");
+                assert!(g.prefix.as_deref() == Some("cluster-a"));
+                assert!(g.endpoint.as_deref() == Some("http://fake-gcs:4443"));
+                assert!(g.allow_http);
+                // Leaving all credential fields unset selects Workload
+                // Identity / ADC.
+                assert!(g.service_account_path.is_none());
+                assert!(g.service_account_key.is_none());
+                assert!(g.application_credentials_path.is_none());
+                // Multipart knobs default when the TOML omits them.
+                assert!(
+                    g.multipart_threshold == crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
+                );
+                assert!(
+                    g.multipart_chunk_size == crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                );
+            }
+            other => panic!("expected Gcs backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_storage_gcs_credentials_parse() {
+        let toml = r#"
+[remote_storage.gcs]
+bucket = "b"
+service_account_path = "/etc/gcs/key.json"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.remote_storage_backend {
+            Some(crate::config::RemoteStorageBackend::Gcs(g)) => {
+                assert!(g.bucket == "b");
+                assert!(g.service_account_path.as_deref() == Some("/etc/gcs/key.json"));
+            }
+            other => panic!("expected Gcs backend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_storage_gcs_config_debug_redacts_credentials() {
+        let gcs = FileRemoteStorageGcsConfig {
+            bucket: "crabka-prod".into(),
+            prefix: None,
+            service_account_path: Some("/etc/gcs/sa-path.json".into()),
+            service_account_key: Some("super-secret-inline-key".into()),
+            application_credentials_path: Some("/etc/gcs/adc.json".into()),
+            endpoint: None,
+            allow_http: false,
+            multipart_threshold: None,
+            multipart_chunk_size: None,
+        };
+        let rendered = format!("{gcs:?}");
+        assert!(!rendered.contains("/etc/gcs/sa-path.json"), "{rendered}");
+        assert!(!rendered.contains("super-secret-inline-key"), "{rendered}");
+        assert!(!rendered.contains("/etc/gcs/adc.json"), "{rendered}");
+        assert!(rendered.contains("***"), "{rendered}");
+        assert!(rendered.contains("crabka-prod"), "{rendered}");
+    }
+
+    #[test]
+    fn remote_storage_local_and_gcs_together_rejected() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.gcs]
+bucket = "b"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot set"),
+            "expected backend-conflict error, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn remote_storage_s3_and_gcs_together_rejected() {
+        let toml = r#"
+[remote_storage.s3]
+bucket = "b"
+region = "us-east-1"
+
+[remote_storage.gcs]
+bucket = "b"
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("cannot set"),
             "expected backend-conflict error, got: {rendered}"
         );
     }

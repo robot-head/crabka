@@ -573,6 +573,10 @@ pub enum RemoteStorageBackend {
     /// S3-compatible `S3RemoteStorage`. Production backend; works with
     /// AWS S3, `MinIO`, Cloudflare R2, and GCS via S3 compatibility.
     S3(crabka_remote_storage::S3Config),
+    /// Native Google Cloud Storage `S3RemoteStorage` engine. Production
+    /// backend for GKE deployments; supports keyless Workload Identity /
+    /// ADC auth (leave all credential fields unset).
+    Gcs(crabka_remote_storage::GcsConfig),
 }
 
 /// KIP-48: default hard upper bound on delegation-token lifetime.
