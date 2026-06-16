@@ -1,0 +1,16 @@
+{# Mounts the interactive WASM KRaft consensus playground.
+
+   The mount point is upgraded in-place by `static/playground/app.js`, which
+   loads the wasm-bindgen module (`crabka_playground.js` / `_bg.wasm`) generated
+   by `website/build-playground.sh`. Asset URLs go through `get_url` so they
+   resolve under the site's base_url (the GitHub Pages /crabka/ subpath).
+
+   Browsers without JS / WebAssembly see the fallback paragraph. #}
+<link rel="stylesheet" href="{{ get_url(path='playground/playground.css') }}">
+<div id="crabka-playground">
+  <p class="cp-fallback">
+    Loading the interactive consensus simulator… this panel needs JavaScript and
+    WebAssembly. If it doesn't appear, your browser may have them disabled.
+  </p>
+</div>
+<script type="module" src="{{ get_url(path='playground/app.js') }}"></script>

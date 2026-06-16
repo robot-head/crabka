@@ -1,0 +1,40 @@
+[package]
+name = "crabka-kraft-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Deterministic, sans-IO KRaft consensus core (KIP-595/996) for Crabka — wasm-friendly"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-kraft-core"
+readme = "README.md"
+keywords = ["kafka", "raft", "kraft", "consensus", "crabka"]
+categories = ["algorithms", "simulation"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The deterministic multi-node simulator with trace recording. Promotes the
+# `sim` module (the scheduler the integration tests and `crabka-docgen` use, and
+# the engine the in-browser WASM playground drives). Pure and IO-free; pulls in
+# `serde` only to make recorded traces serializable.
+sim = ["dep:serde"]
+
+# A pure, deterministic, sans-IO leaf: no tokio, no filesystem, no sockets, no
+# crypto. The async engine, real wire, and on-disk log live in `crabka-raft`,
+# which re-exports this crate's modules under `crabka_raft::kraft`. Keeping the
+# core a clean leaf is what lets it compile to `wasm32-unknown-unknown` for the
+# browser playground.
+[dependencies]
+crabka-voters = { version = "0.3.6", path = "../voters" }
+bytes = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }

@@ -10,6 +10,9 @@ on:
       - "crates/broker/**"
       - "crates/protocol/**"
       - "crates/raft/**"
+      - "crates/kraft-core/**"
+      - "crates/voters/**"
+      - "crates/playground/**"
       - "charts/**"
       - ".github/workflows/docs.yml"
     tags:
@@ -20,6 +23,9 @@ on:
       - "website/**"
       - "crates/docgen/**"
       - "crates/raft/**"
+      - "crates/kraft-core/**"
+      - "crates/voters/**"
+      - "crates/playground/**"
       - "charts/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
@@ -43,10 +49,23 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
       - name: Generate reference markdown
         run: cargo run -p crabka-docgen -- all --out website/content/reference
       - name: Build rustdoc
         run: cargo doc --no-deps --workspace
+      - name: Install wasm-bindgen-cli (version-matched to Cargo.lock)
+        run: |
+          set -euo pipefail
+          # Keep the CLI in lock-step with the wasm-bindgen crate or the
+          # generated glue will refuse to load ("schema version mismatch").
+          ver="$(cargo metadata --format-version 1 --locked \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="wasm-bindgen"))')"
+          echo "wasm-bindgen ${ver}"
+          cargo install wasm-bindgen-cli --version "${ver}" --locked
+      - name: Build the WASM consensus playground
+        run: ./website/build-playground.sh
       - name: Stage rustdoc into site
         run: |
           mkdir -p website/static/api/rust

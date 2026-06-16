@@ -81,6 +81,9 @@ fn render_diagram(out: &mut String, trace: &ScenarioTrace) {
             TraceAction::Append { node, count } => {
                 let _ = writeln!(out, "    Note over N{node}: ✏ append {count} record(s)");
             }
+            TraceAction::Drop { src, dst, event } => {
+                let _ = writeln!(out, "    N{src}--xN{dst}: {event} (dropped)");
+            }
         }
     }
     out.push_str("{% end %}\n\n");
@@ -136,5 +139,25 @@ mod tests {
         assert!(md.contains("Duplicate message delivery"));
         assert!(md.contains("**Invariant:**"));
         assert!(md.contains("**Outcome:**"));
+    }
+
+    #[test]
+    fn emits_a_generated_diagram_per_scenario() {
+        // Each of the three scenarios renders one generated `{% mermaid() %}`
+        // sequence diagram, plus the split-brain scenario leads with one
+        // hand-authored contrast diagram — four mermaid blocks in total. This
+        // pins `render_diagram`'s output specifically: if it stopped emitting,
+        // only the single hand-authored contrast block would remain.
+        let md = failure_scenarios_md();
+        let mermaid_blocks = md.matches("{% mermaid() %}").count();
+        assert!(
+            mermaid_blocks == 4,
+            "expected 3 generated diagrams + 1 contrast, got {mermaid_blocks}"
+        );
+        // A generated diagram declares its participants and draws message
+        // arrows — content the hand-authored contrast for a single scenario
+        // cannot account for on its own (e.g. the reordered/duplicate scenarios).
+        assert!(md.matches("participant N").count() >= 6);
+        assert!(md.contains("->>"));
     }
 }

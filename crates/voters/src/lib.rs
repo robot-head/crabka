@@ -1,10 +1,19 @@
 //! KIP-853 voter set value types: a voter is (id, directory-id, endpoints, kraft.version range).
+//!
+//! This is a pure value-type leaf crate — no IO, no async, no crypto — so it
+//! compiles for `wasm32-unknown-unknown`. `crabka-metadata` re-exports it as
+//! its `voters` module, and the deterministic consensus core
+//! (`crabka-kraft-core`) embeds a [`VoterSet`] in its quorum state.
+
+#![doc(html_root_url = "https://docs.rs/crabka-voters/0.3.6")]
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use crate::NodeId;
+/// A broker/controller node id (Kafka's `int32`, widened to `u64` here because
+/// ids only ever count up from 1).
+pub type NodeId = u64;
 
 /// A single listener endpoint advertised by a voter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

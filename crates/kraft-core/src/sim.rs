@@ -17,11 +17,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::kraft::QuorumStateMachine;
-use crate::kraft::action::{Action, TimerKind};
-use crate::kraft::event::{Event, LogEnd};
-use crate::kraft::role::Role;
-use crate::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
+use crate::action::{Action, TimerKind};
+use crate::core::QuorumStateMachine;
+use crate::event::{Event, LogEnd};
+use crate::role::Role;
+use crate::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
 
 // --------------------------------------------------------------------------
 // Recorded trace types
@@ -80,6 +80,13 @@ pub enum TraceAction {
         node: u64,
         count: usize,
     },
+    /// An in-flight message was deliberately discarded by the operator (the
+    /// interactive playground's "drop" fault) instead of being delivered.
+    Drop {
+        src: u64,
+        dst: u64,
+        event: String,
+    },
 }
 
 /// A single node's observable state at a point in time.
@@ -91,6 +98,30 @@ pub struct NodeRole {
     pub log_len: usize,
     pub hwm: i64,
     pub partitioned: bool,
+}
+
+/// One message sitting on the in-memory bus, waiting to be delivered.
+#[derive(serde::Serialize, Clone)]
+pub struct InFlight {
+    pub src: u64,
+    pub dst: u64,
+    pub event: String,
+}
+
+/// A full, serializable snapshot of the simulation, read back by the browser UI
+/// after every interactive control action.
+#[derive(serde::Serialize, Clone)]
+pub struct SimSnapshot {
+    /// Logical clock in milliseconds.
+    pub clock_ms: u64,
+    /// Every node's observable role/epoch/log state, ascending by id.
+    pub nodes: Vec<NodeRole>,
+    /// Messages currently queued on the bus, next-to-deliver first.
+    pub in_flight: Vec<InFlight>,
+    /// The ids of every node that currently believes it is leader.
+    pub leaders: Vec<u64>,
+    /// How many timeline steps have been recorded so far.
+    pub step_count: usize,
 }
 
 // --------------------------------------------------------------------------
@@ -212,14 +243,12 @@ fn consider(
     }
 }
 
-fn make_voter_set(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
-    crabka_metadata::voters::VoterSet::from_voters(ids.iter().map(|&id| {
-        crabka_metadata::voters::Voter {
-            id,
-            directory_id: uuid::Uuid::nil(),
-            endpoints: Vec::new(),
-            kraft_version: crabka_metadata::voters::KRaftVersionRange::default(),
-        }
+fn make_voter_set(ids: &[NodeId]) -> crabka_voters::VoterSet {
+    crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| crabka_voters::Voter {
+        id,
+        directory_id: uuid::Uuid::nil(),
+        endpoints: Vec::new(),
+        kraft_version: crabka_voters::KRaftVersionRange::default(),
     }))
 }
 
@@ -255,7 +284,14 @@ fn event_label(event: &Event) -> String {
 
 /// A deterministic multi-node `KRaft` simulation over the in-memory fake log,
 /// instrumented to record a [`ScenarioTrace`].
-struct Sim {
+///
+/// Beyond the curated [`scenarios`] it also backs the interactive in-browser
+/// playground (via `crabka-playground`): the same scheduler, driven one step at
+/// a time with operator-injected faults (partition, heal, drop, reorder,
+/// duplicate, append) and a serializable [`SimSnapshot`] read back after each
+/// step. The recorded [`steps`](Self::steps) double as the playground's event
+/// timeline.
+pub struct Sim {
     nodes: BTreeMap<NodeId, Node>,
     voter_ids: Vec<NodeId>,
     now: SimInstant,
@@ -268,7 +304,8 @@ struct Sim {
 }
 
 impl Sim {
-    fn new(voter_ids: &[NodeId]) -> Self {
+    #[must_use]
+    pub fn new(voter_ids: &[NodeId]) -> Self {
         let voters = make_voter_set(voter_ids);
         let mut nodes = BTreeMap::new();
         for &id in voter_ids {
@@ -380,7 +417,10 @@ impl Sim {
             .collect()
     }
 
-    fn run_until_stable(&mut self, max_ticks: usize) {
+    /// Run the scheduler until the cluster fingerprint stops changing (or
+    /// `max_ticks` is hit). Used both by the curated scenarios and by the
+    /// playground's "settle" button.
+    pub fn run_until_stable(&mut self, max_ticks: usize) {
         let mut last_fingerprint = self.fingerprint();
         let mut stable_rounds = 0u32;
         for _ in 0..max_ticks {
@@ -407,7 +447,7 @@ impl Sim {
 
     // ---- public scenario surface ---------------------------------------------
 
-    fn partition(&mut self, node: NodeId) {
+    pub fn partition(&mut self, node: NodeId) {
         self.partitioned.insert(node);
         self.queue.retain(|m| m.src != node && m.dst != node);
         self.record(
@@ -416,7 +456,7 @@ impl Sim {
         );
     }
 
-    fn heal(&mut self, node: NodeId) {
+    pub fn heal(&mut self, node: NodeId) {
         self.partitioned.remove(&node);
         self.record(
             TraceAction::Heal { node },
@@ -424,7 +464,7 @@ impl Sim {
         );
     }
 
-    fn leader_append(&mut self, leader: NodeId, n: usize) {
+    pub fn leader_append(&mut self, leader: NodeId, n: usize) {
         let epoch = self.nodes[&leader].machine.quorum_state().leader_epoch;
         let node = self.nodes.get_mut(&leader).unwrap();
         node.log.append_in_epoch(epoch, n);
@@ -437,12 +477,113 @@ impl Sim {
         );
     }
 
-    fn leaders(&self) -> Vec<NodeId> {
+    #[must_use]
+    pub fn leaders(&self) -> Vec<NodeId> {
         self.nodes
             .values()
             .filter(|n| n.machine.role().is_leader())
             .map(|n| n.id)
             .collect()
+    }
+
+    // ---- interactive control surface (the in-browser playground) ------------
+
+    /// Advance the simulation by one scheduler microstep: deliver the
+    /// front-of-bus message if one is queued, otherwise fire the next-due timer.
+    /// Returns `true` if anything happened (there was a message or a timer).
+    pub fn step_once(&mut self) -> bool {
+        if let Some(msg) = self.queue.pop_front() {
+            self.deliver(msg);
+            return true;
+        }
+        self.fire_next_timer()
+    }
+
+    /// Append `n` records on whichever node is currently leader (the playground
+    /// "produce" button). Returns `false` if there is no leader to append to.
+    pub fn append(&mut self, n: usize) -> bool {
+        let Some(leader) = self.leaders().first().copied() else {
+            return false;
+        };
+        self.leader_append(leader, n);
+        true
+    }
+
+    /// Discard the front-of-bus message instead of delivering it (the "drop"
+    /// fault). Returns `false` if the bus is empty. Recorded as a [`TraceAction::Drop`]
+    /// so it shows up on the event timeline.
+    pub fn drop_next(&mut self) -> bool {
+        let Some(msg) = self.queue.pop_front() else {
+            return false;
+        };
+        let label = event_label(&msg.event);
+        self.record(
+            TraceAction::Drop {
+                src: msg.src,
+                dst: msg.dst,
+                event: label.clone(),
+            },
+            format!("N{} → N{}: {label} dropped in flight", msg.src, msg.dst),
+        );
+        true
+    }
+
+    /// Deliver every queued message back-to-front (non-FIFO) — the "reorder"
+    /// fault. Returns the number delivered.
+    pub fn reorder(&mut self) -> usize {
+        self.deliver_queue_reversed()
+    }
+
+    /// Deliver the front-of-bus message twice — the "duplicate" fault. Returns
+    /// `false` if the bus is empty.
+    pub fn duplicate_next(&mut self) -> bool {
+        self.deliver_front_twice()
+    }
+
+    /// The current logical clock, in milliseconds.
+    #[must_use]
+    pub fn clock_ms(&self) -> u64 {
+        self.now.0
+    }
+
+    /// The voter ids of this cluster, ascending.
+    #[must_use]
+    pub fn voter_ids(&self) -> Vec<NodeId> {
+        self.voter_ids.clone()
+    }
+
+    /// The recorded event timeline (every delivery, fault, timeout, and election
+    /// the simulation has taken so far).
+    #[must_use]
+    pub fn steps(&self) -> &[TraceStep] {
+        &self.steps
+    }
+
+    /// The messages currently in flight on the bus, front (next to deliver) first.
+    #[must_use]
+    pub fn in_flight(&self) -> Vec<InFlight> {
+        self.queue
+            .iter()
+            .map(|m| InFlight {
+                src: m.src,
+                dst: m.dst,
+                event: event_label(&m.event),
+            })
+            .collect()
+    }
+
+    /// A full, serializable snapshot of the cluster: clock, every node's role,
+    /// the in-flight bus, the current leaders, and how many steps have elapsed.
+    /// This is what the browser UI renders after each control action.
+    #[must_use]
+    pub fn snapshot(&self) -> SimSnapshot {
+        SimSnapshot {
+            clock_ms: self.now.0,
+            nodes: self.snapshot_roles(),
+            in_flight: self.in_flight(),
+            leaders: self.leaders(),
+            step_count: self.steps.len(),
+        }
     }
 
     // ---- scheduler internals -------------------------------------------------
@@ -979,5 +1120,125 @@ mod tests {
             leaders == 1,
             "final step must have exactly one Leader, got {leaders}"
         );
+    }
+
+    // ---- interactive control surface (drives the browser playground) --------
+
+    /// Step the bus/timers one microstep at a time (the way the UI's "step"
+    /// button does) until a leader appears, with a bounded number of steps.
+    fn step_until<F: Fn(&Sim) -> bool>(sim: &mut Sim, max: usize, done: F) {
+        for _ in 0..max {
+            if done(sim) {
+                return;
+            }
+            if !sim.step_once() {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn interactive_bootstrap_elects_one_leader() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        // Fresh cluster: no leader, election timers armed, bus empty.
+        assert!(sim.leaders().is_empty());
+        assert!(sim.snapshot().nodes.len() == 3);
+
+        step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
+        sim.run_until_stable(10_000);
+        assert!(
+            sim.leaders().len() == 1,
+            "exactly one leader after bootstrap"
+        );
+
+        let snap = sim.snapshot();
+        assert!(snap.leaders.len() == 1);
+        assert!(snap.clock_ms > 0);
+        assert!(snap.step_count > 0);
+    }
+
+    #[test]
+    fn interactive_partition_then_heal_keeps_one_leader() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
+        sim.run_until_stable(10_000);
+        let old = sim.leaders()[0];
+
+        sim.partition(old);
+        step_until(&mut sim, 10_000, |s| s.leaders().iter().any(|&l| l != old));
+        sim.run_until_stable(10_000);
+
+        sim.heal(old);
+        sim.run_until_stable(10_000);
+        assert!(
+            sim.leaders().len() == 1,
+            "exactly one leader after partition+heal, got {:?}",
+            sim.leaders()
+        );
+    }
+
+    #[test]
+    fn drop_next_removes_a_message_and_records_it() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        // Fire the first timer so there is election traffic on the bus.
+        while sim.in_flight().is_empty() && sim.step_once() {}
+        let before = sim.in_flight().len();
+        assert!(before > 0, "expected election messages on the bus");
+
+        let steps_before = sim.steps().len();
+        assert!(sim.drop_next());
+        assert!(sim.in_flight().len() == before - 1);
+        // The drop is recorded on the timeline.
+        assert!(sim.steps().len() == steps_before + 1);
+        let last = sim.steps().last().unwrap();
+        assert!(matches!(last.action, TraceAction::Drop { .. }));
+    }
+
+    #[test]
+    fn accessors_and_bus_faults_report_consistently() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        assert!(sim.voter_ids() == vec![1, 2, 3]);
+        assert!(sim.clock_ms() == 0);
+
+        // Pump until there is election traffic, then exercise the bus-replay faults.
+        while sim.in_flight().is_empty() && sim.step_once() {}
+        assert!(!sim.in_flight().is_empty());
+        assert!(sim.reorder() >= 1, "reorder delivers the queued round");
+
+        // The logical clock advances as timers fire.
+        sim.run_until_stable(10_000);
+        assert!(sim.clock_ms() > 0);
+
+        // duplicate_next is a no-op-safe replay when the bus has a message.
+        while sim.in_flight().is_empty() && sim.step_once() {}
+        if !sim.in_flight().is_empty() {
+            assert!(sim.duplicate_next());
+        }
+    }
+
+    #[test]
+    fn append_targets_the_current_leader() {
+        let mut sim = Sim::new(&[1, 2, 3]);
+        // No leader yet -> append is a no-op.
+        assert!(!sim.append(2));
+
+        step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
+        sim.run_until_stable(10_000);
+        let leader = sim.leaders()[0];
+        let before = sim
+            .snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.id == leader)
+            .map_or(0, |n| n.log_len);
+
+        assert!(sim.append(2));
+        let after = sim
+            .snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.id == leader)
+            .map_or(0, |n| n.log_len);
+        assert!(after == before + 2, "append added 2 records to the leader");
     }
 }
