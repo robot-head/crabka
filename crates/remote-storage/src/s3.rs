@@ -554,6 +554,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_single_byte_range_start_equals_end() {
+        let store = rsm(None);
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(10);
+        tokio::task::spawn_blocking(move || {
+            store
+                .copy_log_segment_data(&md, &sample_data(src.path(), false))
+                .unwrap();
+            // Inclusive [3, 3] is a valid single-byte range -> "3" (the guard
+            // is `end < start_position`, not `<=`/`==`).
+            assert!(store.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_each_index_type() {
         let store = rsm(None);
         let src = TempDir::new().unwrap();
