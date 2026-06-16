@@ -231,4 +231,16 @@ mod tests {
         let v = capture(|| tracing::trace!("fine-grained detail"));
         assert!(v["severity"] == "DEBUG");
     }
+
+    #[test]
+    fn preserves_u64_and_f64_field_types() {
+        // The other record_* visitor paths are covered by emits_cloud_logging_json
+        // (str/bool/i64/debug); u64 and f64 have their own visitor methods, so
+        // exercise them too and confirm the values survive as native JSON types.
+        let v = capture(|| {
+            tracing::info!(offset = 42_u64, ratio = 0.5_f64, "metrics");
+        });
+        assert!(v["offset"] == 42_u64);
+        assert!(v["ratio"] == 0.5);
+    }
 }
