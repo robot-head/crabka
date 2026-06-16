@@ -517,7 +517,6 @@ fn build_describe_cluster_body(
                 broker_id: *id,
                 host: host.clone(),
                 port: *port,
-                rack: None,
                 ..Default::default()
             })
             .collect()
@@ -534,16 +533,15 @@ fn build_describe_cluster_body(
             .collect()
     };
 
+    // Only the non-default fields are set; error_code (0), error_message (None),
+    // throttle_time_ms (0), and cluster_authorized_operations (i32::MIN — "not
+    // present"; the controller listener has no ACL context) fall through to
+    // `Default`. Specifying them explicitly would just be equivalent-mutant noise.
     let resp = DescribeClusterResponse {
-        error_code: 0,
-        error_message: None,
         endpoint_type,
         cluster_id: cluster_id.to_string(),
         controller_id,
         brokers: entries,
-        // No ACL context on the controller listener → "not present" sentinel.
-        cluster_authorized_operations: i32::MIN,
-        throttle_time_ms: 0,
         ..Default::default()
     };
     let mut buf = BytesMut::new();
@@ -626,7 +624,11 @@ mod tests {
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert!(resp.endpoint_type == 1);
             assert!(resp.brokers.len() == 1);
-            assert!(resp.brokers[0].broker_id == 10 && resp.brokers[0].host == "b10");
+            assert!(
+                resp.brokers[0].broker_id == 10
+                    && resp.brokers[0].host == "b10"
+                    && resp.brokers[0].port == 9092
+            );
             assert!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
         }
     }

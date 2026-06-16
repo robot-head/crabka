@@ -45,4 +45,11 @@ exclude_re = [
     # The public `compress`/`decompress` dispatchers have no codec prefix, so
     # they are not matched and stay under test.
     "compression/src/lib\\.rs.* replace (gzip|snappy|lz4|zstd)_(compress|decompress) ->",
+    # `describe_cluster_response_body` (KIP-919 controller listener) is engine-IO
+    # glue: it pulls the voter set / brokers / quorum leader out of the live
+    # metadata image and delegates the actual projection-and-encode to
+    # `build_describe_cluster_body`, which IS unit-tested. Exercising the image
+    # extraction needs a running controller quorum (no unit-testable signal),
+    # same rationale as the serve-loop/entrypoint globs above.
+    "raft/src/server\\.rs.*describe_cluster_response_body",
 ]
