@@ -2383,4 +2383,55 @@ mod tests {
         assert!(image.broker_epoch(5) == Some(99));
         assert!(image.broker_epoch(404) == None);
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+
+    #[test]
+    fn fresh_image_accessors() {
+        let id = Uuid::from_u128(0xABCD);
+        let image = MetadataImage::new(id);
+        assert!(image.cluster_id() == id); // not Uuid::default()
+        assert!(image.kraft_version() == 0); // fresh image has kraft_version 0
+    }
+
+    #[test]
+    fn broker_lookup_returns_registered_record() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 7,
+                broker_epoch: 1,
+                incarnation_id: Uuid::nil(),
+                host: "h".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
+        let b = image.broker(7).expect("registered broker resolvable");
+        assert!(b.node_id == 7);
+        assert!(image.broker(404).is_none());
+    }
+
+    #[test]
+    fn reapplying_topic_with_new_id_drops_stale_id_index() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        let old_id = Uuid::from_u128(1);
+        let new_id = Uuid::from_u128(2);
+        let topic = |id| {
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: id,
+                partitions: 1,
+                replication_factor: 1,
+            })
+        };
+        image.apply(&topic(old_id));
+        assert!(image.topic_by_id(&old_id).is_some());
+        // Re-apply the same NAME with a different id: the stale id index entry
+        // must be dropped (the `prev.topic_id != t.topic_id` guard).
+        image.apply(&topic(new_id));
+        assert!(image.topic_by_id(&new_id).is_some());
+        assert!(image.topic_by_id(&old_id).is_none());
+    }
 }

@@ -560,4 +560,11 @@ mod tests {
         });
         assert_eq!(round_trip(&r), r);
     }
+
+    #[test]
+    fn partition_epoch_serde_default_is_minus_one() {
+        // -1 is Kafka's "unknown epoch" sentinel; pin it (mutants flip it to
+        // 0/1). This is the `#[serde(default)]` fallback for partition_epoch.
+        assert_eq!(default_partition_epoch(), -1);
+    }
 }
