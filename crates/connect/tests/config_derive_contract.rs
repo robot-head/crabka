@@ -156,11 +156,10 @@ async fn f32_fields_reject_values_outside_f32_range() {
 async fn duration_fields_reject_negative_milliseconds() {
     let def = ConfigDef::new("manual").required("poll_interval", Duration::KIND);
     let raw = serde_json::Map::from_iter([("poll_interval".to_string(), json!(-1))]);
-    let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
 
-    let err = Duration::from_resolved_value(&resolved, "poll_interval").unwrap_err();
+    let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
     assert!(
-        matches!(err, ConfigError::WrongType { key, expected: "non-negative duration milliseconds" } if key == "poll_interval")
+        matches!(err, ConfigError::WrongType { key, expected: "duration milliseconds" } if key == "poll_interval")
     );
 }

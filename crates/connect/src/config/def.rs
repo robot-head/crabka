@@ -233,8 +233,9 @@ fn validate_kind(key: &str, kind: ConfigKind, value: &Value) -> ConfigResult<()>
     let valid = match kind {
         ConfigKind::String => value.is_string(),
         ConfigKind::Bool => value.is_boolean(),
-        ConfigKind::Integer | ConfigKind::DurationMillis | ConfigKind::DurationMs => {
-            value.as_i64().is_some()
+        ConfigKind::Integer => value.as_i64().is_some(),
+        ConfigKind::DurationMillis | ConfigKind::DurationMs => {
+            value.as_i64().is_some_and(|millis| millis >= 0)
         }
         ConfigKind::UnsignedInteger => value.as_u64().is_some(),
         ConfigKind::Float => value.as_f64().is_some(),
@@ -422,6 +423,20 @@ mod tests {
         assert!(
             matches!(err, ConfigError::WrongType { key, expected: "unsigned integer" } if key == "limit")
         );
+    }
+
+    #[tokio::test]
+    async fn duration_kinds_reject_negative_milliseconds() {
+        for kind in [ConfigKind::DurationMillis, ConfigKind::DurationMs] {
+            let def = ConfigDef::new("demo").required("timeout", kind);
+            let raw = raw([("timeout", json!(-1))]);
+
+            let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
+
+            assert!(
+                matches!(err, ConfigError::WrongType { key, expected: "duration milliseconds" } if key == "timeout")
+            );
+        }
     }
 
     #[tokio::test]
