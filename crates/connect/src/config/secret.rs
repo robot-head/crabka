@@ -4,8 +4,6 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::error::{ConfigError, ConfigResult};
-
 /// Owned secret text. Formatting is always redacted.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SecretString(String);
@@ -38,7 +36,7 @@ impl fmt::Display for SecretString {
 
 /// A reference to secret material held by an external provider.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "from", rename_all = "camelCase")]
+#[serde(tag = "from", rename_all = "camelCase", deny_unknown_fields)]
 pub enum SecretRef {
     /// Resolve from an environment variable.
     Env { name: String },
@@ -56,11 +54,27 @@ pub struct ResolveOptions {
     pub allow_literal_secrets: bool,
 }
 
+/// Errors raised by a secret provider while resolving a reference.
+#[derive(Debug, thiserror::Error)]
+pub enum SecretResolutionError {
+    /// The reference names a provider this resolver does not support.
+    #[error("unsupported secret reference provider `{provider}`")]
+    UnsupportedReference { provider: &'static str },
+
+    /// An environment-variable lookup failed.
+    #[error("failed to resolve environment variable `{name}`: {source}")]
+    EnvVar {
+        name: String,
+        #[source]
+        source: env::VarError,
+    },
+}
+
 /// Resolves secret references into redacted secret values.
 #[async_trait]
 pub trait SecretResolver: Send + Sync {
     /// Resolve one secret reference.
-    async fn resolve(&self, secret_ref: &SecretRef) -> ConfigResult<SecretString>;
+    async fn resolve(&self, secret_ref: &SecretRef) -> Result<SecretString, SecretResolutionError>;
 }
 
 /// Secret resolver backed by process environment variables.
@@ -69,19 +83,21 @@ pub struct EnvSecretResolver;
 
 #[async_trait]
 impl SecretResolver for EnvSecretResolver {
-    async fn resolve(&self, secret_ref: &SecretRef) -> ConfigResult<SecretString> {
+    async fn resolve(&self, secret_ref: &SecretRef) -> Result<SecretString, SecretResolutionError> {
         match secret_ref {
             SecretRef::Env { name } => env::var(name).map(SecretString::new).map_err(|source| {
-                ConfigError::SecretResolution {
-                    key: name.clone(),
-                    source: Box::new(source),
+                SecretResolutionError::EnvVar {
+                    name: name.clone(),
+                    source,
                 }
             }),
-            SecretRef::KubernetesSecret { .. } | SecretRef::Vault { .. } => {
-                Err(ConfigError::InvalidSecretRef {
-                    key: "secret".into(),
-                    reason: "resolver only supports env references".into(),
+            SecretRef::KubernetesSecret { .. } => {
+                Err(SecretResolutionError::UnsupportedReference {
+                    provider: "kubernetesSecret",
                 })
+            }
+            SecretRef::Vault { .. } => {
+                Err(SecretResolutionError::UnsupportedReference { provider: "vault" })
             }
         }
     }
@@ -115,5 +131,54 @@ mod tests {
                 name: "POSTGRES_PASSWORD".into()
             }
         );
+    }
+
+    #[test]
+    fn secret_ref_rejects_unknown_fields() {
+        let value = serde_json::json!({
+            "from": "env",
+            "name": "POSTGRES_PASSWORD",
+            "extra": true
+        });
+
+        let err = serde_json::from_value::<SecretRef>(value).unwrap_err();
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[tokio::test]
+    async fn env_resolver_reports_missing_env_as_provider_error() {
+        let resolver = EnvSecretResolver;
+        let err = resolver
+            .resolve(&SecretRef::Env {
+                name: "CRABKA_CONNECT_TEST_MISSING_SECRET".into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SecretResolutionError::EnvVar {
+                name,
+                source: env::VarError::NotPresent,
+            } if name == "CRABKA_CONNECT_TEST_MISSING_SECRET"
+        ));
+    }
+
+    #[tokio::test]
+    async fn env_resolver_reports_valid_non_env_refs_as_unsupported() {
+        let resolver = EnvSecretResolver;
+        let err = resolver
+            .resolve(&SecretRef::Vault {
+                path: "secret/data/connect/pg".into(),
+                key: "password".into(),
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SecretResolutionError::UnsupportedReference { provider: "vault" }
+        ));
     }
 }

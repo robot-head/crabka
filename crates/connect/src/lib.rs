@@ -40,8 +40,8 @@ pub mod source;
 
 pub use config::{
     ConfigDef, ConfigError, ConfigKey, ConfigKind, ConfigResult, ConnectorConfig,
-    EnvSecretResolver, RawConfig, ResolveOptions, ResolvedConfig, SecretRef, SecretResolver,
-    SecretString,
+    EnvSecretResolver, RawConfig, ResolveOptions, ResolvedConfig, SecretRef, SecretResolutionError,
+    SecretResolver, SecretString,
 };
 pub use convert::{ByteIdentity, Converter, SchemaConverter};
 pub use error::ConnectError;

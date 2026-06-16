@@ -8,7 +8,10 @@ mod secret;
 pub use def::{ConfigDef, ConfigKey, ConfigKind, RawConfig};
 pub use error::{ConfigError, ConfigResult};
 pub use resolved::ResolvedConfig;
-pub use secret::{EnvSecretResolver, ResolveOptions, SecretRef, SecretResolver, SecretString};
+pub use secret::{
+    EnvSecretResolver, ResolveOptions, SecretRef, SecretResolutionError, SecretResolver,
+    SecretString,
+};
 
 /// Typed connector configuration produced from a resolved config map.
 pub trait ConnectorConfig: Sized {

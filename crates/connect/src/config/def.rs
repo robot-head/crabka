@@ -5,11 +5,15 @@ pub type RawConfig = Map<String, Value>;
 
 /// ConfigDef-style connector configuration schema.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct ConfigDef;
+pub struct ConfigDef {
+    _private: (),
+}
 
 /// One connector configuration field definition.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ConfigKey;
+pub struct ConfigKey {
+    _private: (),
+}
 
 /// Supported logical connector configuration kinds.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
