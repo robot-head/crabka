@@ -36,16 +36,15 @@
   </div>
 </div>
 {# Mermaid: opt in per-page with `extra.mermaid = true` in front matter.
-   Loaded from a pinned jsdelivr CDN — the sandbox blocks outbound network so
-   the JS can't be vendored into static/js/ here; the end-user's browser on
-   GitHub Pages fetches it directly. Vendoring into static/js/ (so the docs have
-   no third-party runtime dependency) is a future hardening step.
-   Runs at the end of the content block, after the <pre class="mermaid">
-   elements emitted by the mermaid shortcode exist. #}
+   Served from a vendored copy under static/js/ (see static/js/README.md for the
+   pinned version and how to refresh it) — the docs have no third-party runtime
+   dependency. Runs at the end of the content block, after the
+   <pre class="mermaid"> elements emitted by the mermaid shortcode exist. #}
 {% if page.extra.mermaid %}
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({ startOnLoad: true, theme: 'neutral', securityLevel: 'strict' });
+<script src="{{ get_url(path='js/mermaid.min.js') | safe }}"></script>
+<script>
+  mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+  mermaid.run();
 </script>
 {% endif %}
 {% endblock content %}
