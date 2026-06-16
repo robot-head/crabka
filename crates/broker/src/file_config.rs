@@ -707,7 +707,16 @@ impl FileConfig {
         {
             cfg.max_connections_per_ip = max;
         }
-        // `[server_properties]` is intentionally ignored.
+        // `[server_properties]` is intentionally ignored, except for the
+        // handful of recognized Kafka broker properties below.
+        // KIP-939: `transaction.two.phase.commit.enable` (default false).
+        if cfg.transaction_two_phase_commit_enable == defaults.transaction_two_phase_commit_enable
+            && let Some(v) = self
+                .server_properties
+                .get("transaction.two.phase.commit.enable")
+        {
+            cfg.transaction_two_phase_commit_enable = v.trim().eq_ignore_ascii_case("true");
+        }
         if let Some(proto) = self.controller_listener_protocol
             && cfg.controller_listener_protocol == defaults.controller_listener_protocol
         {

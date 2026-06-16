@@ -23,8 +23,11 @@ use crate::coordinator::unified::classic_state::OffsetEntry;
 use crate::error::BrokerError;
 use crate::partition_registry::PartitionRegistry;
 use crate::txn::bootstrap;
+use crate::txn::handlers::end_txn::next_producer_identity;
 use crate::txn::partitioner::partition_for_tid;
-use crate::txn::state::TxnEntry;
+use crate::txn::state::{TxnEntry, TxnState};
+use crate::txn::two_pc::should_abort_idle_txn;
+use crate::txn::version::TxnVersion;
 
 /// A consumer-group committed-offset key: `(topic, partition)`.
 pub(crate) type OffsetKey = (String, i32);
@@ -231,6 +234,131 @@ impl TxnCoordinator {
             .insert(entry.producer_id, entry.transactional_id.clone());
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
         Ok(())
+    }
+
+    /// KIP-939 idle-transaction reaper: abort every locally-coordinated,
+    /// non-2PC, `Ongoing` transaction whose timeout has elapsed at `now_ms`.
+    ///
+    /// 2PC transactions (`txn_timeout_ms == NO_TIMEOUT_MS`) are skipped — their
+    /// external transaction manager owns the commit/abort decision, and Kafka
+    /// must never unilaterally abort a prepared 2PC transaction. The decision is
+    /// delegated to [`should_abort_idle_txn`], the exhaustively model-checked
+    /// core (see [`crate::txn::two_pc_model`]).
+    ///
+    /// Each abort runs the same two-step transition + marker fan-out as an
+    /// `EndTxn(committed=false)` and bumps the producer epoch on completion (at
+    /// `TV_2`) so the timed-out producer is fenced. Marker fan-out is local-only
+    /// (remote partitions are logged + skipped, mirroring the `InitProducerId`
+    /// abort-on-stale-Ongoing path); a concurrent caller that changed the entry
+    /// out from under us aborts this reap of that tid (re-validated before the
+    /// Complete write). Returns the tids it finalized.
+    pub(crate) async fn sweep_expired(&self, now_ms: i64, txnv: TxnVersion) -> Vec<String> {
+        // Snapshot (tid, handle) pairs first so we don't hold DashMap shard
+        // locks across the async abort work.
+        let handles: Vec<(String, Arc<Mutex<TxnEntry>>)> = self
+            .state
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+
+        let mut aborted = Vec::new();
+        for (tid, handle) in handles {
+            // Only reap transactions this broker currently coordinates: a
+            // partition we used to lead may have moved, leaving stale state.
+            if !self.is_coordinator_for(&tid).await {
+                continue;
+            }
+
+            // Phase 1: decide + Ongoing → PrepareAbort under the lock.
+            let prepare_snap = {
+                let mut entry = handle.lock().await;
+                if !should_abort_idle_txn(entry.state, entry.txn_timeout_ms, entry.start_ms, now_ms)
+                {
+                    continue;
+                }
+                entry.state = TxnState::PrepareAbort;
+                entry.last_update_ms = now_ms;
+                entry.clone()
+            };
+            if let Err(e) = self.put(prepare_snap.clone(), txnv).await {
+                warn!(tid, error = %e, "txn reaper: failed to persist PrepareAbort; skipping");
+                continue;
+            }
+
+            // Phase 2: fan out abort markers to local partition leaders.
+            self.dispatch_local_abort_markers(&prepare_snap).await;
+
+            // Phase 3: PrepareAbort → CompleteAbort, re-validating identity +
+            // state so a concurrent EndTxn / InitProducerId is not clobbered.
+            let Some(current) = self.get(&tid) else {
+                continue;
+            };
+            let complete_snap = {
+                let mut entry = current.lock().await;
+                if entry.producer_id != prepare_snap.producer_id
+                    || entry.producer_epoch != prepare_snap.producer_epoch
+                    || entry.state != TxnState::PrepareAbort
+                {
+                    // Someone advanced the entry underneath us; don't finalize.
+                    continue;
+                }
+                let (new_pid, new_epoch) = next_producer_identity(
+                    txnv,
+                    entry.producer_id,
+                    entry.producer_epoch,
+                    &self.producer_ids,
+                );
+                if new_pid != entry.producer_id {
+                    entry.prev_producer_id = entry.producer_id;
+                }
+                entry.state = TxnState::CompleteAbort;
+                entry.producer_id = new_pid;
+                entry.producer_epoch = new_epoch;
+                entry.last_update_ms = now_ms;
+                entry.clone()
+            };
+            if let Err(e) = self.put(complete_snap, txnv).await {
+                warn!(tid, error = %e, "txn reaper: failed to persist CompleteAbort; skipping");
+                continue;
+            }
+            info!(tid, "txn reaper: aborted timed-out transaction");
+            aborted.push(tid);
+        }
+        aborted
+    }
+
+    /// Local-only abort-marker fan-out for the idle-transaction reaper. Writes
+    /// an abort marker to every involved partition this broker leads; partitions
+    /// led by a remote broker are logged and skipped (inter-broker
+    /// `WriteTxnMarkers` from the reaper is not yet wired — same limitation as
+    /// the `InitProducerId` abort-on-stale-Ongoing path).
+    async fn dispatch_local_abort_markers(&self, entry: &TxnEntry) {
+        use crate::txn::marker::{MarkerType, build_marker_batch};
+        for tp in &entry.partitions {
+            let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
+                warn!(
+                    topic = %tp.topic,
+                    partition = tp.partition,
+                    "txn reaper: partition not locally led; abort marker needs inter-broker \
+                     WriteTxnMarkers (not yet wired), skipping"
+                );
+                continue;
+            };
+            let marker = build_marker_batch(
+                entry.producer_id,
+                entry.producer_epoch,
+                part.log_end_offset(),
+                MarkerType::Abort,
+            );
+            if let Err(e) = part.produce_batch(marker).await {
+                warn!(
+                    topic = %tp.topic,
+                    partition = tp.partition,
+                    error = %e,
+                    "txn reaper: failed to write abort marker"
+                );
+            }
+        }
     }
 
     /// Replay every locally-led `__transaction_state` partition into the

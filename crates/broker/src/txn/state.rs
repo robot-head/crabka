@@ -119,6 +119,15 @@ impl TxnEntry {
             start_ms: now_ms,
         }
     }
+
+    /// KIP-939: is this an externally-coordinated two-phase-commit transaction?
+    /// Encoded, exactly like Kafka, by the [`crate::txn::two_pc::NO_TIMEOUT_MS`]
+    /// sentinel in `txn_timeout_ms` — such a transaction is never auto-aborted
+    /// by the idle-transaction reaper.
+    #[must_use]
+    pub fn is_two_phase_commit(&self) -> bool {
+        crate::txn::two_pc::is_two_phase_commit(self.txn_timeout_ms)
+    }
 }
 
 #[cfg(test)]

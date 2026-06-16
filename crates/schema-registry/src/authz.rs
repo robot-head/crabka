@@ -264,6 +264,7 @@ fn acl_entry_from_admin(e: crabka_client_admin::AclEntry) -> crabka_metadata::Ac
         AO::DescribeConfigs => MAO::DescribeConfigs,
         AO::AlterConfigs => MAO::AlterConfigs,
         AO::IdempotentWrite => MAO::IdempotentWrite,
+        AO::TwoPhaseCommit => MAO::TwoPhaseCommit,
     };
     let permission_type = match e.permission_type {
         Perm::Allow => MPerm::Allow,

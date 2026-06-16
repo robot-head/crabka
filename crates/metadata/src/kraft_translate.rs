@@ -201,6 +201,7 @@ fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::DescribeConfigs => 10,
         AclOperation::AlterConfigs => 11,
         AclOperation::IdempotentWrite => 12,
+        AclOperation::TwoPhaseCommit => 15,
     }
 }
 
@@ -217,6 +218,7 @@ fn operation_from_wire(b: i8) -> Result<AclOperation, TranslateError> {
         10 => Ok(AclOperation::DescribeConfigs),
         11 => Ok(AclOperation::AlterConfigs),
         12 => Ok(AclOperation::IdempotentWrite),
+        15 => Ok(AclOperation::TwoPhaseCommit),
         other => Err(TranslateError::Invalid {
             field: "acl operation",
             detail: format!("unknown wire byte {other}"),

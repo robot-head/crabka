@@ -2969,6 +2969,21 @@ impl Broker {
             ));
         }
 
+        // KIP-98 / KIP-939: idle-transaction reaper. Aborts Ongoing
+        // transactions whose timeout has elapsed; 2PC (no-timeout) transactions
+        // are skipped. Every broker runs the loop but only acts on transactions
+        // it currently coordinates. `Duration::ZERO` disables it (the test
+        // default), mirroring the disk-scanner / cleaner interval knobs.
+        if !config.txn_abort_cleanup_interval.is_zero() {
+            let shutdown = supervisor_shutdown.child_token();
+            tokio::spawn(crate::txn::expiration::run(
+                txn_coordinator.clone(),
+                controller.clone(),
+                config.txn_abort_cleanup_interval,
+                shutdown,
+            ));
+        }
+
         // 5. Build handler table.
         let handlers = crate::handlers::build_table();
 

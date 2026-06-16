@@ -303,6 +303,7 @@ fn operation_str(op: AclOperation) -> &'static str {
         AclOperation::DescribeConfigs => "DescribeConfigs",
         AclOperation::AlterConfigs => "AlterConfigs",
         AclOperation::IdempotentWrite => "IdempotentWrite",
+        AclOperation::TwoPhaseCommit => "TwoPhaseCommit",
     }
 }
 

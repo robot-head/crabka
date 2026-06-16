@@ -103,6 +103,7 @@ pub fn operation_concrete(b: i8) -> Result<AclOperation, WireAclError> {
         10 => Ok(AclOperation::DescribeConfigs),
         11 => Ok(AclOperation::AlterConfigs),
         12 => Ok(AclOperation::IdempotentWrite),
+        15 => Ok(AclOperation::TwoPhaseCommit),
         0 | 1 => Err(WireAclError::AnyRequiresFilter),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
@@ -125,6 +126,7 @@ pub fn operation_filter(b: i8) -> Result<Option<AclOperation>, WireAclError> {
         10 => Ok(Some(AclOperation::DescribeConfigs)),
         11 => Ok(Some(AclOperation::AlterConfigs)),
         12 => Ok(Some(AclOperation::IdempotentWrite)),
+        15 => Ok(Some(AclOperation::TwoPhaseCommit)),
         _ => Err(WireAclError::UnknownDiscriminant),
     }
 }
@@ -144,6 +146,7 @@ pub fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::DescribeConfigs => 10,
         AclOperation::AlterConfigs => 11,
         AclOperation::IdempotentWrite => 12,
+        AclOperation::TwoPhaseCommit => 15,
     }
 }
 
@@ -204,10 +207,22 @@ mod tests {
             AclOperation::Read,
             AclOperation::Write,
             AclOperation::IdempotentWrite,
+            // KIP-939: TWO_PHASE_COMMIT, wire byte 15.
+            AclOperation::TwoPhaseCommit,
         ] {
             let b = operation_to_wire(op);
             assert!(operation_concrete(b).unwrap() == op);
         }
+    }
+
+    /// KIP-939: the `TWO_PHASE_COMMIT` operation is wire byte 15 and must
+    /// round-trip through the concrete + filter codecs so `CreateAcls` /
+    /// `DescribeAcls` can carry the 2PC grant on a `TransactionalId`.
+    #[test]
+    fn two_phase_commit_operation_is_byte_15() {
+        assert!(operation_to_wire(AclOperation::TwoPhaseCommit) == 15);
+        assert!(operation_concrete(15) == Ok(AclOperation::TwoPhaseCommit));
+        assert!(operation_filter(15) == Ok(Some(AclOperation::TwoPhaseCommit)));
     }
 
     /// The KIP-48 `TOKEN` (a.k.a. `DELEGATION_TOKEN`)

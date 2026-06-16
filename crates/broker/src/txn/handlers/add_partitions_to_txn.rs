@@ -282,8 +282,9 @@ async fn process_one_txn(
     if !entry.state.can_transition_to(TxnState::Ongoing) {
         return per_topic_with_denied(topics, denied, codes::INVALID_TXN_STATE);
     }
+    let prior_state = entry.state;
     let was_complete = matches!(
-        entry.state,
+        prior_state,
         TxnState::CompleteCommit | TxnState::CompleteAbort
     );
     entry.state = TxnState::Ongoing;
@@ -291,6 +292,14 @@ async fn process_one_txn(
         // Starting a new transaction after a completed one: discard the stale
         // partition set so the new transaction starts clean.
         entry.partitions.clear();
+    }
+    // KIP-98/KIP-939: a transaction "starts" on the edge into Ongoing. Stamp
+    // the start timestamp here (Kafka's `txnStartTimestamp`) so the idle-txn
+    // reaper measures the timeout from the real start, not from InitProducerId.
+    // A partition added to an already-Ongoing transaction keeps the original
+    // start, so an active producer can't keep resetting its own timeout.
+    if prior_state != TxnState::Ongoing {
+        entry.start_ms = now_millis();
     }
 
     // 4. Register partitions for ALLOWED topics only.

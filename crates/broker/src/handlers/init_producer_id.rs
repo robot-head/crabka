@@ -33,6 +33,7 @@ use crate::txn::coordinator::TxnCoordinator;
 use crate::txn::state::{TxnEntry, TxnState};
 use crate::txn::util::now_millis;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -104,6 +105,40 @@ pub(crate) async fn handle(
             // triggered `__transaction_state` bootstrap just happened.
             let image = controller.current_image();
             let txnv = crate::txn::version::resolve_txn_version(&image);
+
+            // ── KIP-939 two-phase-commit gates ───────────────────────────
+            // Validated up-front (like Kafka's `handleInitProducerId`), before
+            // the coordinator-ness check, so a client learns its request is
+            // unauthorized / unsupported regardless of which broker it hit.
+            if req.enable2_pc {
+                // (1) Cluster must have 2PC enabled. Kafka maps a disabled
+                //     cluster to TRANSACTIONAL_ID_AUTHORIZATION_FAILED (not an
+                //     UNSUPPORTED_*), so a client can't probe the feature flag.
+                if !broker.config.transaction_two_phase_commit_enable {
+                    return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+                }
+                // (2) Principal must hold the TWO_PHASE_COMMIT ACL on the tid,
+                //     in addition to the Write checked in the preamble.
+                let two_pc_req = AuthorizationRequest {
+                    principal: ctx.principal,
+                    host: ctx.peer,
+                    resource_type: ResourceType::TransactionalId,
+                    resource_name: tid,
+                    operation: AclOperation::TwoPhaseCommit,
+                };
+                if broker.config.authorizer.authorize(&*image, &two_pc_req)
+                    == AuthorizationResult::Deny
+                {
+                    return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+                }
+            }
+            // keepPreparedTxn (the prepared-txn recovery flow) is not yet a
+            // stable feature in Apache Kafka — its coordinator returns
+            // UNSUPPORTED_VERSION. Match that until the recovery path lands.
+            if req.keep_prepared_txn {
+                return encode_err(version, codes::UNSUPPORTED_VERSION);
+            }
+
             coord.refresh_leader_partitions(&image).await;
 
             // Verify we're the coordinator for this tid.
@@ -127,7 +162,7 @@ pub(crate) async fn handle(
                     &broker.producer_state,
                 )
                 .map_err(BrokerError::Txn)?;
-                handle_transactional(&coord, tid, &req, txnv).await?
+                handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?
             } else {
                 InitProducerIdResponse {
                     error_code: codes::NOT_COORDINATOR,
@@ -163,9 +198,13 @@ async fn handle_transactional(
     tid: &str,
     req: &InitProducerIdRequest,
     txnv: crate::txn::version::TxnVersion,
+    enable_2pc: bool,
 ) -> Result<InitProducerIdResponse, BrokerError> {
     let now_ms = now_millis();
-    let txn_timeout = req.transaction_timeout_ms.clamp(1_000, 15 * 60 * 1_000);
+    // KIP-939: a 2PC producer's transaction never times out — persist the
+    // sentinel timeout. Otherwise clamp the client's request to Kafka's bounds.
+    let txn_timeout =
+        crate::txn::two_pc::resolve_txn_timeout(enable_2pc, req.transaction_timeout_ms);
 
     match coord.get(tid) {
         None => {
