@@ -22,8 +22,11 @@ minimum_test_timeout = 120
 # Don't generate mutants in files that carry no unit-testable signal. The first
 # four mirror the codecov `ignore` list in codecov.yml: machine-emitted protocol
 # codecs (encode/decode/populate per record type) and pure entrypoint/serve-loop
-# glue. The last two keep mutation focused on the system under test rather than
-# the test/bench harnesses themselves.
+# glue. The last three keep mutation focused on the system under test rather than
+# the test/bench harnesses themselves — `bench-driver` is the GKE load/measurement
+# harness whose `run`/`run_consumer` loops drive real brokers, producers, and
+# Prometheus end-to-end (not unit-testable), so it is a bench harness in the same
+# sense as `benches/**` even though it lives in its own crate.
 exclude_globs = [
     "crates/protocol/generated/**",
     "crates/grpc-gateway/src/bin/**",
@@ -36,6 +39,7 @@ exclude_globs = [
     "crates/broker/src/txn/expiration.rs",
     "crates/*/tests/**",
     "crates/*/benches/**",
+    "crates/bench-driver/**",
 ]
 
 # Skip mutants whose display name matches these regexes. Used for spurious
