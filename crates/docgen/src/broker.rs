@@ -190,7 +190,10 @@ mod tests {
         assert!(md.contains("https://kafka.apache.org/protocol"), "{md}");
         // At least one real KIP link in the Spec column.
         assert!(md.contains("[KIP-"), "{md}");
-        assert!(md.contains("cwiki.apache.org/confluence/display/KAFKA/KIP-"), "{md}");
+        assert!(
+            md.contains("cwiki.apache.org/confluence/display/KAFKA/KIP-"),
+            "{md}"
+        );
         // Consumer-group heartbeat (68) maps to KIP-848.
         let row = md
             .lines()

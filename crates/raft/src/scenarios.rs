@@ -56,16 +56,30 @@ pub struct TraceStep {
 #[derive(serde::Serialize, Clone)]
 #[serde(tag = "kind")]
 pub enum TraceAction {
-    Deliver { src: u64, dst: u64, event: String },
-    Partition { node: u64 },
-    Heal { node: u64 },
+    Deliver {
+        src: u64,
+        dst: u64,
+        event: String,
+    },
+    Partition {
+        node: u64,
+    },
+    Heal {
+        node: u64,
+    },
     Timeout {
         node: u64,
         #[serde(rename = "timer_kind")]
         kind: String,
     },
-    Elected { node: u64, epoch: u64 },
-    Append { node: u64, count: usize },
+    Elected {
+        node: u64,
+        epoch: u64,
+    },
+    Append {
+        node: u64,
+        count: usize,
+    },
 }
 
 /// A single node's observable state at a point in time.
@@ -907,7 +921,11 @@ fn message_duplication() -> ScenarioTrace {
         "A message was delivered twice ({}). The duplicate was handled idempotently — \
          a vote already counted is not counted again and an already-known epoch is \
          a no-op — so the cluster still converged to exactly {} leader.",
-        if duplicated { "duplicate injected" } else { "no in-flight message" },
+        if duplicated {
+            "duplicate injected"
+        } else {
+            "no in-flight message"
+        },
         final_leaders.len()
     );
     ScenarioTrace {
