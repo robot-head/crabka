@@ -16,12 +16,123 @@ use std::fmt::Write;
 pub fn render_field_table(schema: &Value) -> String {
     let mut rows = String::new();
     collect_rows(schema, schema, "", 0, &mut rows);
-    let mut out = String::from(
-        "| Field | Type | Required | Default | Description |\n\
-         |-------|------|----------|---------|-------------|\n",
-    );
+    let mut out = field_table_header();
     out.push_str(&rows);
     out
+}
+
+/// Render the root schema's top-level properties as separate, captioned
+/// subsections instead of one flat table — easier to scan than the giant dense
+/// table `render_field_table` produces.
+///
+/// Each top-level property that resolves to an object (a schema with
+/// `properties`) gets its own `## <key>` heading, its description as a blurb,
+/// and a focused field table whose rows are relative to that subtree (the
+/// leading `<key>.` prefix is stripped). Every remaining top-level property —
+/// scalars, arrays, and objects without `properties` — is collected under a
+/// single leading `## General` section as one table keyed by the bare property
+/// name. Sections are separated by a `---` horizontal rule.
+///
+/// Shares all type/default/description/escaping logic with
+/// `render_field_table` via `effective_schema`, `type_label`, `render_default`,
+/// and `collect_rows`; `render_field_table` itself is unchanged so the CRD and
+/// other pages keep their flat layout.
+#[must_use]
+pub fn render_sectioned_field_table(schema: &Value) -> String {
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return String::new();
+    };
+
+    // Partition top-level properties: object-with-`properties` ones become
+    // their own section; everything else (scalars, arrays, refless objects)
+    // lands in the shared "General" table.
+    let mut general: Vec<(&String, &Value)> = Vec::new();
+    let mut sections: Vec<(&String, &Value, &Value)> = Vec::new();
+    for (name, field) in props {
+        let resolved = effective_schema(schema, field);
+        if resolved.get("properties").is_some() {
+            sections.push((name, field, resolved));
+        } else {
+            general.push((name, field));
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    if !general.is_empty() {
+        let mut body = String::from("## General\n\n");
+        body.push_str(&field_table_header());
+        for (name, field) in general {
+            let resolved = effective_schema(schema, field);
+            let req = required.contains(&name.as_str());
+            write_field_row(schema, name, field, resolved, req, &mut body);
+        }
+        parts.push(body);
+    }
+
+    for (name, field, resolved) in sections {
+        let mut body = format!("## {name}\n\n");
+        if let Some(desc) = field
+            .get("description")
+            .or_else(|| resolved.get("description"))
+            .and_then(Value::as_str)
+        {
+            // Blurbs are prose, not table cells, so no pipe escaping needed;
+            // collapse newlines for a single tidy paragraph.
+            body.push_str(&desc.replace('\n', " "));
+            body.push_str("\n\n");
+        }
+        body.push_str(&field_table_header());
+        // Reuse the dotted-path row logic scoped to this subtree, with an empty
+        // prefix so rows read relative to the section (no leading `<key>.`).
+        collect_rows(schema, resolved, "", 0, &mut body);
+        parts.push(body);
+    }
+
+    parts.join("\n\n---\n\n")
+}
+
+/// The shared 5-column field-table header (also used by `render_field_table`'s
+/// literal, kept in sync here for the sectioned variant).
+fn field_table_header() -> String {
+    String::from(
+        "| Field | Type | Required | Default | Description |\n\
+         |-------|------|----------|---------|-------------|\n",
+    )
+}
+
+/// Emit a single field row for `name` (used by the "General" section, which
+/// renders scalar/array top-level props as plain one-row entries). Mirrors the
+/// per-field formatting in `collect_rows` so type/default/description/escaping
+/// stay identical.
+fn write_field_row(
+    root: &Value,
+    name: &str,
+    field: &Value,
+    resolved: &Value,
+    required: bool,
+    out: &mut String,
+) {
+    let ty = type_label(root, resolved);
+    let req = if required { "yes" } else { "no" };
+    let default = field
+        .get("default")
+        .or_else(|| resolved.get("default"))
+        .map(render_default)
+        .unwrap_or_default();
+    let desc = field
+        .get("description")
+        .or_else(|| resolved.get("description"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .replace('\n', " ")
+        .replace('|', "\\|");
+    let _ = writeln!(out, "| `{name}` | {ty} | {req} | {default} | {desc} |");
 }
 
 /// Resolve a JSON-pointer `$ref` like `#/$defs/Foo` against `root`. Returns
@@ -265,6 +376,72 @@ mod tests {
         // Pipes in the description are escaped...
         assert!(row.contains("a \\| b \\| c"), "{row}");
         // ...so the row keeps exactly the 5 columns (6 unescaped delimiters).
+        let unescaped_bars = row
+            .match_indices('|')
+            .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
+            .count();
+        assert!(unescaped_bars == 6, "{row}");
+    }
+
+    #[test]
+    fn sectioned_table_emits_headings_and_separators() {
+        let schema = json!({
+            "type": "object",
+            "required": ["broker_id"],
+            "$defs": {
+                "Tls": {
+                    "type": "object",
+                    "description": "TLS material for the listener.",
+                    "required": ["cert"],
+                    "properties": {
+                        "cert": { "type": "string", "description": "Cert path." },
+                        "key": { "type": "string", "description": "Key path." }
+                    }
+                }
+            },
+            "properties": {
+                "broker_id": { "type": "integer", "description": "This broker's id." },
+                "log_dir": { "type": ["string", "null"], "description": "Data directory." },
+                "tls": {
+                    "anyOf": [ { "$ref": "#/$defs/Tls" }, { "type": "null" } ],
+                    "description": "Server TLS config."
+                }
+            }
+        });
+        let md = render_sectioned_field_table(&schema);
+        // Scalars are grouped under a single General section...
+        assert!(md.contains("## General"), "{md}");
+        assert!(md.contains("| `broker_id` | integer | yes |"), "{md}");
+        assert!(md.contains("| `log_dir` | string | no |"), "{md}");
+        // ...objects get their own captioned section with the field's blurb...
+        assert!(md.contains("## tls"), "{md}");
+        assert!(md.contains("Server TLS config."), "{md}");
+        // ...whose rows are relative to the subtree (no leading `tls.` prefix).
+        assert!(md.contains("| `cert` | string | yes |"), "{md}");
+        assert!(!md.contains("`tls.cert`"), "{md}");
+        // Sections are separated by a horizontal rule.
+        assert!(md.contains("\n---\n"), "{md}");
+    }
+
+    #[test]
+    fn sectioned_table_escapes_pipes_in_section_rows() {
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Inner": {
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "description": "one of: a | b | c" }
+                    }
+                }
+            },
+            "properties": {
+                "section": { "$ref": "#/$defs/Inner" }
+            }
+        });
+        let md = render_sectioned_field_table(&schema);
+        let row = md.lines().find(|l| l.contains("`mode`")).expect("mode row");
+        assert!(row.contains("a \\| b \\| c"), "{row}");
         let unescaped_bars = row
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')

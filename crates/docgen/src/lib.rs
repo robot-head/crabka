@@ -5,6 +5,7 @@
 pub mod broker;
 pub mod emit;
 pub mod operator;
+pub mod scenarios;
 pub mod schema_md;
 pub mod snippets;
 

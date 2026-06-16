@@ -2,7 +2,43 @@
 title = "Deploying Schema Registry"
 weight = 30
 template = "docs/page.html"
+
+[extra]
+mermaid = true
 +++
+
+## What a schema registry is and why you'd want it
+
+When producers and consumers exchange structured records, they need to agree on
+the shape of the data. A schema registry is the shared source of truth for those
+shapes. Producers register a schema and stamp each record with its id; consumers
+fetch the schema by id to deserialize. Crucially, the registry **checks
+compatibility** before accepting a new schema version — so a producer can't roll
+out a change that would break the consumers reading from a topic. That is how you
+evolve a data format (add a field, widen a type) without a flag-day coordination
+across every team.
+
+Crabka's registry is a separate binary that runs as a Kafka **client**, not part
+of the broker. It:
+
+- supports **Avro, Protobuf, and JSON Schema**, each with configurable
+  compatibility checking (backward, forward, full, and their transitive
+  variants);
+- stores every schema in a compacted **`_schemas` topic** on the broker — the
+  topic *is* the database, so the registry is stateless and any replica can be
+  rebuilt by replaying it;
+- exposes a **Confluent-compatible REST API**, so existing Confluent
+  serializers, `kafka-avro-console-*` tools, and tooling work unmodified.
+
+{% mermaid() %}
+flowchart LR
+  Producer[Producer] -->|register / get schema| REST[Registry REST API]
+  Consumer[Consumer] -->|get schema by id| REST
+  REST <-->|read / write| Topic[_schemas topic]
+  Topic --> Broker[(Broker)]
+{% end %}
+
+The rest of this page covers deploying the registry.
 
 ## Operator-managed (recommended)
 

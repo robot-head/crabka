@@ -9,6 +9,7 @@ on:
       - "crates/operator/**"
       - "crates/broker/**"
       - "crates/protocol/**"
+      - "crates/raft/**"
       - "charts/**"
       - ".github/workflows/docs.yml"
     tags:
@@ -18,6 +19,7 @@ on:
     paths:
       - "website/**"
       - "crates/docgen/**"
+      - "crates/raft/**"
       - "charts/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
