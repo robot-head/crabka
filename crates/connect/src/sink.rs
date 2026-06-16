@@ -161,4 +161,12 @@ mod tests {
         check!(sink.durable == 1);
         check!(sink.buffered == 0);
     }
+
+    #[tokio::test]
+    async fn default_begin_abort_and_close_are_noops() {
+        let mut sink = DefaultSink::default();
+        check!(sink.begin().await.is_ok());
+        check!(sink.abort().await.is_ok());
+        check!(sink.close().await.is_ok());
+    }
 }

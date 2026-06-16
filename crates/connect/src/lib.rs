@@ -199,4 +199,37 @@ mod tests {
         let wire = conv.serialize("t", &Bytes::from_static(b"v")).unwrap();
         check!(wire == Bytes::from_static(b"v"));
     }
+
+    #[tokio::test]
+    async fn source_seek_rejects_unresumable_offset() {
+        use assert2::check;
+
+        let mut src = VecSource {
+            records: vec![],
+            pos: 0,
+        };
+        // An offset with no `index` component names no position to resume from.
+        check!(src.seek(SourceOffset::default()).await.is_err());
+        // A negative index cannot map to a vector position.
+        let mut position = OffsetMap::new();
+        position.insert("index".into(), OffsetValue::Long(-1));
+        check!(
+            src.seek(SourceOffset::new(OffsetMap::new(), position))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn source_and_sink_close_are_noops() {
+        use assert2::check;
+
+        let mut src = VecSource {
+            records: vec![],
+            pos: 0,
+        };
+        check!(src.close().await.is_ok());
+        let mut sink = VecSink::default();
+        check!(sink.close().await.is_ok());
+    }
 }

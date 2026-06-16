@@ -192,6 +192,15 @@ mod tests {
     }
 
     #[test]
+    fn offset_value_from_conversions() {
+        check!(OffsetValue::from(7_i64) == OffsetValue::Long(7));
+        check!(OffsetValue::from(true) == OffsetValue::Bool(true));
+        check!(OffsetValue::from(1.5_f64) == OffsetValue::Double(1.5));
+        check!(OffsetValue::from("owned".to_owned()) == OffsetValue::String("owned".into()));
+        check!(OffsetValue::from("borrowed") == OffsetValue::String("borrowed".into()));
+    }
+
+    #[test]
     fn offset_map_is_byte_stable_across_insertion_order() {
         // BTreeMap ordering makes a serialized checkpoint deterministic
         // regardless of the order the connector recorded components.
