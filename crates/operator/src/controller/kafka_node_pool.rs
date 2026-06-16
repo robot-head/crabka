@@ -490,6 +490,25 @@ fn render_broker_container(
             "mountPath": crate::controller::listeners::TIER_STORAGE_PATH,
         }));
     }
+    // KIP-405: GCS with an explicit service-account JSON key. Unlike S3
+    // (env-var credentials), GCS credentials are a FILE and `object_store`'s
+    // GCS builder reads the path directly, so the operator mounts the
+    // referenced Secret read-only at `GCS_CREDENTIALS_DIR` (the key.json
+    // projection is set up by `render_storage`); the broker TOML's
+    // `service_account_path` points at `<dir>/key.json`. Keyless Workload
+    // Identity / ADC (credentials absent) mounts nothing — the pod resolves
+    // credentials from its bound KSA via the metadata server.
+    if tiered_storage
+        .filter(|t| matches!(t.kind, TieredStorageType::Gcs))
+        .and_then(|t| t.gcs.as_ref())
+        .is_some_and(|g| g.credentials.is_some())
+    {
+        volume_mounts.push(json!({
+            "name": "gcs-credentials",
+            "mountPath": crate::controller::listeners::GCS_CREDENTIALS_DIR,
+            "readOnly": true,
+        }));
+    }
     json!({
         "name": "broker",
         "image": broker_image,
@@ -566,6 +585,7 @@ fn render_storage(
     krb5_conf: Option<(&str, &str)>,
     tier_storage_local: bool,
     tier_storage_persistence: Option<&crate::crd::kafka::TieredStoragePersistence>,
+    gcs_credentials: Option<&crate::crd::kafka::GcsCredentials>,
 ) -> (serde_json::Value, Vec<serde_json::Value>) {
     let broker_config_vol = json!({
         "name": "broker-config",
@@ -741,6 +761,34 @@ fn render_storage(
                     "emptyDir": {}
                 }));
         }
+    }
+    // KIP-405: GCS with an explicit service-account JSON key. Append the
+    // user-owned source Secret as a read-only pod volume, pinning the
+    // user's source key to the fixed in-pod path `key.json` so the broker
+    // reads `<GCS_CREDENTIALS_DIR>/key.json` (matching the rendered
+    // `service_account_path`) regardless of how the user named their key.
+    // Same 0o400 mode as the other Secret volumes. Omitted entirely for
+    // keyless Workload Identity / ADC (`credentials` absent).
+    if let Some(creds) = gcs_credentials {
+        let key = creds
+            .service_account_key
+            .key
+            .as_deref()
+            .unwrap_or("secret-key");
+        volumes
+            .as_array_mut()
+            .expect("render_storage built `volumes` via json!([...])")
+            .push(json!({
+                "name": "gcs-credentials",
+                "secret": {
+                    "secretName": creds.service_account_key.name,
+                    "items": [{
+                        "key": key,
+                        "path": crate::controller::listeners::GCS_CREDENTIALS_FILE,
+                    }],
+                    "defaultMode": 0o400_i32,
+                }
+            }));
     }
     (volumes, templates)
 }
@@ -1022,6 +1070,10 @@ pub(crate) fn render_statefulset(
             .map(|(s, k)| (s.as_str(), k.as_str())),
         tier_storage_local,
         tier_storage_persistence,
+        tiered_storage
+            .filter(|t| matches!(t.kind, crate::crd::kafka::TieredStorageType::Gcs))
+            .and_then(|t| t.gcs.as_ref())
+            .and_then(|g| g.credentials.as_ref()),
     );
     let retention_policy =
         render_pvc_retention_policy(pool.spec.storage.as_ref(), tier_storage_persistence);
@@ -3116,6 +3168,7 @@ mod tests {
         k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         });
@@ -3142,6 +3195,7 @@ mod tests {
                 credentials,
                 ..Default::default()
             }),
+            gcs: None,
             metadata_manager: None,
             persistence: None,
         });
@@ -3321,6 +3375,122 @@ mod tests {
         );
     }
 
+    // ── GCS tiered storage volume + mount gating ─────────────────────
+
+    fn parent_with_gcs_tiered_storage(name: &str, with_creds: bool) -> Kafka {
+        let mut k = parent_fixture(name);
+        let credentials = with_creds.then(|| crate::crd::kafka::GcsCredentials {
+            service_account_key: crate::crd::kafka::SecretKeyRef {
+                name: "crabka-gcs-creds".into(),
+                key: Some("key.json".into()),
+            },
+        });
+        k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Gcs,
+            s3: None,
+            gcs: Some(crate::crd::kafka::GcsStorageSpec {
+                bucket: "crabka-tier".into(),
+                credentials,
+                ..Default::default()
+            }),
+            metadata_manager: None,
+            persistence: None,
+        });
+        k
+    }
+
+    /// GCS with an explicit service-account key Secret must mount that
+    /// Secret read-only as a FILE at `GCS_CREDENTIALS_DIR`, projecting the
+    /// referenced key to `key.json`. No AWS-style env vars are added.
+    #[test]
+    fn pod_template_mounts_gcs_credentials_file_when_creds_set() {
+        let parent = parent_with_gcs_tiered_storage("demo", true);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        // Pod volume present, sourced from the Secret with a key.json projection.
+        let vol = pod_spec
+            .volumes
+            .as_ref()
+            .expect("pod volumes")
+            .iter()
+            .find(|v| v.name == "gcs-credentials")
+            .expect("gcs-credentials volume present");
+        let secret = vol.secret.as_ref().expect("gcs-credentials is a Secret volume");
+        assert!(secret.secret_name.as_deref() == Some("crabka-gcs-creds"));
+        let items = secret.items.as_ref().expect("projected items");
+        assert!(items.len() == 1);
+        assert!(items[0].key == "key.json");
+        assert!(items[0].path == "key.json");
+
+        // Read-only mount at the canonical credentials dir.
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let mount = broker
+            .volume_mounts
+            .as_ref()
+            .expect("broker volumeMounts")
+            .iter()
+            .find(|m| m.name == "gcs-credentials")
+            .expect("gcs-credentials mount present");
+        assert!(mount.mount_path == crate::controller::listeners::GCS_CREDENTIALS_DIR);
+        assert!(mount.read_only == Some(true), "must be read-only");
+
+        // GCS must NOT inject AWS-style env vars, and must NOT mount the
+        // Local tier-storage scratch volume.
+        let env = broker.env.as_ref().expect("env present");
+        assert!(
+            env.iter()
+                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY"),
+            "GCS must not inject AWS env, got: {env:?}",
+        );
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "tier-storage"),
+            "GCS must not allocate the Local tier-storage emptyDir",
+        );
+    }
+
+    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset, no
+    /// gcs-credentials volume/mount and no env are added — the pod resolves
+    /// credentials from its bound KSA via the metadata server.
+    #[test]
+    fn pod_template_omits_gcs_credentials_when_keyless() {
+        let parent = parent_with_gcs_tiered_storage("demo", false);
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert!(
+            pod_spec
+                .volumes
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|v| v.name != "gcs-credentials"),
+            "keyless GCS must not allocate a gcs-credentials volume",
+        );
+        let broker = pod_spec
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        assert!(
+            broker
+                .volume_mounts
+                .as_ref()
+                .is_none_or(|m| m.iter().all(|x| x.name != "gcs-credentials")),
+            "keyless GCS must not mount gcs-credentials",
+        );
+    }
+
     // ── tier-storage PVC tests ───────────────────────────────────────
 
     fn parent_with_tier_storage_pvc(name: &str, size: &str, class: Option<&str>) -> Kafka {
@@ -3328,6 +3498,7 @@ mod tests {
         k.spec.tiered_storage = Some(crate::crd::kafka::TieredStorage {
             kind: crate::crd::kafka::TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(crate::crd::kafka::TieredStoragePersistence {
                 size: size.into(),
@@ -3421,6 +3592,7 @@ mod tests {
         parent.spec.tiered_storage = Some(TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "20Gi".into(),
@@ -3451,6 +3623,7 @@ mod tests {
         parent.spec.tiered_storage = Some(TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "20Gi".into(),
@@ -3478,6 +3651,7 @@ mod tests {
         parent.spec.tiered_storage = Some(TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "20Gi".into(),
@@ -3500,6 +3674,7 @@ mod tests {
         parent.spec.tiered_storage = Some(TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
+            gcs: None,
             metadata_manager: None,
             persistence: Some(TieredStoragePersistence {
                 size: "20Gi".into(),
