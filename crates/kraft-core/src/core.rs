@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::kraft::action::{Action, TimerKind};
-use crate::kraft::event::{Event, LogEnd};
-use crate::kraft::role::{ReplicaProgress, Role};
-use crate::kraft::types::{
+use crate::action::{Action, TimerKind};
+use crate::event::{Event, LogEnd};
+use crate::role::{ReplicaProgress, Role};
+use crate::types::{
     LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
 };
 
@@ -17,7 +17,7 @@ use crate::kraft::types::{
 /// pure core and the async engine's initial timer arm so production self-staggers
 /// without per-node config.
 #[must_use]
-pub(crate) fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -> u64 {
+pub fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -> u64 {
     if base_ms == 0 {
         return 0;
     }
@@ -654,8 +654,8 @@ impl QuorumStateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kraft::event::{Event, LogEnd};
-    use crate::kraft::types::*;
+    use crate::event::{Event, LogEnd};
+    use crate::types::*;
     use assert2::assert;
 
     struct FakeLog {
@@ -699,13 +699,13 @@ mod tests {
             }
         }
     }
-    fn voters(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
-        crabka_metadata::voters::VoterSet::from_voters(ids.iter().map(|&id| {
-            crabka_metadata::voters::Voter {
+    fn voters(ids: &[NodeId]) -> crabka_voters::VoterSet {
+        crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| {
+            crabka_voters::Voter {
                 id,
                 directory_id: uuid::Uuid::nil(),
                 endpoints: vec![],
-                kraft_version: crabka_metadata::voters::KRaftVersionRange::default(),
+                kraft_version: crabka_voters::KRaftVersionRange::default(),
             }
         }))
     }

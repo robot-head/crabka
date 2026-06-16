@@ -2101,6 +2101,18 @@ name = "crabka-kafka-tap"
 version = "0.3.6"
 
 [[package]]
+name = "crabka-kraft-core"
+version = "0.3.6"
+dependencies = [
+ "assert2",
+ "bytes",
+ "crabka-voters",
+ "serde",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-log"
 version = "0.3.6"
 dependencies = [
@@ -2152,6 +2164,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "crabka-protocol",
  "crabka-security",
+ "crabka-voters",
  "proptest",
  "serde",
  "serde-wincode",
@@ -2250,6 +2263,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "crabka-client-core",
+ "crabka-kraft-core",
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
@@ -2468,6 +2482,15 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "crabka-voters"
+version = "0.3.6"
+dependencies = [
+ "assert2",
+ "serde",
+ "uuid",
 ]
 
 [[package]]

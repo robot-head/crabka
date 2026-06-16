@@ -5,15 +5,16 @@
 //! KIP-595 [`transport`] wire. This is Crabka's live metadata consensus engine.
 #![allow(dead_code, unused_imports)]
 
-pub mod action;
+// The pure, deterministic, sans-IO consensus core (the `on_event` state
+// machine, its event/action/role/type model, and the snapshot reassembler)
+// lives in the wasm-friendly leaf crate `crabka-kraft-core`. Re-export its
+// modules here so the async engine, real wire, and on-disk log below keep
+// referencing `crate::kraft::{core, types, event, ...}` unchanged.
+pub use crabka_kraft_core::{action, core, event, role, snapshot_fetch, types};
+
 pub mod controller;
-pub mod core;
-pub mod event;
 pub mod log;
-pub mod role;
-pub mod snapshot_fetch;
 pub mod transport;
-pub mod types;
 
 pub use action::Action;
 pub use controller::{KraftConfig, KraftController, checkpoint_dir};

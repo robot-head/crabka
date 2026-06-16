@@ -81,6 +81,9 @@ fn render_diagram(out: &mut String, trace: &ScenarioTrace) {
             TraceAction::Append { node, count } => {
                 let _ = writeln!(out, "    Note over N{node}: ✏ append {count} record(s)");
             }
+            TraceAction::Drop { src, dst, event } => {
+                let _ = writeln!(out, "    N{src}--xN{dst}: {event} (dropped)");
+            }
         }
     }
     out.push_str("{% end %}\n\n");

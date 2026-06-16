@@ -1,6 +1,6 @@
 //! Inputs to the consensus state machine.
 
-use crate::kraft::types::{LeaderEpoch, NodeId};
+use crate::types::{LeaderEpoch, NodeId};
 
 /// A peer's view of its log tip, carried in Vote/Fetch requests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +57,6 @@ pub enum Event {
         leader_id: NodeId,
         leader_epoch: LeaderEpoch,
         /// Set when the leader signalled log divergence.
-        diverging: Option<crate::kraft::types::LogOffsetMetadata>,
+        diverging: Option<crate::types::LogOffsetMetadata>,
     },
 }

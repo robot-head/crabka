@@ -1,10 +1,10 @@
 //! Core data types for the `KRaft` consensus state machine (KIP-595/996).
 //! Pure, sans-IO: no clock, no wire, no log bytes.
 
-use crabka_metadata::voters::VoterSet;
+use crabka_voters::VoterSet;
 use uuid::Uuid;
 
-pub use crate::types::NodeId;
+pub use crabka_voters::NodeId;
 
 /// A simulated/logical instant in milliseconds. Time is always injected, never
 /// read from the system clock (keeps the state machine deterministic).
@@ -94,13 +94,13 @@ mod tests {
         assert!(qs.voters.contains(2));
     }
 
-    pub(crate) fn test_voter_set(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
-        crabka_metadata::voters::VoterSet::from_voters(ids.iter().map(|&id| {
-            crabka_metadata::voters::Voter {
+    pub(crate) fn test_voter_set(ids: &[NodeId]) -> crabka_voters::VoterSet {
+        crabka_voters::VoterSet::from_voters(ids.iter().map(|&id| {
+            crabka_voters::Voter {
                 id,
                 directory_id: uuid::Uuid::nil(),
                 endpoints: Vec::new(),
-                kraft_version: crabka_metadata::voters::KRaftVersionRange::default(),
+                kraft_version: crabka_voters::KRaftVersionRange::default(),
             }
         }))
     }
