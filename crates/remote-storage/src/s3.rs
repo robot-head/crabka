@@ -2,8 +2,11 @@
 //! [`RemoteStorageManager`] (KIP-405 production backend).
 //!
 //! Built on the `object_store` crate, so it works against any `S3-API`
-//! endpoint: AWS S3, `MinIO`, Cloudflare R2, and (via the S3 compatibility
-//! mode) GCS. The trait method bodies are synchronous (mirroring Kafka's
+//! endpoint: AWS S3, `MinIO`, and Cloudflare R2. (Google Cloud Storage has a
+//! dedicated native backend — see [`from_gcs_config`](S3RemoteStorage::from_gcs_config)
+//! in [`crate::gcs`] — which supports keyless GKE Workload Identity instead
+//! of the legacy S3-compatibility/HMAC shim.) The trait method bodies are
+//! synchronous (mirroring Kafka's
 //! blocking `RemoteStorageManager`); the broker drives them from
 //! `spawn_blocking`. Internally we block on the async `object_store` calls
 //! via the current Tokio runtime handle, which is always present inside a

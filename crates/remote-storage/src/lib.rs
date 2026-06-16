@@ -86,6 +86,7 @@
 mod cache;
 pub mod dump;
 mod error;
+mod gcs;
 mod inmemory;
 mod local;
 mod metadata;
@@ -95,6 +96,7 @@ mod storage_manager;
 
 pub use dump::{PartitionDump, RlmmCacheDump};
 pub use error::RemoteStorageError;
+pub use gcs::GcsConfig;
 pub use inmemory::InmemoryRemoteLogMetadataManager;
 pub use local::LocalTieredStorage;
 pub use metadata::{
