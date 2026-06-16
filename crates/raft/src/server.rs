@@ -35,6 +35,11 @@ use crate::wire::{
 /// handshake before any other request.
 const API_KEY_API_VERSIONS: i16 = 18;
 
+/// `DescribeCluster` (KIP-919) — served on the controller listener so an
+/// `AdminClient` bootstrapped with `--bootstrap-controller` can discover the
+/// quorum's controller (or broker) endpoints directly from the leader.
+const API_KEY_DESCRIBE_CLUSTER: i16 = 60;
+
 pub(crate) async fn run(
     listener: TcpListener,
     engine: KraftController,
@@ -115,6 +120,15 @@ where
                     // v0; the JVM controller asks at v4.
                     let resp = api_versions_response_body(api_version);
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
+                    continue;
+                }
+                // DescribeCluster (60, KIP-919) is served here rather than in
+                // `dispatch` because it needs the request version (for the
+                // flexible body codec) and the controller's metadata image. The
+                // flexible v1 ResponseHeader is supplied by `write_response`.
+                if api_key_n == API_KEY_DESCRIBE_CLUSTER {
+                    let resp = describe_cluster_response_body(api_version, &body, &engine).await?;
+                    write_response(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
                 let resp = dispatch(api_key_n, body, &engine).await?;
@@ -256,6 +270,7 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
         (53, 0, 1), // BeginQuorumEpoch
         (54, 0, 1), // EndQuorumEpoch
         (59, 0, 1), // FetchSnapshot
+        (60, 0, 2), // DescribeCluster (KIP-919)
     ];
     let resp = ApiVersionsResponse {
         error_code: 0,
@@ -412,6 +427,130 @@ async fn dispatch_metadata_fetch(
     Ok(Bytes::from(out))
 }
 
+/// Serve `DescribeCluster` (60, KIP-919) on the controller listener from the
+/// controller's metadata image. `endpoint_type=2` (CONTROLLERS) projects the
+/// voter set so a `--bootstrap-controller` `AdminClient` can discover the
+/// quorum; otherwise the registered brokers are returned. The controller
+/// listener carries no principal/ACL context (it is the inter-node trust
+/// boundary, like `metadata_fetch`), so there is no auth gate.
+async fn describe_cluster_response_body(
+    version: i16,
+    body: &[u8],
+    engine: &KraftController,
+) -> Result<Bytes, RaftError> {
+    use crabka_protocol::Decode;
+    use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
+
+    let mut cur = body;
+    let req = DescribeClusterRequest::decode(&mut cur, version)?;
+    let image = engine.current_image();
+
+    // Controller endpoints: each voter's CONTROLLER-named listener, falling back
+    // to its first advertised endpoint.
+    let voters: Vec<(i32, String, i32)> = image
+        .voters()
+        .iter()
+        .map(|v| {
+            let ep = v
+                .endpoints
+                .iter()
+                .find(|e| e.name.eq_ignore_ascii_case("CONTROLLER"))
+                .or_else(|| v.endpoints.first());
+            (
+                i32::try_from(v.id).unwrap_or(-1),
+                ep.map(|e| e.host.clone()).unwrap_or_default(),
+                ep.map_or(-1, |e| i32::from(e.port)),
+            )
+        })
+        .collect();
+    // Broker endpoints: each registered broker's inter-broker host/port.
+    let brokers: Vec<(i32, String, i32, Option<String>)> = image
+        .brokers()
+        .map(|b| {
+            (
+                i32::try_from(b.node_id).unwrap_or(-1),
+                b.host.clone(),
+                i32::from(b.port),
+                b.rack.clone(),
+            )
+        })
+        .collect();
+
+    let controller_id: i32 = engine
+        .quorum_state()
+        .await
+        .ok()
+        .and_then(|qs| qs.leader_id)
+        .and_then(|l| i32::try_from(l).ok())
+        .unwrap_or(-1);
+
+    Ok(build_describe_cluster_body(
+        version,
+        req.endpoint_type,
+        &voters,
+        &brokers,
+        &image.cluster_id().to_string(),
+        controller_id,
+    )?)
+}
+
+/// Encode a `DescribeClusterResponse` body for `version` from already-projected
+/// node tuples. Pure (no engine), so the projection-and-encode is unit-testable.
+fn build_describe_cluster_body(
+    version: i16,
+    endpoint_type: i8,
+    voters: &[(i32, String, i32)],
+    brokers: &[(i32, String, i32, Option<String>)],
+    cluster_id: &str,
+    controller_id: i32,
+) -> Result<Bytes, crabka_protocol::ProtocolError> {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::describe_cluster_response::{
+        DescribeClusterBroker, DescribeClusterResponse,
+    };
+
+    const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
+    let entries: Vec<DescribeClusterBroker> = if endpoint_type == ENDPOINT_TYPE_CONTROLLERS {
+        voters
+            .iter()
+            .map(|(id, host, port)| DescribeClusterBroker {
+                broker_id: *id,
+                host: host.clone(),
+                port: *port,
+                rack: None,
+                ..Default::default()
+            })
+            .collect()
+    } else {
+        brokers
+            .iter()
+            .map(|(id, host, port, rack)| DescribeClusterBroker {
+                broker_id: *id,
+                host: host.clone(),
+                port: *port,
+                rack: rack.clone(),
+                ..Default::default()
+            })
+            .collect()
+    };
+
+    let resp = DescribeClusterResponse {
+        error_code: 0,
+        error_message: None,
+        endpoint_type,
+        cluster_id: cluster_id.to_string(),
+        controller_id,
+        brokers: entries,
+        // No ACL context on the controller listener → "not present" sentinel.
+        cluster_authorized_operations: i32::MIN,
+        throttle_time_ms: 0,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::new();
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -435,6 +574,60 @@ mod tests {
             }
             let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
             assert!(vote.min_version == 0 && vote.max_version == 2);
+        }
+    }
+
+    #[test]
+    fn describe_cluster_body_projects_controllers_and_brokers() {
+        use crabka_protocol::Decode;
+        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+        use crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse;
+
+        // DescribeCluster (60) is advertised so clients negotiate it (KIP-919).
+        let av = super::api_versions_response_body(4);
+        let mut cur = &av[..];
+        let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
+        assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
+
+        let voters = vec![
+            (1i32, "c1".to_string(), 9093i32),
+            (2, "c2".to_string(), 9093),
+        ];
+        let brokers = vec![(
+            10i32,
+            "b10".to_string(),
+            9092i32,
+            Some("rack-a".to_string()),
+        )];
+
+        for version in [1i16, 2] {
+            // endpoint_type = CONTROLLERS (2) → voter projection.
+            let body =
+                super::build_describe_cluster_body(version, 2, &voters, &brokers, "clusterX", 1)
+                    .unwrap();
+            let mut cur = &body[..];
+            let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
+            assert!(cur.is_empty(), "no trailing bytes (v={version})");
+            assert!(resp.endpoint_type == 2);
+            assert!(resp.cluster_id == "clusterX");
+            assert!(resp.controller_id == 1);
+            assert!(resp.brokers.len() == 2);
+            assert!(
+                resp.brokers[0].broker_id == 1
+                    && resp.brokers[0].host == "c1"
+                    && resp.brokers[0].port == 9093
+            );
+
+            // endpoint_type = BROKERS (1) → broker projection (rack preserved).
+            let body =
+                super::build_describe_cluster_body(version, 1, &voters, &brokers, "clusterX", 1)
+                    .unwrap();
+            let mut cur = &body[..];
+            let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
+            assert!(resp.endpoint_type == 1);
+            assert!(resp.brokers.len() == 1);
+            assert!(resp.brokers[0].broker_id == 10 && resp.brokers[0].host == "b10");
+            assert!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
         }
     }
 }
