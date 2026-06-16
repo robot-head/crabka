@@ -532,7 +532,12 @@ mod tests {
     fn plain_features_have_no_level_name() {
         // Integer features use the default level_name -> None.
         assert!(feature("group.version").unwrap().level_name(1).is_none());
-        assert!(feature("transaction.version").unwrap().level_name(2).is_none());
+        assert!(
+            feature("transaction.version")
+                .unwrap()
+                .level_name(2)
+                .is_none()
+        );
     }
 
     #[test]
