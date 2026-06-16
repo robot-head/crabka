@@ -357,4 +357,178 @@ mod tests {
         let err = decode_message_set(&mut cur, wire.len()).unwrap_err();
         assert!(matches!(err, LegacyRecordsError::NestedCompression));
     }
+
+    // --- mutation-coverage tests --------------------------------------------
+    //
+    // Round-trips above don't exercise the malformed/boundary paths or pin
+    // exact framing. These do: precise `needed` counts, error-variant
+    // boundaries, the decompression-cap floor, and the v1 inner-offset rewrite.
+    //
+    // `if count > 0` (the v1 rewrite guard) is an equivalent mutant under
+    // `>= 0`: the rewrite loop is empty when count == 0, so both behave alike.
+
+    #[test]
+    fn decode_message_set_short_buffer_reports_needed() {
+        // 4 bytes available, caller claims a 12-byte set: needed = 12 - 4 = 8.
+        let data = [0u8; 4];
+        let mut cur: &[u8] = &data;
+        let err = decode_message_set(&mut cur, 12).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
+    }
+
+    #[test]
+    fn entry_header_truncated_reports_needed() {
+        // 8 bytes where a 12-byte (offset+size) entry header is required:
+        // needed = 12 - 8 = 4.
+        let data = [0u8; 8];
+        let mut cur: &[u8] = &data;
+        let err = decode_message_set(&mut cur, 8).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+    }
+
+    #[test]
+    fn entry_zero_message_size_is_malformed() {
+        // offset(8) + size(0): clears the `< 12` and `size < 0` guards, then
+        // Message::decode_from rejects the 0-byte frame as Malformed (< 6).
+        // Distinguishes the `<` boundaries from `<=`/`==`.
+        let mut data = BytesMut::new();
+        data.put_i64(0);
+        data.put_i32(0);
+        let n = data.len();
+        let mut cur: &[u8] = &data[..];
+        let err = decode_message_set(&mut cur, n).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Malformed(_)));
+    }
+
+    #[test]
+    fn entry_negative_message_size_rejected() {
+        let mut data = BytesMut::new();
+        data.put_i64(0);
+        data.put_i32(-1);
+        data.put_slice(&[0u8; 4]); // keep region >= 12 bytes
+        let n = data.len();
+        let mut cur: &[u8] = &data[..];
+        let err = decode_message_set(&mut cur, n).unwrap_err();
+        assert!(matches!(
+            err,
+            LegacyRecordsError::NegativeLength {
+                label: "message_size",
+                len: -1
+            }
+        ));
+    }
+
+    #[test]
+    fn entry_message_body_truncated_reports_needed() {
+        // Entry claims a 10-byte message but only 2 bytes follow:
+        // needed = 10 - 2 = 8.
+        let mut data = BytesMut::new();
+        data.put_i64(0);
+        data.put_i32(10);
+        data.put_slice(&[0u8; 2]);
+        let n = data.len();
+        let mut cur: &[u8] = &data[..];
+        let err = decode_message_set(&mut cur, n).unwrap_err();
+        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
+    }
+
+    #[test]
+    fn flat_v1_missing_timestamp_encodes_minus_one() {
+        let recs = vec![ParsedRecord {
+            offset: 7,
+            timestamp: None,
+            key: None,
+            value: Some(Bytes::from_static(b"v")),
+        }];
+        let mut buf = BytesMut::new();
+        encode_flat_message_set(recs, Magic::V1, &mut buf);
+        let mut cur: &[u8] = &buf[..];
+        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
+        assert!(decoded[0].timestamp == Some(-1));
+    }
+
+    #[test]
+    fn compressed_v1_missing_timestamps_default_to_minus_one() {
+        // Records with no timestamps: inner messages encode ts = -1, and the
+        // wrapper's own timestamp (max over records, none present) is -1.
+        let recs = vec![ParsedRecord {
+            offset: 9,
+            timestamp: None,
+            key: None,
+            value: Some(Bytes::from_static(b"v")),
+        }];
+        let mut buf = BytesMut::new();
+        encode_compressed_message_set(&recs, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
+
+        // Inspect the raw wrapper message's own timestamp before unwrapping.
+        let mut cur: &[u8] = &buf[..];
+        let _wrapper_offset = cur.get_i64();
+        let wrapper_size = cur.get_i32() as usize;
+        let wrapper = Message::decode_from(&mut cur, wrapper_size).unwrap();
+        assert!(wrapper.timestamp == Some(-1));
+
+        // The inner record's timestamp survives the unwrap as -1.
+        let mut c2: &[u8] = &buf[..];
+        let decoded = decode_message_set(&mut c2, buf.len()).unwrap();
+        assert!(decoded[0].timestamp == Some(-1));
+    }
+
+    #[test]
+    fn compressed_wrapper_allows_large_decompressed_output() {
+        // The 16 MiB decompression-cap floor must let a ~2 MiB wrapper through
+        // even though the compressed size is tiny. Shrinking the floor (a `*`
+        // flip in `16 * 1024 * 1024`) would reject this round-trip as TooLarge.
+        let big = vec![0x7Eu8; 2 * 1024 * 1024];
+        let recs = vec![ParsedRecord {
+            offset: 0,
+            timestamp: Some(5),
+            key: None,
+            value: Some(Bytes::from(big.clone())),
+        }];
+        let mut buf = BytesMut::new();
+        encode_compressed_message_set(&recs, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
+        let mut cur: &[u8] = &buf[..];
+        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
+        assert!(decoded.len() == 1);
+        assert!(decoded[0].value.as_ref().unwrap().len() == big.len());
+    }
+
+    #[test]
+    fn v1_inner_offset_rewrite_uses_inner_count() {
+        // A set with a flat record FOLLOWED by a compressed v1 wrapper: when the
+        // wrapper is decoded, `out` already holds the flat record (start_len >
+        // 0). The inner-offset rewrite must use the inner count (out.len() -
+        // start_len), not out.len() + start_len.
+        let mut buf = BytesMut::new();
+        encode_flat_message_set(
+            vec![ParsedRecord {
+                offset: 50,
+                timestamp: Some(1),
+                key: None,
+                value: Some(Bytes::from_static(b"flat")),
+            }],
+            Magic::V1,
+            &mut buf,
+        );
+        let inner = vec![
+            ParsedRecord {
+                offset: 100,
+                timestamp: Some(2),
+                key: None,
+                value: Some(Bytes::from_static(b"x")),
+            },
+            ParsedRecord {
+                offset: 101,
+                timestamp: Some(3),
+                key: None,
+                value: Some(Bytes::from_static(b"y")),
+            },
+        ];
+        encode_compressed_message_set(&inner, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
+
+        let mut cur: &[u8] = &buf[..];
+        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
+        let offsets: Vec<i64> = decoded.iter().map(|r| r.offset).collect();
+        assert!(offsets == vec![50, 100, 101]);
+    }
 }
