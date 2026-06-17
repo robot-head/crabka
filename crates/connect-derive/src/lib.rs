@@ -5,7 +5,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use syn::{
     AngleBracketedGenericArguments, Attribute, Data, DeriveInput, Expr, Fields, GenericArgument,
-    PathArguments, Type, parse_macro_input,
+    Generics, PathArguments, Type, parse_macro_input,
 };
 
 #[proc_macro_derive(ConnectorConfig, attributes(config))]
@@ -24,12 +24,7 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
         data,
         ..
     } = input;
-    if !generics.params.is_empty() || generics.where_clause.is_some() {
-        return Err(syn::Error::new_spanned(
-            generics,
-            "ConnectorConfig does not support generic structs",
-        ));
-    }
+    reject_generics(&generics)?;
 
     let crate_path = resolve_crabka_connect_path(&attrs)?;
     let fields = match data {
@@ -126,6 +121,17 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
             }
         }
     })
+}
+
+fn reject_generics(generics: &Generics) -> syn::Result<()> {
+    if generics.params.is_empty() && generics.where_clause.is_none() {
+        return Ok(());
+    }
+
+    Err(syn::Error::new_spanned(
+        generics,
+        "ConnectorConfig does not support generic structs",
+    ))
 }
 
 fn resolve_crabka_connect_path(attrs: &[Attribute]) -> syn::Result<proc_macro2::TokenStream> {

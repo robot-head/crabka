@@ -34,7 +34,7 @@ renamed-connect = {{ package = "crabka-connect", path = "{}" }}
 
     fs::write(
         crate_dir.join("src/main.rs"),
-        r#"use renamed_connect::{ConnectorConfig, SecretString};
+        r"use renamed_connect::{ConnectorConfig, SecretString};
 
 #[derive(ConnectorConfig)]
 struct RenamedConfig {
@@ -46,7 +46,7 @@ struct RenamedConfig {
 fn main() {
     let _ = RenamedConfig::config_def();
 }
-"#,
+",
     )
     .expect("write renamed dependency source");
 
