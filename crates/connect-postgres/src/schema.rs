@@ -1,5 +1,3 @@
-use std::fmt::Write as _;
-
 use bytes::Bytes;
 use crabka_schema_serde::wire::encode_protobuf;
 use prost::Message as _;
@@ -12,10 +10,12 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 use crate::PostgresConnectError;
 use crate::model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue};
 
-pub const KEY_SCHEMA_ID: u32 = 1;
-pub const VALUE_SCHEMA_ID: u32 = 2;
+// Local placeholder IDs until schema registry allocation is wired in.
+const KEY_SCHEMA_ID: u32 = 1;
+const VALUE_SCHEMA_ID: u32 = 2;
 
-const MESSAGE_INDEX: &[i32] = &[0];
+const KEY_MESSAGE_INDEX: &[i32] = &[1];
+const VALUE_MESSAGE_INDEX: &[i32] = &[2];
 const PACKAGE: &str = "crabka.connect.postgres";
 const COLUMN_VALUE: &str = "ColumnValue";
 const ENTITY_KEY: &str = "EntityKey";
@@ -44,7 +44,7 @@ impl PostgresProtoEncoder {
         let message = self.key_to_message(key)?;
         Ok(encode_protobuf(
             KEY_SCHEMA_ID,
-            MESSAGE_INDEX,
+            KEY_MESSAGE_INDEX,
             &message.encode_to_vec(),
         ))
     }
@@ -53,7 +53,7 @@ impl PostgresProtoEncoder {
         let message = self.difference_to_message(value)?;
         Ok(encode_protobuf(
             VALUE_SCHEMA_ID,
-            MESSAGE_INDEX,
+            VALUE_MESSAGE_INDEX,
             &message.encode_to_vec(),
         ))
     }
@@ -133,11 +133,7 @@ impl PostgresProtoEncoder {
     ) -> Result<DynamicMessage, PostgresConnectError> {
         let mut message = DynamicMessage::new(self.column_value.clone());
         set_field(&mut message, "name", Value::String(column.name.clone()))?;
-        set_field(
-            &mut message,
-            "value",
-            Value::String(scalar_to_string(&column.value)),
-        )?;
+        set_scalar_fields(&mut message, &column.value)?;
         Ok(message)
     }
 }
@@ -153,7 +149,12 @@ fn schema_descriptor_set() -> FileDescriptorSet {
                     name: Some(COLUMN_VALUE.to_owned()),
                     field: vec![
                         field("name", 1, Type::String),
-                        field("value", 2, Type::String),
+                        field("kind", 2, Type::String),
+                        field("string_value", 3, Type::String),
+                        field("bool_value", 4, Type::Bool),
+                        field("int_value", 5, Type::Int64),
+                        field("bytes_value", 6, Type::Bytes),
+                        field("is_null", 7, Type::Bool),
                     ],
                     ..DescriptorProto::default()
                 },
@@ -239,20 +240,42 @@ fn operation_name(operation: Operation) -> &'static str {
     }
 }
 
-fn scalar_to_string(value: &ScalarValue) -> String {
+fn set_scalar_fields(
+    message: &mut DynamicMessage,
+    value: &ScalarValue,
+) -> Result<(), PostgresConnectError> {
     match value {
-        ScalarValue::Null => String::new(),
-        ScalarValue::Bool(value) => value.to_string(),
-        ScalarValue::Int(value) => value.to_string(),
-        ScalarValue::Float(value) | ScalarValue::Text(value) => value.clone(),
+        ScalarValue::Null => {
+            set_field(message, "kind", Value::String("null".to_owned()))?;
+            set_field(message, "is_null", Value::Bool(true))?;
+        }
+        ScalarValue::Bool(value) => {
+            set_field(message, "kind", Value::String("bool".to_owned()))?;
+            set_field(message, "bool_value", Value::Bool(*value))?;
+        }
+        ScalarValue::Int(value) => {
+            set_field(message, "kind", Value::String("int".to_owned()))?;
+            set_field(message, "int_value", Value::I64(*value))?;
+        }
+        ScalarValue::Float(value) => {
+            set_field(message, "kind", Value::String("float".to_owned()))?;
+            set_field(message, "string_value", Value::String(value.clone()))?;
+        }
+        ScalarValue::Text(value) => {
+            set_field(message, "kind", Value::String("text".to_owned()))?;
+            set_field(message, "string_value", Value::String(value.clone()))?;
+        }
         ScalarValue::Bytes(value) => {
-            let mut hex = String::with_capacity(value.len() * 2);
-            for byte in value {
-                let _ = write!(hex, "{byte:02x}");
-            }
-            hex
+            set_field(message, "kind", Value::String("bytes".to_owned()))?;
+            set_field(
+                message,
+                "bytes_value",
+                Value::Bytes(Bytes::copy_from_slice(value)),
+            )?;
         }
     }
+
+    Ok(())
 }
 
 fn convert_error(error: impl std::fmt::Display) -> PostgresConnectError {
@@ -261,32 +284,77 @@ fn convert_error(error: impl std::fmt::Display) -> PostgresConnectError {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use prost_reflect::{DescriptorPool, DynamicMessage, Value};
+
     use crabka_schema_serde::wire::decode_protobuf;
 
     use crate::model::{ColumnSchema, ScalarValue};
-    use crate::{
-        ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema,
-        schema::{KEY_SCHEMA_ID, PostgresProtoEncoder, VALUE_SCHEMA_ID},
+    use crate::{ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema};
+
+    use super::{
+        ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder, VALUE_SCHEMA_ID,
+        message_descriptor, schema_descriptor_set,
     };
 
     #[test]
     fn encoder_frames_key_and_value_as_protobuf() {
         let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
         let diff = sample_difference();
+        let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
+            .expect("descriptor pool builds");
 
         let key = encoder.encode_key(&diff.key).expect("key encodes");
         let value = encoder.encode_value(&diff).expect("value encodes");
 
         let (key_id, key_index, key_body) = decode_protobuf(&key).expect("key frame decodes");
         assert_eq!(key_id, KEY_SCHEMA_ID);
-        assert_eq!(key_index, vec![0]);
+        assert_eq!(key_index, vec![1]);
         assert!(!key_body.is_empty());
 
         let (value_id, value_index, value_body) =
             decode_protobuf(&value).expect("value frame decodes");
         assert_eq!(value_id, VALUE_SCHEMA_ID);
-        assert_eq!(value_index, vec![0]);
+        assert_eq!(value_index, vec![2]);
         assert!(!value_body.is_empty());
+
+        let key_message = DynamicMessage::decode(
+            message_descriptor(&pool, ENTITY_KEY).expect("key descriptor"),
+            key_body,
+        )
+        .expect("key body decodes");
+        assert_eq!(string_field(&key_message, "table"), "public.accounts");
+        let key_columns = list_field(&key_message, "columns");
+        let id_column = message_value(&key_columns[0]);
+        assert_eq!(string_field(id_column, "name"), "id");
+        assert_eq!(string_field(id_column, "kind"), "int");
+        assert_eq!(i64_field(id_column, "int_value"), 42);
+
+        let value_message = DynamicMessage::decode(
+            message_descriptor(&pool, ENTITY_DIFFERENCE).expect("value descriptor"),
+            value_body,
+        )
+        .expect("value body decodes");
+        assert_eq!(string_field(&value_message, "table"), "public.accounts");
+        assert_eq!(string_field(&value_message, "operation"), "update");
+        assert_eq!(string_field(&value_message, "lsn"), "0/2A");
+
+        let after = list_field(&value_message, "after");
+        let name_column = message_value(&after[0]);
+        assert_eq!(string_field(name_column, "name"), "name");
+        assert_eq!(string_field(name_column, "kind"), "text");
+        assert_eq!(string_field(name_column, "string_value"), "new");
+
+        let before = list_field(&value_message, "before");
+        let null_column = message_value(&before[1]);
+        assert_eq!(string_field(null_column, "name"), "nickname");
+        assert_eq!(string_field(null_column, "kind"), "null");
+        assert!(bool_field(null_column, "is_null"));
+
+        let avatar_column = message_value(&after[1]);
+        assert_eq!(string_field(avatar_column, "name"), "avatar");
+        assert_eq!(string_field(avatar_column, "kind"), "bytes");
+        assert_eq!(bytes_field(avatar_column, "bytes_value").as_ref(), b"abc");
     }
 
     fn sample_difference() -> EntityDifference {
@@ -302,14 +370,26 @@ mod tests {
             table: "public.accounts".to_owned(),
             key,
             op: Operation::Update,
-            before: vec![ColumnValue {
-                name: "name".to_owned(),
-                value: ScalarValue::Text("old".to_owned()),
-            }],
-            after: vec![ColumnValue {
-                name: "name".to_owned(),
-                value: ScalarValue::Text("new".to_owned()),
-            }],
+            before: vec![
+                ColumnValue {
+                    name: "name".to_owned(),
+                    value: ScalarValue::Text("old".to_owned()),
+                },
+                ColumnValue {
+                    name: "nickname".to_owned(),
+                    value: ScalarValue::Null,
+                },
+            ],
+            after: vec![
+                ColumnValue {
+                    name: "name".to_owned(),
+                    value: ScalarValue::Text("new".to_owned()),
+                },
+                ColumnValue {
+                    name: "avatar".to_owned(),
+                    value: ScalarValue::Bytes(b"abc".to_vec()),
+                },
+            ],
             lsn: PgLsn(42),
             txid: Some(7),
             commit_timestamp_ms: Some(1_700_000_000_000),
@@ -329,6 +409,68 @@ mod tests {
                     },
                 ],
             },
+        }
+    }
+
+    fn string_field(message: &DynamicMessage, name: &str) -> String {
+        match message
+            .get_field_by_name(name)
+            .expect("field exists")
+            .as_ref()
+        {
+            Value::String(value) => value.clone(),
+            other => panic!("field {name} was not a string: {other:?}"),
+        }
+    }
+
+    fn bool_field(message: &DynamicMessage, name: &str) -> bool {
+        match message
+            .get_field_by_name(name)
+            .expect("field exists")
+            .as_ref()
+        {
+            Value::Bool(value) => *value,
+            other => panic!("field {name} was not a bool: {other:?}"),
+        }
+    }
+
+    fn i64_field(message: &DynamicMessage, name: &str) -> i64 {
+        match message
+            .get_field_by_name(name)
+            .expect("field exists")
+            .as_ref()
+        {
+            Value::I64(value) => *value,
+            other => panic!("field {name} was not an int64: {other:?}"),
+        }
+    }
+
+    fn bytes_field(message: &DynamicMessage, name: &str) -> Bytes {
+        match message
+            .get_field_by_name(name)
+            .expect("field exists")
+            .as_ref()
+        {
+            Value::Bytes(value) => value.clone(),
+            other => panic!("field {name} was not bytes: {other:?}"),
+        }
+    }
+
+    fn list_field(message: &DynamicMessage, name: &str) -> Vec<Value> {
+        match message
+            .get_field_by_name(name)
+            .expect("field exists")
+            .as_ref()
+        {
+            Value::List(value) => value.clone(),
+            other => panic!("field {name} was not a list: {other:?}"),
+        }
+    }
+
+    fn message_value(value: &Value) -> &DynamicMessage {
+        match value {
+            Value::Message(message) => message,
+            other => panic!("value was not a message: {other:?}"),
         }
     }
 }
