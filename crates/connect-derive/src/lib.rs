@@ -332,8 +332,55 @@ fn path_ends_with_ident(ty: &Type, expected: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn expanded_config_def(input: &str) -> String {
+        let input: DeriveInput = syn::parse_str(input).unwrap();
+        expand_connector_config(input)
+            .unwrap()
+            .to_string()
+            .split_whitespace()
+            .collect()
+    }
+
     fn parse_type(input: &str) -> Type {
         syn::parse_str(input).unwrap()
+    }
+
+    #[test]
+    fn config_def_marks_secret_required_and_optional_fields() {
+        let expanded = expanded_config_def(
+            r"
+            struct Demo {
+                #[config(secret)]
+                password: SecretString,
+                #[config(secret)]
+                maybe_password: Option<SecretString>,
+                #[config(required, secret)]
+                required_maybe_password: Option<SecretString>,
+            }
+            ",
+        );
+
+        assert!(expanded.contains("def=def.secret(\"password\");"));
+        assert!(expanded.contains("def=def.optional(\"maybe_password\","));
+        assert!(expanded.contains("def=def.secret(\"required_maybe_password\");"));
+    }
+
+    #[test]
+    fn config_def_marks_plain_required_and_optional_fields() {
+        let expanded = expanded_config_def(
+            r"
+            struct Demo {
+                database_url: String,
+                note: Option<String>,
+                #[config(required)]
+                required_note: Option<String>,
+            }
+            ",
+        );
+
+        assert!(expanded.contains("def=def.required(\"database_url\","));
+        assert!(expanded.contains("def=def.optional(\"note\","));
+        assert!(expanded.contains("def=def.required(\"required_note\","));
     }
 
     #[test]
