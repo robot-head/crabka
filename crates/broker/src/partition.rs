@@ -528,7 +528,29 @@ impl Partition {
             }
             tokio::select! {
                 () = &mut waiter => {},
-                () = tokio::time::sleep_until(deadline.into()) => return Err(HwTimeout),
+                () = tokio::time::sleep_until(deadline.into()) => {
+                    // Diagnostic: an acks=all produce gave up waiting for the HW
+                    // to reach its appended offset. Dump the leader-side replica
+                    // state so a failover stall (HW stuck because the ISR can't
+                    // be satisfied) is observable — this path was previously
+                    // silent. Cheap: only fires on a (rare) produce timeout.
+                    let leader_leo = self.log_end_offset();
+                    let st = self.replica_state.lock().await;
+                    let mut isr: Vec<crabka_raft::NodeId> = st.isr.iter().copied().collect();
+                    isr.sort_unstable();
+                    let followers: Vec<(crabka_raft::NodeId, i64)> =
+                        st.per_follower.iter().map(|(k, v)| (*k, v.leo)).collect();
+                    tracing::warn!(
+                        target_offset,
+                        hw = st.hw,
+                        leader_leo,
+                        leader_epoch = st.current_leader_epoch,
+                        ?isr,
+                        ?followers,
+                        "await_hw_at_least: acks=all produce timed out; HW below target offset"
+                    );
+                    return Err(HwTimeout);
+                }
             }
         }
     }
