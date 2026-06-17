@@ -6,9 +6,13 @@
 #   SCENARIOS   space-separated scenario basenames        (default: cluster set)
 #
 # Env vars:
-#   RUNS                 how many times to repeat the whole matrix (default 10).
+#   RUNS                 how many repeats to do THIS invocation (default 10).
 #                        Each repeat tags its output files "-runNN" so nothing
 #                        is clobbered; the report averages all runs per cell.
+#   RUN_START            first repeat index (default 1). Lets a run be resumed /
+#                        split across invocations: a 1-repeat smoke with
+#                        RUN_START=1 RUNS=1 writes run01, then RUN_START=2 RUNS=9
+#                        writes run02..run10 — 10 distinct runs in total.
 #   BENCH_DRIVER_IMAGE   driver Job image ref.
 set -euo pipefail
 
@@ -30,18 +34,20 @@ export BENCH_DRIVER_IMAGE="${BENCH_DRIVER_IMAGE:-us-central1-docker.pkg.dev/robo
 TOPOLOGY="${1:-3broker-rf3}"
 SCENARIOS="${2:-small-msg-saturate fixed-rate-latency large-msg fan-out mixed-acks failover high-partition-saturate high-partition-latency high-partition-fanout}"
 RUNS="${RUNS:-10}"
+RUN_START="${RUN_START:-1}"
+RUN_END=$(( RUN_START + RUNS - 1 ))
 
 RESULTS_DIR="$REPO_ROOT/bench/results"
 mkdir -p "$RESULTS_DIR"
 
-echo "═══ MATRIX: topology=$TOPOLOGY runs=$RUNS ═══"
+echo "═══ MATRIX: topology=$TOPOLOGY runs ${RUN_START}..${RUN_END} ═══"
 echo "scenarios: $SCENARIOS"
 
-for run in $(seq 1 "$RUNS"); do
+for run in $(seq "$RUN_START" "$RUN_END"); do
   # Two-digit, zero-padded so lexical sort == numeric sort in the results dir.
   run_tag=$(printf -- "-run%02d" "$run")
   export BENCH_RUN_TAG="$run_tag"
-  echo "═══════════ REPEAT $run / $RUNS (tag ${run_tag}) ═══════════"
+  echo "═══════════ REPEAT $run / $RUN_END (tag ${run_tag}) ═══════════"
   for scenario in $SCENARIOS; do
     for stack in crabka kafka; do
       echo "═══ $stack / $scenario / $TOPOLOGY / run $run ═══"

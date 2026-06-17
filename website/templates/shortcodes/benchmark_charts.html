@@ -1,0 +1,15 @@
+{# Embeds the generated benchmark charts fragment: the scalar summary bars
+   (mean across runs, run-to-run stddev error bars) followed by per-run and
+   averaged throughput / broker-CPU / broker-memory time series.
+
+   The fragment is produced by
+     crabka-bench-report --web-fragment website/data/benchmarks/charts.html
+   from the matrix results and checked in under data/ (not static/, so it is
+   only inlined here, never served as a standalone broken page). It pulls
+   plotly.js from the CDN. If the file is absent the panel degrades to a note
+   instead of breaking the build. #}
+<div class="benchmark-charts">
+{% set frag = load_data(path="data/benchmarks/charts.html", format="plain", required=false) %}
+{% if frag %}{{ frag | safe }}{% else %}<p><em>Benchmark charts have not been generated yet — run
+<code>just -f bench/justfile bench-report</code> after a matrix run.</em></p>{% endif %}
+</div>

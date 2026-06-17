@@ -54,15 +54,22 @@ bench-cluster-6broker: install-all
     done
     just bench-report
 
-# Aggregate per-run JSON into a Markdown summary plus graph-ready CSVs:
+# Aggregate per-run JSON into a Markdown summary, graph-ready CSVs, a
+# standalone Plotly report, and the website charts fragment:
+#   SUMMARY.md      mean ± CV per (scenario, topology) cell
 #   results.csv     one row per run (wide) — bars with run-to-run error bars
 #   timeseries.csv  long format (run × time-offset × metric) — values over time
+#   report.html     self-contained interactive report (bars + averaged series)
+#   website fragment per-run + averaged throughput/CPU/memory, inlined by the
+#                   `benchmark_charts` Zola shortcode on the benchmarks page
 bench-report:
     cargo run --release -p crabka-bench-driver --bin crabka-bench-report -- \
         --input-dir {{results_dir}} \
         --out {{results_dir}}/SUMMARY.md \
         --csv {{results_dir}}/results.csv \
-        --timeseries-csv {{results_dir}}/timeseries.csv
+        --timeseries-csv {{results_dir}}/timeseries.csv \
+        --html {{results_dir}}/report.html \
+        --web-fragment {{repo_root}}/website/data/benchmarks/charts.html
 
 # Tear down operators and namespaces created by `just install-all`.
 bench-clean:

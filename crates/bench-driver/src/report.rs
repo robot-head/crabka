@@ -579,6 +579,28 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
     Ok(out)
 }
 
+/// Render a self-contained Plotly HTML report (bar charts + averaged
+/// time-series) from every run in `input_dir`. Delegates the aggregation +
+/// figure building to [`crate::aggregate`] / [`crate::graph`].
+pub fn render_html(input_dir: &Path, strict: bool, title: &str) -> Result<String> {
+    let outputs: Vec<RunOutput> = collect_runs(input_dir, strict)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
+    Ok(crate::graph::render_html(&outputs, title))
+}
+
+/// Render the website HTML fragment (per-run + averaged throughput/CPU/memory
+/// charts) from every run in `input_dir`, pairing each run with its `runNN`
+/// tag (parsed from the result filename) so per-run traces are labelled.
+pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
+    let tagged: Vec<(String, RunOutput)> = collect_runs(input_dir, strict)?
+        .into_iter()
+        .map(|(p, r)| (run_tag_from_path(&p), r))
+        .collect();
+    Ok(crate::graph::render_web_fragment(&tagged))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,6 +746,51 @@ mod tests {
         let dir = tempdir().unwrap();
         let md = render_markdown(dir.path(), false).unwrap();
         assert!(md.contains("no `RunOutput` JSON files found"));
+    }
+
+    #[test]
+    fn html_report_loads_runs_and_embeds_plotly() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path()
+                .join("crabka-small-msg-saturate-6broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Crabka, 600_000)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join("kafka-small-msg-saturate-6broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Kafka, 400_000)).unwrap(),
+        )
+        .unwrap();
+        let html = render_html(dir.path(), true, "Bench").unwrap();
+        assert!(html.contains("<html") && html.contains("Bench"));
+        assert!(html.contains("cdn.plot.ly/plotly-3.0.1"));
+        assert!(html.contains("small-msg-saturate"));
+        assert!(html.contains("Producer throughput"));
+    }
+
+    #[test]
+    fn web_fragment_loads_runs_with_tags() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path()
+                .join("crabka-small-msg-saturate-6broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Crabka, 600_000)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join("kafka-small-msg-saturate-6broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Kafka, 400_000)).unwrap(),
+        )
+        .unwrap();
+        let frag = render_web_fragment(dir.path(), true).unwrap();
+        // A fragment, not a full page (no <html> wrapper) but loads plotly.
+        assert!(!frag.contains("<html"));
+        assert!(frag.contains("cdn.plot.ly/plotly-3.0.1"));
+        assert!(frag.contains("Per run"));
+        assert!(frag.contains("small-msg-saturate"));
     }
 
     #[test]
