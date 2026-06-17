@@ -87,6 +87,14 @@ exclude_re = [
     # `crabka_playground::Playground::*` wrappers are mutation-tested (and caught)
     # because that crate always enables `sim`.
     "kraft-core/src/sim\\.rs",
+    # crabka-schema-serde's format modules are gated behind optional features
+    # (`avro`, `json`, `protobuf`) and the crate's default feature set enables
+    # none of them. cargo-mutants' default package run mutates these source
+    # files even though they are compiled out, so those mutations are no-op
+    # survivors under the default build. Feature-enabled test jobs exercise the
+    # modules themselves.
+    "schema-serde/src/format/(avro|json|protobuf)\\.rs",
+    "schema-serde/src/format/mod\\.rs.*Binding::register",
     # `AddPartitionsToTxn`'s start-timestamp stamp (`txnStartTimestamp` on the
     # edge into Ongoing) is reaper-supporting bookkeeping: its only observable
     # effect is *when* the (excluded) idle-transaction reaper measures the

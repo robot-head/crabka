@@ -162,7 +162,7 @@ pub fn check_against_version(
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
     }
-    let (_, _, _vty, vschema, v_refs, _) = snap
+    let existing = snap
         .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
@@ -175,13 +175,15 @@ pub fn check_against_version(
     }
     // The stored version's closure resolves (valid at register time); tolerate
     // failure defensively.
-    let existing_resolved = snap.resolve_closure(&v_refs).unwrap_or_default();
+    let existing_resolved = snap
+        .resolve_closure(&existing.references)
+        .unwrap_or_default();
     let mut msgs = Vec::new();
     check_pair(
         ty,
         candidate,
         candidate_refs,
-        &vschema,
+        &existing.schema,
         &existing_resolved,
         dirs,
         &mut msgs,

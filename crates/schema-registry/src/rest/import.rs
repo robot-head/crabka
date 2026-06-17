@@ -10,6 +10,7 @@ use prost_reflect::prost_types::{FileDescriptorProto, FileDescriptorSet};
 
 use crate::error::SrError;
 use crate::format::{self, SchemaType};
+use crate::kafkastore::RegisterSchema;
 use crate::kafkastore::record::SchemaReference;
 use crate::rest::{AppState, response::ok_json};
 
@@ -38,15 +39,15 @@ pub async fn file_descriptor_set(
         let schema = format::protobuf::normalize(file);
         let reg = st
             .store
-            .register(
-                name,
-                SchemaType::Protobuf,
-                &schema,
-                &references,
-                None,
-                None,
-                None,
-            )
+            .register(RegisterSchema {
+                subject: name,
+                ty: SchemaType::Protobuf,
+                schema: &schema,
+                references: &references,
+                message_type: None,
+                import_id: None,
+                import_version: None,
+            })
             .await?;
         registered.insert(name.clone(), reg.version);
         rows.push(serde_json::json!({
@@ -132,7 +133,7 @@ fn references_for(
                     .store
                     .read()
                     .version(dep, None, false)
-                    .map(|(_, version, _, _, _, _)| version)
+                    .map(|found| found.version)
                     .ok_or_else(|| SrError::ReferenceNotFound(dep.clone()))?,
             };
             Ok(SchemaReference {

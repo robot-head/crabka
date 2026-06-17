@@ -31,7 +31,7 @@ pub async fn delete_version(
             .store
             .read()
             .version(&subject, None, false)
-            .map(|t| t.1)
+            .map(|found| found.version)
             .ok_or_else(|| SrError::SubjectNotFound(subject.clone()))?
     } else {
         parse_concrete_version(&version)?

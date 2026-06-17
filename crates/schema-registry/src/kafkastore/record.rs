@@ -214,26 +214,29 @@ pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-fn schema_kv(
-    subject: &str,
+#[derive(Clone, Copy)]
+struct SchemaRecordParts<'a> {
+    subject: &'a str,
     version: i32,
     id: i32,
     ty: SchemaType,
-    schema: &str,
-    references: &[SchemaReference],
-    message_type: Option<&str>,
+    schema: &'a str,
+    references: &'a [SchemaReference],
+    message_type: Option<&'a str>,
     deleted: bool,
-) -> (Vec<u8>, Vec<u8>) {
-    let key = SchemaKey::new(subject, version);
+}
+
+fn schema_kv(record: SchemaRecordParts<'_>) -> (Vec<u8>, Vec<u8>) {
+    let key = SchemaKey::new(record.subject, record.version);
     let value = SchemaValue {
-        subject: subject.to_string(),
-        version,
-        id,
-        schema_type: ty.wire_name().map(str::to_string),
-        message_type: message_type.map(str::to_string),
-        references: references.to_vec(),
-        schema: schema.to_string(),
-        deleted,
+        subject: record.subject.to_string(),
+        version: record.version,
+        id: record.id,
+        schema_type: record.ty.wire_name().map(str::to_string),
+        message_type: record.message_type.map(str::to_string),
+        references: record.references.to_vec(),
+        schema: record.schema.to_string(),
+        deleted: record.deleted,
     };
     (
         serde_json::to_vec(&key).expect("key serialises"),
@@ -251,7 +254,16 @@ pub fn encode_schema(
     schema: &str,
     references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, references, None, false)
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type: None,
+        deleted: false,
+    })
 }
 
 /// Build a `SCHEMA` record carrying optional Crabka protobuf message binding
@@ -267,7 +279,7 @@ pub fn encode_schema_with_message_type(
     references: &[SchemaReference],
     message_type: Option<&str>,
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(
+    schema_kv(SchemaRecordParts {
         subject,
         version,
         id,
@@ -275,8 +287,8 @@ pub fn encode_schema_with_message_type(
         schema,
         references,
         message_type,
-        false,
-    )
+        deleted: false,
+    })
 }
 
 /// Build a soft-delete `SCHEMA` record: identical key/value to the original but
@@ -290,7 +302,16 @@ pub fn encode_schema_deleted(
     schema: &str,
     references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, references, None, true)
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type: None,
+        deleted: true,
+    })
 }
 
 /// Build a soft-delete `SCHEMA` record while preserving optional message
@@ -305,7 +326,7 @@ pub fn encode_schema_deleted_with_message_type(
     references: &[SchemaReference],
     message_type: Option<&str>,
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(
+    schema_kv(SchemaRecordParts {
         subject,
         version,
         id,
@@ -313,8 +334,8 @@ pub fn encode_schema_deleted_with_message_type(
         schema,
         references,
         message_type,
-        true,
-    )
+        deleted: true,
+    })
 }
 
 /// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,

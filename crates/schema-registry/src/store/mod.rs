@@ -27,6 +27,27 @@ pub struct RegisteredSchema {
     pub message_type: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaVersion {
+    pub id: i32,
+    pub version: i32,
+    pub ty: SchemaType,
+    pub schema: String,
+    pub references: Vec<SchemaReference>,
+    pub message_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedSchema {
+    pub subject: String,
+    pub version: i32,
+    pub id: i32,
+    pub ty: SchemaType,
+    pub schema: String,
+    pub references: Vec<SchemaReference>,
+    pub message_type: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct VersionEntry {
     version: i32,
@@ -311,7 +332,7 @@ impl StoreState {
         if out.is_empty() { None } else { Some(out) }
     }
 
-    /// `(id, version, schemaType, schema, references, messageType)` for a subject+version.
+    /// Stored schema details for a subject+version.
     /// `version=None` resolves to the latest qualifying version.
     #[must_use]
     pub fn version(
@@ -319,14 +340,7 @@ impl StoreState {
         subject: &str,
         version: Option<i32>,
         include_deleted: bool,
-    ) -> Option<(
-        i32,
-        i32,
-        SchemaType,
-        String,
-        Vec<SchemaReference>,
-        Option<String>,
-    )> {
+    ) -> Option<SchemaVersion> {
         let vs = self.subjects.get(subject)?;
         let entry = match version {
             Some(v) => vs
@@ -335,14 +349,14 @@ impl StoreState {
             None => vs.iter().rfind(|e| include_deleted || !e.deleted)?,
         };
         let reg = self.by_id.get(&entry.id)?;
-        Some((
-            entry.id,
-            entry.version,
-            reg.ty,
-            reg.schema.clone(),
-            reg.references.clone(),
-            reg.message_type.clone(),
-        ))
+        Some(SchemaVersion {
+            id: entry.id,
+            version: entry.version,
+            ty: reg.ty,
+            schema: reg.schema.clone(),
+            references: reg.references.clone(),
+            message_type: reg.message_type.clone(),
+        })
     }
 
     /// Schema bytes for a global id. Returns `None` unless some qualifying
@@ -386,41 +400,29 @@ impl StoreState {
         out
     }
 
-    /// Every `(subject, version, id, schemaType, schema, references, messageType)` (GET
-    /// /schemas), sorted by subject then version (matches cp's `/schemas`
-    /// ordering).
+    /// Every schema visible to GET /schemas, sorted by subject then version
+    /// (matches cp's `/schemas` ordering).
     #[must_use]
-    pub fn all_schemas(
-        &self,
-        include_deleted: bool,
-    ) -> Vec<(
-        String,
-        i32,
-        i32,
-        SchemaType,
-        String,
-        Vec<SchemaReference>,
-        Option<String>,
-    )> {
+    pub fn all_schemas(&self, include_deleted: bool) -> Vec<ListedSchema> {
         let mut out = Vec::new();
         for (subject, vs) in &self.subjects {
             for v in vs {
                 if (include_deleted || !v.deleted)
                     && let Some(reg) = self.by_id.get(&v.id)
                 {
-                    out.push((
-                        subject.clone(),
-                        v.version,
-                        v.id,
-                        reg.ty,
-                        reg.schema.clone(),
-                        reg.references.clone(),
-                        reg.message_type.clone(),
-                    ));
+                    out.push(ListedSchema {
+                        subject: subject.clone(),
+                        version: v.version,
+                        id: v.id,
+                        ty: reg.ty,
+                        schema: reg.schema.clone(),
+                        references: reg.references.clone(),
+                        message_type: reg.message_type.clone(),
+                    });
                 }
             }
         }
-        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        out.sort_by(|a, b| a.subject.cmp(&b.subject).then(a.version.cmp(&b.version)));
         out
     }
 
@@ -766,8 +768,8 @@ mod tests {
             .unwrap(); // id2 / v2
         apply_deleted(&mut s, "av", 2, 2, &av("B"));
         // latest LIVE version is v1; latest incl. deleted is v2
-        assert_eq!(s.version("av", None, false).unwrap().1, 1);
-        assert_eq!(s.version("av", None, true).unwrap().1, 2);
+        assert_eq!(s.version("av", None, false).unwrap().version, 1);
+        assert_eq!(s.version("av", None, true).unwrap().version, 2);
     }
 
     #[test]

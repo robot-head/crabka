@@ -153,6 +153,8 @@ mod tests {
     use super::model::SchemaPayload;
     use super::*;
     use assert2::check;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn base_url_trims_trailing_slash() {
@@ -183,5 +185,89 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         check!(j.contains(r#""schemaType":"PROTOBUF""#));
         check!(j.contains(r#""messageType":"demo.Order""#));
+    }
+
+    #[tokio::test]
+    async fn register_posts_schema_payload_and_returns_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value/versions"))
+            .and(body_json(serde_json::json!({
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        let id = client
+            .register(
+                "orders-value",
+                SchemaKind::Protobuf,
+                "syntax = \"proto3\";",
+                Some("demo.Order"),
+            )
+            .await
+            .unwrap();
+
+        check!(id == 42);
+    }
+
+    #[tokio::test]
+    async fn lookup_posts_schema_payload_and_returns_existing_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value"))
+            .and(body_json(serde_json::json!({
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 43,
+                "version": 7,
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        let id = client
+            .lookup(
+                "orders-value",
+                SchemaKind::Json,
+                r#"{"type":"object"}"#,
+                None,
+            )
+            .await
+            .unwrap();
+
+        check!(id == 43);
+    }
+
+    #[tokio::test]
+    async fn latest_id_fetches_latest_subject_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 44,
+                "version": 9,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        check!(client.latest_id("orders-value").await.unwrap() == 44);
     }
 }

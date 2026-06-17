@@ -156,7 +156,9 @@ impl SchemaCache {
             let mut g = self.inner.lock().unwrap();
             g.subject_id.insert(i.subject.clone(), id);
             g.id_schema.insert(id, i.schema.clone());
-            if let Some(message_type) = i.message_type {
+            if let Some(message_type) = i.message_type
+                && !g.id_message_type.contains_key(&id)
+            {
                 g.id_message_type.insert(id, message_type);
             }
         }
@@ -235,6 +237,8 @@ mod tests {
     use super::*;
     use crate::registry::RegistryClient;
     use assert2::check;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cache() -> Arc<SchemaCache> {
         SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default())
@@ -270,5 +274,115 @@ mod tests {
         c.seed_writer_message_type(9, "demo.Order");
         check!(c.writer_message_type(9).as_deref() == Some("demo.Order"));
         check!(c.writer_message_type(10).is_none());
+    }
+
+    #[tokio::test]
+    async fn prewarm_auto_register_resolves_subject_id_and_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value/versions"))
+            .and(body_json(serde_json::json!({
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 50
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::AutoRegister,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            Some("demo.Order"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(50));
+        check!(c.writer_schema(50).unwrap() == "syntax = \"proto3\";");
+        check!(c.writer_message_type(50).as_deref() == Some("demo.Order"));
+    }
+
+    #[tokio::test]
+    async fn prewarm_lookup_only_uses_lookup_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value"))
+            .and(body_json(serde_json::json!({
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 51,
+                "version": 3,
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::LookupOnly,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Json,
+            r#"{"type":"object"}"#,
+            None,
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(51));
+        check!(c.writer_schema(51).unwrap() == r#"{"type":"object"}"#);
+    }
+
+    #[tokio::test]
+    async fn prewarm_use_latest_keeps_registry_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 52,
+                "version": 4,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Latest"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::UseLatest,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            Some("demo.Local"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(52));
+        check!(c.writer_message_type(52).as_deref() == Some("demo.Latest"));
     }
 }

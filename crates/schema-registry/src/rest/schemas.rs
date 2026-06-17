@@ -112,22 +112,20 @@ pub async fn list_schemas(State(st): State<AppState>, Query(q): Query<DeletedQ>)
     let rows = st.store.store.read().all_schemas(q.deleted);
     let arr: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(
-            |(subject, version, id, ty, schema, _references, message_type)| {
-                let mut m = serde_json::Map::new();
-                m.insert("subject".into(), subject.into());
-                m.insert("version".into(), version.into());
-                m.insert("id".into(), id.into());
-                if let Some(t) = ty.wire_name() {
-                    m.insert("schemaType".into(), t.into());
-                }
-                if let Some(t) = message_type {
-                    m.insert("messageType".into(), t.into());
-                }
-                m.insert("schema".into(), schema.into());
-                serde_json::Value::Object(m)
-            },
-        )
+        .map(|row| {
+            let mut m = serde_json::Map::new();
+            m.insert("subject".into(), row.subject.into());
+            m.insert("version".into(), row.version.into());
+            m.insert("id".into(), row.id.into());
+            if let Some(t) = row.ty.wire_name() {
+                m.insert("schemaType".into(), t.into());
+            }
+            if let Some(t) = row.message_type {
+                m.insert("messageType".into(), t.into());
+            }
+            m.insert("schema".into(), row.schema.into());
+            serde_json::Value::Object(m)
+        })
         .collect();
     ok_json(&serde_json::Value::Array(arr))
 }
