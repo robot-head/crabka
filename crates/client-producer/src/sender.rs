@@ -249,6 +249,12 @@ struct PreparedBatch {
     /// (`ROUTING_RETRY_BUDGET`) is measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
+    /// Wall-clock time the batch was most recently handed to the transport.
+    /// Gates re-sends to one per [`SenderConfig::retry_backoff`]: a batch that
+    /// keeps failing (e.g. the leader's pod is bouncing and refusing
+    /// connections) backs off between attempts instead of hot-looping the
+    /// drain loop every linger tick.
+    last_attempt: Option<Instant>,
 }
 
 /// One drain cycle. Builds the send list — each partition's pending resend
@@ -279,7 +285,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     //    and returns batches whose routing budget elapsed, which we fail here
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
-    let (mut to_send, expired) = collect_retries(&mut state.retry, now);
+    let (mut to_send, expired) = collect_retries(&mut state.retry, now, cfg.retry_backoff);
     for pb in expired {
         fail_batch(
             pb.records,
@@ -288,13 +294,16 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         finish_in_flight(cfg);
     }
 
-    // A partition resending this cycle is "occupied": it must not also send a
+    // A partition with a pending resend is "occupied": it must not also send a
     // new batch (two same-partition requests on the wire could reorder and trip
     // `OUT_OF_ORDER_SEQUENCE_NUMBER`). Its next batch waits in the accumulator
-    // until the resend acks and the slot frees.
+    // until the resend acks and the slot frees. This covers both batches
+    // resending this cycle (`to_send`) and ones still parked in their retry slot
+    // backing off (`state.retry`) — a backed-off slot is still occupied.
     let mut occupied: HashSet<(String, i32)> = to_send
         .iter()
         .map(|pb| (pb.topic.clone(), pb.partition))
+        .chain(state.retry.keys().cloned())
         .collect();
 
     // 2. One new batch per idle partition. Across partitions we fan out
@@ -333,6 +342,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         let Some(batch) = batch else { continue };
         let mut pb = prepare_batch(cfg, &key.0, key.1, batch).await;
         pb.first_sent = Some(now);
+        pb.last_attempt = Some(now);
         occupied.insert(key);
         to_send.push(pb);
     }
@@ -359,11 +369,16 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
+    retry_backoff: Duration,
 ) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
     let mut to_send: Vec<PreparedBatch> = Vec::new();
     let mut expired: Vec<PreparedBatch> = Vec::new();
+    // Batches not yet eligible for a resend (still within `retry_backoff` of
+    // their last attempt) are re-parked here so a persistently-failing leader
+    // doesn't hot-loop the drain on every linger tick.
+    let mut parked: Vec<((String, i32), PreparedBatch)> = Vec::new();
 
-    for (_key, mut pb) in retry.drain() {
+    for (key, mut pb) in retry.drain() {
         if pb
             .first_sent
             .is_some_and(|t| now.duration_since(t) >= ROUTING_RETRY_BUDGET)
@@ -371,10 +386,24 @@ fn collect_retries(
             expired.push(pb);
             continue;
         }
+        // Honour the retry backoff: a batch resent under `retry_backoff` ago
+        // waits in its slot until the backoff elapses.
+        if pb
+            .last_attempt
+            .is_some_and(|t| now.duration_since(t) < retry_backoff)
+        {
+            parked.push((key, pb));
+            continue;
+        }
         if pb.first_sent.is_none() {
             pb.first_sent = Some(now);
         }
+        pb.last_attempt = Some(now);
         to_send.push(pb);
+    }
+
+    for (key, pb) in parked {
+        retry.insert(key, pb);
     }
 
     (to_send, expired)
@@ -488,6 +517,7 @@ async fn prepare_batch(
         record_batch,
         records: batch.records,
         first_sent: None,
+        last_attempt: None,
     }
 }
 
@@ -967,6 +997,7 @@ mod tests {
             },
             records: vec![record],
             first_sent,
+            last_attempt: None,
         };
         (pb, rx)
     }
@@ -1011,7 +1042,8 @@ mod tests {
         retry.insert(("t".to_string(), 0), old);
         retry.insert(("t".to_string(), 1), recent);
 
-        let (to_send, expired) = collect_retries(&mut retry, Instant::now());
+        let (to_send, expired) =
+            collect_retries(&mut retry, Instant::now(), Duration::from_millis(100));
 
         assert!(expired.len() == 1);
         assert!(expired[0].base_sequence == 0);
@@ -1027,11 +1059,41 @@ mod tests {
         retry.insert(("t".to_string(), 0), pb);
 
         let now = Instant::now();
-        let (to_send, expired) = collect_retries(&mut retry, now);
+        let (to_send, expired) = collect_retries(&mut retry, now, Duration::from_millis(100));
 
         assert!(expired.is_empty());
         assert!(to_send.len() == 1);
         assert!(to_send[0].first_sent == Some(now));
+    }
+
+    #[test]
+    fn collect_retries_backs_off_recently_attempted_batch() {
+        // A batch resent `now` (last_attempt = now) must NOT be resent again
+        // until `retry_backoff` elapses — otherwise a leader that keeps refusing
+        // connections (a bouncing pod) hot-loops the drain on every linger tick.
+        let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
+        let now = Instant::now();
+        let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
+        pb.last_attempt = Some(now);
+        retry.insert(("t".to_string(), 0), pb);
+
+        // Within the backoff window: parked, nothing sent, slot retained.
+        let (to_send, expired) = collect_retries(
+            &mut retry,
+            now + Duration::from_millis(40),
+            Duration::from_millis(100),
+        );
+        assert!(to_send.is_empty() && expired.is_empty());
+        assert!(retry.len() == 1);
+
+        // Past the backoff window: eligible again and drained out to send.
+        let (to_send, _expired) = collect_retries(
+            &mut retry,
+            now + Duration::from_millis(120),
+            Duration::from_millis(100),
+        );
+        assert!(to_send.len() == 1);
+        assert!(retry.is_empty());
     }
 }
 

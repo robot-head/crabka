@@ -526,6 +526,17 @@ fn render_broker_container(
             "initialDelaySeconds": 30,
             "periodSeconds": 10
         },
+        // A controller-voter that is restarted uncleanly (e.g. a deleted pod)
+        // can take tens of seconds to rejoin the KRaft quorum before it opens
+        // the data port. The startupProbe grants that grace and suppresses the
+        // liveness probe until the broker is actually serving on BROKER_PORT,
+        // so a slow rejoin is never SIGKILLed mid-rejoin into a crash loop
+        // (which would also keep flapping the broker and block leader failover).
+        "startupProbe": {
+            "tcpSocket": { "port": BROKER_PORT },
+            "periodSeconds": 5,
+            "failureThreshold": 30
+        },
         "resources": resources,
         "volumeMounts": volume_mounts,
         "securityContext": {
@@ -1703,6 +1714,36 @@ mod tests {
              Otherwise `crabka format` refuses to overwrite a non-empty \
              log_dir on the first boot of an empty PVC. \
              format at byte {format_pos}, .node-id at byte {node_id_write_pos}",
+        );
+    }
+
+    #[test]
+    fn render_statefulset_broker_has_startup_probe_for_slow_rejoin() {
+        // A controller-voter restarted uncleanly can take tens of seconds to
+        // rejoin the KRaft quorum before it opens the data port. Without a
+        // startupProbe the liveness probe SIGKILLs it mid-rejoin into a crash
+        // loop (which also keeps it flapping so leader failover never fires).
+        let parent = parent_fixture("demo");
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod = sts.spec.unwrap().template.spec.unwrap();
+        let broker = pod
+            .containers
+            .iter()
+            .find(|c| c.name == "broker")
+            .expect("broker container");
+        let startup = broker.startup_probe.as_ref().expect(
+            "broker must have a startupProbe so a slow rejoin isn't crash-looped by liveness",
+        );
+        assert!(
+            startup.tcp_socket.is_some(),
+            "startupProbe should gate on the data port being open"
+        );
+        // Generous failure budget so a legitimately slow rejoin completes.
+        assert!(
+            startup.failure_threshold.unwrap_or(0) >= 12,
+            "startupProbe needs a generous failureThreshold for a slow KRaft rejoin, got {:?}",
+            startup.failure_threshold
         );
     }
 
