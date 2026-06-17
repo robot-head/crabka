@@ -17,10 +17,10 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-client-core = { version = "0.3.6", path = "../client-core" }
-crabka-metadata    = { version = "0.3.6", path = "../metadata" }
-crabka-protocol    = { version = "0.3.6", path = "../protocol", default-features = false }
-crabka-security    = { version = "0.3.6", path = "../security" }
+crabka-client-core = { version = "0.3.7", path = "../client-core" }
+crabka-metadata    = { version = "0.3.7", path = "../metadata" }
+crabka-protocol    = { version = "0.3.7", path = "../protocol", default-features = false }
+crabka-security    = { version = "0.3.7", path = "../security" }
 async-trait        = { workspace = true }
 bytes              = { workspace = true }
 ring               = { workspace = true }

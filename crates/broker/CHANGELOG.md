@@ -6,6 +6,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Emit Cloud Logging-friendly structured JSON across services ([#508](https://github.com/robot-head/crabka/pull/508))
+
+- KIP-1071 streams->classic cold downgrade + admin type-awareness (slice 2) ([#506](https://github.com/robot-head/crabka/pull/506))
+
+- KIP-534 log-compaction retention + fix control-batch dedup data-loss ([#528](https://github.com/robot-head/crabka/pull/528))
+
+- DescribeCluster endpoint_type=CONTROLLERS (KIP-919) + KIP matrix fixes ([#551](https://github.com/robot-head/crabka/pull/551))
+
+- Surface request-quota throttle in ThrottleTimeMs (KIP-219) ([#553](https://github.com/robot-head/crabka/pull/553))
+
+- KIP-939 2PC participation — coordinator semantics + stateright model ([#560](https://github.com/robot-head/crabka/pull/560))
+
+- Native GCS RemoteStorageManager backend (keyless Workload Identity) ([#574](https://github.com/robot-head/crabka/pull/574))
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Withhold KIP-848 partitions until previous owner revokes (+ stateright model that found it) ([#521](https://github.com/robot-head/crabka/pull/521))
+
+- Token-bucket over-grant/underflow race + stateright interleaving model (KIP-73) ([#531](https://github.com/robot-head/crabka/pull/531))
+
+- Classic group static-membership index corruption + stateright model (KIP-345) ([#534](https://github.com/robot-head/crabka/pull/534))
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Add exhaustive KIP matrix; fix UnregisterBroker KIP-185→919 mislabel ([#549](https://github.com/robot-head/crabka/pull/549))
+
+- Make website coherent and fix links ([#579](https://github.com/robot-head/crabka/pull/579))
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- Stateright consensus model + deterministic-sync test infra (Phase 1) ([#511](https://github.com/robot-head/crabka/pull/511))
+
+- De-flake share + group-coordination tests (Phase 2) ([#513](https://github.com/robot-head/crabka/pull/513))
+
+- Stateright model of the share-partition acquisition core (KIP-932) ([#514](https://github.com/robot-head/crabka/pull/514))
+
+- Stateright model of the ISR / replica-state core (no-committed-data-loss) ([#515](https://github.com/robot-head/crabka/pull/515))
+
+- Stateright model of leader-failover + unclean-recovery safety (KIP-841/966) ([#516](https://github.com/robot-head/crabka/pull/516))
+
+- Stateright model of KIP-455 partition-reassignment completion ([#520](https://github.com/robot-head/crabka/pull/520))
+
+- Stateright model of the KIP-98/EOS transaction coordinator ([#523](https://github.com/robot-head/crabka/pull/523))
+
+- Data-plane safety models — idempotent-producer + log-truncation (stateright + proptest) ([#524](https://github.com/robot-head/crabka/pull/524))
+
+- Fetch HWM visibility-window model + de-dup response fields ([#529](https://github.com/robot-head/crabka/pull/529))
+
+- Exhaustive + proptest verification of quota lookup precedence (KIP-13/124/612) ([#535](https://github.com/robot-head/crabka/pull/535))
+
+- KIP-227 fetch-session forget+merge composition model ([#536](https://github.com/robot-head/crabka/pull/536))
+
+- Data-path composition model — end-to-end formal verification (HWM↔truncation↔failover↔visibility) ([#539](https://github.com/robot-head/crabka/pull/539))
+
+- Txn/EOS composition model — read_committed visibility algebra (LSO ↔ HWM clamp ↔ abort filter) ([#541](https://github.com/robot-head/crabka/pull/541))
+
+- Consumer-group composition model — reconciliation ↔ real OffsetCommit epoch fence ([#543](https://github.com/robot-head/crabka/pull/543))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
+
 ## [0.3.6] — 2026-06-13
 
 ## [0.3.5] — 2026-06-12

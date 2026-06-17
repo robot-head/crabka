@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Emit Cloud Logging-friendly structured JSON across services ([#508](https://github.com/robot-head/crabka/pull/508))
+
+- Interactive in-browser WASM consensus simulator ([#562](https://github.com/robot-head/crabka/pull/562))
+
+- KIP-939 2PC participation — coordinator semantics + stateright model ([#560](https://github.com/robot-head/crabka/pull/560))
+
+- Scaffold rules_rust client build + lean client_minimal facade ([#570](https://github.com/robot-head/crabka/pull/570))
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Add exhaustive KIP matrix; fix UnregisterBroker KIP-185→919 mislabel ([#549](https://github.com/robot-head/crabka/pull/549))
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- Stateright consensus model + deterministic-sync test infra (Phase 1) ([#511](https://github.com/robot-head/crabka/pull/511))
+
+- Kill cargo-mutants survivors in metadata (and raft) ([#555](https://github.com/robot-head/crabka/pull/555))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
+
 ## [0.3.6] — 2026-06-13
 
 ## [0.3.5] — 2026-06-12

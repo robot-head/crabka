@@ -5,6 +5,21 @@ All notable changes to `crabka-compression` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Scaffold rules_rust client build + lean client_minimal facade ([#570](https://github.com/robot-head/crabka/pull/570))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- Add cargo-mutants incremental mutation testing ([#550](https://github.com/robot-head/crabka/pull/550))
+
+
 ## [0.3.6] — 2026-06-13
 
 

@@ -5,6 +5,23 @@ All notable changes to `crabka-protocol` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- KIP-534 log-compaction retention + fix control-batch dedup data-loss ([#528](https://github.com/robot-head/crabka/pull/528))
+
+- Scaffold rules_rust client build + lean client_minimal facade ([#570](https://github.com/robot-head/crabka/pull/570))
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Make the client scaffold actually build end-to-end ([#573](https://github.com/robot-head/crabka/pull/573))
+
+
 ## [0.3.6] — 2026-06-13
 
 
