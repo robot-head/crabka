@@ -343,6 +343,13 @@ impl Log {
         self.pending.clear(); // reset_to is a hard reset (after divergence)
         self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
         self.active = Some(new_active);
+        // The log now holds no records, so the leader-epoch cache must hold no
+        // entries (Kafka's truncateFullyAndStartAt → leaderEpochCache.clearAndFlush).
+        // Leaving stale entries makes a follower advertise a `last_fetched_epoch`
+        // it has no record for, so the leader's KIP-320 reconciliation serves a
+        // batch at a mismatched base offset and the follower loops forever on
+        // append_at — a phantom ISR member that pins the high-watermark.
+        self.epoch_checkpoint.clear()?;
         Ok(())
     }
 
@@ -2034,6 +2041,54 @@ mod tests {
         let leo = log.log_end_offset();
         assert!(log.epoch_checkpoint().end_offset_for_epoch(7, leo) == -1);
         assert!(log.epoch_checkpoint().end_offset_for_epoch(1, leo) == leo);
+    }
+
+    #[test]
+    fn reset_to_clears_leader_epoch_checkpoint() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        // A follower that replicated real data builds an epoch history.
+        log.append(&mut sample_batch_with_epoch(3, 1)).unwrap(); // epoch 1 @ 0
+        log.append(&mut sample_batch_with_epoch(2, 2)).unwrap(); // epoch 2 @ 3
+        log.append(&mut sample_batch_with_epoch(1, 5)).unwrap(); // epoch 5 @ 5
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(5));
+
+        // Hard reset to an empty log — the replicator's OFFSET_OUT_OF_RANGE
+        // recovery path (Kafka's `truncateFullyAndStartAt`). The log now has
+        // NO records, so it must advertise NO leader epoch. Otherwise the
+        // follower keeps sending a stale `last_fetched_epoch` and the leader's
+        // KIP-320 reconciliation serves a batch at a mismatched base offset,
+        // looping forever on `append_at` (phantom ISR member → pinned HW →
+        // acks=all stall).
+        log.reset_to(0).unwrap();
+
+        assert!(
+            log.epoch_checkpoint().latest_epoch() == None,
+            "reset_to must clear the leader-epoch cache (an empty log advertises no epoch)"
+        );
+        assert!(log.epoch_checkpoint().entries().is_empty());
+        // The cleared state must survive a reopen (a restarted broker re-reads
+        // the on-disk checkpoint file).
+        let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert!(reopened.epoch_checkpoint().entries().is_empty());
+    }
+
+    #[test]
+    fn reset_to_nonzero_base_clears_all_epochs_not_just_tail() {
+        // Guards against the subtly-wrong fix `truncate_from_end(new_base)`,
+        // which retains an entry whose `start_offset < new_base` even though
+        // the reset log holds no records below `new_base`.
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        log.append(&mut sample_batch_with_epoch(3, 1)).unwrap(); // epoch 1 @ 0
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(1));
+        log.reset_to(1000).unwrap(); // empty log starting at 1000
+        assert!(
+            log.epoch_checkpoint().entries().is_empty(),
+            "epoch 1 @ offset 0 backs no records after reset_to(1000); must be cleared"
+        );
     }
 
     #[test]
