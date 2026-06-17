@@ -25,7 +25,10 @@ use prost_reflect::prost::Message;
 use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::prost_types::field_descriptor_proto::Label;
 use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
-use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
+use prost_reflect::prost_types::{
+    DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
+    ServiceDescriptorProto,
+};
 
 pub struct ProtobufSchema {
     descriptor: FileDescriptorProto,
@@ -73,29 +76,54 @@ pub fn normalize(fdp: &FileDescriptorProto) -> String {
         let _ = writeln!(out, "import \"{dep}\";");
     }
 
+    let package = fdp.package.as_deref().unwrap_or("");
+
+    for en in &fdp.enum_type {
+        out.push('\n');
+        write_enum(&mut out, en, 0);
+    }
     for msg in &fdp.message_type {
         out.push('\n');
-        write_message(&mut out, msg, 0);
+        write_message(&mut out, msg, 0, package);
+    }
+    for service in &fdp.service {
+        out.push('\n');
+        write_service(&mut out, service, package);
     }
     out
 }
 
-fn write_message(out: &mut String, msg: &DescriptorProto, depth: usize) {
+fn write_message(out: &mut String, msg: &DescriptorProto, depth: usize, package: &str) {
     let indent = "  ".repeat(depth);
     let name = msg.name.as_deref().unwrap_or("Unknown");
     let _ = writeln!(out, "{indent}message {name} {{");
+    for en in &msg.enum_type {
+        write_enum(out, en, depth + 1);
+    }
     for field in &msg.field {
-        write_field(out, field, depth + 1);
+        write_field(out, field, depth + 1, package);
     }
     for nested in &msg.nested_type {
-        write_message(out, nested, depth + 1);
+        write_message(out, nested, depth + 1, package);
     }
     let _ = writeln!(out, "{indent}}}");
 }
 
-fn write_field(out: &mut String, field: &FieldDescriptorProto, depth: usize) {
+fn write_enum(out: &mut String, en: &EnumDescriptorProto, depth: usize) {
     let indent = "  ".repeat(depth);
-    let ty = proto_type_name(field);
+    let name = en.name.as_deref().unwrap_or("Unknown");
+    let _ = writeln!(out, "{indent}enum {name} {{");
+    for value in &en.value {
+        let value_name = value.name.as_deref().unwrap_or("UNKNOWN");
+        let number = value.number.unwrap_or(0);
+        let _ = writeln!(out, "{indent}  {value_name} = {number};");
+    }
+    let _ = writeln!(out, "{indent}}}");
+}
+
+fn write_field(out: &mut String, field: &FieldDescriptorProto, depth: usize, package: &str) {
+    let indent = "  ".repeat(depth);
+    let ty = proto_type_name(field, package);
     let name = field.name.as_deref().unwrap_or("unknown");
     let number = field.number.unwrap_or(0);
     // Repeated label prefix (proto3; optional is implicit).
@@ -106,11 +134,36 @@ fn write_field(out: &mut String, field: &FieldDescriptorProto, depth: usize) {
     let _ = writeln!(out, "{indent}{label_prefix}{ty} {name} = {number};");
 }
 
+fn write_service(out: &mut String, service: &ServiceDescriptorProto, package: &str) {
+    let name = service.name.as_deref().unwrap_or("Unknown");
+    let _ = writeln!(out, "service {name} {{");
+    for method in &service.method {
+        let method_name = method.name.as_deref().unwrap_or("Unknown");
+        let input_prefix = if method.client_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
+        let output_prefix = if method.server_streaming.unwrap_or(false) {
+            "stream "
+        } else {
+            ""
+        };
+        let input = proto_ref_name(method.input_type.as_deref().unwrap_or("Unknown"), package);
+        let output = proto_ref_name(method.output_type.as_deref().unwrap_or("Unknown"), package);
+        let _ = writeln!(
+            out,
+            "  rpc {method_name} ({input_prefix}{input}) returns ({output_prefix}{output});"
+        );
+    }
+    let _ = writeln!(out, "}}");
+}
+
 /// Map a `FieldDescriptorProto` to its `.proto` type name.
-fn proto_type_name(field: &FieldDescriptorProto) -> String {
+fn proto_type_name(field: &FieldDescriptorProto, package: &str) -> String {
     // If type_name is set (enum/message ref), use that (strip leading dot).
     if let Some(ref tn) = field.type_name {
-        return tn.trim_start_matches('.').to_string();
+        return proto_ref_name(tn, package);
     }
     match field.r#type() {
         FieldType::Double => "double",
@@ -131,6 +184,15 @@ fn proto_type_name(field: &FieldDescriptorProto) -> String {
         FieldType::Group | FieldType::Message | FieldType::Enum => "unknown",
     }
     .to_string()
+}
+
+fn proto_ref_name(name: &str, package: &str) -> String {
+    if !package.is_empty()
+        && let Some(local) = name.strip_prefix(&format!(".{package}."))
+    {
+        return local.to_string();
+    }
+    name.trim_start_matches('.').to_string()
 }
 
 pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<ProtobufSchema, SrError> {
@@ -415,6 +477,58 @@ mod tests {
             o.normalized_form(),
             "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n"
         );
+    }
+
+    #[test]
+    fn normalize_preserves_nested_enum_and_message_indentation() {
+        use prost_reflect::prost_types::EnumValueDescriptorProto;
+
+        let fdp = FileDescriptorProto {
+            syntax: Some("proto3".into()),
+            message_type: vec![DescriptorProto {
+                name: Some("Outer".into()),
+                enum_type: vec![EnumDescriptorProto {
+                    name: Some("Kind".into()),
+                    value: vec![
+                        EnumValueDescriptorProto {
+                            name: Some("KIND_UNSPECIFIED".into()),
+                            number: Some(0),
+                            ..Default::default()
+                        },
+                        EnumValueDescriptorProto {
+                            name: Some("KIND_READY".into()),
+                            number: Some(1),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                nested_type: vec![DescriptorProto {
+                    name: Some("Inner".into()),
+                    field: vec![FieldDescriptorProto {
+                        name: Some("id".into()),
+                        number: Some(1),
+                        label: Some(Label::Optional as i32),
+                        r#type: Some(FieldType::String as i32),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            normalize(&fdp),
+            "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
+        );
+    }
+
+    #[test]
+    fn proto_ref_name_does_not_treat_empty_package_as_local_prefix() {
+        assert_eq!(proto_ref_name("...Money", ""), "Money");
+        assert_eq!(proto_ref_name(".m.Money", "m"), "Money");
     }
 
     #[test]

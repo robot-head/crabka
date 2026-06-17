@@ -4,6 +4,7 @@ pub mod compatibility;
 pub mod config;
 pub mod delete;
 pub mod forward;
+pub mod import;
 pub mod mode;
 pub mod response;
 pub mod schemas;
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/schemas/types", get(schemas::types))
         .route("/schemas", get(schemas::list_schemas))
+        .route("/schemas/import", post(import::file_descriptor_set))
         .route("/schemas/ids/{id}", get(schemas::get_by_id))
         .route(
             "/schemas/ids/{id}/versions",
