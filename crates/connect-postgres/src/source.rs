@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use crabka_connect::{ConnectError, ConnectRecord, Source, SourceOffset};
+use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
 
 use crate::model::Operation;
 use crate::pgoutput::{RelationCache, RelationEvent, RowEvent};
@@ -23,6 +23,7 @@ pub struct PostgresWalSource {
     encoder: PostgresProtoEncoder,
     pending: VecDeque<LogicalEvent>,
     checkpoint: Option<PgLsn>,
+    resume_lsn: Option<PgLsn>,
 }
 
 impl PostgresWalSource {
@@ -38,19 +39,34 @@ impl PostgresWalSource {
             encoder: PostgresProtoEncoder::new()?,
             pending: events.into_iter().collect(),
             checkpoint: None,
+            resume_lsn: None,
         })
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.len()
     }
 }
 
 #[async_trait]
 impl Source<Bytes, Bytes> for PostgresWalSource {
     async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
-        while let Some(event) = self.pending.pop_front() {
+        while let Some(event) = self.pending.front().cloned() {
             match event {
                 LogicalEvent::Relation(relation) => {
+                    self.pending.pop_front();
                     self.relation_cache.apply_relation(relation);
                 }
                 LogicalEvent::Row(row) => {
+                    if self
+                        .resume_lsn
+                        .is_some_and(|resume_lsn| row.lsn <= resume_lsn)
+                    {
+                        self.pending.pop_front();
+                        continue;
+                    }
+
                     let diff = self.relation_cache.translate(row)?;
                     let key = self.encoder.encode_key(&diff.key)?;
                     let value = if diff.op == Operation::Delete {
@@ -71,6 +87,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                         record = record.with_timestamp(commit_timestamp_ms);
                     }
 
+                    self.pending.pop_front();
                     return Ok(Some(record));
                 }
             }
@@ -85,8 +102,23 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
     }
 
     async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
-        self.checkpoint = Some(PgLsn::from_source_offset(&offset, &self.config.slot_name)?);
+        validate_database(&offset, &self.database_name)?;
+        let lsn = PgLsn::from_source_offset(&offset, &self.config.slot_name)?;
+        self.checkpoint = Some(lsn);
+        self.resume_lsn = Some(lsn);
         Ok(())
+    }
+}
+
+fn validate_database(offset: &SourceOffset, expected_database: &str) -> Result<(), ConnectError> {
+    match offset.partition.get("database") {
+        Some(OffsetValue::String(database)) if database == expected_database => Ok(()),
+        Some(OffsetValue::String(database)) => Err(ConnectError::Offset(format!(
+            "source offset database {database:?} does not match expected database {expected_database:?}"
+        ))),
+        _ => Err(ConnectError::Offset(
+            "source offset missing string database".to_owned(),
+        )),
     }
 }
 
@@ -251,6 +283,61 @@ mod tests {
         source.seek(offset).await.expect("seek succeeds");
 
         check!(source.checkpoint() == Some(PgLsn(0x2a).to_source_offset("app", "slot_a")));
+    }
+
+    #[tokio::test]
+    async fn seek_past_first_row_poll_emits_only_later_row_without_regressing_checkpoint() {
+        let mut source = PostgresWalSource::scripted(
+            config("slot_a"),
+            "app",
+            [
+                LogicalEvent::Relation(orders_relation()),
+                LogicalEvent::Row(insert_event(PgLsn(0x2a))),
+                LogicalEvent::Row(insert_event(PgLsn(0x2b))),
+            ],
+        )
+        .expect("source builds");
+
+        source
+            .seek(PgLsn(0x2a).to_source_offset("app", "slot_a"))
+            .await
+            .expect("seek succeeds");
+
+        let record = source
+            .poll()
+            .await
+            .expect("poll succeeds")
+            .expect("later row emits");
+
+        check!(header_value(&record, "crabka.pg.lsn").as_ref() == b"0/2B");
+        check!(source.checkpoint() == Some(PgLsn(0x2b).to_source_offset("app", "slot_a")));
+        check!(source.poll().await.expect("poll succeeds").is_none());
+    }
+
+    #[tokio::test]
+    async fn translation_failure_does_not_drop_pending_row() {
+        let mut source = PostgresWalSource::scripted(
+            config("slot_a"),
+            "app",
+            [LogicalEvent::Row(insert_event(PgLsn(0x2a)))],
+        )
+        .expect("source builds");
+
+        check!(source.poll().await.is_err());
+
+        check!(source.pending_len() == 1);
+        check!(source.checkpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn seek_rejects_offset_for_different_database() {
+        let mut source = PostgresWalSource::scripted(config("slot_a"), "app", []).unwrap();
+        let offset = PgLsn(0x2a).to_source_offset("other_app", "slot_a");
+
+        let error = source.seek(offset).await.expect_err("database mismatch");
+
+        check!(matches!(error, crabka_connect::ConnectError::Offset(_)));
+        check!(source.checkpoint().is_none());
     }
 
     #[tokio::test]
