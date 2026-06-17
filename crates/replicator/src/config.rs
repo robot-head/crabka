@@ -1,0 +1,1 @@
+//! Replicator YAML configuration types.
