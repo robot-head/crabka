@@ -117,7 +117,8 @@ async fn start_three_tiered_brokers() -> (
             cfg.listen_addr = client_addrs[i];
             cfg.advertised_listener = format!("127.0.0.1:{}", client_addrs[i].port());
             cfg.controller_listen_addr = controller_addrs[i];
-            cfg.controller_quorum_voters = voters.clone();
+            cfg.controller_quorum_voters =
+                voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
             cfg.bootstrap_mode = BootstrapMode::Bootstrap;
             cfg.auto_join = false;
             cfg.bootstrap_servers = vec![];

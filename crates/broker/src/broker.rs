@@ -1329,14 +1329,17 @@ impl BrokerHandle {
     /// responds with `should_shut_down=true`. This call then invokes
     /// the regular [`shutdown`](Self::shutdown).
     ///
-    /// Returns `Err(BrokerError::ShutdownTimeout)` if leadership is not
-    /// fully drained within `timeout`. The caller can then fall back to
-    /// a hard shutdown via [`shutdown`](Self::shutdown) if it wishes.
+    /// Always stops the broker before returning: on a clean drain via the
+    /// regular [`shutdown`](Self::shutdown), and on `timeout` via a hard
+    /// shutdown fallback (returning `Err(ShutdownTimeout)` so the caller
+    /// knows the drain was incomplete). Either way the broker is stopped, so
+    /// the process can exit before a Kubernetes SIGKILL.
     ///
     /// # Errors
     ///
     /// - `BrokerError::ShutdownTimeout` — the controller did not
-    ///   acknowledge `should_shut_down=true` within `timeout`.
+    ///   acknowledge `should_shut_down=true` within `timeout`; the broker was
+    ///   hard-shut-down anyway.
     #[allow(clippy::used_underscore_binding)]
     pub async fn controlled_shutdown(
         self,
@@ -1366,7 +1369,20 @@ impl BrokerHandle {
                 self.shutdown().await;
                 Ok(())
             }
-            Err(_) => Err(BrokerError::ShutdownTimeout(timeout)),
+            Err(_) => {
+                // Leadership did not fully drain in time (e.g. the controller
+                // is itself unreachable). Still stop cleanly via the regular
+                // hard shutdown so the process exits before the Kubernetes
+                // SIGKILL — a partly-drained graceful stop still beats an
+                // abrupt kill. The `ShutdownTimeout` return tells the caller
+                // the drain was incomplete.
+                tracing::warn!(
+                    ?timeout,
+                    "controlled shutdown drain timed out; falling back to hard shutdown"
+                );
+                self.shutdown().await;
+                Err(BrokerError::ShutdownTimeout(timeout))
+            }
         }
     }
 
@@ -1766,61 +1782,22 @@ impl Broker {
             // through raft in step 2b); a `Rejoin` node already has them
             // committed on disk and must not re-submit.
             if initial_voters.is_empty() && !config.controller_quorum_voters.is_empty() {
-                let voters = if config.controller_quorum_voters.len() > 1 {
-                    // Static N-voter set: one `Voter` per configured
-                    // `(node_id, controller_addr)`. The engine identifies
-                    // voters by node id for dialing (CONTROLLER endpoint) and
-                    // for vote-grant tallying; `directory_id` is carried in the
-                    // records but is not used by the engine's vote/peer logic
-                    // (verified against `kraft/network.rs::controller_addr` and
-                    // `kraft/core.rs`, which key on `NodeId` and use
-                    // `Uuid::nil()` for vote keys). So `directory_id` only needs
-                    // to be exact for self; peers get a deterministic
-                    // placeholder because peer directory ids are not load-bearing
-                    // for static-voter Crabka quorums.
-                    let voters: Vec<crabka_metadata::Voter> = config
-                        .controller_quorum_voters
-                        .iter()
-                        .map(|&(node_id, addr)| crabka_metadata::Voter {
-                            id: node_id,
-                            directory_id: if node_id == config.node_id {
-                                config.directory_id
-                            } else {
-                                uuid::Uuid::nil()
-                            },
-                            endpoints: vec![crabka_metadata::VoterEndpoint {
-                                name: "CONTROLLER".to_string(),
-                                host: addr.ip().to_string(),
-                                port: addr.port(),
-                            }],
-                            kraft_version: crabka_metadata::KRaftVersionRange::default(),
-                        })
-                        .collect();
-                    tracing::info!(
-                        node_id = config.node_id,
-                        voter_count = voters.len(),
-                        mode = ?config.bootstrap_mode,
-                        "KIP-595 static multi-voter set: deriving voters from controller_quorum_voters"
-                    );
-                    crabka_metadata::VoterSet::from_voters(voters)
-                } else {
-                    let self_voter = crabka_metadata::Voter {
-                        id: config.node_id,
-                        directory_id: config.directory_id,
-                        endpoints: vec![crabka_metadata::VoterEndpoint {
-                            name: "CONTROLLER".to_string(),
-                            host: config.controller_listen_addr.ip().to_string(),
-                            port: config.controller_listen_addr.port(),
-                        }],
-                        kraft_version: crabka_metadata::KRaftVersionRange::default(),
-                    };
-                    tracing::info!(
-                        node_id = config.node_id,
-                        mode = ?config.bootstrap_mode,
-                        "KIP-595 single-voter set: forming/recovering single-voter cluster"
-                    );
-                    crabka_metadata::VoterSet::from_voters([self_voter])
-                };
+                // Build the static voter set, keeping peer hosts as their
+                // configured DNS names so the dialer re-resolves them per
+                // (re)connect — a rejoining peer on a new pod IP stays
+                // reachable. See `static_controller_voter_set`.
+                let voters = static_controller_voter_set(
+                    &config.controller_quorum_voters,
+                    config.node_id,
+                    config.directory_id,
+                    config.controller_listen_addr,
+                );
+                tracing::info!(
+                    node_id = config.node_id,
+                    voter_count = config.controller_quorum_voters.len(),
+                    mode = ?config.bootstrap_mode,
+                    "KIP-595 static voter set: deriving voters from controller_quorum_voters (peer hosts re-resolved per dial)"
+                );
                 // The engine reconstructs its voter set from `initial_voters`
                 // (config-derived) every boot under KIP-595 static voters, so the
                 // `V1Voters` / `V1KRaftVersion` raft-control records are NOT seeded
@@ -3480,6 +3457,84 @@ fn parse_advertised_host_port(addr: &str) -> (String, u16) {
     ("localhost".into(), 9092)
 }
 
+/// Build the KIP-595 static controller [`VoterSet`](crabka_metadata::VoterSet)
+/// from the configured `controller_quorum_voters` (`(id, "<host>:<port>")`).
+///
+/// Peer endpoint hosts are kept as their configured **DNS names** — NOT
+/// pre-resolved to IPs — so the inter-broker dialer re-resolves them on every
+/// (re)connect (`TcpStream::connect((host, port))` does a fresh lookup). A
+/// `StatefulSet` peer that restarts on a new pod IP keeps its stable DNS name,
+/// so re-resolution reaches it again; freezing the boot-time IP here would
+/// permanently strand a rejoining voter — its peers would dial the dead old IP
+/// forever, the leader's `BeginQuorumEpoch` heartbeats would never arrive, and
+/// the rejoining node would never learn the leader (so it would never open its
+/// data listener).
+///
+/// `directory_id` is only load-bearing for self: the engine keys vote/peer
+/// logic on `NodeId` and uses `Uuid::nil()` for vote keys, so peers get a nil
+/// placeholder (verified against `kraft/network.rs::controller_addr` and
+/// `kraft/core.rs`).
+fn static_controller_voter_set(
+    quorum_voters: &[(crabka_raft::NodeId, String)],
+    self_node_id: crabka_raft::NodeId,
+    self_directory_id: uuid::Uuid,
+    self_controller_listen: std::net::SocketAddr,
+) -> crabka_metadata::VoterSet {
+    // Split a configured "<host>:<port>" into (host, port), keeping the host
+    // verbatim (a DNS name resolved later, per dial). `file_config`
+    // (`parse_quorum_voter`) validates the shape, so a parse miss here is not
+    // expected; fall back to port 0 rather than panicking.
+    fn split_host_port(host_port: &str) -> (String, u16) {
+        match host_port.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(0)),
+            None => (host_port.to_string(), 0),
+        }
+    }
+    fn voter(
+        id: crabka_raft::NodeId,
+        directory_id: uuid::Uuid,
+        host: String,
+        port: u16,
+    ) -> crabka_metadata::Voter {
+        crabka_metadata::Voter {
+            id,
+            directory_id,
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".to_string(),
+                host,
+                port,
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }
+    }
+
+    if quorum_voters.len() > 1 {
+        // Static N-voter set: one `Voter` per configured `(node_id, host:port)`.
+        let voters: Vec<crabka_metadata::Voter> = quorum_voters
+            .iter()
+            .map(|(node_id, host_port)| {
+                let (host, port) = split_host_port(host_port);
+                let directory_id = if *node_id == self_node_id {
+                    self_directory_id
+                } else {
+                    uuid::Uuid::nil()
+                };
+                voter(*node_id, directory_id, host, port)
+            })
+            .collect();
+        crabka_metadata::VoterSet::from_voters(voters)
+    } else {
+        // Standalone single self-voter. Self is never dialed, so its endpoint
+        // uses this node's own controller listen address directly.
+        crabka_metadata::VoterSet::from_voters([voter(
+            self_node_id,
+            self_directory_id,
+            self_controller_listen.ip().to_string(),
+            self_controller_listen.port(),
+        )])
+    }
+}
+
 /// Live-connection accounting backing the `max.connections` (global) and
 /// `max.connections.per.ip` caps. Cloning shares the same counters
 /// (`Arc`-wrapped internally), so every listener accept loop and every
@@ -3697,6 +3752,65 @@ mod tests {
     use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    #[test]
+    fn static_voter_set_keeps_peer_hostnames_for_per_dial_resolution() {
+        // Peer endpoint hosts MUST be the configured DNS names, NOT resolved to
+        // IPs: the inter-broker dialer re-resolves the host on every connect, so
+        // a peer that restarts on a new pod IP (stable DNS name, fresh A record)
+        // is reached again. Regression — pre-resolving froze the peer's
+        // boot-time IP, so after a `StatefulSet` pod restart every peer dialed
+        // the dead old IP forever, the rejoining voter never received
+        // `BeginQuorumEpoch`, never learned the leader, and never opened :9092.
+        let quorum = vec![
+            (
+                0u64,
+                "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
+            ),
+            (
+                1u64,
+                "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
+            ),
+        ];
+        let self_dir = uuid::Uuid::from_u128(7);
+        let set =
+            static_controller_voter_set(&quorum, 0, self_dir, "0.0.0.0:9093".parse().unwrap());
+
+        let v0 = set.get(0).expect("voter 0 present");
+        let ep0 = v0
+            .endpoints
+            .iter()
+            .find(|e| e.name == "CONTROLLER")
+            .expect("controller endpoint");
+        assert!(ep0.host == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local");
+        assert!(ep0.port == 9093);
+        // Self keeps its real directory id; peers get the nil placeholder.
+        assert!(v0.directory_id == self_dir);
+
+        let v1 = set.get(1).expect("voter 1 present");
+        let ep1 = v1
+            .endpoints
+            .iter()
+            .find(|e| e.name == "CONTROLLER")
+            .expect("controller endpoint");
+        assert!(ep1.host == "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local");
+        assert!(v1.directory_id == uuid::Uuid::nil());
+    }
+
+    #[test]
+    fn static_voter_set_single_self_voter_uses_listen_addr() {
+        // Standalone single-voter: the lone self endpoint uses this node's own
+        // controller listen address.
+        let quorum = vec![(3u64, "127.0.0.1:9093".to_string())];
+        let self_dir = uuid::Uuid::from_u128(3);
+        let set =
+            static_controller_voter_set(&quorum, 3, self_dir, "192.168.1.5:9099".parse().unwrap());
+        assert!(set.len() == 1);
+        let v = set.get(3).expect("self voter present");
+        let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
+        assert!(ep.host == "192.168.1.5");
+        assert!(ep.port == 9099);
+    }
 
     #[test]
     fn connection_guard_increments_and_decrements_global_and_per_ip() {

@@ -227,7 +227,7 @@ impl ControllerHandle {
                 current_leader: Some(leader),
             }) => {
                 if let Some(addr) = self.voter_addr(leader) {
-                    self.forward_submit_to(leader, addr, &records).await
+                    self.forward_submit_to(leader, &addr, &records).await
                 } else {
                     Err(RaftError::NotLeader {
                         current_leader: Some(leader),
@@ -295,16 +295,10 @@ impl ControllerHandle {
         Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
-    /// Resolve a voter's controller listener address from the static voter set's
-    /// CONTROLLER endpoint.
-    fn voter_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
-        let voter = self.voters.get(node_id)?;
-        let endpoint = voter
-            .endpoints
-            .iter()
-            .find(|e| e.name == "CONTROLLER")
-            .or_else(|| voter.endpoints.first())?;
-        format!("{}:{}", endpoint.host, endpoint.port).parse().ok()
+    /// Resolve a voter's controller listener `<host>:<port>` from the static
+    /// voter set's CONTROLLER endpoint. See [`controller_endpoint_addr`].
+    fn voter_addr(&self, node_id: NodeId) -> Option<String> {
+        controller_endpoint_addr(&self.voters, node_id)
     }
 
     /// Open a one-shot authenticated connection to the leader's controller
@@ -313,7 +307,7 @@ impl ControllerHandle {
     async fn forward_submit_to(
         &self,
         leader: NodeId,
-        addr: SocketAddr,
+        addr: &str,
         records: &[crabka_metadata::MetadataRecord],
     ) -> Result<(), RaftError> {
         let body_bytes = <serde_wincode::SerdeCompat<Vec<crabka_metadata::MetadataRecord>> as wincode::Serialize>::serialize(
@@ -332,7 +326,7 @@ impl ControllerHandle {
         };
         let conn = self
             .dialer
-            .dial(leader, &addr.to_string(), opts)
+            .dial(leader, addr, opts)
             .await
             .map_err(RaftError::Network)?;
 
@@ -426,6 +420,26 @@ impl ControllerHandle {
             let _ = h.await;
         }
     }
+}
+
+/// Resolve a voter's CONTROLLER-listener `<host>:<port>` from the voter set,
+/// preferring the endpoint named `CONTROLLER` and falling back to the first.
+///
+/// The host is returned VERBATIM (a DNS name), never pre-resolved to a
+/// `SocketAddr`. The dialer re-resolves it per connect (`TcpStream::connect`),
+/// so a peer that restarts on a new pod IP stays reachable. Parsing to a
+/// `SocketAddr` here would (a) freeze a restarted peer's boot-time IP and
+/// (b) fail outright on a non-literal hostname — which silently disabled
+/// leader-forwarding of `submit_change` (e.g. broker self-registration), since
+/// `parse()` returned `None` and the forward was skipped.
+fn controller_endpoint_addr(voters: &crabka_metadata::VoterSet, node_id: NodeId) -> Option<String> {
+    let voter = voters.get(node_id)?;
+    let endpoint = voter
+        .endpoints
+        .iter()
+        .find(|e| e.name == "CONTROLLER")
+        .or_else(|| voter.endpoints.first())?;
+    Some(format!("{}:{}", endpoint.host, endpoint.port))
 }
 
 #[async_trait::async_trait]
@@ -663,6 +677,30 @@ mod bootstrap_mode_tests {
     use super::*;
     use assert2::assert;
     use tempfile::TempDir;
+
+    #[test]
+    fn controller_endpoint_addr_keeps_dns_hostname_not_parsed_socketaddr() {
+        // Regression: a voter endpoint host is a per-pod DNS FQDN, NOT a
+        // pre-resolved IP. The resolver must return "<host>:<port>" verbatim so
+        // the dialer re-resolves it per connect. Parsing to a `SocketAddr`
+        // returns None for a hostname, which silently disabled leader-forwarding
+        // of `submit_change` — broker self-registration then failed with "not
+        // leader" and RF=3 topics could not be placed.
+        let host = "demo-broker-2-0.demo-broker-headless.default.svc.cluster.local";
+        let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
+            id: 2,
+            directory_id: Uuid::nil(),
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".to_string(),
+                host: host.to_string(),
+                port: 9093,
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }]);
+        assert!(controller_endpoint_addr(&voters, 2) == Some(format!("{host}:9093")));
+        // Unknown voter id resolves to None (no panic, no empty address).
+        assert!(controller_endpoint_addr(&voters, 99).is_none());
+    }
 
     #[tokio::test]
     async fn bootstrap_on_non_empty_log_errors() {

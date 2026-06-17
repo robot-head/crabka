@@ -6,7 +6,6 @@
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
 //! applying records exactly as the controller state machine would.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,8 +21,10 @@ use crabka_raft::{NodeId, OutboundDialer};
 /// Static configuration for the observer.
 #[derive(Clone)]
 pub struct ObserverConfig {
-    /// Controller-listener voter map (id, addr) from `controller_quorum_voters`.
-    pub voters: Vec<(NodeId, SocketAddr)>,
+    /// Controller-listener voter map `(id, "<host>:<port>")` from
+    /// `controller_quorum_voters`. The host is carried verbatim; the dialer
+    /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
+    pub voters: Vec<(NodeId, String)>,
     /// Outbound dialer (same TLS/SASL path as the raft transport).
     pub dialer: Arc<dyn OutboundDialer>,
     /// `client_id` for the dial handshake.
@@ -95,7 +96,7 @@ impl MetadataObserver {
 /// caller fails over).
 async fn fetch_once(
     config: &ObserverConfig,
-    addr: SocketAddr,
+    addr: &str,
     target: NodeId,
     fetch_offset: u64,
     image_tx: &watch::Sender<Arc<MetadataImage>>,
@@ -111,7 +112,7 @@ async fn fetch_once(
         client_id: config.client_id.clone(),
         ..crabka_client_core::ConnectionOptions::default()
     };
-    let conn = match config.dialer.dial(target, &addr.to_string(), opts).await {
+    let conn = match config.dialer.dial(target, addr, opts).await {
         Ok(c) => c,
         Err(e) => {
             debug!(%addr, error = %e, "observer dial failed");
@@ -211,10 +212,10 @@ async fn run_loop(
             tokio::time::sleep(config.poll_interval).await;
             continue;
         }
-        let (target, addr) = config.voters[target_idx % config.voters.len()];
+        let (target, addr) = config.voters[target_idx % config.voters.len()].clone();
         let result = tokio::select! {
             () = shutdown.cancelled() => return,
-            r = fetch_once(&config, addr, target, fetch_offset, &observer.image) => r,
+            r = fetch_once(&config, &addr, target, fetch_offset, &observer.image) => r,
         };
         if let Some(new_offset) = result {
             let _ = observer.leader.send_replace(Some(target));
@@ -268,7 +269,7 @@ mod tests {
         .expect("submit");
 
         let observer = MetadataObserver::start(ObserverConfig {
-            voters: vec![(1, ctrl_addr)],
+            voters: vec![(1, ctrl_addr.to_string())],
             dialer: Arc::new(crabka_raft::PlaintextDialer),
             client_id: "test-observer".into(),
             cluster_id: Uuid::nil(),

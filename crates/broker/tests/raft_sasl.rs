@@ -44,7 +44,7 @@ fn sasl_broker_config(
     cfg.advertised_listener = data_addr.to_string();
     cfg.node_id = u64::try_from(i + 1).unwrap();
     cfg.controller_listen_addr = ctrl_addr;
-    cfg.controller_quorum_voters = voters.to_vec();
+    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     cfg.bootstrap_mode = mode;
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
@@ -340,7 +340,7 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     c1.listen_addr = data_listen_addr();
     c1.advertised_listener = data_listen_addr().to_string();
     c1.controller_listen_addr = ctrl_addrs[0];
-    c1.controller_quorum_voters = voters.clone();
+    c1.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     c1.bootstrap_mode = BootstrapMode::Bootstrap;
     c1.controller_listener_protocol = ListenerProtocol::Plaintext;
 
@@ -350,7 +350,7 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     c2.listen_addr = data_listen_addr();
     c2.advertised_listener = data_listen_addr().to_string();
     c2.controller_listen_addr = ctrl_addrs[1];
-    c2.controller_quorum_voters = voters.clone();
+    c2.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     c2.bootstrap_mode = BootstrapMode::Bootstrap;
     c2.controller_listener_protocol = ListenerProtocol::Plaintext;
 

@@ -190,7 +190,9 @@ impl MetadataSource for ObserverSource {
 /// voter list. Mirrors the `API_KEY_SUBMIT_CHANGE` request the controller
 /// already serves.
 pub struct QuorumForwarder {
-    pub(crate) voters: Vec<(NodeId, SocketAddr)>,
+    /// Voter map `(id, "<host>:<port>")` — host carried verbatim; the dialer
+    /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
+    pub(crate) voters: Vec<(NodeId, String)>,
     pub(crate) dialer: Arc<dyn OutboundDialer>,
     pub(crate) client_id: String,
     pub(crate) leader: watch::Receiver<Option<NodeId>>,
@@ -200,7 +202,7 @@ impl QuorumForwarder {
     async fn try_submit(
         &self,
         target: NodeId,
-        addr: SocketAddr,
+        addr: &str,
         body: &[u8],
     ) -> Result<crabka_raft::CrabkaSubmitChangeResponse, RaftError> {
         let opts = crabka_client_core::ConnectionOptions {
@@ -209,7 +211,7 @@ impl QuorumForwarder {
         };
         let conn = self
             .dialer
-            .dial(target, &addr.to_string(), opts)
+            .dial(target, addr, opts)
             .await
             .map_err(RaftError::Network)?;
         let resp_body = conn
@@ -242,15 +244,15 @@ impl MetadataWriter for QuorumForwarder {
         req.encode_v0(&mut body).map_err(RaftError::Protocol)?;
 
         let hint = *self.leader.borrow();
-        let mut order: Vec<(NodeId, SocketAddr)> = Vec::new();
+        let mut order: Vec<(NodeId, String)> = Vec::new();
         if let Some(l) = hint
             && let Some(t) = self.voters.iter().find(|(id, _)| *id == l)
         {
-            order.push(*t);
+            order.push(t.clone());
         }
         for v in &self.voters {
             if Some(v.0) != hint {
-                order.push(*v);
+                order.push(v.clone());
             }
         }
 
@@ -258,7 +260,7 @@ impl MetadataWriter for QuorumForwarder {
             current_leader: hint,
         };
         for (target, addr) in order {
-            match self.try_submit(target, addr, &body).await {
+            match self.try_submit(target, &addr, &body).await {
                 Ok(resp) if resp.error_code == 0 => return Ok(()),
                 // error_code 2 => leader rejected at apply-time. Match the
                 // controller's own forward path (`forward_submit_to`), which

@@ -139,10 +139,7 @@ async fn start_host_broker_on(client_port: u16, controller_port: u16) -> (Broker
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: format!("0.0.0.0:{controller_port}").parse().expect("addr"),
-        controller_quorum_voters: vec![(
-            1,
-            format!("127.0.0.1:{controller_port}").parse().unwrap(),
-        )],
+        controller_quorum_voters: vec![(1, format!("127.0.0.1:{controller_port}"))],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -492,7 +489,7 @@ fn crabka_mixed_config(
     cfg.controller_listen_addr = own_controller_addr;
     cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.to_vec();
+    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);

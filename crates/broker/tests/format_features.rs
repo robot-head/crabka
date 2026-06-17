@@ -91,7 +91,7 @@ async fn standalone_format_feature_overrides_surface_in_api_versions() {
     cfg.listen_addr = client_addr;
     cfg.advertised_listener = client_addr.to_string();
     cfg.controller_listen_addr = controller_addr;
-    cfg.controller_quorum_voters = vec![(1, controller_addr)];
+    cfg.controller_quorum_voters = vec![(1, controller_addr.to_string())];
     cfg.bootstrap_mode = crabka_broker::BootstrapMode::Bootstrap;
 
     let data_listener = client_listeners.into_iter().next().unwrap();
