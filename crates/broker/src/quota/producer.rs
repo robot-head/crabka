@@ -101,4 +101,14 @@ mod tests {
         assert!(matching > Duration::ZERO);
         assert!(other_client == Duration::ZERO);
     }
+
+    #[test]
+    fn producer_quota_delay_reflects_exact_overage_at_configured_rate() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 1_000.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_producer_quota(&img, &buckets, "alice", "app", "default", 1_250);
+
+        assert!(delay == Duration::from_millis(250));
+    }
 }

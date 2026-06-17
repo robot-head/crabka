@@ -14,7 +14,7 @@
 //! (`unclean.leader.election.enable`) read by the controller's automatic
 //! failover path on ISR-empty. One is the KIP-966 offset-aware recovery
 //! strategy (`unclean.recovery.strategy`) which supersedes it.
-//! One is Crabka's QoS routing key (`qos.tier`), used by producer quota
+//! One is Crabka's `QoS` routing key (`qos.tier`), used by producer quota
 //! enforcement to partition runtime buckets by topic tier.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
@@ -83,7 +83,7 @@ pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
 /// KIP-534: how long tombstones and transaction markers are retained after
 /// they first become compaction-eligible (the delete-horizon grace window).
 pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
-/// Crabka extension: per-topic QoS tier used to partition producer quota
+/// Crabka extension: per-topic `QoS` tier used to partition producer quota
 /// buckets. Unset topics resolve to [`DEFAULT_QOS_TIER`].
 pub(crate) const QOS_TIER: &str = "qos.tier";
 pub(crate) const DEFAULT_QOS_TIER: &str = "default";
@@ -213,7 +213,7 @@ pub(crate) fn is_recognized(key: &str) -> bool {
     )
 }
 
-/// Resolve a topic's QoS tier for producer quota bucket partitioning.
+/// Resolve a topic's `QoS` tier for producer quota bucket partitioning.
 /// Missing or corrupt values fall back to `default`, matching the
 /// permissive runtime behavior of other Produce-side topic config reads.
 #[must_use]
@@ -348,6 +348,7 @@ pub struct TopicConfigDoc {
 
 /// The full whitelist documented on the topic-configs reference page.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
     vec![
         TopicConfigDoc {
