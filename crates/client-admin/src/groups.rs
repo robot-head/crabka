@@ -35,11 +35,8 @@ struct Entry {
 impl AdminClient {
     /// Return the group-id of every consumer group known to the broker.
     pub async fn list_groups(&mut self) -> Result<Vec<String>, AdminError> {
-        let req = ListGroupsRequest {
-            states_filter: vec![],
-            types_filter: vec![],
-            ..Default::default()
-        };
+        // Default request lists every group (empty state/type filters).
+        let req = ListGroupsRequest::default();
         let resp = self.conn.send(req).await?;
         if resp.error_code != 0 {
             return Err(AdminError::Broker {
@@ -57,9 +54,8 @@ impl AdminClient {
     /// Requests all topics/partitions (`topics: None`). Entries with a
     /// committed offset < 0 (i.e. no committed offset) are skipped.
     ///
-    /// At `OffsetFetch` v10 the response carries `topic_id` instead of `name`.
-    /// We resolve ids → names via a `Metadata` round-trip when any topic name
-    /// in the response is empty.
+    /// At `OffsetFetch` v10 the response carries `topic_id` instead of `name`, so
+    /// the topic ids are resolved to names via a `Metadata` round-trip.
     pub async fn list_consumer_group_offsets(
         &mut self,
         group: &str,
@@ -72,16 +68,12 @@ impl AdminClient {
                 topics: None,
                 ..Default::default()
             }],
-            require_stable: false,
             ..Default::default()
         };
         let resp = self.conn.send(req).await?;
 
-        // Collect raw results and any topic_ids that need name resolution.
-        // At OffsetFetch v10 topic names are omitted; at v8/v9 they are present.
+        // Collect committed offsets, keeping each topic's id for name resolution.
         let mut raw: Vec<Entry> = Vec::new();
-        let mut needs_resolve = false;
-
         for g in resp.groups {
             if g.error_code != 0 {
                 return Err(AdminError::Broker {
@@ -92,9 +84,6 @@ impl AdminClient {
                 });
             }
             for t in g.topics {
-                if t.name.is_empty() && t.topic_id != WireUuid::ZERO {
-                    needs_resolve = true;
-                }
                 for p in t.partitions {
                     if p.committed_offset >= 0 {
                         raw.push(Entry {
@@ -108,18 +97,12 @@ impl AdminClient {
             }
         }
 
-        // If any topic came back name-less (OffsetFetch v10), fetch a Metadata
-        // response and build an id→name map for resolution.
-        let id_to_name: HashMap<WireUuid, String> = if needs_resolve {
-            let meta = self
-                .conn
-                .send(MetadataRequest {
-                    // `topics: None` fetches all topics.
-                    topics: None,
-                    allow_auto_topic_creation: false,
-                    ..Default::default()
-                })
-                .await?;
+        // Build an id→name map from a `Metadata` round-trip (default request =
+        // all topics). At OffsetFetch v10 the response omits names, so this is
+        // how empty-named entries below recover their topic; at v8/v9 names are
+        // already present and the per-entry resolution simply ignores this map.
+        let id_to_name: HashMap<WireUuid, String> = {
+            let meta = self.conn.send(MetadataRequest::default()).await?;
             meta.topics
                 .into_iter()
                 .filter_map(|t| {
@@ -130,8 +113,6 @@ impl AdminClient {
                     }
                 })
                 .collect()
-        } else {
-            HashMap::new()
         };
 
         let mut out = BTreeMap::new();
