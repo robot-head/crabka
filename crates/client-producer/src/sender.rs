@@ -652,6 +652,13 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
     }
 }
 
+/// The instant a transport-failed batch becomes eligible to resend: `now` plus
+/// the configured `retry_backoff`. Pulled out so the offset direction (the
+/// deadline must be in the *future*) is unit-testable.
+fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
+    now + retry_backoff
+}
+
 /// Send a single batch as its own single-partition `ProduceRequest`, resolving
 /// its transport/broker result to a [`BatchVerdict`]. The batch is returned
 /// alongside the verdict (the caller still owns its records). On a connection
@@ -692,7 +699,7 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
                     // leader isn't hammered every linger tick, and force a
                     // metadata refresh so the resend re-resolves to whatever
                     // leader the cluster (re-)elected.
-                    pb.backoff_until = Some(Instant::now() + cfg.retry_backoff);
+                    pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
                     return BatchSendResult {
                         pb,
                         verdict: BatchVerdict::Retry,
@@ -1092,6 +1099,17 @@ mod tests {
         assert!(collect_after(backoff) == (1, 0));
         // After the backoff instant: eligible and drained out to send.
         assert!(collect_after(Duration::from_millis(160)) == (1, 0));
+    }
+
+    #[test]
+    fn backoff_deadline_is_in_the_future() {
+        // The resend deadline must be `now + retry_backoff` — strictly after
+        // `now`. A `+` -> `-` (deadline in the past) would disable the backoff
+        // and re-admit the connection-refused hot loop.
+        let now = Instant::now();
+        let d = Duration::from_millis(100);
+        assert!(backoff_deadline(now, d) == now + d);
+        assert!(backoff_deadline(now, d) > now);
     }
 }
 
