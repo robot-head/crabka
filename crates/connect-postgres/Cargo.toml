@@ -1,0 +1,30 @@
+[package]
+name = "crabka-connect-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-connect = { path = "../connect", version = "0.3.7" }
+crabka-schema-serde = { path = "../schema-serde", version = "0.3.7", features = ["protobuf"] }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures-util = { workspace = true }
+postgres-types = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tokio-postgres = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
