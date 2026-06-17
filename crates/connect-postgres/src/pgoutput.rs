@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::{
-    ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, TableSchema,
+    ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue, TableSchema,
 };
 use crate::{PgLsn, PostgresConnectError};
 
@@ -28,6 +28,335 @@ pub struct RowEvent {
     pub commit_timestamp_ms: Option<i64>,
     pub kind: RowEventKind,
     pub values: Vec<ColumnValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedMessage {
+    Begin { final_lsn: PgLsn, xid: i64 },
+    Commit { commit_lsn: PgLsn },
+    Relation(RelationEvent),
+    Row(RowEvent),
+    Keepalive,
+}
+
+pub fn decode_pgoutput_message(
+    bytes: &[u8],
+    lsn: PgLsn,
+    txid: Option<i64>,
+) -> Result<DecodedMessage, PostgresConnectError> {
+    let mut reader = PgOutputReader::new(bytes);
+    let tag = reader.read_u8("message tag")?;
+
+    let message = match tag {
+        b'B' => {
+            let final_lsn = PgLsn(reader.read_u64("begin final_lsn")?);
+            let _commit_time = reader.read_i64("begin commit_time")?;
+            let xid = i64::from(reader.read_i32("begin xid")?);
+            DecodedMessage::Begin { final_lsn, xid }
+        }
+        b'C' => {
+            let _flags = reader.read_u8("commit flags")?;
+            let commit_lsn = PgLsn(reader.read_u64("commit commit_lsn")?);
+            let _end_lsn = reader.read_u64("commit end_lsn")?;
+            let _commit_time = reader.read_i64("commit commit_time")?;
+            DecodedMessage::Commit { commit_lsn }
+        }
+        b'R' => DecodedMessage::Relation(decode_relation(&mut reader)?),
+        b'I' => DecodedMessage::Row(decode_insert(&mut reader, lsn, txid)?),
+        b'U' => DecodedMessage::Row(decode_update(&mut reader, lsn, txid)?),
+        b'D' => DecodedMessage::Row(decode_delete(&mut reader, lsn, txid)?),
+        tag => {
+            return Err(PostgresConnectError::Backend(format!(
+                "unsupported pgoutput message tag {:?}",
+                char::from(tag)
+            )));
+        }
+    };
+
+    reader.finish()?;
+    Ok(message)
+}
+
+fn decode_relation(reader: &mut PgOutputReader<'_>) -> Result<RelationEvent, PostgresConnectError> {
+    let relation_id = reader.read_u32("relation id")?;
+    let schema = reader.read_cstr("relation namespace")?;
+    let table = reader.read_cstr("relation name")?;
+    let _replica_identity = reader.read_u8("relation replica identity")?;
+    let column_count = reader.read_count("relation column count")?;
+    let mut columns = Vec::with_capacity(column_count);
+
+    for index in 0..column_count {
+        let flags = reader.read_u8("relation column flags")?;
+        let name = reader.read_cstr("relation column name")?;
+        let type_oid = reader.read_i32("relation column type oid")?;
+        let _atttypmod = reader.read_i32("relation column atttypmod")?;
+        columns.push(ColumnSchema {
+            name,
+            type_name: type_name(type_oid).to_owned(),
+            key: flags & 1 == 1,
+        });
+
+        if columns[index].name.is_empty() {
+            return Err(PostgresConnectError::Backend(format!(
+                "invalid pgoutput relation column {index}: empty name"
+            )));
+        }
+    }
+
+    Ok(RelationEvent {
+        relation_id,
+        schema,
+        table,
+        columns,
+    })
+}
+
+fn decode_insert(
+    reader: &mut PgOutputReader<'_>,
+    lsn: PgLsn,
+    txid: Option<i64>,
+) -> Result<RowEvent, PostgresConnectError> {
+    let relation_id = reader.read_u32("insert relation id")?;
+    reader.expect_u8(b'N', "insert tuple tag N")?;
+    let values = decode_tuple(reader)?;
+
+    Ok(RowEvent {
+        relation_id,
+        lsn,
+        txid,
+        commit_timestamp_ms: None,
+        kind: RowEventKind::Insert,
+        values,
+    })
+}
+
+fn decode_update(
+    reader: &mut PgOutputReader<'_>,
+    lsn: PgLsn,
+    txid: Option<i64>,
+) -> Result<RowEvent, PostgresConnectError> {
+    let relation_id = reader.read_u32("update relation id")?;
+    let tag = reader.read_u8("update tuple tag")?;
+    let (old, new_tag) = match tag {
+        b'K' | b'O' => (
+            decode_tuple(reader)?,
+            reader.read_u8("update new tuple tag")?,
+        ),
+        b'N' => (Vec::new(), b'N'),
+        tag => {
+            return Err(PostgresConnectError::Backend(format!(
+                "invalid pgoutput update tuple tag {:?}",
+                char::from(tag)
+            )));
+        }
+    };
+
+    if new_tag != b'N' {
+        return Err(PostgresConnectError::Backend(format!(
+            "invalid pgoutput update new tuple tag {:?}",
+            char::from(new_tag)
+        )));
+    }
+
+    let values = decode_tuple(reader)?;
+    Ok(RowEvent {
+        relation_id,
+        lsn,
+        txid,
+        commit_timestamp_ms: None,
+        kind: RowEventKind::Update { old },
+        values,
+    })
+}
+
+fn decode_delete(
+    reader: &mut PgOutputReader<'_>,
+    lsn: PgLsn,
+    txid: Option<i64>,
+) -> Result<RowEvent, PostgresConnectError> {
+    let relation_id = reader.read_u32("delete relation id")?;
+    let tag = reader.read_u8("delete tuple tag")?;
+    if !matches!(tag, b'K' | b'O') {
+        return Err(PostgresConnectError::Backend(format!(
+            "invalid pgoutput delete tuple tag {:?}",
+            char::from(tag)
+        )));
+    }
+    let values = decode_tuple(reader)?;
+
+    Ok(RowEvent {
+        relation_id,
+        lsn,
+        txid,
+        commit_timestamp_ms: None,
+        kind: RowEventKind::Delete,
+        values,
+    })
+}
+
+fn decode_tuple(reader: &mut PgOutputReader<'_>) -> Result<Vec<ColumnValue>, PostgresConnectError> {
+    let value_count = reader.read_count("tuple value count")?;
+    let mut values = Vec::with_capacity(value_count);
+
+    for index in 0..value_count {
+        let value_tag = reader.read_u8("tuple value tag")?;
+        let value = match value_tag {
+            b'n' | b'u' => ScalarValue::Null,
+            b't' => {
+                let bytes = reader.read_len_bytes("text tuple value")?;
+                let value = std::str::from_utf8(bytes).map_err(|error| {
+                    PostgresConnectError::Backend(format!(
+                        "invalid utf8 in pgoutput text tuple value: {error}"
+                    ))
+                })?;
+                ScalarValue::Text(value.to_owned())
+            }
+            b'b' => ScalarValue::Bytes(reader.read_len_bytes("binary tuple value")?.to_vec()),
+            tag => {
+                return Err(PostgresConnectError::Backend(format!(
+                    "unsupported pgoutput tuple value tag {:?}",
+                    char::from(tag)
+                )));
+            }
+        };
+
+        values.push(ColumnValue {
+            name: format!("col{index}"),
+            value,
+        });
+    }
+
+    Ok(values)
+}
+
+fn type_name(type_oid: i32) -> &'static str {
+    match type_oid {
+        16 => "bool",
+        20 => "int8",
+        21 => "int2",
+        23 => "int4",
+        25 => "text",
+        700 => "float4",
+        701 => "float8",
+        1043 => "varchar",
+        1700 => "numeric",
+        _ => "unknown",
+    }
+}
+
+struct PgOutputReader<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> PgOutputReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, position: 0 }
+    }
+
+    fn finish(&self) -> Result<(), PostgresConnectError> {
+        if self.position == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(PostgresConnectError::Backend(format!(
+                "invalid pgoutput message: {} trailing bytes",
+                self.bytes.len() - self.position
+            )))
+        }
+    }
+
+    fn read_u8(&mut self, field: &str) -> Result<u8, PostgresConnectError> {
+        let bytes = self.read_exact(1, field)?;
+        Ok(bytes[0])
+    }
+
+    fn expect_u8(&mut self, expected: u8, field: &str) -> Result<(), PostgresConnectError> {
+        let actual = self.read_u8(field)?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(PostgresConnectError::Backend(format!(
+                "invalid pgoutput {field}: expected {:?}, got {:?}",
+                char::from(expected),
+                char::from(actual)
+            )))
+        }
+    }
+
+    fn read_i16(&mut self, field: &str) -> Result<i16, PostgresConnectError> {
+        let bytes = self.read_exact(2, field)?;
+        Ok(i16::from_be_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_count(&mut self, field: &str) -> Result<usize, PostgresConnectError> {
+        let count = self.read_i16(field)?;
+        usize::try_from(count).map_err(|_| {
+            PostgresConnectError::Backend(format!("invalid pgoutput {field}: negative count"))
+        })
+    }
+
+    fn read_i32(&mut self, field: &str) -> Result<i32, PostgresConnectError> {
+        let bytes = self.read_exact(4, field)?;
+        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u32(&mut self, field: &str) -> Result<u32, PostgresConnectError> {
+        let bytes = self.read_exact(4, field)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_i64(&mut self, field: &str) -> Result<i64, PostgresConnectError> {
+        let bytes = self.read_exact(8, field)?;
+        Ok(i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn read_u64(&mut self, field: &str) -> Result<u64, PostgresConnectError> {
+        let bytes = self.read_exact(8, field)?;
+        Ok(u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn read_len_bytes(&mut self, field: &str) -> Result<&'a [u8], PostgresConnectError> {
+        let length = self.read_i32(field)?;
+        let length = usize::try_from(length).map_err(|_| {
+            PostgresConnectError::Backend(format!("invalid pgoutput {field}: negative length"))
+        })?;
+        self.read_exact(length, field)
+    }
+
+    fn read_cstr(&mut self, field: &str) -> Result<String, PostgresConnectError> {
+        let remaining = &self.bytes[self.position..];
+        let Some(length) = remaining.iter().position(|byte| *byte == 0) else {
+            return Err(PostgresConnectError::Backend(format!(
+                "truncated pgoutput {field}: missing null terminator"
+            )));
+        };
+        let bytes = &remaining[..length];
+        self.position += length + 1;
+        let value = std::str::from_utf8(bytes).map_err(|error| {
+            PostgresConnectError::Backend(format!("invalid utf8 in pgoutput {field}: {error}"))
+        })?;
+        Ok(value.to_owned())
+    }
+
+    fn read_exact(&mut self, length: usize, field: &str) -> Result<&'a [u8], PostgresConnectError> {
+        let end = self.position.checked_add(length).ok_or_else(|| {
+            PostgresConnectError::Backend(format!("invalid pgoutput {field}: length overflow"))
+        })?;
+        if end > self.bytes.len() {
+            return Err(PostgresConnectError::Backend(format!(
+                "truncated pgoutput {field}: needed {length} bytes, have {}",
+                self.bytes.len().saturating_sub(self.position)
+            )));
+        }
+
+        let bytes = &self.bytes[self.position..end];
+        self.position = end;
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -362,5 +691,192 @@ mod tests {
             }
             error => panic!("expected backend error, got {error:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod decode_tests {
+    use assert2::check;
+
+    use super::{DecodedMessage, RowEventKind, decode_pgoutput_message};
+    use crate::model::ScalarValue;
+    use crate::{PgLsn, PostgresConnectError};
+
+    fn put_i16(bytes: &mut Vec<u8>, value: i16) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_i32(bytes: &mut Vec<u8>, value: i32) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_i64(bytes: &mut Vec<u8>, value: i64) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_cstr(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.push(0);
+    }
+
+    fn put_text_value(bytes: &mut Vec<u8>, value: &str) {
+        bytes.push(b't');
+        let length = i32::try_from(value.len()).expect("test value length should fit i32");
+        put_i32(bytes, length);
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    #[test]
+    fn decodes_relation_message() {
+        let mut bytes = vec![b'R'];
+        put_i32(&mut bytes, 7);
+        put_cstr(&mut bytes, "public");
+        put_cstr(&mut bytes, "orders");
+        bytes.push(b'd');
+        put_i16(&mut bytes, 2);
+        bytes.push(1);
+        put_cstr(&mut bytes, "id");
+        put_i32(&mut bytes, 20);
+        put_i32(&mut bytes, -1);
+        bytes.push(0);
+        put_cstr(&mut bytes, "status");
+        put_i32(&mut bytes, 25);
+        put_i32(&mut bytes, -1);
+
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(99))
+            .expect("relation message should decode");
+
+        let DecodedMessage::Relation(relation) = decoded else {
+            panic!("expected relation message");
+        };
+        check!(relation.relation_id == 7);
+        check!(relation.schema == "public");
+        check!(relation.table == "orders");
+        check!(relation.columns.len() == 2);
+        check!(relation.columns[0].name == "id");
+        check!(relation.columns[0].type_name == "int8");
+        check!(relation.columns[0].key);
+        check!(relation.columns[1].name == "status");
+        check!(relation.columns[1].type_name == "text");
+        check!(!relation.columns[1].key);
+    }
+
+    #[test]
+    fn decodes_insert_message_to_row_event() {
+        let mut bytes = vec![b'I'];
+        put_i32(&mut bytes, 7);
+        bytes.push(b'N');
+        put_i16(&mut bytes, 2);
+        put_text_value(&mut bytes, "42");
+        put_text_value(&mut bytes, "paid");
+
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(99))
+            .expect("insert message should decode");
+
+        let DecodedMessage::Row(row) = decoded else {
+            panic!("expected row message");
+        };
+        check!(row.relation_id == 7);
+        check!(row.lsn == PgLsn(0x2a));
+        check!(row.txid == Some(99));
+        check!(row.commit_timestamp_ms == None);
+        check!(row.kind == RowEventKind::Insert);
+        check!(row.values.len() == 2);
+        check!(row.values[0].name == "col0");
+        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
+    }
+
+    #[test]
+    fn decodes_delete_message_to_row_event() {
+        let mut bytes = vec![b'D'];
+        put_i32(&mut bytes, 7);
+        bytes.push(b'K');
+        put_i16(&mut bytes, 1);
+        put_text_value(&mut bytes, "42");
+
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2b), None)
+            .expect("delete message should decode");
+
+        let DecodedMessage::Row(row) = decoded else {
+            panic!("expected row message");
+        };
+        check!(row.relation_id == 7);
+        check!(row.lsn == PgLsn(0x2b));
+        check!(row.txid == None);
+        check!(row.kind == RowEventKind::Delete);
+        check!(row.values.len() == 1);
+        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
+    }
+
+    #[test]
+    fn decodes_update_message_to_row_event() {
+        let mut bytes = vec![b'U'];
+        put_i32(&mut bytes, 7);
+        bytes.push(b'K');
+        put_i16(&mut bytes, 1);
+        put_text_value(&mut bytes, "41");
+        bytes.push(b'N');
+        put_i16(&mut bytes, 2);
+        put_text_value(&mut bytes, "42");
+        put_text_value(&mut bytes, "paid");
+
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2c), Some(100))
+            .expect("update message should decode");
+
+        let DecodedMessage::Row(row) = decoded else {
+            panic!("expected row message");
+        };
+        check!(row.relation_id == 7);
+        let RowEventKind::Update { old } = row.kind else {
+            panic!("expected update event");
+        };
+        check!(old.len() == 1);
+        check!(old[0].value == ScalarValue::Text("41".to_owned()));
+        check!(row.values.len() == 2);
+        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
+    }
+
+    #[test]
+    fn malformed_message_returns_backend_error() {
+        let error = decode_pgoutput_message(&[b'R', 0, 0], PgLsn(0), None)
+            .expect_err("truncated message should fail");
+
+        match error {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("truncated"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_begin_and_commit_messages() {
+        let mut begin = vec![b'B'];
+        put_i64(&mut begin, 0x0102_0304);
+        put_i64(&mut begin, 1_700_000_000);
+        put_i32(&mut begin, 123);
+
+        let decoded = decode_pgoutput_message(&begin, PgLsn(0), None).expect("begin should decode");
+        check!(
+            decoded
+                == DecodedMessage::Begin {
+                    final_lsn: PgLsn(0x0102_0304),
+                    xid: 123,
+                }
+        );
+
+        let mut commit = vec![b'C', 0];
+        put_i64(&mut commit, 0x0102_0305);
+        put_i64(&mut commit, 0x0102_0306);
+        put_i64(&mut commit, 1_700_000_001);
+
+        let decoded =
+            decode_pgoutput_message(&commit, PgLsn(0), None).expect("commit should decode");
+        check!(
+            decoded
+                == DecodedMessage::Commit {
+                    commit_lsn: PgLsn(0x0102_0305),
+                }
+        );
     }
 }
