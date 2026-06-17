@@ -101,4 +101,16 @@ exclude_re = [
     # timeout from, so no unit test can kill a mutation of it. The function's
     # actual add-partition logic is covered by the broker txn integration suite.
     "add_partitions_to_txn\\.rs.*process_one_txn",
+    # connect-postgres live DB edge functions are tokio-postgres query wrappers.
+    # Their decision branches are factored into pure helpers in source.rs and
+    # unit-tested; the wrappers themselves need a running PostgreSQL catalog or
+    # replication slot to observe.
+    "connect-postgres/src/source\\.rs.*(PostgresWalSource::connect|PostgresWalSource::fill_pending_from_slot|validate_publication_tables|validate_publication_settings|ensure_slot|current_database)",
+    # The parsed LSN high half is shifted left by 32 bits and the low half is
+    # bounded to 32 bits, so OR and XOR produce identical values here.
+    "connect-postgres/src/offset\\.rs.*replace \\| with \\^ in <impl FromStr for PgLsn>::from_str",
+    # In PostgresWalSource::poll this mutation requeues a non-transactional row
+    # forever (`transaction.is_some() || row.commit_lsn.is_none()`), so
+    # cargo-mutants reports a timeout instead of an assertion gap.
+    "connect-postgres/src/source\\.rs.*replace && with \\|\\| in <impl Source<Bytes, Bytes> for PostgresWalSource>::poll",
 ]
