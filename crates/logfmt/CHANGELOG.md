@@ -12,15 +12,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
 
 
-- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
-
-## [0.3.6] — 2026-06-13
-
-## [0.3.5] — 2026-06-12
-
-
-### <!-- 7 -->⚙️ Miscellaneous Tasks
-
-
-- Update Cargo.lock dependencies
+- Add cargo-mutants incremental mutation testing ([#550](https://github.com/robot-head/crabka/pull/550))
 

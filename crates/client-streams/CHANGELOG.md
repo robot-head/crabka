@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Emit Cloud Logging-friendly structured JSON across services ([#508](https://github.com/robot-head/crabka/pull/508))
+
+- Columnar/dataframe support (polars, arrow-rs, columnar) ([#540](https://github.com/robot-head/crabka/pull/540))
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Data-formats guide + tested JSON→proto→arrow→polars→proto pipeline ([#544](https://github.com/robot-head/crabka/pull/544))
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- De-flake coordinator tests + run only unit tests on macOS/windows matrix ([#519](https://github.com/robot-head/crabka/pull/519))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
+
 ## [0.3.6] — 2026-06-13
 
 

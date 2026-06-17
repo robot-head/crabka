@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Emit Cloud Logging-friendly structured JSON across services ([#508](https://github.com/robot-head/crabka/pull/508))
+
+- Serve DescribeCluster on the controller listener (KIP-919 Phase 2) ([#554](https://github.com/robot-head/crabka/pull/554))
+
+- Interactive in-browser WASM consensus simulator ([#562](https://github.com/robot-head/crabka/pull/562))
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Clamp high-watermark monotonicity inside recompute_high_watermark ([#512](https://github.com/robot-head/crabka/pull/512))
+
+
+### <!-- 3 -->📚 Documentation
+
+
+- Diagrams, simulator-generated failure slideshow, and IA polish ([#556](https://github.com/robot-head/crabka/pull/556))
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- Stateright consensus model + deterministic-sync test infra (Phase 1) ([#511](https://github.com/robot-head/crabka/pull/511))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
+
 ## [0.3.6] — 2026-06-13
 
 ## [0.3.5] — 2026-06-12

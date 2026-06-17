@@ -23,5 +23,5 @@ quote = { workspace = true }
 syn = { workspace = true }
 
 [dev-dependencies]
-crabka-connect = { version = "0.3.6", path = "../connect", default-features = false }
+crabka-connect = { version = "0.3.7", path = "../connect", default-features = false }
 trybuild = { workspace = true }

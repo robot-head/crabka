@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.7] — 2026-06-17
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Emit Cloud Logging-friendly structured JSON across services ([#508](https://github.com/robot-head/crabka/pull/508))
+
+- Pipeline produce requests with one in-flight per partition ([#564](https://github.com/robot-head/crabka/pull/564))
+
+- Scaffold rules_rust client build + lean client_minimal facade ([#570](https://github.com/robot-head/crabka/pull/570))
+
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+
+- De-hardcode release versions + sign/attest published Helm charts ([#530](https://github.com/robot-head/crabka/pull/530))
+
 ## [0.3.6] — 2026-06-13
 
 ## [0.3.5] — 2026-06-12
