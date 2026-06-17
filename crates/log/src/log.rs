@@ -218,7 +218,14 @@ impl Log {
         for (i, base) in base_offsets.iter().enumerate() {
             if i + 1 < base_offsets.len() {
                 let mut seg = Segment::open(&dir, *base)?;
-                seg.seal();
+                // `Segment::open` is a no-scan load that leaves
+                // `last_offset = base - 1`. A sealed segment's true last offset
+                // is one below the next segment's base; set it so `read_raw`
+                // (which skips a segment whose `last_offset() < fetch_offset`)
+                // doesn't skip this recovered segment and serve a later base
+                // offset — which after a restart manufactures an offset gap that
+                // strands a follower fetching from a low offset.
+                seg.seal_at(base_offsets[i + 1] - 1);
                 segments.push(seg);
             } else {
                 active = Some(Segment::open_active(&dir, *base, config.validate_on_open)?);
@@ -2072,6 +2079,42 @@ mod tests {
         // the on-disk checkpoint file).
         let reopened = Log::open(dir.path(), LogConfig::default()).unwrap();
         assert!(reopened.epoch_checkpoint().entries().is_empty());
+    }
+
+    #[test]
+    fn read_raw_after_reopen_does_not_skip_first_sealed_segment() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let cfg = LogConfig {
+            segment_bytes: 1, // roll on every append → one segment per batch
+            ..LogConfig::default()
+        };
+        {
+            let mut log = Log::open(dir.path(), cfg.clone()).unwrap();
+            log.append(&mut sample_batch(1)).unwrap(); // offset 0 → sealed seg base 0
+            log.append(&mut sample_batch(1)).unwrap(); // offset 1 → sealed seg base 1
+            log.append(&mut sample_batch(1)).unwrap(); // offset 2 → active seg base 2
+            assert!(log.log_end_offset() == 3);
+            assert!(
+                log.segments.len() >= 2,
+                "test must create >= 2 sealed segments"
+            );
+        }
+        // Reopen simulates a broker restart: sealed segments are loaded via the
+        // no-scan Segment::open, which leaves last_offset = base - 1. Without
+        // fixing last_offset from the next segment's base, read_raw skips the
+        // first sealed segment (its stale last_offset < fetch_offset) and serves
+        // a later segment's base — the on-cluster phantom-follower gap that
+        // pinned the high-watermark and stalled acks=all.
+        let reopened = Log::open(dir.path(), cfg).unwrap();
+        let r = reopened
+            .read_raw(0, reopened.log_end_offset(), 1 << 20)
+            .unwrap();
+        assert!(
+            r.start_offset == 0,
+            "read from offset 0 after reopen must return the first batch (offset 0), got start_offset={}",
+            r.start_offset
+        );
     }
 
     #[test]
