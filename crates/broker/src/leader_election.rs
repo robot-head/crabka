@@ -161,13 +161,30 @@ pub(crate) async fn compute_failover_changes(
                     // non-zero rate of unclean failovers in their cluster.
                     metrics.record_unclean_leader_election();
                 }
+                // One source of truth for the bumped epoch: used by both the
+                // log line and the emitted record, so the failover tests that
+                // assert the incremented `leader_epoch` also pin the logged
+                // value (no un-killable log-only arithmetic).
+                let new_leader_epoch = pr.leader_epoch + 1;
+                tracing::info!(
+                    topic = %pr.topic,
+                    partition = pr.partition,
+                    dead,
+                    old_leader = pr.leader,
+                    new_leader = leader,
+                    old_isr = ?pr.isr,
+                    new_isr = ?isr,
+                    new_leader_epoch,
+                    unclean,
+                    "failover: re-electing partition leader (triggered by dead broker)"
+                );
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
                     topic: pr.topic.clone(),
                     partition: pr.partition,
                     leader,
                     replicas: pr.replicas.clone(),
                     isr,
-                    leader_epoch: pr.leader_epoch + 1,
+                    leader_epoch: new_leader_epoch,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),

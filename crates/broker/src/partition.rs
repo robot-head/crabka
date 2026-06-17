@@ -494,6 +494,20 @@ impl Partition {
         let leader_changed = prev_leader != new_leader || prev_epoch != new_epoch;
         let mut st = self.replica_state.lock().await;
         if leader_changed {
+            // Diagnostic: every broker hosting this partition logs the
+            // leader/epoch transition it observes in committed metadata. Logged
+            // on ALL replicas, so the full leadership sequence survives even
+            // when the controller-leader pod that drove the change is killed —
+            // used to trace failover leadership churn / flip-flop.
+            tracing::info!(
+                topic = %self.topic,
+                partition = self.partition_id,
+                prev_leader,
+                new_leader,
+                prev_epoch,
+                new_epoch,
+                "partition leadership changed (observed in committed metadata)"
+            );
             st.per_follower.clear();
         }
         st.current_leader_epoch = new_epoch;
