@@ -55,6 +55,7 @@ pub(crate) struct Binding {
     pub role: Role,
     pub kind: SchemaKind,
     pub schema: String,
+    pub message_type: Option<String>,
 }
 
 #[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
@@ -75,6 +76,11 @@ impl Binding {
     /// Intern this subject for pre-warm.
     pub(crate) fn register(&self, topic: &str) {
         let subject = self.subject(topic);
-        self.cache.intern(&subject, self.kind, &self.schema);
+        self.cache.intern(
+            &subject,
+            self.kind,
+            &self.schema,
+            self.message_type.as_deref(),
+        );
     }
 }

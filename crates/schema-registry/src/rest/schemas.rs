@@ -15,7 +15,7 @@ pub async fn get_by_id(
     Path(id): Path<i32>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
-    let (ty, schema, references) = st
+    let (ty, schema, references, message_type) = st
         .store
         .store
         .read()
@@ -24,6 +24,9 @@ pub async fn get_by_id(
     let mut body = serde_json::Map::new();
     if let Some(t) = ty.wire_name() {
         body.insert("schemaType".into(), t.into());
+    }
+    if let Some(t) = message_type {
+        body.insert("messageType".into(), t.into());
     }
     body.insert("schema".into(), schema.into());
     if !references.is_empty() {
@@ -70,7 +73,7 @@ pub async fn get_by_id_schema(
     State(st): State<AppState>,
     Path(id): Path<i32>,
 ) -> Result<Response, SrError> {
-    let (_, schema, _) = st
+    let (_, schema, _, _) = st
         .store
         .store
         .read()
@@ -109,15 +112,18 @@ pub async fn list_schemas(State(st): State<AppState>, Query(q): Query<DeletedQ>)
     let rows = st.store.store.read().all_schemas(q.deleted);
     let arr: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(subject, version, id, ty, schema, _references)| {
+        .map(|row| {
             let mut m = serde_json::Map::new();
-            m.insert("subject".into(), subject.into());
-            m.insert("version".into(), version.into());
-            m.insert("id".into(), id.into());
-            if let Some(t) = ty.wire_name() {
+            m.insert("subject".into(), row.subject.into());
+            m.insert("version".into(), row.version.into());
+            m.insert("id".into(), row.id.into());
+            if let Some(t) = row.ty.wire_name() {
                 m.insert("schemaType".into(), t.into());
             }
-            m.insert("schema".into(), schema.into());
+            if let Some(t) = row.message_type {
+                m.insert("messageType".into(), t.into());
+            }
+            m.insert("schema".into(), row.schema.into());
             serde_json::Value::Object(m)
         })
         .collect();

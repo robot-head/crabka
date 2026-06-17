@@ -8,6 +8,8 @@ pub struct SchemaPayload<'a> {
     pub schema: &'a str,
     #[serde(rename = "schemaType", skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<&'a str>,
+    #[serde(rename = "messageType", skip_serializing_if = "Option::is_none")]
+    pub message_type: Option<&'a str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub references: &'a [SchemaReference],
 }
@@ -36,6 +38,8 @@ pub struct SubjectVersionResponse {
     pub schema: String,
     #[serde(rename = "schemaType", default)]
     pub schema_type: Option<String>,
+    #[serde(rename = "messageType", default)]
+    pub message_type: Option<String>,
 }
 
 /// Response of `GET /schemas/ids/{id}`.
@@ -44,4 +48,6 @@ pub struct SchemaByIdResponse {
     pub schema: String,
     #[serde(rename = "schemaType", default)]
     pub schema_type: Option<String>,
+    #[serde(rename = "messageType", default)]
+    pub message_type: Option<String>,
 }

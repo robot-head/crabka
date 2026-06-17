@@ -40,3 +40,4 @@ assert2 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 serde_json = { workspace = true }
 hex = { workspace = true }
+wiremock = "0.6"

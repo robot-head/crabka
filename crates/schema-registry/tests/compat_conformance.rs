@@ -39,7 +39,7 @@ fn assert_matrix_matches_cp(
     for c in load_matrix(file) {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", c.level.clone());
-        snap.register("s", ty, &c.writer, &[])
+        snap.register("s", ty, &c.writer, &[], None)
             .expect("writer registers");
         let got = compat::check_against_version(&snap, "s", ty, &c.reader, &[], None)
             .expect("verdict")

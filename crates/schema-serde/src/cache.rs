@@ -39,6 +39,7 @@ struct Interned {
     subject: String,
     kind: SchemaKind,
     schema: String,
+    message_type: Option<String>,
 }
 
 #[derive(Default)]
@@ -47,6 +48,8 @@ struct Inner {
     subject_id: HashMap<String, u32>,
     /// id ⇒ writer schema text (deserialize path).
     id_schema: HashMap<u32, String>,
+    /// id ⇒ protobuf message descriptor full name (deserialize path).
+    id_message_type: HashMap<u32, String>,
     /// Local schemas to resolve on pre-warm.
     interned: Vec<Interned>,
     /// ids whose fetch is in flight (dedup background fetches).
@@ -106,7 +109,13 @@ impl SchemaCache {
     }
 
     /// Register a local `(subject, kind, schema)` for pre-warm. Idempotent.
-    pub fn intern(&self, subject: &str, kind: SchemaKind, schema: &str) {
+    pub fn intern(
+        &self,
+        subject: &str,
+        kind: SchemaKind,
+        schema: &str,
+        message_type: Option<&str>,
+    ) {
         let mut g = self.inner.lock().unwrap();
         if g.interned.iter().any(|i| i.subject == subject) {
             return;
@@ -115,6 +124,7 @@ impl SchemaCache {
             subject: subject.to_string(),
             kind,
             schema: schema.to_string(),
+            message_type: message_type.map(str::to_string),
         });
     }
 
@@ -125,16 +135,32 @@ impl SchemaCache {
         for i in pending {
             let id = match self.config.mode {
                 RegisterMode::AutoRegister => {
-                    self.client.register(&i.subject, i.kind, &i.schema).await?
+                    self.client
+                        .register(&i.subject, i.kind, &i.schema, i.message_type.as_deref())
+                        .await?
                 }
                 RegisterMode::LookupOnly => {
-                    self.client.lookup(&i.subject, i.kind, &i.schema).await?
+                    self.client
+                        .lookup(&i.subject, i.kind, &i.schema, i.message_type.as_deref())
+                        .await?
                 }
-                RegisterMode::UseLatest => self.client.latest_id(&i.subject).await?,
+                RegisterMode::UseLatest => {
+                    let latest = self.client.latest(&i.subject).await?;
+                    if let Some(message_type) = latest.message_type {
+                        let mut g = self.inner.lock().unwrap();
+                        g.id_message_type.insert(latest.id, message_type);
+                    }
+                    latest.id
+                }
             };
             let mut g = self.inner.lock().unwrap();
             g.subject_id.insert(i.subject.clone(), id);
             g.id_schema.insert(id, i.schema.clone());
+            if let Some(message_type) = i.message_type
+                && !g.id_message_type.contains_key(&id)
+            {
+                g.id_message_type.insert(id, message_type);
+            }
         }
         Ok(())
     }
@@ -161,7 +187,10 @@ impl SchemaCache {
                     let mut g = this.inner.lock().unwrap();
                     g.fetching.remove(&id);
                     if let Ok(schema) = fetched {
-                        g.id_schema.insert(id, schema);
+                        if let Some(message_type) = schema.message_type {
+                            g.id_message_type.insert(id, message_type);
+                        }
+                        g.id_schema.insert(id, schema.schema);
                     }
                 });
             }
@@ -176,6 +205,21 @@ impl SchemaCache {
             .unwrap()
             .id_schema
             .insert(id, schema.into());
+    }
+
+    /// Synchronous hot-path read of protobuf message metadata for a writer id.
+    #[must_use]
+    pub fn writer_message_type(&self, id: u32) -> Option<String> {
+        self.inner.lock().unwrap().id_message_type.get(&id).cloned()
+    }
+
+    /// Test/seed hook: install id→protobuf message metadata directly.
+    pub fn seed_writer_message_type(&self, id: u32, message_type: impl Into<String>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .id_message_type
+            .insert(id, message_type.into());
     }
 
     /// Test/seed hook: install a subject→id mapping directly.
@@ -193,6 +237,8 @@ mod tests {
     use super::*;
     use crate::registry::RegistryClient;
     use assert2::check;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cache() -> Arc<SchemaCache> {
         SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default())
@@ -201,8 +247,8 @@ mod tests {
     #[test]
     fn intern_is_idempotent_per_subject() {
         let c = cache();
-        c.intern("orders-value", SchemaKind::Avro, "a");
-        c.intern("orders-value", SchemaKind::Avro, "a");
+        c.intern("orders-value", SchemaKind::Avro, "a", None);
+        c.intern("orders-value", SchemaKind::Avro, "a", None);
         check!(c.inner.lock().unwrap().interned.len() == 1);
     }
 
@@ -220,5 +266,123 @@ mod tests {
     #[test]
     fn default_mode_is_auto_register() {
         check!(CacheConfig::default().mode == RegisterMode::AutoRegister);
+    }
+
+    #[test]
+    fn message_type_metadata_is_cached_by_id() {
+        let c = cache();
+        c.seed_writer_message_type(9, "demo.Order");
+        check!(c.writer_message_type(9).as_deref() == Some("demo.Order"));
+        check!(c.writer_message_type(10).is_none());
+    }
+
+    #[tokio::test]
+    async fn prewarm_auto_register_resolves_subject_id_and_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value/versions"))
+            .and(body_json(serde_json::json!({
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 50
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::AutoRegister,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            Some("demo.Order"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(50));
+        check!(c.writer_schema(50).unwrap() == "syntax = \"proto3\";");
+        check!(c.writer_message_type(50).as_deref() == Some("demo.Order"));
+    }
+
+    #[tokio::test]
+    async fn prewarm_lookup_only_uses_lookup_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value"))
+            .and(body_json(serde_json::json!({
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 51,
+                "version": 3,
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::LookupOnly,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Json,
+            r#"{"type":"object"}"#,
+            None,
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(51));
+        check!(c.writer_schema(51).unwrap() == r#"{"type":"object"}"#);
+    }
+
+    #[tokio::test]
+    async fn prewarm_use_latest_keeps_registry_message_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 52,
+                "version": 4,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Latest"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = SchemaCache::new(
+            RegistryClient::new(server.uri()),
+            CacheConfig {
+                mode: RegisterMode::UseLatest,
+            },
+        );
+        c.intern(
+            "orders-value",
+            SchemaKind::Protobuf,
+            "syntax = \"proto3\";",
+            Some("demo.Local"),
+        );
+
+        c.prewarm().await.unwrap();
+
+        check!(c.id_for_subject("orders-value") == Some(52));
+        check!(c.writer_message_type(52).as_deref() == Some("demo.Latest"));
     }
 }

@@ -162,7 +162,7 @@ pub fn check_against_version(
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
     }
-    let (_, _, _vty, vschema, v_refs) = snap
+    let existing = snap
         .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
@@ -175,13 +175,15 @@ pub fn check_against_version(
     }
     // The stored version's closure resolves (valid at register time); tolerate
     // failure defensively.
-    let existing_resolved = snap.resolve_closure(&v_refs).unwrap_or_default();
+    let existing_resolved = snap
+        .resolve_closure(&existing.references)
+        .unwrap_or_default();
     let mut msgs = Vec::new();
     check_pair(
         ty,
         candidate,
         candidate_refs,
-        &vschema,
+        &existing.schema,
         &existing_resolved,
         dirs,
         &mut msgs,
@@ -228,7 +230,8 @@ mod tests {
     fn backward_rejects_added_required_field() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[], None)
+            .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         assert!(matches!(
             check_registration(&snap, "s", SchemaType::Avro, &bad, &[]),
@@ -244,7 +247,8 @@ mod tests {
     fn none_level_bypasses() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "NONE".into());
-        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[], None)
+            .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         assert!(check_registration(&snap, "s", SchemaType::Avro, &bad, &[]).is_ok());
     }
@@ -253,7 +257,8 @@ mod tests {
     fn check_against_version_verdict() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[], None)
+            .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, &[], None).unwrap();
         assert!(!v.is_compatible);

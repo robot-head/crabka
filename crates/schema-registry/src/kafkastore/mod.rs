@@ -35,6 +35,16 @@ pub struct KafkaStore {
     schemas_topic: String,
 }
 
+pub struct RegisterSchema<'a> {
+    pub subject: &'a str,
+    pub ty: SchemaType,
+    pub schema: &'a str,
+    pub references: &'a [SchemaReference],
+    pub message_type: Option<&'a str>,
+    pub import_id: Option<i32>,
+    pub import_version: Option<i32>,
+}
+
 impl KafkaStore {
     /// Create `_schemas`, start the reader, build the writer.
     ///
@@ -84,16 +94,17 @@ impl KafkaStore {
     /// `import_id`/`import_version` (no id-assignment, no compat check). In
     /// `READONLY` mode, rejected. Otherwise the path is dedup → compat →
     /// assign → persist → read-your-writes.
-    pub async fn register(
-        &self,
-        subject: &str,
-        ty: SchemaType,
-        schema: &str,
-        references: &[SchemaReference],
-        import_id: Option<i32>,
-        import_version: Option<i32>,
-    ) -> Result<Registered, SrError> {
+    pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
         let _gate = self.write_gate.lock().await;
+        let RegisterSchema {
+            subject,
+            ty,
+            schema,
+            references,
+            message_type,
+            import_id,
+            import_version,
+        } = req;
         let mode = self.effective_mode(subject);
         if mode == "READONLY" {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
@@ -112,7 +123,15 @@ impl KafkaStore {
                 ));
             };
             format::parse(ty, schema, &resolved)?; // 42201 if unparseable
-            let (key, value) = record::encode_schema(subject, version, id, ty, schema, references);
+            let (key, value) = record::encode_schema_with_message_type(
+                subject,
+                version,
+                id,
+                ty,
+                schema,
+                references,
+                message_type,
+            );
             let offset = self
                 .writer
                 .produce(key, value)
@@ -121,11 +140,14 @@ impl KafkaStore {
             self.await_applied(offset).await;
             return Ok(Registered { id, version });
         }
-        if let Some(existing) = self
-            .store
-            .read()
-            .find_under_subject(subject, ty, schema, references, false)
-        {
+        if let Some(existing) = self.store.read().find_under_subject(
+            subject,
+            ty,
+            schema,
+            references,
+            message_type,
+            false,
+        ) {
             return Ok(existing);
         }
         // Enforce compatibility against existing versions per the subject's
@@ -137,10 +159,17 @@ impl KafkaStore {
         // clone (the reader is the sole mutator of the live store).
         let reg = {
             let mut probe = self.store.read().clone();
-            probe.register(subject, ty, schema, references)?
+            probe.register(subject, ty, schema, references, message_type)?
         };
-        let (key, value) =
-            record::encode_schema(subject, reg.version, reg.id, ty, schema, references);
+        let (key, value) = record::encode_schema_with_message_type(
+            subject,
+            reg.version,
+            reg.id,
+            ty,
+            schema,
+            references,
+            message_type,
+        );
         let offset = self
             .writer
             .produce(key, value)
@@ -209,7 +238,7 @@ impl KafkaStore {
     pub async fn soft_delete_version(&self, subject: &str, version: i32) -> Result<i32, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
-        let (id, ver, ty, schema, references) = {
+        let found = {
             let s = self.store.read();
             if s.versions(subject, true).is_none() {
                 return Err(SrError::SubjectNotFound(subject.to_string()));
@@ -226,15 +255,22 @@ impl KafkaStore {
         {
             return Err(SrError::ReferencedByOthers(format!("{subject}:{version}")));
         }
-        let (key, value) =
-            record::encode_schema_deleted(subject, ver, id, ty, &schema, &references);
+        let (key, value) = record::encode_schema_deleted_with_message_type(
+            subject,
+            found.version,
+            found.id,
+            found.ty,
+            &found.schema,
+            &found.references,
+            found.message_type.as_deref(),
+        );
         let offset = self
             .writer
             .produce(key, value)
             .await
             .map_err(|e| SrError::Backend(e.to_string()))?;
         self.await_applied(offset).await;
-        Ok(ver)
+        Ok(found.version)
     }
 
     /// Permanently delete a version (tombstone). Requires a prior soft delete.

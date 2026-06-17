@@ -20,6 +20,13 @@ pub struct RegistryClient {
     http: Client,
 }
 
+/// Schema text plus optional Crabka extension metadata fetched by global id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedSchema {
+    pub schema: String,
+    pub message_type: Option<String>,
+}
+
 impl RegistryClient {
     /// Build a client for a registry at `base_url` (e.g. `http://localhost:8081`).
     #[must_use]
@@ -37,11 +44,13 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions", self.base_url);
         let body = SchemaPayload {
             schema,
             schema_type: kind.wire_name(),
+            message_type,
             references: &[] as &[SchemaReference],
         };
         let resp: RegisterResponse = self.post_json(&url, &body).await?;
@@ -55,11 +64,13 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}", self.base_url);
         let body = SchemaPayload {
             schema,
             schema_type: kind.wire_name(),
+            message_type,
             references: &[] as &[SchemaReference],
         };
         let resp: SubjectVersionResponse = self.post_json(&url, &body).await?;
@@ -68,17 +79,25 @@ impl RegistryClient {
 
     /// Fetch the latest registered version's id under `subject`
     /// (`use.latest.version=true`).
-    pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
+    pub async fn latest(&self, subject: &str) -> Result<SubjectVersionResponse, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions/latest", self.base_url);
-        let resp: SubjectVersionResponse = self.get_json(&url).await?;
-        Ok(resp.id)
+        self.get_json(&url).await
     }
 
-    /// Fetch a schema's text by global id (deserialize path).
-    pub async fn schema_by_id(&self, id: u32) -> Result<String, SchemaSerdeError> {
+    /// Fetch the latest registered version's id under `subject`
+    /// (`use.latest.version=true`).
+    pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
+        Ok(self.latest(subject).await?.id)
+    }
+
+    /// Fetch a schema's text and optional metadata by global id (deserialize path).
+    pub async fn schema_by_id(&self, id: u32) -> Result<FetchedSchema, SchemaSerdeError> {
         let url = format!("{}/schemas/ids/{id}", self.base_url);
         let resp: SchemaByIdResponse = self.get_json(&url).await?;
-        Ok(resp.schema)
+        Ok(FetchedSchema {
+            schema: resp.schema,
+            message_type: resp.message_type,
+        })
     }
 
     async fn post_json<B: serde::Serialize, R: serde::de::DeserializeOwned>(
@@ -134,6 +153,8 @@ mod tests {
     use super::model::SchemaPayload;
     use super::*;
     use assert2::check;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn base_url_trims_trailing_slash() {
@@ -146,6 +167,7 @@ mod tests {
         let p = SchemaPayload {
             schema: "\"string\"",
             schema_type: SchemaKind::Avro.wire_name(),
+            message_type: None,
             references: &[],
         };
         let j = serde_json::to_string(&p).unwrap();
@@ -157,9 +179,95 @@ mod tests {
         let p = SchemaPayload {
             schema: "syntax = \"proto3\";",
             schema_type: SchemaKind::Protobuf.wire_name(),
+            message_type: Some("demo.Order"),
             references: &[],
         };
         let j = serde_json::to_string(&p).unwrap();
         check!(j.contains(r#""schemaType":"PROTOBUF""#));
+        check!(j.contains(r#""messageType":"demo.Order""#));
+    }
+
+    #[tokio::test]
+    async fn register_posts_schema_payload_and_returns_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value/versions"))
+            .and(body_json(serde_json::json!({
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 42
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        let id = client
+            .register(
+                "orders-value",
+                SchemaKind::Protobuf,
+                "syntax = \"proto3\";",
+                Some("demo.Order"),
+            )
+            .await
+            .unwrap();
+
+        check!(id == 42);
+    }
+
+    #[tokio::test]
+    async fn lookup_posts_schema_payload_and_returns_existing_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/subjects/orders-value"))
+            .and(body_json(serde_json::json!({
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 43,
+                "version": 7,
+                "schema": r#"{"type":"object"}"#,
+                "schemaType": "JSON"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        let id = client
+            .lookup(
+                "orders-value",
+                SchemaKind::Json,
+                r#"{"type":"object"}"#,
+                None,
+            )
+            .await
+            .unwrap();
+
+        check!(id == 43);
+    }
+
+    #[tokio::test]
+    async fn latest_id_fetches_latest_subject_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 44,
+                "version": 9,
+                "schema": "syntax = \"proto3\";",
+                "schemaType": "PROTOBUF",
+                "messageType": "demo.Order"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = RegistryClient::new(server.uri());
+        check!(client.latest_id("orders-value").await.unwrap() == 44);
     }
 }

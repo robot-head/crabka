@@ -45,6 +45,7 @@ impl<T: AvroSchema> AvroSerde<T> {
                 role,
                 kind: SchemaKind::Avro,
                 schema: reader_schema.canonical_form(),
+                message_type: None,
             },
             reader_schema,
             _marker: PhantomData,

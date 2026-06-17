@@ -49,6 +49,12 @@ pub struct SchemaValue {
         default
     )]
     pub schema_type: Option<String>,
+    #[serde(
+        rename = "messageType",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub message_type: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub references: Vec<SchemaReference>,
     pub schema: String,
@@ -208,24 +214,29 @@ pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-fn schema_kv(
-    subject: &str,
+#[derive(Clone, Copy)]
+struct SchemaRecordParts<'a> {
+    subject: &'a str,
     version: i32,
     id: i32,
     ty: SchemaType,
-    schema: &str,
-    references: &[SchemaReference],
+    schema: &'a str,
+    references: &'a [SchemaReference],
+    message_type: Option<&'a str>,
     deleted: bool,
-) -> (Vec<u8>, Vec<u8>) {
-    let key = SchemaKey::new(subject, version);
+}
+
+fn schema_kv(record: SchemaRecordParts<'_>) -> (Vec<u8>, Vec<u8>) {
+    let key = SchemaKey::new(record.subject, record.version);
     let value = SchemaValue {
-        subject: subject.to_string(),
-        version,
-        id,
-        schema_type: ty.wire_name().map(str::to_string),
-        references: references.to_vec(),
-        schema: schema.to_string(),
-        deleted,
+        subject: record.subject.to_string(),
+        version: record.version,
+        id: record.id,
+        schema_type: record.ty.wire_name().map(str::to_string),
+        message_type: record.message_type.map(str::to_string),
+        references: record.references.to_vec(),
+        schema: record.schema.to_string(),
+        deleted: record.deleted,
     };
     (
         serde_json::to_vec(&key).expect("key serialises"),
@@ -243,7 +254,41 @@ pub fn encode_schema(
     schema: &str,
     references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, references, false)
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type: None,
+        deleted: false,
+    })
+}
+
+/// Build a `SCHEMA` record carrying optional Crabka protobuf message binding
+/// metadata. `message_type = None` preserves the Confluent-compatible value
+/// shape.
+#[must_use]
+pub fn encode_schema_with_message_type(
+    subject: &str,
+    version: i32,
+    id: i32,
+    ty: SchemaType,
+    schema: &str,
+    references: &[SchemaReference],
+    message_type: Option<&str>,
+) -> (Vec<u8>, Vec<u8>) {
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type,
+        deleted: false,
+    })
 }
 
 /// Build a soft-delete `SCHEMA` record: identical key/value to the original but
@@ -257,7 +302,40 @@ pub fn encode_schema_deleted(
     schema: &str,
     references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, references, true)
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type: None,
+        deleted: true,
+    })
+}
+
+/// Build a soft-delete `SCHEMA` record while preserving optional message
+/// binding metadata.
+#[must_use]
+pub fn encode_schema_deleted_with_message_type(
+    subject: &str,
+    version: i32,
+    id: i32,
+    ty: SchemaType,
+    schema: &str,
+    references: &[SchemaReference],
+    message_type: Option<&str>,
+) -> (Vec<u8>, Vec<u8>) {
+    schema_kv(SchemaRecordParts {
+        subject,
+        version,
+        id,
+        ty,
+        schema,
+        references,
+        message_type,
+        deleted: true,
+    })
 }
 
 /// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,
@@ -412,6 +490,27 @@ mod tests {
             SchemaRecord::Schema(_, val) => assert_eq!(val.references, refs),
             other => panic!("expected Schema, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn encode_schema_round_trips_message_type_when_present() {
+        let (k, v) = encode_schema_with_message_type(
+            "pb-value",
+            1,
+            7,
+            SchemaType::Protobuf,
+            "syntax = \"proto3\"; message Order {}",
+            &[],
+            Some("demo.Order"),
+        );
+        match SchemaRecord::decode(&k, Some(&v)) {
+            SchemaRecord::Schema(_, val) => {
+                assert_eq!(val.message_type.as_deref(), Some("demo.Order"));
+            }
+            other => panic!("expected Schema, got {other:?}"),
+        }
+        let raw: serde_json::Value = serde_json::from_slice(&v).unwrap();
+        assert_eq!(raw["messageType"], "demo.Order");
     }
 
     /// The `_schemas` SCHEMA value `references` byte-shape must match cp 7.4.0
