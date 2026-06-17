@@ -85,16 +85,13 @@ impl ConfigDef {
     #[must_use]
     pub fn required(mut self, name: impl Into<String>, kind: ConfigKind) -> Self {
         let name = name.into();
-        self.keys.insert(
-            name.clone(),
-            ConfigKey {
-                name,
-                kind,
-                required: true,
-                default: None,
-                description: None,
-            },
-        );
+        self.define_key(ConfigKey {
+            name,
+            kind,
+            required: true,
+            default: None,
+            description: None,
+        });
         self
     }
 
@@ -102,16 +99,13 @@ impl ConfigDef {
     #[must_use]
     pub fn optional(mut self, name: impl Into<String>, kind: ConfigKind) -> Self {
         let name = name.into();
-        self.keys.insert(
-            name.clone(),
-            ConfigKey {
-                name,
-                kind,
-                required: false,
-                default: None,
-                description: None,
-            },
-        );
+        self.define_key(ConfigKey {
+            name,
+            kind,
+            required: false,
+            default: None,
+            description: None,
+        });
         self
     }
 
@@ -124,16 +118,13 @@ impl ConfigDef {
         default: impl Into<Value>,
     ) -> Self {
         let name = name.into();
-        self.keys.insert(
-            name.clone(),
-            ConfigKey {
-                name,
-                kind,
-                required: false,
-                default: Some(default.into()),
-                description: None,
-            },
-        );
+        self.define_key(ConfigKey {
+            name,
+            kind,
+            required: false,
+            default: Some(default.into()),
+            description: None,
+        });
         self
     }
 
@@ -141,6 +132,14 @@ impl ConfigDef {
     #[must_use]
     pub fn secret(self, name: impl Into<String>) -> Self {
         self.required(name, ConfigKind::Secret)
+    }
+
+    fn define_key(&mut self, key: ConfigKey) {
+        let name = key.name.clone();
+        assert!(
+            self.keys.insert(name.clone(), key).is_none(),
+            "duplicate connector config key `{name}`"
+        );
     }
 
     /// Validate raw configuration and resolve secret references.
@@ -506,6 +505,14 @@ mod tests {
             ConfigKind::DurationMs.expected(),
             ConfigKind::DurationMillis.expected()
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate connector config key `database_url`")]
+    fn duplicate_config_def_keys_panic_at_definition_time() {
+        let _ = ConfigDef::new("demo")
+            .required("database_url", ConfigKind::String)
+            .optional("database_url", ConfigKind::String);
     }
 
     #[tokio::test]

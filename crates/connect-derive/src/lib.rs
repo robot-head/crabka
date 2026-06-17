@@ -1,5 +1,7 @@
 use proc_macro::TokenStream;
+use std::collections::BTreeSet;
 
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use syn::{
     AngleBracketedGenericArguments, Attribute, Data, DeriveInput, Expr, Fields, GenericArgument,
@@ -16,6 +18,7 @@ pub fn derive_connector_config(input: TokenStream) -> TokenStream {
 
 fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ident = input.ident;
+    let crate_path = resolve_crabka_connect_path(&input.attrs)?;
     let fields = match input.data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
@@ -36,6 +39,7 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
 
     let mut def_steps = Vec::new();
     let mut initializers = Vec::new();
+    let mut seen_keys = BTreeSet::new();
 
     for field in fields {
         let field_ident = field.ident.expect("named fields have identifiers");
@@ -45,6 +49,12 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
         let type_info = analyze_type(&ty)?;
         validate_field_attrs(&attrs, &ty)?;
         let key = attrs.name.unwrap_or_else(|| field_ident.to_string());
+        if !seen_keys.insert(key.clone()) {
+            return Err(syn::Error::new_spanned(
+                &field_ident,
+                format!("duplicate connector config key `{key}`"),
+            ));
+        }
         let key_lit = syn::LitStr::new(&key, field_ident.span());
 
         if attrs.secret {
@@ -56,7 +66,7 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
                 def_steps.push(quote! {
                     def = def.optional(
                         #key_lit,
-                        <#ty as ::crabka_connect::FromResolvedValue>::KIND,
+                        <#ty as #crate_path::FromResolvedValue>::KIND,
                     );
                 });
             }
@@ -64,22 +74,22 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
             def_steps.push(quote! {
                 def = def.default(
                     #key_lit,
-                    <#ty as ::crabka_connect::FromResolvedValue>::KIND,
-                    ::crabka_connect::__serde_json::json!(#default),
+                    <#ty as #crate_path::FromResolvedValue>::KIND,
+                    #crate_path::__serde_json::json!(#default),
                 );
             });
         } else if attrs.required || !type_info.is_option {
             def_steps.push(quote! {
-                def = def.required(#key_lit, <#ty as ::crabka_connect::FromResolvedValue>::KIND);
+                def = def.required(#key_lit, <#ty as #crate_path::FromResolvedValue>::KIND);
             });
         } else {
             def_steps.push(quote! {
-                def = def.optional(#key_lit, <#ty as ::crabka_connect::FromResolvedValue>::KIND);
+                def = def.optional(#key_lit, <#ty as #crate_path::FromResolvedValue>::KIND);
             });
         }
 
         initializers.push(quote! {
-            #field_ident: <#ty as ::crabka_connect::FromResolvedValue>::from_resolved_value(
+            #field_ident: <#ty as #crate_path::FromResolvedValue>::from_resolved_value(
                 config,
                 #key_lit,
             )?
@@ -87,22 +97,54 @@ fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::Token
     }
 
     Ok(quote! {
-        impl ::crabka_connect::ConnectorConfig for #ident {
-            fn config_def() -> ::crabka_connect::ConfigDef {
-                let mut def = ::crabka_connect::ConfigDef::new(stringify!(#ident));
+        impl #crate_path::ConnectorConfig for #ident {
+            fn config_def() -> #crate_path::ConfigDef {
+                let mut def = #crate_path::ConfigDef::new(stringify!(#ident));
                 #(#def_steps)*
                 def
             }
 
             fn from_resolved(
-                config: &::crabka_connect::ResolvedConfig,
-            ) -> ::crabka_connect::ConfigResult<Self> {
+                config: &#crate_path::ResolvedConfig,
+            ) -> #crate_path::ConfigResult<Self> {
                 Ok(Self {
                     #(#initializers,)*
                 })
             }
         }
     })
+}
+
+fn resolve_crabka_connect_path(attrs: &[Attribute]) -> syn::Result<proc_macro2::TokenStream> {
+    let mut override_path = None;
+    for attr in attrs {
+        if !attr.path().is_ident("config") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate") {
+                let value = meta.value()?;
+                let lit: syn::LitStr = value.parse()?;
+                let path: syn::Path = lit.parse()?;
+                override_path = Some(quote!(#path));
+                Ok(())
+            } else {
+                Err(meta.error("unsupported container config attribute"))
+            }
+        })?;
+    }
+
+    if let Some(path) = override_path {
+        return Ok(path);
+    }
+
+    match crate_name("crabka-connect") {
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            Ok(quote!(::#ident))
+        }
+        Ok(FoundCrate::Itself) | Err(_) => Ok(quote!(::crabka_connect)),
+    }
 }
 
 #[derive(Default)]

@@ -2045,6 +2045,7 @@ name = "crabka-connect-derive"
 version = "0.3.6"
 dependencies = [
  "crabka-connect",
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "syn 2.0.118",

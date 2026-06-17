@@ -141,6 +141,7 @@ tower = "0.5"
 futures = "0.3"
 anyhow = "1"
 parking_lot = "0.12"
+proc-macro-crate = "3"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
@@ -160,4 +161,3 @@ jsonschema = { version = "0.46", default-features = false }
 # https://github.com/Devolutions/sspi-rs/pull/681.
 [patch.crates-io]
 sspi = { git = "https://github.com/robot-head/sspi-rs.git", branch = "crabka/sasl-gssapi" }
-
