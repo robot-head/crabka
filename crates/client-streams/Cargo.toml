@@ -75,7 +75,10 @@ required-features = ["polars", "arrow"]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
 crabka-broker = { version = "0.3.7", path = "../broker", features = ["test-helpers"] }
-crabka-schema-registry = { version = "0.3.7", path = "../schema-registry" }
+# Dev-only path dependency. Keep the crates.io requirement on the released
+# minor line so `cargo publish` can package this crate even when release-plz
+# publishes dev-dependency-only workspace crates later in the same run.
+crabka-schema-registry = { version = "0.3", path = "../schema-registry" }
 crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
 hex = { workspace = true }
 prost = { workspace = true }
