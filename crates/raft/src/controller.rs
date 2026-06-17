@@ -702,6 +702,35 @@ mod bootstrap_mode_tests {
         assert!(controller_endpoint_addr(&voters, 99).is_none());
     }
 
+    #[test]
+    fn controller_endpoint_addr_prefers_controller_endpoint_over_others() {
+        // A voter advertises several listeners. The resolver must pick the one
+        // named CONTROLLER even when it is not first in the list — submit_change
+        // must be forwarded to the controller listener, not (e.g.) the
+        // inter-broker REPLICATION listener on a different port. The non-
+        // CONTROLLER endpoint is placed FIRST so a flipped `name == "CONTROLLER"`
+        // predicate (matching the first NON-controller endpoint instead) returns
+        // the wrong address.
+        let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
+            id: 7,
+            directory_id: Uuid::nil(),
+            endpoints: vec![
+                crabka_metadata::VoterEndpoint {
+                    name: "REPLICATION".to_string(),
+                    host: "replication-host".to_string(),
+                    port: 9092,
+                },
+                crabka_metadata::VoterEndpoint {
+                    name: "CONTROLLER".to_string(),
+                    host: "controller-host".to_string(),
+                    port: 9093,
+                },
+            ],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }]);
+        assert!(controller_endpoint_addr(&voters, 7) == Some("controller-host:9093".to_string()));
+    }
+
     #[tokio::test]
     async fn bootstrap_on_non_empty_log_errors() {
         let dir = TempDir::new().unwrap();

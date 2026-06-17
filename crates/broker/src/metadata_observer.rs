@@ -197,6 +197,14 @@ async fn fetch_once(
     Some(new_offset.max(fetch_offset))
 }
 
+/// Round-robin pick into a non-empty voter list: index `idx` wrapped by the
+/// list length. Pulled out of the serve-loop so the wrap-around is unit-tested
+/// (a `/`-for-`%` slip would stop the observer rotating to the next voter when
+/// the current one is unreachable, stranding it on a dead voter).
+fn voter_at(voters: &[(NodeId, String)], idx: usize) -> &(NodeId, String) {
+    &voters[idx % voters.len()]
+}
+
 async fn run_loop(
     config: ObserverConfig,
     observer: Arc<MetadataObserver>,
@@ -212,7 +220,7 @@ async fn run_loop(
             tokio::time::sleep(config.poll_interval).await;
             continue;
         }
-        let (target, addr) = config.voters[target_idx % config.voters.len()].clone();
+        let (target, addr) = voter_at(&config.voters, target_idx).clone();
         let result = tokio::select! {
             () = shutdown.cancelled() => return,
             r = fetch_once(&config, &addr, target, fetch_offset, &observer.image) => r,
@@ -245,6 +253,25 @@ mod tests {
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    #[test]
+    fn voter_at_wraps_round_robin_by_modulo() {
+        let voters = vec![
+            (1u64, "a:9093".to_string()),
+            (2u64, "b:9093".to_string()),
+            (3u64, "c:9093".to_string()),
+        ];
+        // In-range picks each distinct voter. `idx / len` (the `%`→`/` mutant)
+        // would collapse 1 and 2 to index 0 ("a"), so distinguishing 0/1/2 here
+        // proves the modulo, not integer division, indexes the list.
+        assert!(voter_at(&voters, 0).0 == 1);
+        assert!(voter_at(&voters, 1).0 == 2);
+        assert!(voter_at(&voters, 2).0 == 3);
+        // Wrap-around: index 3 must rotate back to the first voter (3 % 3 == 0);
+        // `3 / 3 == 1` would return the second voter instead.
+        assert!(voter_at(&voters, 3).0 == 1);
+        assert!(voter_at(&voters, 4).0 == 2);
+    }
 
     #[tokio::test]
     async fn observer_replicates_committed_topic() {

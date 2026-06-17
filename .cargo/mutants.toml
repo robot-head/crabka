@@ -101,6 +101,32 @@ exclude_re = [
     # timeout from, so no unit test can kill a mutation of it. The function's
     # actual add-partition logic is covered by the broker txn integration suite.
     "add_partitions_to_txn\\.rs.*process_one_txn",
+    # The broker binary's `main` is pure entrypoint glue (parse args, build the
+    # `BrokerConfig`, `Broker::start`, await a shutdown signal, controlled-stop)
+    # exercised end-to-end by every in-process broker test — same rationale as
+    # the `src/bin/**` globs for grpc-gateway / schema-registry above. Mutating
+    # the `BrokerConfig` field wiring it hands to `Broker::start` has no
+    # unit-testable signal (no test constructs the live broker from CLI args);
+    # the fields' behavior is covered where they are consumed in the lib.
+    "broker/src/bin/broker\\.rs.*from struct BrokerConfig",
+    # `wait_for_termination_signal` blocks on real OS signals (SIGTERM/SIGINT/
+    # ctrl-c) and returns the signal name solely for a log line — there is no
+    # way to deliver a signal to the test process and assert the returned name
+    # in a unit test. Pure signal-handler glue.
+    "broker/src/bin/broker\\.rs.*wait_for_termination_signal",
+    # `ControllerHandle::voter_addr` is a one-line delegation to the free
+    # function `controller_endpoint_addr` (which IS unit-tested, including the
+    # CONTROLLER-endpoint preference). Killing the wrapper's mutants would need
+    # a live `ControllerHandle`; the resolution logic itself carries the signal
+    # and is mutation-tested in `controller_endpoint_addr`.
+    "raft/src/controller\\.rs.*ControllerHandle::voter_addr",
+    # `ControllerHandle::forward_submit_to` is leader-forwarding engine-IO: it
+    # serializes the records, dials the leader's controller listener, sends
+    # `API_KEY_SUBMIT_CHANGE`, and translates the response. Only exercised by a
+    # live multi-node quorum (the on-cluster forward path), not unit tests —
+    # same rationale as `QuorumForwarder::try_submit` and
+    # `describe_cluster_response_body`.
+    "raft/src/controller\\.rs.*ControllerHandle::forward_submit_to",
     # connect-postgres live DB edge functions are tokio-postgres query wrappers.
     # Their decision branches are factored into pure helpers in source.rs and
     # unit-tested; the wrappers themselves need a running PostgreSQL catalog or
