@@ -13,11 +13,22 @@ pub struct RelationEvent {
     pub columns: Vec<ColumnSchema>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowTupleKind {
+    Full,
+    Key,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RowEventKind {
     Insert,
-    Update { old: Vec<ColumnValue> },
-    Delete,
+    Update {
+        old: Vec<ColumnValue>,
+        old_tuple_kind: RowTupleKind,
+    },
+    Delete {
+        tuple_kind: RowTupleKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,12 +148,13 @@ fn decode_update(
 ) -> Result<RowEvent, PostgresConnectError> {
     let relation_id = reader.read_u32("update relation id")?;
     let tag = reader.read_u8("update tuple tag")?;
-    let (old, new_tag) = match tag {
+    let (old, old_tuple_kind, new_tag) = match tag {
         b'K' | b'O' => (
             decode_tuple(reader)?,
+            tuple_kind(tag),
             reader.read_u8("update new tuple tag")?,
         ),
-        b'N' => (Vec::new(), b'N'),
+        b'N' => (Vec::new(), RowTupleKind::Full, b'N'),
         tag => {
             return Err(PostgresConnectError::Backend(format!(
                 "invalid pgoutput update tuple tag {:?}",
@@ -164,7 +176,10 @@ fn decode_update(
         lsn,
         txid,
         commit_timestamp_ms: None,
-        kind: RowEventKind::Update { old },
+        kind: RowEventKind::Update {
+            old,
+            old_tuple_kind,
+        },
         values,
     })
 }
@@ -189,9 +204,19 @@ fn decode_delete(
         lsn,
         txid,
         commit_timestamp_ms: None,
-        kind: RowEventKind::Delete,
+        kind: RowEventKind::Delete {
+            tuple_kind: tuple_kind(tag),
+        },
         values,
     })
+}
+
+fn tuple_kind(tag: u8) -> RowTupleKind {
+    if tag == b'K' {
+        RowTupleKind::Key
+    } else {
+        RowTupleKind::Full
+    }
 }
 
 fn decode_tuple(reader: &mut PgOutputReader<'_>) -> Result<Vec<ColumnValue>, PostgresConnectError> {
@@ -385,17 +410,26 @@ impl RelationCache {
             ))
         })?;
         let table = format!("{}.{}", schema.schema, schema.table);
-        let values = normalize_values(schema, event.values, "row values")?;
-        let key_columns = extract_key_columns(schema, &values)?;
-        let key = EntityKey {
-            table: table.clone(),
-            columns: key_columns.clone(),
-        };
 
-        let (op, before, after) = match event.kind {
-            RowEventKind::Insert => (Operation::Insert, Vec::new(), values),
-            RowEventKind::Update { old } => {
-                let old = normalize_values(schema, old, "old row values")?;
+        let (op, before, after, key_columns) = match event.kind {
+            RowEventKind::Insert => {
+                let values =
+                    normalize_values(schema, event.values, RowTupleKind::Full, "row values")?;
+                let key_columns = extract_key_columns(schema, &values)?;
+                (Operation::Insert, Vec::new(), values, key_columns)
+            }
+            RowEventKind::Update {
+                old,
+                old_tuple_kind,
+            } => {
+                let values =
+                    normalize_values(schema, event.values, RowTupleKind::Full, "row values")?;
+                let key_columns = extract_key_columns(schema, &values)?;
+                let old = if old.is_empty() {
+                    old
+                } else {
+                    normalize_values(schema, old, old_tuple_kind, "old row values")?
+                };
                 if has_any_key_column(schema, &old) {
                     let old_key_columns = extract_key_columns(schema, &old)?;
                     if old_key_columns != key_columns {
@@ -405,9 +439,17 @@ impl RelationCache {
                     }
                 }
 
-                (Operation::Update, old, values)
+                (Operation::Update, old, values, key_columns)
             }
-            RowEventKind::Delete => (Operation::Delete, values, Vec::new()),
+            RowEventKind::Delete { tuple_kind } => {
+                let values = normalize_values(schema, event.values, tuple_kind, "row values")?;
+                let key_columns = extract_key_columns(schema, &values)?;
+                (Operation::Delete, values, Vec::new(), key_columns)
+            }
+        };
+        let key = EntityKey {
+            table: table.clone(),
+            columns: key_columns,
         };
 
         Ok(EntityDifference {
@@ -427,30 +469,35 @@ impl RelationCache {
 fn normalize_values(
     schema: &TableSchema,
     values: Vec<ColumnValue>,
+    tuple_kind: RowTupleKind,
     label: &str,
 ) -> Result<Vec<ColumnValue>, PostgresConnectError> {
+    let expected_columns: Vec<&ColumnSchema> = match tuple_kind {
+        RowTupleKind::Full => schema.columns.iter().collect(),
+        RowTupleKind::Key => schema.columns.iter().filter(|column| column.key).collect(),
+    };
+
+    if values.len() != expected_columns.len() {
+        return Err(PostgresConnectError::Backend(format!(
+            "column count mismatch for {}.{} {label}: decoded {} values but expected {} columns",
+            schema.schema,
+            schema.table,
+            values.len(),
+            expected_columns.len()
+        )));
+    }
+
     if values.iter().all(|value| {
-        schema
-            .columns
+        expected_columns
             .iter()
             .any(|column| column.name == value.name)
     }) {
         return Ok(values);
     }
 
-    if values.len() != schema.columns.len() {
-        return Err(PostgresConnectError::Backend(format!(
-            "column count mismatch for {}.{} {label}: decoded {} values but relation schema has {} columns",
-            schema.schema,
-            schema.table,
-            values.len(),
-            schema.columns.len()
-        )));
-    }
-
     Ok(values
         .into_iter()
-        .zip(&schema.columns)
+        .zip(expected_columns)
         .map(|(value, column)| ColumnValue {
             name: column.name.clone(),
             value: value.value,
@@ -493,7 +540,7 @@ fn has_any_key_column(schema: &TableSchema, values: &[ColumnValue]) -> bool {
 mod tests {
     use assert2::check;
 
-    use super::{RelationCache, RelationEvent, RowEvent, RowEventKind};
+    use super::{RelationCache, RelationEvent, RowEvent, RowEventKind, RowTupleKind};
     use crate::PgLsn;
     use crate::PostgresConnectError;
     use crate::model::{ColumnSchema, ColumnValue, Operation, ScalarValue};
@@ -606,7 +653,9 @@ mod tests {
                 lsn: PgLsn(0x2a),
                 txid: None,
                 commit_timestamp_ms: None,
-                kind: RowEventKind::Delete,
+                kind: RowEventKind::Delete {
+                    tuple_kind: RowTupleKind::Full,
+                },
                 values: values.clone(),
             })
             .expect("relation should translate");
@@ -668,7 +717,7 @@ mod tests {
             txid: None,
             commit_timestamp_ms: None,
             kind: RowEventKind::Insert,
-            values: vec![status("new")],
+            values: vec![status("new"), status("paid")],
         });
 
         let error = result.expect_err("missing key should fail");
@@ -694,7 +743,10 @@ mod tests {
                 lsn: PgLsn(0x2e),
                 txid: Some(100),
                 commit_timestamp_ms: Some(1_700_000_000_001),
-                kind: RowEventKind::Update { old: old.clone() },
+                kind: RowEventKind::Update {
+                    old: old.clone(),
+                    old_tuple_kind: RowTupleKind::Full,
+                },
                 values: new.clone(),
             })
             .expect("relation should translate");
@@ -717,6 +769,7 @@ mod tests {
             commit_timestamp_ms: None,
             kind: RowEventKind::Update {
                 old: vec![id(41), status("new")],
+                old_tuple_kind: RowTupleKind::Full,
             },
             values: vec![id(42), status("paid")],
         });
@@ -787,14 +840,39 @@ mod tests {
             error => panic!("expected backend error, got {error:?}"),
         }
     }
+
+    #[test]
+    fn named_partial_full_row_values_are_a_count_mismatch() {
+        let mut cache = RelationCache::default();
+        cache.apply_relation(orders_relation("text"));
+
+        let error = cache
+            .translate(RowEvent {
+                relation_id: 7,
+                lsn: PgLsn(0x34),
+                txid: None,
+                commit_timestamp_ms: None,
+                kind: RowEventKind::Insert,
+                values: vec![id(42)],
+            })
+            .expect_err("partial full row should fail count validation");
+
+        match error {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("column count mismatch"));
+                check!(message.contains("public.orders"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod decode_tests {
     use assert2::check;
 
-    use super::{DecodedMessage, RowEventKind, decode_pgoutput_message};
-    use crate::model::ScalarValue;
+    use super::{DecodedMessage, RowEventKind, RowTupleKind, decode_pgoutput_message};
+    use crate::model::{ColumnSchema, ScalarValue};
     use crate::{PgLsn, PostgresConnectError};
 
     fn put_i16(bytes: &mut Vec<u8>, value: i16) {
@@ -823,6 +901,26 @@ mod decode_tests {
         let length = i32::try_from(value.len()).expect("test value length should fit i32");
         put_i32(bytes, length);
         bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn orders_relation_message() -> super::RelationEvent {
+        super::RelationEvent {
+            relation_id: 7,
+            schema: "public".to_owned(),
+            table: "orders".to_owned(),
+            columns: vec![
+                ColumnSchema {
+                    name: "id".to_owned(),
+                    type_name: "int8".to_owned(),
+                    key: true,
+                },
+                ColumnSchema {
+                    name: "status".to_owned(),
+                    type_name: "text".to_owned(),
+                    key: false,
+                },
+            ],
+        }
     }
 
     #[test]
@@ -934,6 +1032,63 @@ mod decode_tests {
     }
 
     #[test]
+    fn decoded_delete_key_tuple_translates_with_key_column_name() {
+        let mut cache = super::RelationCache::default();
+        cache.apply_relation(orders_relation_message());
+
+        let mut delete_bytes = vec![b'D'];
+        put_i32(&mut delete_bytes, 7);
+        delete_bytes.push(b'K');
+        put_i16(&mut delete_bytes, 1);
+        put_text_value(&mut delete_bytes, "42");
+
+        let DecodedMessage::Row(row) =
+            decode_pgoutput_message(&delete_bytes, PgLsn(0x35), Some(102))
+                .expect("delete should decode")
+        else {
+            panic!("expected row");
+        };
+        let difference = cache
+            .translate(row)
+            .expect("decoded delete should translate");
+
+        check!(difference.key.columns[0].name == "id");
+        check!(difference.before[0].name == "id");
+        check!(difference.before[0].value == ScalarValue::Text("42".to_owned()));
+    }
+
+    #[test]
+    fn decoded_update_key_old_tuple_translates_for_non_key_update() {
+        let mut cache = super::RelationCache::default();
+        cache.apply_relation(orders_relation_message());
+
+        let mut update_bytes = vec![b'U'];
+        put_i32(&mut update_bytes, 7);
+        update_bytes.push(b'K');
+        put_i16(&mut update_bytes, 1);
+        put_text_value(&mut update_bytes, "42");
+        update_bytes.push(b'N');
+        put_i16(&mut update_bytes, 2);
+        put_text_value(&mut update_bytes, "42");
+        put_text_value(&mut update_bytes, "paid");
+
+        let DecodedMessage::Row(row) =
+            decode_pgoutput_message(&update_bytes, PgLsn(0x36), Some(103))
+                .expect("update should decode")
+        else {
+            panic!("expected row");
+        };
+        let difference = cache
+            .translate(row)
+            .expect("decoded update should translate");
+
+        check!(difference.before[0].name == "id");
+        check!(difference.before[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.after[1].name == "status");
+        check!(difference.after[1].value == ScalarValue::Text("paid".to_owned()));
+    }
+
+    #[test]
     fn decodes_delete_message_to_row_event() {
         let mut bytes = vec![b'D'];
         put_i32(&mut bytes, 7);
@@ -950,7 +1105,12 @@ mod decode_tests {
         check!(row.relation_id == 7);
         check!(row.lsn == PgLsn(0x2b));
         check!(row.txid == None);
-        check!(row.kind == RowEventKind::Delete);
+        check!(
+            row.kind
+                == RowEventKind::Delete {
+                    tuple_kind: RowTupleKind::Key,
+                }
+        );
         check!(row.values.len() == 1);
         check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
     }
@@ -974,9 +1134,14 @@ mod decode_tests {
             panic!("expected row message");
         };
         check!(row.relation_id == 7);
-        let RowEventKind::Update { old } = row.kind else {
+        let RowEventKind::Update {
+            old,
+            old_tuple_kind,
+        } = row.kind
+        else {
             panic!("expected update event");
         };
+        check!(old_tuple_kind == RowTupleKind::Key);
         check!(old.len() == 1);
         check!(old[0].value == ScalarValue::Text("41".to_owned()));
         check!(row.values.len() == 2);

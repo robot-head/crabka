@@ -138,7 +138,7 @@ mod tests {
 
     use super::{LogicalEvent, PostgresWalSource};
     use crate::model::{ColumnSchema, ColumnValue, ScalarValue};
-    use crate::pgoutput::{RelationEvent, RowEvent, RowEventKind};
+    use crate::pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind};
     use crate::{PgLsn, PostgresSourceConfig};
 
     fn header_value(
@@ -215,7 +215,9 @@ mod tests {
             lsn,
             txid: None,
             commit_timestamp_ms: None,
-            kind: RowEventKind::Delete,
+            kind: RowEventKind::Delete {
+                tuple_kind: RowTupleKind::Full,
+            },
             values: vec![id(42), status("cancelled")],
         }
     }
