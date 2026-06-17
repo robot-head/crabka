@@ -20,10 +20,7 @@ pub mod model {
     pub struct TableSchema;
 }
 
-pub mod offset {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct PgLsn(pub u64);
-}
+pub mod offset;
 
 pub mod pgoutput {}
 
