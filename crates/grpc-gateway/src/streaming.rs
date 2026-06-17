@@ -15,11 +15,150 @@ use crabka_authz::AuthorizationResult;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
 use futures_util::{Stream, StreamExt};
+use jsonpath_rust::parser::model::JpQuery;
+use jsonpath_rust::query::js_path_process;
+use serde_json::Value;
 
+use crate::codec::{SchemaFormat, SchemaMeta};
 use crate::consume::ConsumeSession;
 use crate::handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host};
 use crate::pb;
 use crate::state::AppState;
+
+struct CompiledPredicates(Vec<CompiledPredicate>);
+
+struct CompiledPredicate {
+    query: JpQuery,
+    op: pb::PredicateOp,
+    expected: PredicateValue,
+}
+
+enum PredicateValue {
+    String(String),
+    Int64(i64),
+    Double(f64),
+    Bool(bool),
+}
+
+fn compile_subscribe_predicates(
+    predicates: Vec<pb::FieldPredicate>,
+) -> Result<CompiledPredicates, String> {
+    let mut compiled = Vec::with_capacity(predicates.len());
+    for predicate in predicates {
+        let query = jsonpath_rust::parser::parse_json_path(&predicate.path).map_err(|e| {
+            format!(
+                "invalid Subscribe predicate JSONPath {:?}: {e}",
+                predicate.path
+            )
+        })?;
+        let op = pb::PredicateOp::try_from(predicate.op)
+            .map_err(|_| "unknown Subscribe predicate op".to_string())?;
+        if op != pb::PredicateOp::Equals {
+            return Err("Subscribe predicate op must be EQUALS".to_string());
+        }
+        let expected = match predicate.value {
+            Some(pb::field_predicate::Value::StringValue(v)) => PredicateValue::String(v),
+            Some(pb::field_predicate::Value::Int64Value(v)) => PredicateValue::Int64(v),
+            Some(pb::field_predicate::Value::DoubleValue(v)) if v.is_finite() => {
+                PredicateValue::Double(v)
+            }
+            Some(pb::field_predicate::Value::DoubleValue(_)) => {
+                return Err("Subscribe predicate double_value must be finite".to_string());
+            }
+            Some(pb::field_predicate::Value::BoolValue(v)) => PredicateValue::Bool(v),
+            None => {
+                return Err("Subscribe predicate requires a value".to_string());
+            }
+        };
+        compiled.push(CompiledPredicate {
+            query,
+            op,
+            expected,
+        });
+    }
+    Ok(CompiledPredicates(compiled))
+}
+
+#[cfg(test)]
+fn decoded_record_matches(
+    predicates: &CompiledPredicates,
+    decoded: &crate::codec::Decoded,
+) -> bool {
+    structured_json_matches(predicates, decoded.json.as_ref())
+}
+
+fn structured_json_matches(predicates: &CompiledPredicates, json: Option<&bytes::Bytes>) -> bool {
+    if predicates.0.is_empty() {
+        return true;
+    }
+    let Some(json) = json else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(json) else {
+        return false;
+    };
+    predicates
+        .0
+        .iter()
+        .all(|predicate| predicate_matches(predicate, &value))
+}
+
+fn predicate_matches(predicate: &CompiledPredicate, value: &Value) -> bool {
+    if predicate.op != pb::PredicateOp::Equals {
+        return false;
+    }
+    let Ok(matches) = js_path_process(&predicate.query, value) else {
+        return false;
+    };
+    matches
+        .into_iter()
+        .any(|matched| expected_value_matches(&predicate.expected, matched.val()))
+}
+
+fn expected_value_matches(expected: &PredicateValue, actual: &Value) -> bool {
+    match expected {
+        PredicateValue::String(expected) => actual.as_str() == Some(expected.as_str()),
+        PredicateValue::Int64(expected) => {
+            actual
+                .as_i64()
+                .or_else(|| actual.as_str().and_then(|s| s.parse::<i64>().ok()))
+                == Some(*expected)
+        }
+        PredicateValue::Double(expected) => actual
+            .as_f64()
+            .or_else(|| actual.as_str().and_then(|s| s.parse::<f64>().ok()))
+            .is_some_and(|actual| actual.total_cmp(expected).is_eq()),
+        PredicateValue::Bool(expected) => actual.as_bool() == Some(*expected),
+    }
+}
+
+fn schema_meta_to_pb(meta: SchemaMeta) -> pb::SchemaSelector {
+    pb::SchemaSelector {
+        subject: meta.subject,
+        id: meta.id,
+        format: match meta.format {
+            SchemaFormat::Avro => pb::SchemaFormat::Avro as i32,
+            SchemaFormat::Json => pb::SchemaFormat::Json as i32,
+            SchemaFormat::Protobuf => pb::SchemaFormat::Protobuf as i32,
+        },
+    }
+}
+
+fn inbound_from_decoded_record(record: crate::consume::DecodedConsumerRecord) -> pb::Inbound {
+    pb::Inbound {
+        topic: record.topic,
+        partition: record.partition,
+        offset: record.offset,
+        key: record.key.map(|b| b.to_vec()),
+        value: record.value.to_vec(),
+        headers: std::collections::HashMap::new(),
+        timestamp_ms: record.timestamp,
+        structured: record.json.map(|json| pb::StructuredValue {
+            json: json.to_vec(),
+        }),
+        schema: record.schema.map(schema_meta_to_pb),
+    }
+}
 
 /// Produce every record in each inbound `SendRequest`, emitting one `SendAck`
 /// (with a per-record `RecordResult` vector) per request. Each record is gated
@@ -138,6 +277,11 @@ pub fn subscribe_inner(
             }
         }
 
+        let predicates = match compile_subscribe_predicates(start.predicates) {
+            Ok(predicates) => predicates,
+            Err(e) => { yield Err(ConnectError::new_invalid_argument(e)); return; }
+        };
+
         let client_id = format!("{}-sub", state.config.client_id);
         let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone(), state.codec.clone()).await {
             Ok(s) => s,
@@ -165,19 +309,10 @@ pub fn subscribe_inner(
                     match batch {
                         Ok(records) => {
                             for r in records {
-                                to_emit.push(pb::Inbound {
-                                    topic: r.topic,
-                                    partition: r.partition,
-                                    offset: r.offset,
-                                    key: r.key.map(|b| b.to_vec()),
-                                    value: r.value.map(|b| b.to_vec()).unwrap_or_default(),
-                                    headers: std::collections::HashMap::new(),
-                                    timestamp_ms: r.timestamp,
-                                    // Structured/schema view is wired by a later
-                                    // task; RawCodec emits the raw value only.
-                                    structured: None,
-                                    schema: None,
-                                });
+                                if !structured_json_matches(&predicates, r.json.as_ref()) {
+                                    continue;
+                                }
+                                to_emit.push(inbound_from_decoded_record(r));
                             }
                             if !to_emit.is_empty() && auto_commit { commit = true; }
                         }
@@ -216,4 +351,169 @@ pub async fn subscribe(
     Ok(ConnectResponse::new(StreamBody::new(Box::pin(
         subscribe_inner(req.0, state, eff, host),
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+    use crate::codec::{Decoded, SchemaFormat, SchemaMeta};
+
+    fn decoded_json(json: &'static [u8]) -> Decoded {
+        Decoded {
+            value: Bytes::from_static(b"wire"),
+            schema: Some(SchemaMeta {
+                subject: "metadata-value".to_string(),
+                id: 17,
+                format: SchemaFormat::Protobuf,
+            }),
+            json: Some(Bytes::from_static(json)),
+        }
+    }
+
+    #[test]
+    fn subscribe_predicate_matches_string_field() {
+        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.entity_type".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::StringValue(
+                "NETWORK_NODE".to_string(),
+            )),
+        }])
+        .expect("predicate compiles");
+
+        assert!(decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"entity_type":"NETWORK_NODE"}"#)
+        ));
+        assert!(!decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"entity_type":"TOPIC"}"#)
+        ));
+    }
+
+    #[test]
+    fn subscribe_predicate_matches_proto_int64_json_string() {
+        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.node_id".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::Int64Value(7)),
+        }])
+        .expect("predicate compiles");
+
+        assert!(decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"node_id":"7"}"#)
+        ));
+        assert!(!decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"node_id":"8"}"#)
+        ));
+    }
+
+    #[test]
+    fn subscribe_predicate_matches_bool_field() {
+        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.ready".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::BoolValue(true)),
+        }])
+        .expect("predicate compiles");
+
+        assert!(decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"ready":true}"#)
+        ));
+        assert!(!decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"ready":false}"#)
+        ));
+    }
+
+    #[test]
+    fn subscribe_predicate_matches_finite_double_field() {
+        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.load".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::DoubleValue(1.5)),
+        }])
+        .expect("finite double predicate compiles");
+
+        assert!(decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"load":1.5}"#)
+        ));
+        assert!(!decoded_record_matches(
+            &predicates,
+            &decoded_json(br#"{"load":2.5}"#)
+        ));
+    }
+
+    #[test]
+    fn subscribe_predicate_rejects_non_finite_double_value() {
+        let result = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.load".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::DoubleValue(f64::INFINITY)),
+        }]);
+
+        assert!(matches!(
+            result,
+            Err(err) if err == "Subscribe predicate double_value must be finite"
+        ));
+    }
+
+    #[test]
+    fn subscribe_predicate_rejects_raw_unstructured_records() {
+        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+            path: "$.entity_type".to_string(),
+            op: pb::PredicateOp::Equals as i32,
+            value: Some(pb::field_predicate::Value::StringValue(
+                "NETWORK_NODE".to_string(),
+            )),
+        }])
+        .expect("predicate compiles");
+        let decoded = Decoded {
+            value: Bytes::from_static(b"raw"),
+            schema: None,
+            json: None,
+        };
+
+        assert!(!decoded_record_matches(&predicates, &decoded));
+    }
+
+    #[test]
+    fn inbound_carries_structured_json_and_schema_metadata() {
+        let record = crate::consume::DecodedConsumerRecord {
+            topic: "metadata".to_string(),
+            partition: 2,
+            offset: 9,
+            timestamp: 1234,
+            key: Some(Bytes::from_static(b"k")),
+            value: Bytes::from_static(b"\x08\x07"),
+            schema: Some(SchemaMeta {
+                subject: "metadata-value".to_string(),
+                id: 17,
+                format: SchemaFormat::Protobuf,
+            }),
+            json: Some(Bytes::from_static(br#"{"entity_type":"NETWORK_NODE"}"#)),
+        };
+
+        let inbound = inbound_from_decoded_record(record);
+
+        assert_eq!(inbound.topic, "metadata");
+        assert_eq!(inbound.partition, 2);
+        assert_eq!(inbound.offset, 9);
+        assert_eq!(inbound.key.as_deref(), Some(&b"k"[..]));
+        assert_eq!(inbound.value, b"\x08\x07");
+        assert_eq!(
+            inbound.structured.expect("structured JSON").json,
+            br#"{"entity_type":"NETWORK_NODE"}"#
+        );
+        let schema = inbound.schema.expect("schema metadata");
+        assert_eq!(schema.subject, "metadata-value");
+        assert_eq!(schema.id, 17);
+        assert_eq!(schema.format, pb::SchemaFormat::Protobuf as i32);
+    }
 }

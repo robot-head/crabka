@@ -205,6 +205,7 @@ async fn subscribe_streams_records_then_commits() {
             group_id: "sub-group".into(),
             topics: vec!["sub-topic".into()],
             auto_commit: true,
+            predicates: vec![],
         })),
     };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<

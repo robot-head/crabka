@@ -5,10 +5,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 
-use crate::codec::RecordCodec;
+use crate::codec::{RecordCodec, SchemaMeta};
 use crate::error::GatewayError;
+
+#[derive(Debug, Clone)]
+pub struct DecodedConsumerRecord {
+    pub topic: String,
+    pub partition: i32,
+    pub offset: i64,
+    pub timestamp: i64,
+    pub key: Option<bytes::Bytes>,
+    pub value: bytes::Bytes,
+    pub schema: Option<SchemaMeta>,
+    pub json: Option<bytes::Bytes>,
+}
 
 pub struct ConsumeSession {
     /// Held in an `Option` so [`Drop`] can `take()` the consumer and tear down
@@ -44,23 +56,37 @@ impl ConsumeSession {
     }
 
     /// Poll a batch; record values are decoded through the codec.
-    pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, GatewayError> {
-        let mut batch = self
+    pub async fn poll(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<DecodedConsumerRecord>, GatewayError> {
+        let batch = self
             .consumer
             .as_mut()
             .expect("ConsumeSession polled after close")
             .poll(timeout)
             .await?;
-        for r in &mut batch {
-            if let Some(v) = r.value.take() {
-                let decoded = self.codec.decode(&r.topic, v).await?;
-                // The structured/json/schema_meta view on the decoded value is
-                // threaded onto the Subscribe `Inbound`; for now
-                // the de-framed payload is the record value.
-                r.value = Some(decoded.value);
-            }
+        let mut decoded_batch = Vec::with_capacity(batch.len());
+        for r in batch {
+            let (value, schema, json) = match r.value {
+                Some(v) => {
+                    let decoded = self.codec.decode(&r.topic, v).await?;
+                    (decoded.value, decoded.schema, decoded.json)
+                }
+                None => (bytes::Bytes::new(), None, None),
+            };
+            decoded_batch.push(DecodedConsumerRecord {
+                topic: r.topic,
+                partition: r.partition,
+                offset: r.offset,
+                timestamp: r.timestamp,
+                key: r.key,
+                value,
+                schema,
+                json,
+            });
         }
-        Ok(batch)
+        Ok(decoded_batch)
     }
 
     /// Commit current positions (at-least-once: call after delivery is acked).
