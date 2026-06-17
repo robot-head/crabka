@@ -29,7 +29,9 @@ SPI; the converter layer mirrors Kafka Connect's `Converter`.
 ## Connector configuration
 
 Connector implementations can declare a ConfigDef-style schema and derive typed
-config extraction:
+config extraction. This example uses `serde_json` to build raw JSON config, so
+consumers using this style should add `serde_json = "1"` as a direct
+dependency.
 
 ```rust
 use crabka_connect::{
@@ -47,19 +49,19 @@ struct PostgresSourceConfig {
     schema: String,
 }
 
-# async fn build() -> crabka_connect::ConfigResult<PostgresSourceConfig> {
-let raw: serde_json::Map<String, serde_json::Value> = serde_json::Map::from_iter([
-    ("database_url".to_string(), json!("postgres://localhost/app")),
-    (
-        "password".to_string(),
-        json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
-    ),
-]);
-let def: ConfigDef = PostgresSourceConfig::config_def();
-let resolved = def.resolve(raw, &EnvSecretResolver).await?;
-let config: PostgresSourceConfig = ConnectorConfig::from_resolved(&resolved)?;
-Ok(config)
-# }
+async fn build() -> crabka_connect::ConfigResult<PostgresSourceConfig> {
+    let raw: serde_json::Map<String, serde_json::Value> = serde_json::Map::from_iter([
+        ("database_url".to_string(), json!("postgres://localhost/app")),
+        (
+            "password".to_string(),
+            json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
+        ),
+    ]);
+    let def: ConfigDef = PostgresSourceConfig::config_def();
+    let resolved = def.resolve(raw, &EnvSecretResolver).await?;
+    let config: PostgresSourceConfig = ConnectorConfig::from_resolved(&resolved)?;
+    Ok(config)
+}
 ```
 
 Secret fields resolve through `SecretResolver` implementations and are redacted
