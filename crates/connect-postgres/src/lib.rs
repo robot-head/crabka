@@ -9,7 +9,7 @@ pub mod offset;
 
 pub mod pgoutput;
 
-pub mod schema {}
+pub mod schema;
 
 pub mod source {
     #[derive(Debug, Clone)]
