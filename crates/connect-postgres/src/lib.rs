@@ -3,26 +3,11 @@
 pub mod config;
 pub mod error;
 
-pub mod model {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ColumnValue;
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct EntityDifference;
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct EntityKey;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Operation {}
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct TableSchema;
-}
+pub mod model;
 
 pub mod offset;
 
-pub mod pgoutput {}
+pub mod pgoutput;
 
 pub mod schema {}
 
