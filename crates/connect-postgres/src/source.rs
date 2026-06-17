@@ -3,9 +3,12 @@ use std::collections::VecDeque;
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
+use tokio_postgres::{Client, NoTls};
 
 use crate::model::Operation;
-use crate::pgoutput::{RelationCache, RelationEvent, RowEvent};
+use crate::pgoutput::{
+    DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message,
+};
 use crate::schema::PostgresProtoEncoder;
 use crate::{PgLsn, PostgresSourceConfig};
 
@@ -15,10 +18,11 @@ pub enum LogicalEvent {
     Row(RowEvent),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PostgresWalSource {
     config: PostgresSourceConfig,
     database_name: String,
+    client: Option<Client>,
     relation_cache: RelationCache,
     encoder: PostgresProtoEncoder,
     pending: VecDeque<LogicalEvent>,
@@ -35,9 +39,48 @@ impl PostgresWalSource {
         Ok(Self {
             config,
             database_name: database_name.into(),
+            client: None,
             relation_cache: RelationCache::default(),
             encoder: PostgresProtoEncoder::new()?,
             pending: events.into_iter().collect(),
+            checkpoint: None,
+            resume_lsn: None,
+        })
+    }
+
+    pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
+        let (client, connection) =
+            tokio_postgres::connect(config.database_url.expose_secret(), NoTls)
+                .await
+                .map_err(|error| ConnectError::Backend(error.to_string()))?;
+
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::warn!(%error, "postgres source connection task failed");
+            }
+        });
+
+        if !config.table_names.is_empty() {
+            client
+                .batch_execute(&create_publication_sql(
+                    &config.publication_name,
+                    &config.schema,
+                    &config.table_names,
+                ))
+                .await
+                .map_err(|error| ConnectError::Backend(error.to_string()))?;
+        }
+
+        ensure_slot(&client, &config.slot_name).await?;
+        let database_name = current_database(&client).await?;
+
+        Ok(Self {
+            config,
+            database_name,
+            client: Some(client),
+            relation_cache: RelationCache::default(),
+            encoder: PostgresProtoEncoder::new()?,
+            pending: VecDeque::new(),
             checkpoint: None,
             resume_lsn: None,
         })
@@ -47,11 +90,54 @@ impl PostgresWalSource {
     fn pending_len(&self) -> usize {
         self.pending.len()
     }
+
+    async fn fill_pending_from_slot(&mut self) -> Result<(), ConnectError> {
+        let Some(client) = &self.client else {
+            return Ok(());
+        };
+
+        let rows = client
+            .query(
+                &get_binary_changes_sql(
+                    &self.config.slot_name,
+                    self.config.max_messages_per_poll,
+                    &self.config.publication_name,
+                ),
+                &[],
+            )
+            .await
+            .map_err(|error| ConnectError::Backend(error.to_string()))?;
+
+        for row in rows {
+            let lsn: String = row.get("lsn");
+            let xid: i64 = row.get("xid");
+            let data: Vec<u8> = row.get("data");
+            let lsn = lsn.parse::<PgLsn>()?;
+
+            match decode_pgoutput_message(&data, lsn, Some(xid))? {
+                DecodedMessage::Relation(relation) => {
+                    self.pending.push_back(LogicalEvent::Relation(relation));
+                }
+                DecodedMessage::Row(row) => {
+                    self.pending.push_back(LogicalEvent::Row(row));
+                }
+                DecodedMessage::Begin { .. }
+                | DecodedMessage::Commit { .. }
+                | DecodedMessage::Keepalive => {}
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Source<Bytes, Bytes> for PostgresWalSource {
     async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
+        if self.pending.is_empty() {
+            self.fill_pending_from_slot().await?;
+        }
+
         while let Some(event) = self.pending.front().cloned() {
             match event {
                 LogicalEvent::Relation(relation) => {
@@ -110,6 +196,72 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
     }
 }
 
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn create_publication_sql(publication: &str, schema: &str, tables: &[String]) -> String {
+    let table_list = tables
+        .iter()
+        .map(|table| format!("{}.{}", quote_ident(schema), quote_ident(table)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let create_sql = format!(
+        "CREATE PUBLICATION {} FOR TABLE {}",
+        quote_ident(publication),
+        table_list
+    );
+
+    format!(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = {}) THEN EXECUTE {}; END IF; END $$",
+        sql_string(publication),
+        sql_string(&create_sql)
+    )
+}
+
+fn get_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
+    format!(
+        "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_get_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
+        sql_string(slot),
+        max_messages,
+        sql_string(publication)
+    )
+}
+
+async fn ensure_slot(client: &Client, slot_name: &str) -> Result<(), ConnectError> {
+    let slot = client
+        .query_opt(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
+            &[&slot_name],
+        )
+        .await
+        .map_err(|error| ConnectError::Backend(error.to_string()))?;
+
+    if slot.is_none() {
+        client
+            .query(
+                "SELECT * FROM pg_create_logical_replication_slot($1, 'pgoutput')",
+                &[&slot_name],
+            )
+            .await
+            .map_err(|error| ConnectError::Backend(error.to_string()))?;
+    }
+
+    Ok(())
+}
+
+async fn current_database(client: &Client) -> Result<String, ConnectError> {
+    client
+        .query_one("SELECT current_database()", &[])
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| ConnectError::Backend(error.to_string()))
+}
+
 fn validate_database(offset: &SourceOffset, expected_database: &str) -> Result<(), ConnectError> {
     match offset.partition.get("database") {
         Some(OffsetValue::String(database)) if database == expected_database => Ok(()),
@@ -127,6 +279,37 @@ fn operation_header(operation: Operation) -> &'static str {
         Operation::Insert => "insert",
         Operation::Update => "update",
         Operation::Delete => "delete",
+    }
+}
+
+#[cfg(test)]
+mod sql_tests {
+    use assert2::check;
+
+    use super::{create_publication_sql, get_binary_changes_sql};
+
+    #[test]
+    fn publication_sql_quotes_identifiers() {
+        let sql = create_publication_sql(
+            "pub\"name",
+            "sch\"ema",
+            &["orders".to_owned(), "line\"items".to_owned()],
+        );
+
+        check!(sql.contains("CREATE PUBLICATION \"pub\"\"name\""));
+        check!(
+            sql.contains("FOR TABLE \"sch\"\"ema\".\"orders\", \"sch\"\"ema\".\"line\"\"items\"")
+        );
+        check!(sql.contains("WHERE pubname = 'pub\"name'"));
+    }
+
+    #[test]
+    fn binary_changes_sql_escapes_string_literals() {
+        let sql = get_binary_changes_sql("slot'name", 25, "pub'name");
+
+        check!(
+            sql == "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_get_binary_changes('slot''name', NULL, 25, 'proto_version', '1', 'publication_names', 'pub''name')"
+        );
     }
 }
 
