@@ -52,6 +52,12 @@ pub struct Consumer {
     pub(crate) next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
     /// KIP-320 per-partition leader-epoch metadata, keyed like `next_offsets`.
     pub(crate) positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
+    /// Pending [`seek`](Consumer::seek) targets: `(topic, partition) -> next
+    /// offset to fetch`. Applied at the top of `poll` once the partition is
+    /// assigned, *after* the coordinator's post-assignment prime — so a seek
+    /// requested before assignment is not overwritten by the prime (see
+    /// `seek.rs`). Empty in steady state.
+    pub(crate) pending_seeks: Arc<Mutex<HashMap<(String, i32), i64>>>,
     /// Topic UUIDs resolved at build time. Required by Fetch v ≥ 13
     /// (which carries `topic_id` instead of the topic name).
     pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
@@ -398,6 +404,7 @@ impl Consumer {
         let assigned = Arc::new(Mutex::new(assigned_partitions));
         let next_offsets = Arc::new(Mutex::new(next_offsets));
         let positions = Arc::new(Mutex::new(positions));
+        let pending_seeks = Arc::new(Mutex::new(HashMap::new()));
         let topic_ids = Arc::new(Mutex::new(topic_ids));
 
         let shutdown = CancellationToken::new();
@@ -431,6 +438,7 @@ impl Consumer {
             assigned,
             next_offsets,
             positions,
+            pending_seeks,
             topic_ids,
             session_timeout,
             heartbeat_interval,

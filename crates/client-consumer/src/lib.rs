@@ -82,6 +82,7 @@ mod group_metadata;
 mod offset_wire;
 mod poll;
 mod position;
+mod seek;
 mod share;
 mod validate;
 
