@@ -215,3 +215,50 @@ impl FromResolvedValue for Duration {
         Ok(Self::from_millis(millis))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Number, Value};
+
+    use super::*;
+
+    fn resolved_float(value: f64) -> ResolvedConfig {
+        let mut config = ResolvedConfig::default();
+        config.insert_plain(
+            "ratio",
+            Value::Number(Number::from_f64(value).expect("finite test float")),
+        );
+        config
+    }
+
+    #[test]
+    fn f32_extraction_accepts_inclusive_boundaries() {
+        let min = resolved_float(f64::from(f32::MIN));
+        let max = resolved_float(f64::from(f32::MAX));
+
+        assert_eq!(
+            f32::from_resolved_value(&min, "ratio").unwrap().to_bits(),
+            f32::MIN.to_bits()
+        );
+        assert_eq!(
+            f32::from_resolved_value(&max, "ratio").unwrap().to_bits(),
+            f32::MAX.to_bits()
+        );
+    }
+
+    #[test]
+    fn f32_extraction_rejects_values_beyond_boundaries() {
+        let below_min = resolved_float(f64::from(f32::MIN) * 2.0);
+        let above_max = resolved_float(f64::from(f32::MAX) * 2.0);
+
+        for config in [&below_min, &above_max] {
+            assert!(matches!(
+                f32::from_resolved_value(config, "ratio"),
+                Err(ConfigError::WrongType {
+                    key,
+                    expected: "float in range for f32",
+                }) if key == "ratio"
+            ));
+        }
+    }
+}

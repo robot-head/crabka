@@ -342,6 +342,20 @@ mod tests {
         assert!(optional_secret.is_option);
         assert!(optional_secret.is_secret);
 
+        let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
+        assert!(!string_vec.is_option);
+        assert!(!string_vec.is_secret);
+        assert!(analyze_type(&parse_type("Vec<u8>")).is_err());
+
+        for scalar in [
+            "String", "bool", "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64",
+            "usize", "f32", "f64", "Value",
+        ] {
+            let info = analyze_type(&parse_type(scalar)).unwrap();
+            assert!(!info.is_option, "{scalar} is not optional");
+            assert!(!info.is_secret, "{scalar} is not secret");
+        }
+
         let std_duration = analyze_type(&parse_type("std::time::Duration")).unwrap();
         assert!(!std_duration.is_option);
         assert!(!std_duration.is_secret);

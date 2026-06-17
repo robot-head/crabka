@@ -4,6 +4,7 @@ use crabka_connect_derive::ConnectorConfig;
 use renamed_connect::{ConnectorConfig as _, SecretString};
 
 #[derive(ConnectorConfig)]
+#[allow(dead_code)]
 #[config(crate = "renamed_connect")]
 struct RenamedConfig {
     database_url: String,

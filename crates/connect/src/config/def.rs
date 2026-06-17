@@ -540,6 +540,36 @@ mod tests {
     }
 
     #[test]
+    fn config_def_reports_its_name() {
+        let def = ConfigDef::new("postgres-source");
+
+        assert_eq!(def.name(), "postgres-source");
+    }
+
+    #[test]
+    fn config_def_debug_includes_name_and_redacts_secret_defaults() {
+        let key = ConfigKey {
+            name: "password".to_string(),
+            kind: ConfigKind::Secret,
+            required: false,
+            default: Some(json!("literal-secret")),
+            description: Some("database password".to_string()),
+        };
+        let def = ConfigDef {
+            name: "demo".to_string(),
+            keys: BTreeMap::from_iter([("password".to_string(), key)]),
+        };
+
+        let debug = format!("{def:?}");
+
+        assert!(debug.contains("ConfigDef"));
+        assert!(debug.contains("demo"));
+        assert!(debug.contains("password"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("literal-secret"));
+    }
+
+    #[test]
     #[should_panic(expected = "duplicate connector config key `database_url`")]
     fn duplicate_config_def_keys_panic_at_definition_time() {
         let _ = ConfigDef::new("demo")
@@ -567,6 +597,30 @@ mod tests {
 
         assert!(!debug.contains("literal-secret"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn non_secret_defaults_are_not_redacted_in_debug() {
+        let key = ConfigKey {
+            name: "schema".to_string(),
+            kind: ConfigKind::String,
+            required: false,
+            default: Some(json!("public")),
+            description: None,
+        };
+
+        let debug = format!("{key:?}");
+
+        assert!(debug.contains("public"));
+        assert!(!debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn secret_default_validation_rejects_literals_without_opt_in() {
+        let err = validate_secret_default(&json!("literal-secret"), ResolveOptions::default())
+            .expect_err("literal secret defaults require explicit opt in");
+
+        assert_eq!(err, "literal secret strings are disabled");
     }
 
     #[tokio::test]

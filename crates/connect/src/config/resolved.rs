@@ -167,3 +167,20 @@ impl fmt::Debug for ResolvedConfig {
         map.finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_getter_rejects_secret_values_as_non_secret_string() {
+        let mut config = ResolvedConfig::default();
+        config.insert_secret("password", SecretString::new("literal-secret"));
+
+        let err = config.get_string("password").unwrap_err();
+
+        assert!(
+            matches!(err, ConfigError::WrongType { key, expected: "non-secret string" } if key == "password")
+        );
+    }
+}
