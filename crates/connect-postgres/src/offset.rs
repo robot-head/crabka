@@ -89,6 +89,8 @@ fn parse_lsn_half(half: &str, lsn: &str) -> Result<u64, PostgresConnectError> {
 
 #[cfg(test)]
 mod tests {
+    use crabka_connect::{OffsetValue, SourceOffset};
+
     use super::PgLsn;
     use crate::PostgresConnectError;
 
@@ -98,6 +100,10 @@ mod tests {
 
         assert_eq!(lsn, PgLsn(0x16_b374_d848));
         assert_eq!(lsn.to_string(), "16/B374D848");
+        assert_eq!(
+            "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
+            PgLsn(u64::MAX)
+        );
     }
 
     #[test]
@@ -109,7 +115,32 @@ mod tests {
             PgLsn::from_source_offset(&offset, "slot_a").expect("matching slot"),
             lsn
         );
-        assert!(PgLsn::from_source_offset(&offset, "slot_b").is_err());
+        match PgLsn::from_source_offset(&offset, "slot_b").expect_err("slot mismatch") {
+            PostgresConnectError::Offset(message) => {
+                assert!(message.contains("does not match expected slot"));
+                assert!(message.contains("slot_a"));
+                assert!(message.contains("slot_b"));
+            }
+            error => panic!("expected offset error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn source_offset_rejects_missing_or_non_string_slot() {
+        let missing = SourceOffset::default();
+        let mut non_string = PgLsn(42).to_source_offset("app", "slot_a");
+        non_string
+            .partition
+            .insert("slot".to_owned(), OffsetValue::Long(7));
+
+        for offset in [missing, non_string] {
+            match PgLsn::from_source_offset(&offset, "slot_a").expect_err("slot should fail") {
+                PostgresConnectError::Offset(message) => {
+                    assert_eq!(message, "source offset missing string slot");
+                }
+                error => panic!("expected offset error, got {error:?}"),
+            }
+        }
     }
 
     #[test]

@@ -297,8 +297,8 @@ mod tests {
     use crate::{ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema};
 
     use super::{
-        ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder, VALUE_SCHEMA_ID,
-        message_descriptor, schema_descriptor_set,
+        COLUMN_VALUE, ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder,
+        VALUE_SCHEMA_ID, message_descriptor, schema_descriptor_set,
     };
 
     #[test]
@@ -412,6 +412,52 @@ mod tests {
 
         assert_eq!(string_field(id_column, "kind"), "int");
         assert_eq!(i64_field(id_column, "int_value"), 42);
+    }
+
+    #[test]
+    fn descriptor_fields_have_expected_proto3_labels() {
+        let descriptor_set = schema_descriptor_set();
+        let file = descriptor_set.file.first().expect("descriptor file");
+        let column_value = file
+            .message_type
+            .iter()
+            .find(|message| message.name.as_deref() == Some(COLUMN_VALUE))
+            .expect("column value message");
+        let entity_key = file
+            .message_type
+            .iter()
+            .find(|message| message.name.as_deref() == Some(ENTITY_KEY))
+            .expect("entity key message");
+        let entity_difference = file
+            .message_type
+            .iter()
+            .find(|message| message.name.as_deref() == Some(ENTITY_DIFFERENCE))
+            .expect("entity difference message");
+
+        assert_eq!(
+            column_value
+                .field
+                .iter()
+                .find(|field| field.name.as_deref() == Some("name"))
+                .and_then(|field| field.label),
+            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32)
+        );
+        assert_eq!(
+            entity_key
+                .field
+                .iter()
+                .find(|field| field.name.as_deref() == Some("columns"))
+                .and_then(|field| field.label),
+            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Repeated as i32)
+        );
+        assert_eq!(
+            entity_difference
+                .field
+                .iter()
+                .find(|field| field.name.as_deref() == Some("key"))
+                .and_then(|field| field.label),
+            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32)
+        );
     }
 
     fn sample_difference() -> EntityDifference {

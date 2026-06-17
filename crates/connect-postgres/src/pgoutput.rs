@@ -632,10 +632,13 @@ fn has_any_key_column(schema: &TableSchema, values: &[ColumnValue]) -> bool {
 mod tests {
     use assert2::check;
 
-    use super::{RelationCache, RelationEvent, RowEvent, RowEventKind, RowTupleKind};
+    use super::{
+        RelationCache, RelationEvent, RowEvent, RowEventKind, RowTupleKind, coerce_bytea,
+        coerce_value,
+    };
     use crate::PgLsn;
     use crate::PostgresConnectError;
-    use crate::model::{ColumnSchema, ColumnValue, Operation, ScalarValue};
+    use crate::model::{ColumnSchema, ColumnValue, Operation, ScalarValue, TableSchema};
 
     fn orders_relation(type_name: &str) -> RelationEvent {
         RelationEvent {
@@ -965,6 +968,122 @@ mod tests {
                 check!(message.contains("public.orders"));
             }
             error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn pgoutput_text_scalars_are_coerced_to_declared_column_types() {
+        check!(
+            coerce_value(ScalarValue::Text("t".to_owned()), "bool").expect("true bool")
+                == ScalarValue::Bool(true)
+        );
+        check!(
+            coerce_value(ScalarValue::Text("f".to_owned()), "bool").expect("false bool")
+                == ScalarValue::Bool(false)
+        );
+        check!(
+            coerce_value(ScalarValue::Text("12.50".to_owned()), "numeric").expect("numeric")
+                == ScalarValue::Float("12.50".to_owned())
+        );
+        check!(
+            coerce_value(ScalarValue::Text("\\xDEad".to_owned()), "bytea").expect("bytea")
+                == ScalarValue::Bytes(vec![0xde, 0xad])
+        );
+    }
+
+    #[test]
+    fn invalid_bool_text_is_rejected() {
+        let error = coerce_value(ScalarValue::Text("yes".to_owned()), "bool")
+            .expect_err("invalid bool should fail");
+
+        match error {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("invalid bool pgoutput text value"));
+                check!(message.contains("yes"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn bytea_text_supports_escape_and_raw_forms() {
+        check!(coerce_bytea("\\x0001ff").expect("hex bytea") == vec![0, 1, 255]);
+        check!(coerce_bytea("raw").expect("raw bytea") == b"raw".to_vec());
+    }
+
+    #[test]
+    fn bytea_hex_rejects_odd_length_and_invalid_pairs() {
+        let odd = coerce_bytea("\\x0").expect_err("odd-length bytea should fail");
+        let invalid = coerce_bytea("\\xzz").expect_err("invalid bytea should fail");
+
+        match odd {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("odd hex length"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+        match invalid {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("invalid bytea pgoutput text value"));
+                check!(message.contains("zz"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn update_without_old_tuple_does_not_trigger_key_change_check() {
+        let mut cache = RelationCache::default();
+        cache.apply_relation(orders_relation("text"));
+
+        let difference = cache
+            .translate(RowEvent {
+                relation_id: 7,
+                lsn: PgLsn(0x35),
+                commit_lsn: None,
+                txid: None,
+                commit_timestamp_ms: None,
+                kind: RowEventKind::Update {
+                    old: Vec::new(),
+                    old_tuple_kind: RowTupleKind::Full,
+                },
+                values: vec![id(42), status("paid")],
+            })
+            .expect("missing old tuple should translate");
+
+        check!(difference.key.columns == vec![id(42)]);
+        check!(difference.before == Vec::new());
+    }
+
+    #[test]
+    fn key_column_presence_ignores_non_key_columns() {
+        let schema = TableSchema {
+            schema: "public".to_owned(),
+            table: "orders".to_owned(),
+            columns: orders_relation("text").columns,
+        };
+
+        check!(super::has_any_key_column(&schema, &[id(42)]));
+        check!(!super::has_any_key_column(&schema, &[status("paid")]));
+        check!(!super::has_any_key_column(&schema, &[]));
+    }
+
+    #[test]
+    fn type_oids_map_to_supported_scalar_names() {
+        for (oid, name) in [
+            (16, "bool"),
+            (17, "bytea"),
+            (20, "int8"),
+            (21, "int2"),
+            (23, "int4"),
+            (25, "text"),
+            (700, "float4"),
+            (701, "float8"),
+            (1043, "varchar"),
+            (1700, "numeric"),
+            (999_999, "unknown"),
+        ] {
+            check!(super::type_name(oid) == name);
         }
     }
 }
@@ -1302,6 +1421,27 @@ mod decode_tests {
         match error {
             PostgresConnectError::Backend(message) => {
                 check!(message.contains("truncated"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_message_bytes_are_rejected() {
+        let mut bytes = vec![b'I'];
+        put_i32(&mut bytes, 7);
+        bytes.push(b'N');
+        put_i16(&mut bytes, 2);
+        put_text_value(&mut bytes, "42");
+        put_text_value(&mut bytes, "paid");
+        bytes.push(0xff);
+
+        let error = decode_pgoutput_message(&bytes, PgLsn(0), None)
+            .expect_err("trailing bytes should fail");
+
+        match error {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("trailing bytes"));
             }
             error => panic!("expected backend error, got {error:?}"),
         }

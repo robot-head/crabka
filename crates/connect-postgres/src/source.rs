@@ -411,12 +411,8 @@ async fn validate_publication_tables(
     let published_tables = rows
         .into_iter()
         .map(|row| row.get::<_, String>("tablename"))
-        .collect::<HashSet<_>>();
-    let missing_tables = tables
-        .iter()
-        .filter(|table| !published_tables.contains(*table))
-        .cloned()
         .collect::<Vec<_>>();
+    let missing_tables = missing_publication_tables(tables, published_tables);
 
     if missing_tables.is_empty() {
         Ok(())
@@ -426,6 +422,18 @@ async fn validate_publication_tables(
             missing_tables.join(", ")
         )))
     }
+}
+
+fn missing_publication_tables(
+    tables: &[String],
+    published_tables: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let published_tables = published_tables.into_iter().collect::<HashSet<_>>();
+    tables
+        .iter()
+        .filter(|table| !published_tables.contains(*table))
+        .cloned()
+        .collect()
 }
 
 async fn validate_publication_settings(
@@ -445,13 +453,17 @@ async fn validate_publication_settings(
     let pubdelete: bool = row.get("pubdelete");
     let pubtruncate: bool = row.get("pubtruncate");
 
-    if pubinsert && pubupdate && pubdelete && !pubtruncate {
+    if publication_settings_are_compatible([pubinsert, pubupdate, pubdelete, pubtruncate]) {
         Ok(())
     } else {
         Err(ConnectError::Backend(format!(
             "publication {publication:?} must publish insert, update, and delete, and must not publish truncate"
         )))
     }
+}
+
+fn publication_settings_are_compatible([insert, update, delete, truncate]: [bool; 4]) -> bool {
+    insert && update && delete && !truncate
 }
 
 async fn ensure_slot(
@@ -478,16 +490,32 @@ async fn ensure_slot(
     let plugin: Option<String> = slot.get("plugin");
     let slot_type: String = slot.get("slot_type");
     let database: Option<String> = slot.get("database");
+    validate_slot_metadata(
+        slot_name,
+        plugin.as_deref(),
+        &slot_type,
+        database.as_deref(),
+        database_name,
+    )
+}
+
+fn validate_slot_metadata(
+    slot_name: &str,
+    plugin: Option<&str>,
+    slot_type: &str,
+    database: Option<&str>,
+    database_name: &str,
+) -> Result<(), ConnectError> {
     let mut mismatches = Vec::new();
 
-    if plugin.as_deref() != Some("pgoutput") {
-        mismatches.push(format!("plugin is {:?}", plugin.as_deref()));
+    if plugin != Some("pgoutput") {
+        mismatches.push(format!("plugin is {plugin:?}"));
     }
     if slot_type != "logical" {
         mismatches.push(format!("slot_type is {slot_type:?}"));
     }
-    if database.as_deref() != Some(database_name) {
-        mismatches.push(format!("database is {:?}", database.as_deref()));
+    if database != Some(database_name) {
+        mismatches.push(format!("database is {database:?}"));
     }
 
     if mismatches.is_empty() {
@@ -533,8 +561,9 @@ mod sql_tests {
     use assert2::check;
 
     use super::{
-        advance_slot_sql, create_publication_sql, peek_binary_changes_sql,
-        publication_settings_sql, publication_tables_sql, replication_slot_sql,
+        advance_slot_sql, create_publication_sql, missing_publication_tables,
+        peek_binary_changes_sql, publication_settings_are_compatible, publication_settings_sql,
+        publication_tables_sql, replication_slot_sql, validate_slot_metadata,
     };
 
     #[test]
@@ -596,6 +625,58 @@ mod sql_tests {
     fn advance_slot_sql_casts_lsn_parameter() {
         check!(advance_slot_sql() == "SELECT pg_replication_slot_advance($1, $2::pg_lsn)");
     }
+
+    #[test]
+    fn publication_table_validation_reports_only_missing_configured_tables() {
+        let missing = missing_publication_tables(
+            &["orders".to_owned(), "accounts".to_owned()],
+            ["orders".to_owned(), "ignored".to_owned()],
+        );
+
+        check!(missing == vec!["accounts".to_owned()]);
+    }
+
+    #[test]
+    fn publication_settings_require_insert_update_delete_without_truncate() {
+        check!(publication_settings_are_compatible([
+            true, true, true, false
+        ]));
+        check!(!publication_settings_are_compatible([
+            false, true, true, false
+        ]));
+        check!(!publication_settings_are_compatible([
+            true, false, true, false
+        ]));
+        check!(!publication_settings_are_compatible([
+            true, true, false, false
+        ]));
+        check!(!publication_settings_are_compatible([
+            true, true, true, true
+        ]));
+    }
+
+    #[test]
+    fn slot_metadata_accepts_pgoutput_logical_slot_for_current_database() {
+        validate_slot_metadata("slot_a", Some("pgoutput"), "logical", Some("app"), "app")
+            .expect("matching slot should validate");
+    }
+
+    #[test]
+    fn slot_metadata_reports_all_incompatible_fields() {
+        let error =
+            validate_slot_metadata("slot_a", Some("test_decoding"), "physical", None, "app")
+                .expect_err("incompatible slot should fail");
+
+        match error {
+            crabka_connect::ConnectError::Backend(message) => {
+                check!(message.contains("replication slot \"slot_a\" is not compatible"));
+                check!(message.contains("plugin is Some(\"test_decoding\")"));
+                check!(message.contains("slot_type is \"physical\""));
+                check!(message.contains("database is None"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -604,7 +685,7 @@ mod tests {
     use crabka_connect::{SecretString, Source as _};
     use crabka_schema_serde::wire::MAGIC;
 
-    use super::{LogicalEvent, PostgresWalSource};
+    use super::{LogicalEvent, PostgresWalSource, validate_database};
     use crate::model::{ColumnSchema, ColumnValue, ScalarValue};
     use crate::pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind};
     use crate::{PgLsn, PostgresSourceConfig};
@@ -757,6 +838,28 @@ mod tests {
         check!(source.checkpoint() == Some(PgLsn(0x2a).to_source_offset("app", "slot_a")));
     }
 
+    #[test]
+    fn skip_lsn_checks_resume_and_checkpoint_offsets_independently() {
+        let mut source = PostgresWalSource::scripted(config("slot_a"), "app", []).unwrap();
+        source.resume_lsn = Some(PgLsn(0x20));
+
+        check!(source.should_skip_lsn(PgLsn(0x20)));
+        check!(!source.should_skip_lsn(PgLsn(0x21)));
+
+        source.resume_lsn = None;
+        source.checkpoint = Some(PgLsn(0x30));
+
+        check!(source.should_skip_lsn(PgLsn(0x30)));
+        check!(!source.should_skip_lsn(PgLsn(0x31)));
+
+        source.resume_lsn = Some(PgLsn(0x20));
+        source.checkpoint = Some(PgLsn(0x30));
+
+        check!(source.should_skip_lsn(PgLsn(0x20)));
+        check!(source.should_skip_lsn(PgLsn(0x30)));
+        check!(!source.should_skip_lsn(PgLsn(0x31)));
+    }
+
     #[tokio::test]
     async fn seek_past_first_row_poll_emits_only_later_row_without_regressing_checkpoint() {
         let mut source = PostgresWalSource::scripted(
@@ -834,6 +937,40 @@ mod tests {
 
         check!(matches!(error, crabka_connect::ConnectError::Offset(_)));
         check!(source.checkpoint().is_none());
+    }
+
+    #[test]
+    fn validate_database_rejects_missing_or_non_string_database_partition() {
+        let missing = crabka_connect::SourceOffset::default();
+        let mut non_string = crabka_connect::SourceOffset::default();
+        non_string
+            .partition
+            .insert("database".to_owned(), crabka_connect::OffsetValue::Long(7));
+
+        check!(matches!(
+            validate_database(&missing, "app"),
+            Err(crabka_connect::ConnectError::Offset(_))
+        ));
+        check!(matches!(
+            validate_database(&non_string, "app"),
+            Err(crabka_connect::ConnectError::Offset(_))
+        ));
+    }
+
+    #[test]
+    fn validate_database_reports_database_mismatch() {
+        let offset = PgLsn(0x2a).to_source_offset("other_app", "slot_a");
+
+        let error = validate_database(&offset, "app").expect_err("database mismatch should fail");
+
+        match error {
+            crabka_connect::ConnectError::Offset(message) => {
+                check!(message.contains("does not match expected database"));
+                check!(message.contains("other_app"));
+                check!(message.contains("app"));
+            }
+            error => panic!("expected offset error, got {error:?}"),
+        }
     }
 
     #[tokio::test]
