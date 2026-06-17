@@ -30,6 +30,7 @@
 //! value is a tombstone), an optional timestamp, and ordered headers — see
 //! [`ConnectRecord`].
 
+pub mod config;
 pub mod convert;
 pub mod error;
 pub mod record;
@@ -37,12 +38,21 @@ pub mod runtime;
 pub mod sink;
 pub mod source;
 
+pub use config::{
+    ConfigDef, ConfigError, ConfigKey, ConfigKind, ConfigResult, ConnectorConfig,
+    EnvSecretResolver, FromResolvedValue, RawConfig, ResolveOptions, ResolvedConfig, SecretRef,
+    SecretResolutionError, SecretResolver, SecretString,
+};
 pub use convert::{ByteIdentity, Converter, SchemaConverter};
+#[cfg(feature = "derive")]
+pub use crabka_connect_derive::ConnectorConfig;
 pub use error::ConnectError;
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
 pub use runtime::{
     CheckpointStore, ConnectorHandle, ConnectorRuntime, InMemoryCheckpointStore, RuntimeState,
 };
+#[doc(hidden)]
+pub use serde_json as __serde_json;
 pub use sink::Sink;
 pub use source::Source;
 

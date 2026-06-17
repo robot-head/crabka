@@ -13,13 +13,15 @@ pub mod json;
 #[cfg(feature = "protobuf")]
 pub mod protobuf;
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 
-use crate::cache::SchemaCache;
 use crate::error::SchemaSerdeError;
-use crate::subject::{Role, SchemaKind};
+#[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
+use {
+    crate::cache::SchemaCache,
+    crate::subject::{Role, SchemaKind},
+    std::sync::Arc,
+};
 
 /// Serialize `T` to a Confluent-framed payload for `topic` (subject derived
 /// from the topic + the serde's role).
@@ -46,6 +48,7 @@ pub trait SchemaSubject: Send + Sync + 'static {
 
 /// Shared bound state every format serde carries: the cache, the role, and the
 /// local type's schema (kind + text) used for registration/lookup.
+#[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
 #[derive(Clone)]
 pub(crate) struct Binding {
     pub cache: Arc<SchemaCache>,
@@ -54,6 +57,7 @@ pub(crate) struct Binding {
     pub schema: String,
 }
 
+#[cfg(any(feature = "avro", feature = "json", feature = "protobuf"))]
 impl Binding {
     /// The registry subject for `topic` under this serde's role.
     pub(crate) fn subject(&self, topic: &str) -> String {
