@@ -293,6 +293,7 @@ mod tests {
     use crabka_schema_serde::wire::decode_protobuf;
 
     use crate::model::{ColumnSchema, ScalarValue};
+    use crate::pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind};
     use crate::{ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema};
 
     use super::{
@@ -365,6 +366,52 @@ mod tests {
             string_field(unchanged_toast_column, "kind"),
             "unchanged_toast"
         );
+    }
+
+    #[test]
+    fn decoded_int8_key_encodes_as_int_scalar_kind() {
+        let mut cache = RelationCache::default();
+        cache.apply_relation(RelationEvent {
+            relation_id: 7,
+            schema: "public".to_owned(),
+            table: "orders".to_owned(),
+            columns: vec![ColumnSchema {
+                name: "id".to_owned(),
+                type_name: "int8".to_owned(),
+                key: true,
+            }],
+        });
+        let difference = cache
+            .translate(RowEvent {
+                relation_id: 7,
+                lsn: PgLsn(0x2a),
+                commit_lsn: None,
+                txid: None,
+                commit_timestamp_ms: None,
+                kind: RowEventKind::Insert,
+                values: vec![ColumnValue {
+                    name: "col0".to_owned(),
+                    value: ScalarValue::Text("42".to_owned()),
+                }],
+            })
+            .expect("decoded row should translate");
+        assert_eq!(difference.key.columns[0].value, ScalarValue::Int(42));
+
+        let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
+        let key = encoder.encode_key(&difference.key).expect("key encodes");
+        let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
+            .expect("descriptor pool builds");
+        let (_, _, key_body) = decode_protobuf(&key).expect("key frame decodes");
+        let key_message = DynamicMessage::decode(
+            message_descriptor(&pool, ENTITY_KEY).expect("key descriptor"),
+            key_body,
+        )
+        .expect("key body decodes");
+        let key_columns = list_field(&key_message, "columns");
+        let id_column = message_value(&key_columns[0]);
+
+        assert_eq!(string_field(id_column, "kind"), "int");
+        assert_eq!(i64_field(id_column, "int_value"), 42);
     }
 
     fn sample_difference() -> EntityDifference {

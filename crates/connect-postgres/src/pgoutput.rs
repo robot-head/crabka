@@ -35,6 +35,7 @@ pub enum RowEventKind {
 pub struct RowEvent {
     pub relation_id: u32,
     pub lsn: PgLsn,
+    pub commit_lsn: Option<PgLsn>,
     pub txid: Option<i64>,
     pub commit_timestamp_ms: Option<i64>,
     pub kind: RowEventKind,
@@ -43,8 +44,15 @@ pub struct RowEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodedMessage {
-    Begin { final_lsn: PgLsn, xid: i64 },
-    Commit { commit_lsn: PgLsn },
+    Begin {
+        final_lsn: PgLsn,
+        xid: i64,
+    },
+    Commit {
+        commit_lsn: PgLsn,
+        end_lsn: PgLsn,
+        commit_timestamp_ms: i64,
+    },
     Relation(RelationEvent),
     Row(RowEvent),
     Keepalive,
@@ -68,9 +76,14 @@ pub fn decode_pgoutput_message(
         b'C' => {
             let _flags = reader.read_u8("commit flags")?;
             let commit_lsn = PgLsn(reader.read_u64("commit commit_lsn")?);
-            let _end_lsn = reader.read_u64("commit end_lsn")?;
-            let _commit_time = reader.read_i64("commit commit_time")?;
-            DecodedMessage::Commit { commit_lsn }
+            let end_lsn = PgLsn(reader.read_u64("commit end_lsn")?);
+            let commit_timestamp_ms =
+                postgres_timestamp_micros_to_unix_ms(reader.read_i64("commit commit_time")?);
+            DecodedMessage::Commit {
+                commit_lsn,
+                end_lsn,
+                commit_timestamp_ms,
+            }
         }
         b'R' => DecodedMessage::Relation(decode_relation(&mut reader)?),
         b'I' => DecodedMessage::Row(decode_insert(&mut reader, lsn, txid)?),
@@ -134,6 +147,7 @@ fn decode_insert(
     Ok(RowEvent {
         relation_id,
         lsn,
+        commit_lsn: None,
         txid,
         commit_timestamp_ms: None,
         kind: RowEventKind::Insert,
@@ -174,6 +188,7 @@ fn decode_update(
     Ok(RowEvent {
         relation_id,
         lsn,
+        commit_lsn: None,
         txid,
         commit_timestamp_ms: None,
         kind: RowEventKind::Update {
@@ -202,6 +217,7 @@ fn decode_delete(
     Ok(RowEvent {
         relation_id,
         lsn,
+        commit_lsn: None,
         txid,
         commit_timestamp_ms: None,
         kind: RowEventKind::Delete {
@@ -258,6 +274,7 @@ fn decode_tuple(reader: &mut PgOutputReader<'_>) -> Result<Vec<ColumnValue>, Pos
 fn type_name(type_oid: i32) -> &'static str {
     match type_oid {
         16 => "bool",
+        17 => "bytea",
         20 => "int8",
         21 => "int2",
         23 => "int4",
@@ -268,6 +285,11 @@ fn type_name(type_oid: i32) -> &'static str {
         1700 => "numeric",
         _ => "unknown",
     }
+}
+
+fn postgres_timestamp_micros_to_unix_ms(value: i64) -> i64 {
+    const POSTGRES_EPOCH_UNIX_MS: i64 = 946_684_800_000;
+    POSTGRES_EPOCH_UNIX_MS + value.div_euclid(1_000)
 }
 
 struct PgOutputReader<'a> {
@@ -410,6 +432,7 @@ impl RelationCache {
             ))
         })?;
         let table = format!("{}.{}", schema.schema, schema.table);
+        let lsn = event.commit_lsn.unwrap_or(event.lsn);
 
         let (op, before, after, key_columns) = match event.kind {
             RowEventKind::Insert => {
@@ -458,7 +481,7 @@ impl RelationCache {
             op,
             before,
             after,
-            lsn: event.lsn,
+            lsn,
             txid: event.txid,
             commit_timestamp_ms: event.commit_timestamp_ms,
             schema: schema.clone(),
@@ -492,17 +515,86 @@ fn normalize_values(
             .iter()
             .any(|column| column.name == value.name)
     }) {
-        return Ok(values);
+        return values
+            .into_iter()
+            .map(|value| {
+                let column = expected_columns
+                    .iter()
+                    .find(|column| column.name == value.name)
+                    .expect("validated column name should be present");
+                Ok(ColumnValue {
+                    name: value.name,
+                    value: coerce_value(value.value, &column.type_name)?,
+                })
+            })
+            .collect();
     }
 
-    Ok(values
+    values
         .into_iter()
         .zip(expected_columns)
-        .map(|(value, column)| ColumnValue {
-            name: column.name.clone(),
-            value: value.value,
+        .map(|(value, column)| {
+            Ok(ColumnValue {
+                name: column.name.clone(),
+                value: coerce_value(value.value, &column.type_name)?,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn coerce_value(value: ScalarValue, type_name: &str) -> Result<ScalarValue, PostgresConnectError> {
+    let ScalarValue::Text(text) = value else {
+        return Ok(value);
+    };
+
+    match type_name {
+        "bool" => coerce_bool(&text),
+        "int2" | "int4" | "int8" => text.parse::<i64>().map(ScalarValue::Int).map_err(|error| {
+            PostgresConnectError::Backend(format!(
+                "invalid {type_name} pgoutput text value {text:?}: {error}"
+            ))
+        }),
+        "float4" | "float8" | "numeric" => Ok(ScalarValue::Float(text)),
+        "bytea" => Ok(ScalarValue::Bytes(coerce_bytea(&text)?)),
+        _ => Ok(ScalarValue::Text(text)),
+    }
+}
+
+fn coerce_bool(text: &str) -> Result<ScalarValue, PostgresConnectError> {
+    match text {
+        "t" | "true" | "1" => Ok(ScalarValue::Bool(true)),
+        "f" | "false" | "0" => Ok(ScalarValue::Bool(false)),
+        _ => Err(PostgresConnectError::Backend(format!(
+            "invalid bool pgoutput text value {text:?}"
+        ))),
+    }
+}
+
+fn coerce_bytea(text: &str) -> Result<Vec<u8>, PostgresConnectError> {
+    let Some(hex) = text.strip_prefix("\\x") else {
+        return Ok(text.as_bytes().to_vec());
+    };
+    if hex.len() % 2 != 0 {
+        return Err(PostgresConnectError::Backend(format!(
+            "invalid bytea pgoutput text value {text:?}: odd hex length"
+        )));
+    }
+
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let pair = std::str::from_utf8(chunk).map_err(|error| {
+                PostgresConnectError::Backend(format!(
+                    "invalid bytea pgoutput text value {text:?}: {error}"
+                ))
+            })?;
+            u8::from_str_radix(pair, 16).map_err(|error| {
+                PostgresConnectError::Backend(format!(
+                    "invalid bytea pgoutput text value {text:?}: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn extract_key_columns(
@@ -621,6 +713,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x16_b374_d848),
+                commit_lsn: None,
                 txid: Some(99),
                 commit_timestamp_ms: Some(1_700_000_000_000),
                 kind: RowEventKind::Insert,
@@ -651,6 +744,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x2a),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Delete {
@@ -677,6 +771,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x2b),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Insert,
@@ -696,6 +791,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x2c),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Insert,
@@ -714,6 +810,7 @@ mod tests {
         let result = cache.translate(RowEvent {
             relation_id: 7,
             lsn: PgLsn(0x2d),
+            commit_lsn: None,
             txid: None,
             commit_timestamp_ms: None,
             kind: RowEventKind::Insert,
@@ -741,6 +838,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x2e),
+                commit_lsn: None,
                 txid: Some(100),
                 commit_timestamp_ms: Some(1_700_000_000_001),
                 kind: RowEventKind::Update {
@@ -765,6 +863,7 @@ mod tests {
         let result = cache.translate(RowEvent {
             relation_id: 7,
             lsn: PgLsn(0x2f),
+            commit_lsn: None,
             txid: None,
             commit_timestamp_ms: None,
             kind: RowEventKind::Update {
@@ -792,6 +891,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x30),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Insert,
@@ -809,7 +909,7 @@ mod tests {
             .expect("decoded placeholders should bind to relation schema");
 
         check!(difference.key.columns[0].name == "id");
-        check!(difference.key.columns[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.key.columns[0].value == ScalarValue::Int(42));
         check!(difference.after[1].name == "status");
     }
 
@@ -822,6 +922,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x31),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Insert,
@@ -850,6 +951,7 @@ mod tests {
             .translate(RowEvent {
                 relation_id: 7,
                 lsn: PgLsn(0x34),
+                commit_lsn: None,
                 txid: None,
                 commit_timestamp_ms: None,
                 kind: RowEventKind::Insert,
@@ -1027,8 +1129,34 @@ mod decode_tests {
             .expect("decoded insert should translate");
 
         check!(difference.key.columns[0].name == "id");
-        check!(difference.key.columns[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.key.columns[0].value == ScalarValue::Int(42));
         check!(difference.after[1].name == "status");
+    }
+
+    #[test]
+    fn decoded_int8_text_value_translates_to_int_scalar_for_key() {
+        let mut cache = super::RelationCache::default();
+        cache.apply_relation(orders_relation_message());
+
+        let mut insert_bytes = vec![b'I'];
+        put_i32(&mut insert_bytes, 7);
+        insert_bytes.push(b'N');
+        put_i16(&mut insert_bytes, 2);
+        put_text_value(&mut insert_bytes, "42");
+        put_text_value(&mut insert_bytes, "paid");
+
+        let DecodedMessage::Row(row) =
+            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(101))
+                .expect("insert should decode")
+        else {
+            panic!("expected row");
+        };
+        let difference = cache
+            .translate(row)
+            .expect("decoded insert should translate");
+
+        check!(difference.key.columns[0].name == "id");
+        check!(difference.key.columns[0].value == ScalarValue::Int(42));
     }
 
     #[test]
@@ -1054,7 +1182,7 @@ mod decode_tests {
 
         check!(difference.key.columns[0].name == "id");
         check!(difference.before[0].name == "id");
-        check!(difference.before[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.before[0].value == ScalarValue::Int(42));
     }
 
     #[test]
@@ -1083,7 +1211,7 @@ mod decode_tests {
             .expect("decoded update should translate");
 
         check!(difference.before[0].name == "id");
-        check!(difference.before[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.before[0].value == ScalarValue::Int(42));
         check!(difference.after[1].name == "status");
         check!(difference.after[1].value == ScalarValue::Text("paid".to_owned()));
     }
@@ -1198,7 +1326,7 @@ mod decode_tests {
         let mut commit = vec![b'C', 0];
         put_i64(&mut commit, 0x0102_0305);
         put_i64(&mut commit, 0x0102_0306);
-        put_i64(&mut commit, 1_700_000_001);
+        put_i64(&mut commit, 1_000);
 
         let decoded =
             decode_pgoutput_message(&commit, PgLsn(0), None).expect("commit should decode");
@@ -1206,6 +1334,8 @@ mod decode_tests {
             decoded
                 == DecodedMessage::Commit {
                     commit_lsn: PgLsn(0x0102_0305),
+                    end_lsn: PgLsn(0x0102_0306),
+                    commit_timestamp_ms: 946_684_800_001,
                 }
         );
     }

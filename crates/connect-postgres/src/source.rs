@@ -14,8 +14,22 @@ use crate::{PgLsn, PostgresSourceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalEvent {
+    Begin {
+        final_lsn: PgLsn,
+        xid: i64,
+    },
+    Commit {
+        commit_lsn: PgLsn,
+        end_lsn: PgLsn,
+        commit_timestamp_ms: i64,
+    },
     Relation(RelationEvent),
     Row(RowEvent),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TransactionState {
+    xid: i64,
 }
 
 #[derive(Debug)]
@@ -26,6 +40,8 @@ pub struct PostgresWalSource {
     relation_cache: RelationCache,
     encoder: PostgresProtoEncoder,
     pending: VecDeque<LogicalEvent>,
+    transaction: Option<TransactionState>,
+    transaction_rows: Vec<RowEvent>,
     checkpoint: Option<PgLsn>,
     resume_lsn: Option<PgLsn>,
 }
@@ -43,6 +59,8 @@ impl PostgresWalSource {
             relation_cache: RelationCache::default(),
             encoder: PostgresProtoEncoder::new()?,
             pending: events.into_iter().collect(),
+            transaction: None,
+            transaction_rows: Vec::new(),
             checkpoint: None,
             resume_lsn: None,
         })
@@ -78,6 +96,7 @@ impl PostgresWalSource {
                 &config.table_names,
             )
             .await?;
+            validate_publication_settings(&client, &config.publication_name).await?;
         }
 
         ensure_slot(&client, &config.slot_name, &database_name).await?;
@@ -89,6 +108,8 @@ impl PostgresWalSource {
             relation_cache: RelationCache::default(),
             encoder: PostgresProtoEncoder::new()?,
             pending: VecDeque::new(),
+            transaction: None,
+            transaction_rows: Vec::new(),
             checkpoint: None,
             resume_lsn: None,
         })
@@ -122,37 +143,118 @@ impl PostgresWalSource {
 
         for row in rows {
             let lsn: String = row.get("lsn");
-            let xid: i64 = row.get("xid");
             let data: Vec<u8> = row.get("data");
             let lsn = lsn.parse::<PgLsn>()?;
 
-            match decode_pgoutput_message(&data, lsn, Some(xid))? {
-                DecodedMessage::Relation(relation) => {
-                    self.pending.push_back(LogicalEvent::Relation(relation));
-                }
-                DecodedMessage::Row(row) => {
-                    if !self.should_skip_row(row.lsn) {
-                        self.pending.push_back(LogicalEvent::Row(row));
-                    }
-                }
-                DecodedMessage::Begin { .. }
-                | DecodedMessage::Commit { .. }
-                | DecodedMessage::Keepalive => {}
-            }
+            self.apply_decoded_message(decode_pgoutput_message(&data, lsn, None)?);
         }
 
         Ok(())
     }
 
-    fn should_skip_row(&self, lsn: PgLsn) -> bool {
+    fn apply_decoded_message(&mut self, message: DecodedMessage) {
+        match message {
+            DecodedMessage::Begin { final_lsn, xid } => {
+                self.apply_logical_event(LogicalEvent::Begin { final_lsn, xid });
+            }
+            DecodedMessage::Commit {
+                commit_lsn,
+                end_lsn,
+                commit_timestamp_ms,
+            } => self.apply_logical_event(LogicalEvent::Commit {
+                commit_lsn,
+                end_lsn,
+                commit_timestamp_ms,
+            }),
+            DecodedMessage::Relation(relation) => {
+                self.apply_logical_event(LogicalEvent::Relation(relation));
+            }
+            DecodedMessage::Row(row) => self.apply_logical_event(LogicalEvent::Row(row)),
+            DecodedMessage::Keepalive => {}
+        }
+    }
+
+    fn apply_logical_event(&mut self, event: LogicalEvent) {
+        match event {
+            LogicalEvent::Begin { final_lsn: _, xid } => {
+                self.transaction = Some(TransactionState { xid });
+                self.transaction_rows.clear();
+            }
+            LogicalEvent::Commit {
+                commit_lsn: _,
+                end_lsn,
+                commit_timestamp_ms,
+            } => {
+                self.commit_transaction(end_lsn, commit_timestamp_ms);
+            }
+            LogicalEvent::Relation(relation) => {
+                self.pending.push_back(LogicalEvent::Relation(relation));
+            }
+            LogicalEvent::Row(row) => {
+                self.enqueue_row(row);
+            }
+        }
+    }
+
+    fn enqueue_row(&mut self, row: RowEvent) {
+        if self.should_skip_row(&row) {
+            return;
+        }
+
+        if self.transaction.is_some() {
+            if !self.transaction_rows.contains(&row) {
+                self.transaction_rows.push(row);
+            }
+        } else {
+            self.pending.push_back(LogicalEvent::Row(row));
+        }
+    }
+
+    fn commit_transaction(&mut self, end_lsn: PgLsn, commit_timestamp_ms: i64) {
+        let Some(transaction) = self.transaction.take() else {
+            return;
+        };
+        if self.should_skip_lsn(end_lsn) {
+            self.transaction_rows.clear();
+            return;
+        }
+
+        for mut row in self.transaction_rows.drain(..) {
+            row.commit_lsn = Some(end_lsn);
+            row.txid = Some(transaction.xid);
+            row.commit_timestamp_ms = Some(commit_timestamp_ms);
+            self.pending.push_back(LogicalEvent::Row(row));
+        }
+    }
+
+    fn should_skip_row(&self, row: &RowEvent) -> bool {
+        let checkpoint_lsn = row.commit_lsn.unwrap_or(row.lsn);
+        if self.should_skip_resume_lsn(checkpoint_lsn) {
+            return true;
+        }
+        if row.commit_lsn.is_some() {
+            return false;
+        }
+
+        self.should_skip_checkpoint_lsn(row.lsn)
+    }
+
+    fn should_skip_lsn(&self, lsn: PgLsn) -> bool {
+        self.should_skip_resume_lsn(lsn) || self.should_skip_checkpoint_lsn(lsn)
+    }
+
+    fn should_skip_resume_lsn(&self, lsn: PgLsn) -> bool {
+        self.resume_lsn.is_some_and(|resume_lsn| lsn <= resume_lsn)
+    }
+
+    fn should_skip_checkpoint_lsn(&self, lsn: PgLsn) -> bool {
         // Because the live path peeks, Postgres can return rows that were
         // already emitted and checkpointed in this process. Skip them here so
         // duplicate peek results do not re-emit before the runtime calls
         // acknowledge, which advances the replication slot after checkpoint
         // persistence.
-        self.resume_lsn
-            .max(self.checkpoint)
-            .is_some_and(|resume_lsn| lsn <= resume_lsn)
+        self.checkpoint
+            .is_some_and(|checkpoint_lsn| lsn <= checkpoint_lsn)
     }
 }
 
@@ -165,12 +267,22 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
 
         while let Some(event) = self.pending.front().cloned() {
             match event {
+                LogicalEvent::Begin { .. } | LogicalEvent::Commit { .. } => {
+                    self.pending.pop_front();
+                    self.apply_logical_event(event);
+                }
                 LogicalEvent::Relation(relation) => {
                     self.pending.pop_front();
                     self.relation_cache.apply_relation(relation);
                 }
                 LogicalEvent::Row(row) => {
-                    if self.should_skip_row(row.lsn) {
+                    if self.transaction.is_some() && row.commit_lsn.is_none() {
+                        self.pending.pop_front();
+                        self.apply_logical_event(LogicalEvent::Row(row));
+                        continue;
+                    }
+
+                    if self.should_skip_row(&row) {
                         self.pending.pop_front();
                         continue;
                     }
@@ -249,7 +361,7 @@ fn create_publication_sql(publication: &str, schema: &str, tables: &[String]) ->
         .collect::<Vec<_>>()
         .join(", ");
     let create_sql = format!(
-        "CREATE PUBLICATION {} FOR TABLE {}",
+        "CREATE PUBLICATION {} FOR TABLE {} WITH (publish = 'insert, update, delete')",
         quote_ident(publication),
         table_list
     );
@@ -263,7 +375,7 @@ fn create_publication_sql(publication: &str, schema: &str, tables: &[String]) ->
 
 fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
     format!(
-        "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_peek_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
+        "SELECT lsn::text AS lsn, data FROM pg_logical_slot_peek_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
         sql_string(slot),
         max_messages,
         sql_string(publication)
@@ -272,6 +384,10 @@ fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> 
 
 fn publication_tables_sql() -> &'static str {
     "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
+}
+
+fn publication_settings_sql() -> &'static str {
+    "SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = $1"
 }
 
 fn replication_slot_sql() -> &'static str {
@@ -308,6 +424,32 @@ async fn validate_publication_tables(
         Err(ConnectError::Backend(format!(
             "publication {publication:?} does not cover configured tables: {}",
             missing_tables.join(", ")
+        )))
+    }
+}
+
+async fn validate_publication_settings(
+    client: &Client,
+    publication: &str,
+) -> Result<(), ConnectError> {
+    let Some(row) = client
+        .query_opt(publication_settings_sql(), &[&publication])
+        .await
+        .map_err(|error| ConnectError::Backend(error.to_string()))?
+    else {
+        return Ok(());
+    };
+
+    let pubinsert: bool = row.get("pubinsert");
+    let pubupdate: bool = row.get("pubupdate");
+    let pubdelete: bool = row.get("pubdelete");
+    let pubtruncate: bool = row.get("pubtruncate");
+
+    if pubinsert && pubupdate && pubdelete && !pubtruncate {
+        Ok(())
+    } else {
+        Err(ConnectError::Backend(format!(
+            "publication {publication:?} must publish insert, update, and delete, and must not publish truncate"
         )))
     }
 }
@@ -391,8 +533,8 @@ mod sql_tests {
     use assert2::check;
 
     use super::{
-        advance_slot_sql, create_publication_sql, peek_binary_changes_sql, publication_tables_sql,
-        replication_slot_sql,
+        advance_slot_sql, create_publication_sql, peek_binary_changes_sql,
+        publication_settings_sql, publication_tables_sql, replication_slot_sql,
     };
 
     #[test]
@@ -415,8 +557,15 @@ mod sql_tests {
         let sql = peek_binary_changes_sql("slot'name", 25, "pub'name");
 
         check!(
-            sql == "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_peek_binary_changes('slot''name', NULL, 25, 'proto_version', '1', 'publication_names', 'pub''name')"
+            sql == "SELECT lsn::text AS lsn, data FROM pg_logical_slot_peek_binary_changes('slot''name', NULL, 25, 'proto_version', '1', 'publication_names', 'pub''name')"
         );
+    }
+
+    #[test]
+    fn publication_sql_excludes_truncate_events() {
+        let sql = create_publication_sql("pub", "public", &["orders".to_owned()]);
+
+        check!(sql.contains("WITH (publish = ''insert, update, delete'')"));
     }
 
     #[test]
@@ -424,6 +573,14 @@ mod sql_tests {
         check!(
             publication_tables_sql()
                 == "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
+        );
+    }
+
+    #[test]
+    fn publication_settings_sql_reads_publish_flags() {
+        check!(
+            publication_settings_sql()
+                == "SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = $1"
         );
     }
 
@@ -513,6 +670,7 @@ mod tests {
         RowEvent {
             relation_id: 7,
             lsn,
+            commit_lsn: None,
             txid: Some(99),
             commit_timestamp_ms: Some(1_700_000_000_000),
             kind: RowEventKind::Insert,
@@ -524,6 +682,7 @@ mod tests {
         RowEvent {
             relation_id: 7,
             lsn,
+            commit_lsn: None,
             txid: None,
             commit_timestamp_ms: None,
             kind: RowEventKind::Delete {
@@ -705,5 +864,76 @@ mod tests {
 
         check!(source.poll().await.expect("poll succeeds").is_none());
         check!(source.checkpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn transaction_commit_metadata_is_applied_to_all_rows() {
+        let mut second = insert_event(PgLsn(0x2b));
+        second.values = vec![id(43), status("pending")];
+        let mut source = PostgresWalSource::scripted(
+            config("slot_a"),
+            "app",
+            [
+                LogicalEvent::Relation(orders_relation()),
+                LogicalEvent::Begin {
+                    final_lsn: PgLsn(0x40),
+                    xid: 123,
+                },
+                LogicalEvent::Row(insert_event(PgLsn(0x2a))),
+                LogicalEvent::Row(second),
+                LogicalEvent::Commit {
+                    commit_lsn: PgLsn(0x41),
+                    end_lsn: PgLsn(0x42),
+                    commit_timestamp_ms: 1_700_000_000_123,
+                },
+            ],
+        )
+        .expect("source builds");
+
+        let first = source
+            .poll()
+            .await
+            .expect("first poll succeeds")
+            .expect("first row emits");
+        let second = source
+            .poll()
+            .await
+            .expect("second poll succeeds")
+            .expect("second row emits");
+
+        check!(header_value(&first, "crabka.pg.lsn").as_ref() == b"0/42");
+        check!(header_value(&second, "crabka.pg.lsn").as_ref() == b"0/42");
+        check!(first.timestamp == Some(1_700_000_000_123));
+        check!(second.timestamp == Some(1_700_000_000_123));
+        check!(source.checkpoint() == Some(PgLsn(0x42).to_source_offset("app", "slot_a")));
+        check!(source.poll().await.expect("poll succeeds").is_none());
+    }
+
+    #[test]
+    fn decoded_transaction_messages_stage_rows_with_commit_metadata() {
+        let mut source =
+            PostgresWalSource::scripted(config("slot_a"), "app", []).expect("source builds");
+        let mut row = insert_event(PgLsn(0x2a));
+        row.txid = None;
+        row.commit_timestamp_ms = None;
+
+        source.apply_decoded_message(crate::pgoutput::DecodedMessage::Begin {
+            final_lsn: PgLsn(0x40),
+            xid: 123,
+        });
+        source.apply_decoded_message(crate::pgoutput::DecodedMessage::Row(row));
+        source.apply_decoded_message(crate::pgoutput::DecodedMessage::Commit {
+            commit_lsn: PgLsn(0x41),
+            end_lsn: PgLsn(0x42),
+            commit_timestamp_ms: 1_700_000_000_123,
+        });
+
+        let Some(LogicalEvent::Row(row)) = source.pending.pop_front() else {
+            panic!("committed row should be pending");
+        };
+        check!(row.lsn == PgLsn(0x2a));
+        check!(row.commit_lsn == Some(PgLsn(0x42)));
+        check!(row.txid == Some(123));
+        check!(row.commit_timestamp_ms == Some(1_700_000_000_123));
     }
 }
