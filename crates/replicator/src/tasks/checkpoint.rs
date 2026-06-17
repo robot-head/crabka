@@ -9,8 +9,10 @@ use crabka_client_admin::AdminClient;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tracing::warn;
 
+use crate::config::NamingPolicy;
 use crate::error::ReplicatorError;
 use crate::mm2::{Checkpoint, OffsetSync};
+use crate::naming::Renamer;
 use crate::offset_sync_store::OffsetSyncStore;
 use crate::selector::Selector;
 
@@ -22,6 +24,9 @@ pub struct CheckpointParams {
     pub target_bootstrap: String,
     /// Alias of the source cluster (used to derive MM2 topic names).
     pub source_alias: String,
+    /// Naming policy for the flow, used to rename the checkpoint's topic to the
+    /// remote name a failed-over consumer reads (MM2 `RemoteClusterUtils` parity).
+    pub naming: NamingPolicy,
     /// Selector for which consumer groups to checkpoint.
     pub group_selector: Selector,
     /// Optional TLS/SASL security applied to the target producer + admin.
@@ -75,6 +80,10 @@ pub async fn run_once(
         .map_err(|e| ReplicatorError::Client(format!("build target producer: {e}")))?;
 
     // 5. For each matched group, translate committed offsets and produce checkpoints.
+    // The checkpoint's topic is the REMOTE (renamed) topic a failed-over consumer
+    // reads on the target, matching MM2's `renameTopicPartition`. Offset-sync
+    // translation still keys on the SOURCE topic name.
+    let renamer = Renamer::new(params.naming, &params.source_alias);
     for group in &groups {
         let offsets = match admin.list_consumer_group_offsets(group).await {
             Ok(o) => o,
@@ -91,7 +100,7 @@ pub async fn run_once(
 
             let checkpoint = Checkpoint {
                 group: group.clone(),
-                topic,
+                topic: renamer.target_name(&topic),
                 partition,
                 upstream: committed,
                 downstream,
@@ -271,6 +280,7 @@ mod tests {
                 source_bootstrap: sb,
                 target_bootstrap: tb.clone(),
                 source_alias: "us-east".into(),
+                naming: NamingPolicy::Default,
                 group_selector: Selector::compile(&["g".into()], &[]).unwrap(),
                 security: None,
             },

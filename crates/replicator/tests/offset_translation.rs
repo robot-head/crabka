@@ -120,6 +120,7 @@ async fn offset_translation_never_skips_unreplicated_data() {
             source_bootstrap: source.bootstrap.clone(),
             target_bootstrap: target.bootstrap.clone(),
             source_alias: "us-east".into(),
+            naming: crabka_replicator::config::NamingPolicy::Default,
             group_selector: Selector::compile(&["analytics".into()], &[]).unwrap(),
             security: None,
         },
@@ -153,9 +154,11 @@ async fn offset_translation_never_skips_unreplicated_data() {
                 None
             }
         })
-        .filter(|c| c.group == "analytics" && c.topic == "orders" && c.partition == 0)
+        // MM2 parity: the checkpoint stores the RENAMED (remote) topic that a
+        // failed-over consumer reads on the target — `us-east.orders`, not `orders`.
+        .filter(|c| c.group == "analytics" && c.topic == "us-east.orders" && c.partition == 0)
         .last()
-        .expect("no checkpoint found for (analytics, orders, 0)");
+        .expect("no checkpoint found for (analytics, us-east.orders, 0)");
 
     // ------------------------------------------ count replicated records
     #[allow(clippy::cast_possible_wrap)]

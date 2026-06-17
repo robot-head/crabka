@@ -163,6 +163,7 @@ impl FlowWorker {
                 source_bootstrap: p.source_bootstrap.clone(),
                 target_bootstrap: p.target_bootstrap.clone(),
                 source_alias: p.source_alias.clone(),
+                naming: p.naming,
                 group_selector: p.group_selector.clone(),
                 security: p.security_target.clone(),
             },
