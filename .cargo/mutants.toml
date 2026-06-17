@@ -101,4 +101,8 @@ exclude_re = [
     # The parsed LSN high half is shifted left by 32 bits and the low half is
     # bounded to 32 bits, so OR and XOR produce identical values here.
     "connect-postgres/src/offset\\.rs.*replace \\| with \\^ in <impl FromStr for PgLsn>::from_str",
+    # In PostgresWalSource::poll this mutation requeues a non-transactional row
+    # forever (`transaction.is_some() || row.commit_lsn.is_none()`), so
+    # cargo-mutants reports a timeout instead of an assertion gap.
+    "connect-postgres/src/source\\.rs.*replace && with \\|\\| in <impl Source<Bytes, Bytes> for PostgresWalSource>::poll",
 ]
