@@ -1,6 +1,6 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Thirteen keys are recognized. Five propagate live to `Log.config`
+//! Fifteen keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
 //! `compression.type`), plus the tiered-storage local-retention
 //! pair (`local.retention.ms`, `local.retention.bytes`) and the KIP-534
@@ -14,6 +14,8 @@
 //! (`unclean.leader.election.enable`) read by the controller's automatic
 //! failover path on ISR-empty. One is the KIP-966 offset-aware recovery
 //! strategy (`unclean.recovery.strategy`) which supersedes it.
+//! One is Crabka's `QoS` routing key (`qos.tier`), used by producer quota
+//! enforcement to partition runtime buckets by topic tier.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
 
@@ -81,6 +83,10 @@ pub(crate) const LOCAL_RETENTION_BYTES: &str = "local.retention.bytes";
 /// KIP-534: how long tombstones and transaction markers are retained after
 /// they first become compaction-eligible (the delete-horizon grace window).
 pub(crate) const DELETE_RETENTION_MS: &str = "delete.retention.ms";
+/// Crabka extension: per-topic `QoS` tier used to partition producer quota
+/// buckets. Unset topics resolve to [`DEFAULT_QOS_TIER`].
+pub(crate) const QOS_TIER: &str = "qos.tier";
+pub(crate) const DEFAULT_QOS_TIER: &str = "default";
 
 /// Validate a single key/value pair. `Err(reason)` carries an
 /// operator-readable explanation that the handler propagates into the
@@ -116,6 +122,7 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
                 "remote.storage.enable={value} not supported; expected `true` or `false`"
             )),
         },
+        QOS_TIER => validate_qos_tier(value),
         crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
         | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY => {
             crate::throttle::ThrottledReplicas::parse(value).map(|_| ())
@@ -166,6 +173,22 @@ fn parse_u64_at_least(min: u64, value: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
+fn validate_qos_tier(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("qos.tier must not be empty".into());
+    }
+    if value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "qos.tier={value} not supported; expected non-empty ASCII letters, digits, '.', '_' or '-'"
+        ))
+    }
+}
+
 /// Returns `true` if `key` is one of the recognized topic-config keys.
 /// Useful for `IncrementalAlterConfigs` DELETE-op validation without
 /// requiring a sentinel probe value.
@@ -184,9 +207,25 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | LOCAL_RETENTION_MS
             | LOCAL_RETENTION_BYTES
             | DELETE_RETENTION_MS
+            | QOS_TIER
             | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
             | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
+}
+
+/// Resolve a topic's `QoS` tier for producer quota bucket partitioning.
+/// Missing or corrupt values fall back to `default`, matching the
+/// permissive runtime behavior of other Produce-side topic config reads.
+#[must_use]
+pub(crate) fn resolve_qos_tier<'a>(
+    image: &'a crabka_metadata::MetadataImage,
+    topic: &str,
+) -> &'a str {
+    image
+        .topic_config(topic)
+        .and_then(|m| m.get(QOS_TIER))
+        .filter(|v| validate_qos_tier(v).is_ok())
+        .map_or(DEFAULT_QOS_TIER, String::as_str)
 }
 
 /// Resolve `unclean.recovery.strategy` for `topic`, defaulting to
@@ -309,6 +348,7 @@ pub struct TopicConfigDoc {
 
 /// The full whitelist documented on the topic-configs reference page.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
     vec![
         TopicConfigDoc {
@@ -396,6 +436,13 @@ pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
             description: "How long tombstones and transaction markers are retained after becoming compaction-eligible.",
         },
         TopicConfigDoc {
+            key: QOS_TIER,
+            value_type: "string",
+            default: Some(DEFAULT_QOS_TIER),
+            kip: None,
+            description: "Crabka QoS tier used to partition producer quota buckets.",
+        },
+        TopicConfigDoc {
             key: crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
             value_type: "string",
             default: None,
@@ -448,6 +495,7 @@ mod doc_tests {
             LOCAL_RETENTION_MS,
             LOCAL_RETENTION_BYTES,
             DELETE_RETENTION_MS,
+            QOS_TIER,
             crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
             crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
         ] {
@@ -568,6 +616,26 @@ mod tests {
     fn validate_unknown_key_rejected() {
         let err = validate_topic_config("flush.ms", "1000").unwrap_err();
         assert!(err.contains("unrecognized"));
+    }
+
+    #[test]
+    fn validate_qos_tier_accepts_ascii_identifiers() {
+        for v in ["default", "gold", "bulk_1", "critical-prod", "tier.2"] {
+            assert!(validate_topic_config(QOS_TIER, v).is_ok(), "qos.tier={v}");
+        }
+    }
+
+    #[test]
+    fn validate_qos_tier_rejects_empty_or_unsafe_values() {
+        for v in ["", "has space", "../escape", "ümlaut"] {
+            assert!(validate_topic_config(QOS_TIER, v).is_err(), "qos.tier={v}");
+        }
+    }
+
+    #[test]
+    fn resolve_qos_tier_defaults_when_unset() {
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        assert!(resolve_qos_tier(&image, "t") == DEFAULT_QOS_TIER);
     }
 
     #[test]
