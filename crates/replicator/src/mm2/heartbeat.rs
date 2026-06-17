@@ -1,0 +1,37 @@
+use crate::error::ReplicatorError;
+
+use super::{Reader, Writer};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heartbeat {
+    pub source: String,
+    pub target: String,
+    pub timestamp_ms: i64,
+}
+
+impl Heartbeat {
+    pub const TOPIC: &'static str = "heartbeats";
+
+    #[must_use]
+    pub fn key_bytes(&self) -> Vec<u8> {
+        Writer::new()
+            .string(&self.source)
+            .string(&self.target)
+            .finish()
+    }
+
+    #[must_use]
+    pub fn value_bytes(&self) -> Vec<u8> {
+        Writer::new().i64(self.timestamp_ms).finish()
+    }
+
+    pub fn from_bytes(key: &[u8], val: &[u8]) -> Result<Self, ReplicatorError> {
+        let mut k = Reader::new(key)?;
+        let mut v = Reader::new(val)?;
+        Ok(Self {
+            source: k.string()?,
+            target: k.string()?,
+            timestamp_ms: v.i64()?,
+        })
+    }
+}
