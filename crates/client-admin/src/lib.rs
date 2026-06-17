@@ -18,6 +18,7 @@ use thiserror::Error;
 
 pub mod configs;
 pub mod delegation_tokens;
+pub mod groups;
 pub mod log_dirs;
 pub mod quotas;
 pub mod topics;
