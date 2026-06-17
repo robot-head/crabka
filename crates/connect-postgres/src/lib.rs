@@ -11,10 +11,7 @@ pub mod pgoutput;
 
 pub mod schema;
 
-pub mod source {
-    #[derive(Debug, Clone)]
-    pub struct PostgresWalSource;
-}
+pub mod source;
 
 pub use config::PostgresSourceConfig;
 pub use error::PostgresConnectError;
