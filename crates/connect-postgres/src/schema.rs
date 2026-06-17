@@ -249,6 +249,9 @@ fn set_scalar_fields(
             set_field(message, "kind", Value::String("null".to_owned()))?;
             set_field(message, "is_null", Value::Bool(true))?;
         }
+        ScalarValue::UnchangedToast => {
+            set_field(message, "kind", Value::String("unchanged_toast".to_owned()))?;
+        }
         ScalarValue::Bool(value) => {
             set_field(message, "kind", Value::String("bool".to_owned()))?;
             set_field(message, "bool_value", Value::Bool(*value))?;
@@ -355,6 +358,13 @@ mod tests {
         assert_eq!(string_field(avatar_column, "name"), "avatar");
         assert_eq!(string_field(avatar_column, "kind"), "bytes");
         assert_eq!(bytes_field(avatar_column, "bytes_value").as_ref(), b"abc");
+
+        let unchanged_toast_column = message_value(&after[2]);
+        assert_eq!(string_field(unchanged_toast_column, "name"), "details");
+        assert_eq!(
+            string_field(unchanged_toast_column, "kind"),
+            "unchanged_toast"
+        );
     }
 
     fn sample_difference() -> EntityDifference {
@@ -388,6 +398,10 @@ mod tests {
                 ColumnValue {
                     name: "avatar".to_owned(),
                     value: ScalarValue::Bytes(b"abc".to_vec()),
+                },
+                ColumnValue {
+                    name: "details".to_owned(),
+                    value: ScalarValue::UnchangedToast,
                 },
             ],
             lsn: PgLsn(42),

@@ -49,6 +49,7 @@ pub struct ColumnValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarValue {
     Null,
+    UnchangedToast,
     Bool(bool),
     Int(i64),
     Float(String),

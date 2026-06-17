@@ -51,7 +51,7 @@ pub fn decode_pgoutput_message(
         b'B' => {
             let final_lsn = PgLsn(reader.read_u64("begin final_lsn")?);
             let _commit_time = reader.read_i64("begin commit_time")?;
-            let xid = i64::from(reader.read_i32("begin xid")?);
+            let xid = i64::from(reader.read_u32("begin xid")?);
             DecodedMessage::Begin { final_lsn, xid }
         }
         b'C' => {
@@ -201,7 +201,8 @@ fn decode_tuple(reader: &mut PgOutputReader<'_>) -> Result<Vec<ColumnValue>, Pos
     for index in 0..value_count {
         let value_tag = reader.read_u8("tuple value tag")?;
         let value = match value_tag {
-            b'n' | b'u' => ScalarValue::Null,
+            b'n' => ScalarValue::Null,
+            b'u' => ScalarValue::UnchangedToast,
             b't' => {
                 let bytes = reader.read_len_bytes("text tuple value")?;
                 let value = std::str::from_utf8(bytes).map_err(|error| {
@@ -384,15 +385,17 @@ impl RelationCache {
             ))
         })?;
         let table = format!("{}.{}", schema.schema, schema.table);
-        let key_columns = extract_key_columns(schema, &event.values)?;
+        let values = normalize_values(schema, event.values, "row values")?;
+        let key_columns = extract_key_columns(schema, &values)?;
         let key = EntityKey {
             table: table.clone(),
             columns: key_columns.clone(),
         };
 
         let (op, before, after) = match event.kind {
-            RowEventKind::Insert => (Operation::Insert, Vec::new(), event.values),
+            RowEventKind::Insert => (Operation::Insert, Vec::new(), values),
             RowEventKind::Update { old } => {
+                let old = normalize_values(schema, old, "old row values")?;
                 if has_any_key_column(schema, &old) {
                     let old_key_columns = extract_key_columns(schema, &old)?;
                     if old_key_columns != key_columns {
@@ -402,9 +405,9 @@ impl RelationCache {
                     }
                 }
 
-                (Operation::Update, old, event.values)
+                (Operation::Update, old, values)
             }
-            RowEventKind::Delete => (Operation::Delete, event.values, Vec::new()),
+            RowEventKind::Delete => (Operation::Delete, values, Vec::new()),
         };
 
         Ok(EntityDifference {
@@ -419,6 +422,40 @@ impl RelationCache {
             schema: schema.clone(),
         })
     }
+}
+
+fn normalize_values(
+    schema: &TableSchema,
+    values: Vec<ColumnValue>,
+    label: &str,
+) -> Result<Vec<ColumnValue>, PostgresConnectError> {
+    if values.iter().all(|value| {
+        schema
+            .columns
+            .iter()
+            .any(|column| column.name == value.name)
+    }) {
+        return Ok(values);
+    }
+
+    if values.len() != schema.columns.len() {
+        return Err(PostgresConnectError::Backend(format!(
+            "column count mismatch for {}.{} {label}: decoded {} values but relation schema has {} columns",
+            schema.schema,
+            schema.table,
+            values.len(),
+            schema.columns.len()
+        )));
+    }
+
+    Ok(values
+        .into_iter()
+        .zip(&schema.columns)
+        .map(|(value, column)| ColumnValue {
+            name: column.name.clone(),
+            value: value.value,
+        })
+        .collect())
 }
 
 fn extract_key_columns(
@@ -692,6 +729,64 @@ mod tests {
             error => panic!("expected backend error, got {error:?}"),
         }
     }
+
+    #[test]
+    fn decoded_placeholder_values_bind_to_schema_names_before_key_extraction() {
+        let mut cache = RelationCache::default();
+        cache.apply_relation(orders_relation("text"));
+
+        let difference = cache
+            .translate(RowEvent {
+                relation_id: 7,
+                lsn: PgLsn(0x30),
+                txid: None,
+                commit_timestamp_ms: None,
+                kind: RowEventKind::Insert,
+                values: vec![
+                    ColumnValue {
+                        name: "col0".to_owned(),
+                        value: ScalarValue::Text("42".to_owned()),
+                    },
+                    ColumnValue {
+                        name: "col1".to_owned(),
+                        value: ScalarValue::Text("paid".to_owned()),
+                    },
+                ],
+            })
+            .expect("decoded placeholders should bind to relation schema");
+
+        check!(difference.key.columns[0].name == "id");
+        check!(difference.key.columns[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.after[1].name == "status");
+    }
+
+    #[test]
+    fn decoded_placeholder_count_mismatch_is_an_error() {
+        let mut cache = RelationCache::default();
+        cache.apply_relation(orders_relation("text"));
+
+        let error = cache
+            .translate(RowEvent {
+                relation_id: 7,
+                lsn: PgLsn(0x31),
+                txid: None,
+                commit_timestamp_ms: None,
+                kind: RowEventKind::Insert,
+                values: vec![ColumnValue {
+                    name: "col0".to_owned(),
+                    value: ScalarValue::Text("42".to_owned()),
+                }],
+            })
+            .expect_err("decoded placeholder count should match relation schema");
+
+        match error {
+            PostgresConnectError::Backend(message) => {
+                check!(message.contains("column count mismatch"));
+                check!(message.contains("public.orders"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -707,6 +802,10 @@ mod decode_tests {
     }
 
     fn put_i32(bytes: &mut Vec<u8>, value: i32) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn put_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend_from_slice(&value.to_be_bytes());
     }
 
@@ -787,6 +886,54 @@ mod decode_tests {
     }
 
     #[test]
+    fn decoded_relation_and_insert_translate_with_schema_column_names() {
+        let mut relation_bytes = vec![b'R'];
+        put_i32(&mut relation_bytes, 7);
+        put_cstr(&mut relation_bytes, "public");
+        put_cstr(&mut relation_bytes, "orders");
+        relation_bytes.push(b'd');
+        put_i16(&mut relation_bytes, 2);
+        relation_bytes.push(1);
+        put_cstr(&mut relation_bytes, "id");
+        put_i32(&mut relation_bytes, 20);
+        put_i32(&mut relation_bytes, -1);
+        relation_bytes.push(0);
+        put_cstr(&mut relation_bytes, "status");
+        put_i32(&mut relation_bytes, 25);
+        put_i32(&mut relation_bytes, -1);
+
+        let mut cache = super::RelationCache::default();
+        let DecodedMessage::Relation(relation) =
+            decode_pgoutput_message(&relation_bytes, PgLsn(0), None)
+                .expect("relation should decode")
+        else {
+            panic!("expected relation");
+        };
+        cache.apply_relation(relation);
+
+        let mut insert_bytes = vec![b'I'];
+        put_i32(&mut insert_bytes, 7);
+        insert_bytes.push(b'N');
+        put_i16(&mut insert_bytes, 2);
+        put_text_value(&mut insert_bytes, "42");
+        put_text_value(&mut insert_bytes, "paid");
+
+        let DecodedMessage::Row(row) =
+            decode_pgoutput_message(&insert_bytes, PgLsn(0x32), Some(101))
+                .expect("insert should decode")
+        else {
+            panic!("expected row");
+        };
+        let difference = cache
+            .translate(row)
+            .expect("decoded insert should translate");
+
+        check!(difference.key.columns[0].name == "id");
+        check!(difference.key.columns[0].value == ScalarValue::Text("42".to_owned()));
+        check!(difference.after[1].name == "status");
+    }
+
+    #[test]
     fn decodes_delete_message_to_row_event() {
         let mut bytes = vec![b'D'];
         put_i32(&mut bytes, 7);
@@ -837,6 +984,24 @@ mod decode_tests {
     }
 
     #[test]
+    fn decodes_unchanged_toast_as_distinct_scalar_value() {
+        let mut bytes = vec![b'U'];
+        put_i32(&mut bytes, 7);
+        bytes.push(b'N');
+        put_i16(&mut bytes, 2);
+        put_text_value(&mut bytes, "42");
+        bytes.push(b'u');
+
+        let decoded = decode_pgoutput_message(&bytes, PgLsn(0x33), Some(100))
+            .expect("update message should decode");
+
+        let DecodedMessage::Row(row) = decoded else {
+            panic!("expected row message");
+        };
+        check!(row.values[1].value == ScalarValue::UnchangedToast);
+    }
+
+    #[test]
     fn malformed_message_returns_backend_error() {
         let error = decode_pgoutput_message(&[b'R', 0, 0], PgLsn(0), None)
             .expect_err("truncated message should fail");
@@ -876,6 +1041,23 @@ mod decode_tests {
             decoded
                 == DecodedMessage::Commit {
                     commit_lsn: PgLsn(0x0102_0305),
+                }
+        );
+    }
+
+    #[test]
+    fn decodes_begin_xid_as_unsigned_u32() {
+        let mut begin = vec![b'B'];
+        put_i64(&mut begin, 0x0102_0304);
+        put_i64(&mut begin, 1_700_000_000);
+        put_u32(&mut begin, 0x8000_0000);
+
+        let decoded = decode_pgoutput_message(&begin, PgLsn(0), None).expect("begin should decode");
+        check!(
+            decoded
+                == DecodedMessage::Begin {
+                    final_lsn: PgLsn(0x0102_0304),
+                    xid: 2_147_483_648,
                 }
         );
     }
