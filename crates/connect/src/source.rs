@@ -30,6 +30,13 @@ use crate::record::{ConnectRecord, SourceOffset};
 /// opaque to the runtime — only the source interprets it — so a source is free
 /// to encode a log sequence number, a byte offset, a GTID set, or whatever
 /// resume token its backend uses.
+///
+/// After the sink commit is durable and checkpoint persistence succeeds, the
+/// runtime calls [`acknowledge`](Source::acknowledge) with the persisted offset.
+/// Sources that hold backend resources such as non-advancing cursors or logical
+/// replication slots can use this hook to release data that is now safe to
+/// discard. The default implementation is a no-op for sources that need no
+/// explicit acknowledgement.
 #[async_trait]
 pub trait Source<K, V>: Send + Sync + 'static {
     /// Pull the next record, advancing the source's read position.
@@ -62,6 +69,23 @@ pub trait Source<K, V>: Send + Sync + 'static {
     /// this source can resume from (e.g. the upstream log has since been
     /// truncated past it).
     async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError>;
+
+    /// Acknowledge that `offset` is durable end-to-end.
+    ///
+    /// The runtime calls this only after a non-empty batch has been committed
+    /// to the sink and the same offset has been saved in the checkpoint store.
+    /// It is never called before checkpoint persistence, so a failing
+    /// checkpoint save prevents upstream acknowledgement. Sources may use this
+    /// to advance external cursors or release retained log segments.
+    ///
+    /// The default is a no-op, preserving existing source implementations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError`] if the upstream acknowledgement fails.
+    async fn acknowledge(&mut self, _offset: &SourceOffset) -> Result<(), ConnectError> {
+        Ok(())
+    }
 
     /// Release any resources held by the source (connections, file handles).
     /// The default is a no-op. After `close`, the source is not polled again.

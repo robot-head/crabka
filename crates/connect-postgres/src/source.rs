@@ -106,8 +106,8 @@ impl PostgresWalSource {
 
         // This live seam intentionally peeks instead of getting changes. Peeking
         // avoids advancing the Postgres replication slot before downstream sink
-        // durability is known. A future ack/feedback hook should advance the
-        // slot only after committed checkpoints are safe to release.
+        // durability is known; acknowledge advances the slot only after the
+        // runtime has committed the sink and saved the checkpoint.
         let rows = client
             .query(
                 &peek_binary_changes_sql(
@@ -147,10 +147,9 @@ impl PostgresWalSource {
     fn should_skip_row(&self, lsn: PgLsn) -> bool {
         // Because the live path peeks, Postgres can return rows that were
         // already emitted and checkpointed in this process. Skip them here so
-        // duplicate peek results do not re-emit. With a small
-        // max_messages_per_poll, a peek batch can be all stale prefix rows; for
-        // now the configured bound is preserved until a future feedback hook can
-        // advance the slot after committed checkpoints.
+        // duplicate peek results do not re-emit before the runtime calls
+        // acknowledge, which advances the replication slot after checkpoint
+        // persistence.
         self.resume_lsn
             .max(self.checkpoint)
             .is_some_and(|resume_lsn| lsn <= resume_lsn)
@@ -217,6 +216,22 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
         self.resume_lsn = Some(lsn);
         Ok(())
     }
+
+    async fn acknowledge(&mut self, offset: &SourceOffset) -> Result<(), ConnectError> {
+        validate_database(offset, &self.database_name)?;
+        let lsn = PgLsn::from_source_offset(offset, &self.config.slot_name)?;
+
+        if let Some(client) = &self.client {
+            let lsn_text = lsn.to_string();
+            client
+                .execute(advance_slot_sql(), &[&self.config.slot_name, &lsn_text])
+                .await
+                .map_err(|error| ConnectError::Backend(error.to_string()))?;
+        }
+
+        self.resume_lsn = Some(lsn);
+        Ok(())
+    }
 }
 
 fn quote_ident(value: &str) -> String {
@@ -261,6 +276,10 @@ fn publication_tables_sql() -> &'static str {
 
 fn replication_slot_sql() -> &'static str {
     "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
+}
+
+fn advance_slot_sql() -> &'static str {
+    "SELECT pg_replication_slot_advance($1, $2::pg_lsn)"
 }
 
 async fn validate_publication_tables(
@@ -372,7 +391,7 @@ mod sql_tests {
     use assert2::check;
 
     use super::{
-        create_publication_sql, peek_binary_changes_sql, publication_tables_sql,
+        advance_slot_sql, create_publication_sql, peek_binary_changes_sql, publication_tables_sql,
         replication_slot_sql,
     };
 
@@ -414,6 +433,11 @@ mod sql_tests {
             replication_slot_sql()
                 == "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
         );
+    }
+
+    #[test]
+    fn advance_slot_sql_casts_lsn_parameter() {
+        check!(advance_slot_sql() == "SELECT pg_replication_slot_advance($1, $2::pg_lsn)");
     }
 }
 
@@ -651,6 +675,23 @@ mod tests {
 
         check!(matches!(error, crabka_connect::ConnectError::Offset(_)));
         check!(source.checkpoint().is_none());
+    }
+
+    #[tokio::test]
+    async fn scripted_acknowledge_accepts_matching_offset_and_rejects_database_mismatch() {
+        let mut source = PostgresWalSource::scripted(config("slot_a"), "app", []).unwrap();
+
+        source
+            .acknowledge(&PgLsn(0x2a).to_source_offset("app", "slot_a"))
+            .await
+            .expect("matching offset acknowledged");
+
+        let error = source
+            .acknowledge(&PgLsn(0x2b).to_source_offset("other_app", "slot_a"))
+            .await
+            .expect_err("database mismatch rejected");
+
+        check!(matches!(error, crabka_connect::ConnectError::Offset(_)));
     }
 
     #[tokio::test]

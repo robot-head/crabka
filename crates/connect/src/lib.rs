@@ -7,7 +7,8 @@
 //! - [`Source`] pulls records out of an external system one at a time
 //!   ([`poll`](Source::poll)), snapshots its read position
 //!   ([`checkpoint`](Source::checkpoint)), and restores it on restart
-//!   ([`seek`](Source::seek)).
+//!   ([`seek`](Source::seek)). Sources can optionally acknowledge a persisted
+//!   checkpoint after sink commit with [`acknowledge`](Source::acknowledge).
 //! - [`Sink`] pushes records into an external system in batches
 //!   ([`put`](Sink::put)), makes them durable ([`flush`](Sink::flush)), and
 //!   optionally gates writes behind a transaction for exactly-once delivery

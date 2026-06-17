@@ -7,8 +7,9 @@
 //!
 //! ## The driver loop
 //!
-//! The runtime drives one sequential `poll → put → commit → checkpoint` loop on
-//! the source. It is deliberately *not* a two-task pipeline with a channel
+//! The runtime drives one sequential
+//! `poll → put → commit → checkpoint → acknowledge` loop on the source. It is
+//! deliberately *not* a two-task pipeline with a channel
 //! between poll and put: [`Source::checkpoint`] reads the source's *live*
 //! position, so the poll side must never run ahead of what the sink has made
 //! durable — otherwise a persisted checkpoint would name records that were
@@ -27,9 +28,11 @@
 //!    [`put`](Sink::put) the batch, [`commit`](Sink::commit) it (which for an
 //!    at-least-once sink delegates to [`flush`](Sink::flush)).
 //! 3. After the commit is durable, [`checkpoint`](Source::checkpoint) the source
-//!    and persist it through the [`CheckpointStore`]. On restart the runtime
-//!    [`seek`](Source::seek)s to this offset, so delivery resumes from the last
-//!    fully-committed record.
+//!    and persist it through the [`CheckpointStore`]. Only after that save
+//!    succeeds does the runtime call [`acknowledge`](Source::acknowledge), so an
+//!    upstream cursor advances only after the durable checkpoint names it. On
+//!    restart the runtime [`seek`](Source::seek)s to this offset, so delivery
+//!    resumes from the last fully-committed record.
 //!
 //! A put/commit failure on a transactional sink triggers a best-effort
 //! [`abort`](Sink::abort) before the error propagates, so a half-written
@@ -466,8 +469,8 @@ where
     }
 
     /// Write a non-empty batch inside the transactional gate (lazy `begin`),
-    /// commit it, then persist the source checkpoint. Aborts on failure when the
-    /// sink is transactional.
+    /// commit it, persist the source checkpoint, then acknowledge that offset.
+    /// Aborts on failure when the sink is transactional.
     async fn write_committed(
         &mut self,
         batch: Vec<crate::record::ConnectRecord<K, V>>,
@@ -496,6 +499,7 @@ where
         // restart resumes from the last fully-committed record, never past it.
         if let Some(offset) = self.source.checkpoint() {
             self.checkpoints.save(&offset).await?;
+            self.source.acknowledge(&offset).await?;
         }
         tracing::debug!(records = count, transactional, "committed connector batch");
         Ok(())
@@ -931,6 +935,109 @@ mod tests {
             .unwrap();
         check!(collect(&mut rx, 1).await == vec![Bytes::from_static(b"a")]);
         check!(shutdown(handle).await.is_err());
+    }
+
+    struct OrderingSource {
+        emitted: bool,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl Source<Bytes, Bytes> for OrderingSource {
+        async fn poll(&mut self) -> Result<Option<ConnectRecord<Bytes, Bytes>>, ConnectError> {
+            if self.emitted {
+                return Ok(None);
+            }
+            self.emitted = true;
+            Ok(Some(ConnectRecord::new(
+                None,
+                Some(Bytes::from_static(b"a")),
+            )))
+        }
+
+        fn checkpoint(&self) -> Option<SourceOffset> {
+            self.emitted.then(|| {
+                let mut position = OffsetMap::new();
+                position.insert("index".into(), OffsetValue::Long(1));
+                SourceOffset::new(OffsetMap::new(), position)
+            })
+        }
+
+        async fn seek(&mut self, _offset: SourceOffset) -> Result<(), ConnectError> {
+            Ok(())
+        }
+
+        async fn acknowledge(&mut self, _offset: &SourceOffset) -> Result<(), ConnectError> {
+            self.events.lock().unwrap().push("acknowledge");
+            Ok(())
+        }
+    }
+
+    struct OrderingSink {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl Sink<Bytes, Bytes> for OrderingSink {
+        async fn put(
+            &mut self,
+            _records: Vec<ConnectRecord<Bytes, Bytes>>,
+        ) -> Result<(), ConnectError> {
+            self.events.lock().unwrap().push("put");
+            Ok(())
+        }
+
+        async fn flush(&mut self) -> Result<(), ConnectError> {
+            self.events.lock().unwrap().push("commit");
+            Ok(())
+        }
+    }
+
+    struct OrderingCheckpointStore {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        saved: Mutex<Option<SourceOffset>>,
+    }
+
+    #[async_trait]
+    impl CheckpointStore for OrderingCheckpointStore {
+        async fn save(&self, offset: &SourceOffset) -> Result<(), ConnectError> {
+            self.events.lock().unwrap().push("checkpoint_save");
+            *self.saved.lock().unwrap() = Some(offset.clone());
+            Ok(())
+        }
+
+        async fn load(&self) -> Result<Option<SourceOffset>, ConnectError> {
+            Ok(self.saved.lock().unwrap().clone())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_acknowledge_runs_after_sink_commit_and_checkpoint_save() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(OrderingCheckpointStore {
+            events: events.clone(),
+            saved: Mutex::new(None),
+        });
+        let handle = ConnectorRuntime::new()
+            .add_source(OrderingSource {
+                emitted: false,
+                events: events.clone(),
+            })
+            .add_sink(OrderingSink {
+                events: events.clone(),
+            })
+            .checkpoint_store(store)
+            .poll_backoff(Duration::from_millis(5))
+            .run()
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown(handle).await.unwrap();
+
+        check!(
+            events.lock().unwrap().as_slice()
+                == ["put", "commit", "checkpoint_save", "acknowledge"]
+        );
     }
 
     /// A sink whose `close` fails, to prove a close error surfaces from an
