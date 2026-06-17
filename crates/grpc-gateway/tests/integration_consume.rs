@@ -85,7 +85,7 @@ async fn subscribe_receives_then_commits() {
             break;
         }
     }
-    check!(got.iter().any(|v| v.as_deref() == Some(b"c1".as_ref())));
+    check!(got.iter().any(|v| v.as_ref() == b"c1".as_ref()));
     session.commit().await.unwrap();
 
     broker.shutdown().await;

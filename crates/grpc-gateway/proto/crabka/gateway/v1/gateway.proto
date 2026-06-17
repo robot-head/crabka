@@ -21,6 +21,27 @@ enum SchemaFormat {
   PROTOBUF = 3;
 }
 
+enum PredicateOp {
+  PREDICATE_OP_UNSPECIFIED = 0;
+  EQUALS = 1;
+}
+
+// A server-side predicate over the decoded structured JSON view of a record.
+// `path` is a JSONPath expression evaluated after Confluent-framed Avro,
+// JSON Schema, or Protobuf payloads are decoded through the registry. The
+// current implementation supports scalar equality; raw/unframed records do not
+// match structured predicates.
+message FieldPredicate {
+  string path = 1;
+  PredicateOp op = 2;
+  oneof value {
+    string string_value = 3;
+    int64 int64_value = 4;
+    double double_value = 5;
+    bool bool_value = 6;
+  }
+}
+
 // Selects the schema to serialize a structured value against. An empty
 // `subject` resolves via TopicNameStrategy (`<topic>-value`); a non-zero
 // `id` pins a registered schema version.
@@ -81,6 +102,7 @@ message SubscribeStart {
   string group_id = 1;
   repeated string topics = 2;
   bool auto_commit = 3;
+  repeated FieldPredicate predicates = 4;
 }
 
 // An Ack triggers a commit of the consumer's current consumed positions. The
