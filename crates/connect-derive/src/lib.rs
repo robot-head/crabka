@@ -17,9 +17,22 @@ pub fn derive_connector_config(input: TokenStream) -> TokenStream {
 }
 
 fn expand_connector_config(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    let ident = input.ident;
-    let crate_path = resolve_crabka_connect_path(&input.attrs)?;
-    let fields = match input.data {
+    let DeriveInput {
+        attrs,
+        ident,
+        generics,
+        data,
+        ..
+    } = input;
+    if !generics.params.is_empty() || generics.where_clause.is_some() {
+        return Err(syn::Error::new_spanned(
+            generics,
+            "ConnectorConfig does not support generic structs",
+        ));
+    }
+
+    let crate_path = resolve_crabka_connect_path(&attrs)?;
+    let fields = match data {
         Data::Struct(data) => match data.fields {
             Fields::Named(fields) => fields.named,
             _ => {

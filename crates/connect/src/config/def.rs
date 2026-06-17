@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use serde_json::{Map, Value};
 
@@ -44,7 +45,7 @@ impl ConfigKind {
 
 /// One connector configuration field definition.
 #[non_exhaustive]
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ConfigKey {
     pub name: String,
     pub kind: ConfigKind,
@@ -54,10 +55,37 @@ pub struct ConfigKey {
 }
 
 /// ConfigDef-style connector configuration schema.
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ConfigDef {
     name: String,
     keys: BTreeMap<String, ConfigKey>,
+}
+
+impl fmt::Debug for ConfigKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted_default = if self.kind == ConfigKind::Secret && self.default.is_some() {
+            Some(Value::String("<redacted>".to_owned()))
+        } else {
+            self.default.clone()
+        };
+
+        f.debug_struct("ConfigKey")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("required", &self.required)
+            .field("default", &redacted_default)
+            .field("description", &self.description)
+            .finish()
+    }
+}
+
+impl fmt::Debug for ConfigDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigDef")
+            .field("name", &self.name)
+            .field("keys", &self.keys)
+            .finish()
+    }
 }
 
 impl ConfigDef {
@@ -118,6 +146,10 @@ impl ConfigDef {
         default: impl Into<Value>,
     ) -> Self {
         let name = name.into();
+        assert!(
+            kind != ConfigKind::Secret,
+            "secret connector config key `{name}` cannot have a default"
+        );
         self.define_key(ConfigKey {
             name,
             kind,
@@ -513,6 +545,28 @@ mod tests {
         let _ = ConfigDef::new("demo")
             .required("database_url", ConfigKind::String)
             .optional("database_url", ConfigKind::String);
+    }
+
+    #[test]
+    #[should_panic(expected = "secret connector config key `password` cannot have a default")]
+    fn secret_defaults_panic_at_definition_time() {
+        let _ = ConfigDef::new("demo").default("password", ConfigKind::Secret, "literal-secret");
+    }
+
+    #[test]
+    fn secret_defaults_are_redacted_in_debug_defensively() {
+        let key = ConfigKey {
+            name: "password".to_string(),
+            kind: ConfigKind::Secret,
+            required: false,
+            default: Some(json!("literal-secret")),
+            description: None,
+        };
+
+        let debug = format!("{key:?}");
+
+        assert!(!debug.contains("literal-secret"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[tokio::test]
