@@ -118,10 +118,18 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         Some(SourceOffset::new(BTreeMap::new(), position))
     }
 
-    /// No-op seek: the consumer uses committed group offsets on restart.
+    /// No-op seek (Slice 1 limitation).
     ///
-    /// A full `Consumer::seek` implementation is deferred; for now the group's
-    /// committed offsets serve as the resume point.
+    /// The connect runtime persists this source's position to the target via the
+    /// checkpoint store, but `crabka-client-consumer` currently exposes no
+    /// `seek`/`assign` API, so the saved position cannot yet be applied on
+    /// restart — and the consumer does not commit group offsets either. A
+    /// restarted replicator therefore re-reads from the earliest available
+    /// offset: delivery stays **at-least-once with no data gap**, but records
+    /// produced before a crash are reprocessed rather than resumed-past. Wiring
+    /// true position recovery requires a consumer `seek` API and is tracked as a
+    /// follow-up; the durable checkpoint state is already written, ready to drive
+    /// it.
     ///
     /// # Errors
     ///
