@@ -14,7 +14,7 @@ impl Heartbeat {
 
     #[must_use]
     pub fn key_bytes(&self) -> Vec<u8> {
-        Writer::new()
+        Writer::keyless()
             .string(&self.source)
             .string(&self.target)
             .finish()
@@ -26,7 +26,7 @@ impl Heartbeat {
     }
 
     pub fn from_bytes(key: &[u8], val: &[u8]) -> Result<Self, ReplicatorError> {
-        let mut k = Reader::new(key)?;
+        let mut k = Reader::keyless(key);
         let mut v = Reader::new(val)?;
         Ok(Self {
             source: k.string()?,

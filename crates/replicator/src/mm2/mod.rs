@@ -14,10 +14,21 @@ pub(crate) const VERSION: i16 = 0;
 pub(crate) struct Writer(Vec<u8>);
 
 impl Writer {
+    /// Versioned buffer: emits the `[int16 version]` header first.
+    ///
+    /// The real JVM MM2 codecs version only the record *value* (via
+    /// `HEADER_SCHEMA`), never the key (`serializeKey` writes `KEY_SCHEMA`
+    /// alone). Use [`Writer::new`] for values, [`Writer::keyless`] for keys.
     pub fn new() -> Self {
         let mut w = Vec::new();
         w.extend_from_slice(&VERSION.to_be_bytes());
         Self(w)
+    }
+
+    /// Versionless buffer for record keys (no `[int16 version]` header), as
+    /// produced by the JVM MM2 `serializeKey()` path.
+    pub fn keyless() -> Self {
+        Self(Vec::new())
     }
 
     pub fn string(&mut self, s: &str) -> &mut Self {
@@ -49,6 +60,8 @@ pub(crate) struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// Reader over a versioned buffer (record *value*): consumes and validates
+    /// the leading `[int16 version]` header.
     pub fn new(buf: &'a [u8]) -> Result<Self, ReplicatorError> {
         if buf.len() < 2 || i16::from_be_bytes([buf[0], buf[1]]) != VERSION {
             return Err(ReplicatorError::Codec(
@@ -56,6 +69,12 @@ impl<'a> Reader<'a> {
             ));
         }
         Ok(Self { buf, pos: 2 })
+    }
+
+    /// Reader over a versionless buffer (record *key*): the JVM MM2
+    /// `serializeKey()` path emits no version header.
+    pub fn keyless(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], ReplicatorError> {
@@ -106,7 +125,8 @@ mod tests {
             target: "eu-west".into(),
             timestamp_ms: 100,
         };
-        assert!(hb.key_bytes() == b"\x00\x00\x00\x07us-east\x00\x07eu-west".to_vec());
+        // Key is versionless (JVM MM2 serializeKey writes no version header).
+        assert!(hb.key_bytes() == b"\x00\x07us-east\x00\x07eu-west".to_vec());
         // value = version(i16=0x0000) + timestamp(i64=100=0x0000_0000_0000_0064) = 10 bytes
         assert!(hb.value_bytes() == b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x64".to_vec());
         let (k, v) = (hb.key_bytes(), hb.value_bytes());
@@ -122,7 +142,8 @@ mod tests {
             downstream: 742,
         };
         assert!(OffsetSync::from_bytes(&os.key_bytes(), &os.value_bytes()).unwrap() == os);
-        assert!(os.key_bytes() == b"\x00\x00\x00\x06orders\x00\x00\x00\x07".to_vec());
+        // Key is versionless (JVM MM2 serializeKey writes no version header).
+        assert!(os.key_bytes() == b"\x00\x06orders\x00\x00\x00\x07".to_vec());
     }
 
     #[test]

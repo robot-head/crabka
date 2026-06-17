@@ -18,7 +18,7 @@ impl OffsetSync {
 
     #[must_use]
     pub fn key_bytes(&self) -> Vec<u8> {
-        Writer::new()
+        Writer::keyless()
             .string(&self.topic)
             .i32(self.partition)
             .finish()
@@ -26,15 +26,18 @@ impl OffsetSync {
 
     #[must_use]
     pub fn value_bytes(&self) -> Vec<u8> {
-        Writer::new()
+        // OffsetSync has no HEADER_SCHEMA / version field at all in the JVM MM2
+        // codec — both key and value are versionless (unlike Heartbeat and
+        // Checkpoint, whose *value* carries a version header).
+        Writer::keyless()
             .i64(self.upstream)
             .i64(self.downstream)
             .finish()
     }
 
     pub fn from_bytes(key: &[u8], val: &[u8]) -> Result<Self, ReplicatorError> {
-        let mut k = Reader::new(key)?;
-        let mut v = Reader::new(val)?;
+        let mut k = Reader::keyless(key);
+        let mut v = Reader::keyless(val);
         Ok(Self {
             topic: k.string()?,
             partition: k.i32()?,
