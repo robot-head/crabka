@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -60,6 +60,8 @@ impl PostgresWalSource {
             }
         });
 
+        let database_name = current_database(&client).await?;
+
         if !config.table_names.is_empty() {
             client
                 .batch_execute(&create_publication_sql(
@@ -69,10 +71,16 @@ impl PostgresWalSource {
                 ))
                 .await
                 .map_err(|error| ConnectError::Backend(error.to_string()))?;
+            validate_publication_tables(
+                &client,
+                &config.publication_name,
+                &config.schema,
+                &config.table_names,
+            )
+            .await?;
         }
 
-        ensure_slot(&client, &config.slot_name).await?;
-        let database_name = current_database(&client).await?;
+        ensure_slot(&client, &config.slot_name, &database_name).await?;
 
         Ok(Self {
             config,
@@ -96,9 +104,13 @@ impl PostgresWalSource {
             return Ok(());
         };
 
+        // This live seam intentionally peeks instead of getting changes. Peeking
+        // avoids advancing the Postgres replication slot before downstream sink
+        // durability is known. A future ack/feedback hook should advance the
+        // slot only after committed checkpoints are safe to release.
         let rows = client
             .query(
-                &get_binary_changes_sql(
+                &peek_binary_changes_sql(
                     &self.config.slot_name,
                     self.config.max_messages_per_poll,
                     &self.config.publication_name,
@@ -119,7 +131,9 @@ impl PostgresWalSource {
                     self.pending.push_back(LogicalEvent::Relation(relation));
                 }
                 DecodedMessage::Row(row) => {
-                    self.pending.push_back(LogicalEvent::Row(row));
+                    if !self.should_skip_row(row.lsn) {
+                        self.pending.push_back(LogicalEvent::Row(row));
+                    }
                 }
                 DecodedMessage::Begin { .. }
                 | DecodedMessage::Commit { .. }
@@ -128,6 +142,18 @@ impl PostgresWalSource {
         }
 
         Ok(())
+    }
+
+    fn should_skip_row(&self, lsn: PgLsn) -> bool {
+        // Because the live path peeks, Postgres can return rows that were
+        // already emitted and checkpointed in this process. Skip them here so
+        // duplicate peek results do not re-emit. With a small
+        // max_messages_per_poll, a peek batch can be all stale prefix rows; for
+        // now the configured bound is preserved until a future feedback hook can
+        // advance the slot after committed checkpoints.
+        self.resume_lsn
+            .max(self.checkpoint)
+            .is_some_and(|resume_lsn| lsn <= resume_lsn)
     }
 }
 
@@ -145,10 +171,7 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
                     self.relation_cache.apply_relation(relation);
                 }
                 LogicalEvent::Row(row) => {
-                    if self
-                        .resume_lsn
-                        .is_some_and(|resume_lsn| row.lsn <= resume_lsn)
-                    {
+                    if self.should_skip_row(row.lsn) {
                         self.pending.pop_front();
                         continue;
                     }
@@ -223,25 +246,64 @@ fn create_publication_sql(publication: &str, schema: &str, tables: &[String]) ->
     )
 }
 
-fn get_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
+fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
     format!(
-        "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_get_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
+        "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_peek_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
         sql_string(slot),
         max_messages,
         sql_string(publication)
     )
 }
 
-async fn ensure_slot(client: &Client, slot_name: &str) -> Result<(), ConnectError> {
+fn publication_tables_sql() -> &'static str {
+    "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
+}
+
+fn replication_slot_sql() -> &'static str {
+    "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
+}
+
+async fn validate_publication_tables(
+    client: &Client,
+    publication: &str,
+    schema: &str,
+    tables: &[String],
+) -> Result<(), ConnectError> {
+    let rows = client
+        .query(publication_tables_sql(), &[&publication, &schema])
+        .await
+        .map_err(|error| ConnectError::Backend(error.to_string()))?;
+    let published_tables = rows
+        .into_iter()
+        .map(|row| row.get::<_, String>("tablename"))
+        .collect::<HashSet<_>>();
+    let missing_tables = tables
+        .iter()
+        .filter(|table| !published_tables.contains(*table))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing_tables.is_empty() {
+        Ok(())
+    } else {
+        Err(ConnectError::Backend(format!(
+            "publication {publication:?} does not cover configured tables: {}",
+            missing_tables.join(", ")
+        )))
+    }
+}
+
+async fn ensure_slot(
+    client: &Client,
+    slot_name: &str,
+    database_name: &str,
+) -> Result<(), ConnectError> {
     let slot = client
-        .query_opt(
-            "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
-            &[&slot_name],
-        )
+        .query_opt(replication_slot_sql(), &[&slot_name])
         .await
         .map_err(|error| ConnectError::Backend(error.to_string()))?;
 
-    if slot.is_none() {
+    let Some(slot) = slot else {
         client
             .query(
                 "SELECT * FROM pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -249,9 +311,32 @@ async fn ensure_slot(client: &Client, slot_name: &str) -> Result<(), ConnectErro
             )
             .await
             .map_err(|error| ConnectError::Backend(error.to_string()))?;
+        return Ok(());
+    };
+
+    let plugin: Option<String> = slot.get("plugin");
+    let slot_type: String = slot.get("slot_type");
+    let database: Option<String> = slot.get("database");
+    let mut mismatches = Vec::new();
+
+    if plugin.as_deref() != Some("pgoutput") {
+        mismatches.push(format!("plugin is {:?}", plugin.as_deref()));
+    }
+    if slot_type != "logical" {
+        mismatches.push(format!("slot_type is {slot_type:?}"));
+    }
+    if database.as_deref() != Some(database_name) {
+        mismatches.push(format!("database is {:?}", database.as_deref()));
     }
 
-    Ok(())
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(ConnectError::Backend(format!(
+            "replication slot {slot_name:?} is not compatible: {}",
+            mismatches.join(", ")
+        )))
+    }
 }
 
 async fn current_database(client: &Client) -> Result<String, ConnectError> {
@@ -286,7 +371,10 @@ fn operation_header(operation: Operation) -> &'static str {
 mod sql_tests {
     use assert2::check;
 
-    use super::{create_publication_sql, get_binary_changes_sql};
+    use super::{
+        create_publication_sql, peek_binary_changes_sql, publication_tables_sql,
+        replication_slot_sql,
+    };
 
     #[test]
     fn publication_sql_quotes_identifiers() {
@@ -304,11 +392,27 @@ mod sql_tests {
     }
 
     #[test]
-    fn binary_changes_sql_escapes_string_literals() {
-        let sql = get_binary_changes_sql("slot'name", 25, "pub'name");
+    fn peek_binary_changes_sql_escapes_string_literals_without_advancing_slot() {
+        let sql = peek_binary_changes_sql("slot'name", 25, "pub'name");
 
         check!(
-            sql == "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_get_binary_changes('slot''name', NULL, 25, 'proto_version', '1', 'publication_names', 'pub''name')"
+            sql == "SELECT lsn::text AS lsn, xid::bigint AS xid, data FROM pg_logical_slot_peek_binary_changes('slot''name', NULL, 25, 'proto_version', '1', 'publication_names', 'pub''name')"
+        );
+    }
+
+    #[test]
+    fn publication_validation_sql_reads_publication_tables() {
+        check!(
+            publication_tables_sql()
+                == "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
+        );
+    }
+
+    #[test]
+    fn replication_slot_validation_sql_reads_slot_metadata() {
+        check!(
+            replication_slot_sql()
+                == "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
         );
     }
 }
@@ -497,6 +601,30 @@ mod tests {
         check!(header_value(&record, "crabka.pg.lsn").as_ref() == b"0/2B");
         check!(source.checkpoint() == Some(PgLsn(0x2b).to_source_offset("app", "slot_a")));
         check!(source.poll().await.expect("poll succeeds").is_none());
+    }
+
+    #[tokio::test]
+    async fn checkpointed_duplicate_row_is_skipped_without_regressing_checkpoint() {
+        let mut source = PostgresWalSource::scripted(
+            config("slot_a"),
+            "app",
+            [
+                LogicalEvent::Relation(orders_relation()),
+                LogicalEvent::Row(insert_event(PgLsn(0x2a))),
+                LogicalEvent::Row(insert_event(PgLsn(0x2a))),
+            ],
+        )
+        .expect("source builds");
+
+        let record = source
+            .poll()
+            .await
+            .expect("poll succeeds")
+            .expect("first row emits");
+
+        check!(header_value(&record, "crabka.pg.lsn").as_ref() == b"0/2A");
+        check!(source.poll().await.expect("poll succeeds").is_none());
+        check!(source.checkpoint() == Some(PgLsn(0x2a).to_source_offset("app", "slot_a")));
     }
 
     #[tokio::test]
