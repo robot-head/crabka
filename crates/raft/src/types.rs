@@ -18,28 +18,26 @@ pub struct Node {
 }
 
 impl Node {
-    /// The controller RPC endpoint peers dial. By convention the first
-    /// endpoint named "CONTROLLER"; falls back to the first endpoint.
+    /// The controller RPC endpoint peers dial, as a `"<host>:<port>"` string.
+    /// By convention the first endpoint named "CONTROLLER"; falls back to the
+    /// first endpoint.
+    ///
+    /// The host is returned VERBATIM (a DNS name), never pre-resolved to a
+    /// `SocketAddr`: voter endpoints carry per-pod `StatefulSet` FQDNs, and the
+    /// dialer re-resolves the host per connect (`TcpStream::connect`) so a peer
+    /// that restarts on a new pod IP stays reachable. Parsing to a `SocketAddr`
+    /// here returned `None` for any DNS hostname — the same footgun that
+    /// silently broke `submit_change` leader-forwarding via
+    /// `ControllerHandle::voter_addr` (now `controller_endpoint_addr` in
+    /// `controller.rs`; mirrors `controller_addr` in `network.rs`).
     #[must_use]
-    pub fn controller_addr(&self) -> Option<std::net::SocketAddr> {
+    pub fn controller_addr(&self) -> Option<String> {
         let endpoint = self
             .endpoints
             .iter()
             .find(|e| e.name == "CONTROLLER")
             .or_else(|| self.endpoints.first())?;
-        match format!("{}:{}", endpoint.host, endpoint.port).parse() {
-            Ok(addr) => Some(addr),
-            Err(error) => {
-                tracing::warn!(
-                    endpoint = %endpoint.name,
-                    host = %endpoint.host,
-                    port = endpoint.port,
-                    %error,
-                    "controller endpoint host:port failed to parse as a SocketAddr"
-                );
-                None
-            }
-        }
+        Some(format!("{}:{}", endpoint.host, endpoint.port))
     }
 }
 
@@ -87,6 +85,24 @@ mod node_tests {
             ],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         };
-        assert!(n.controller_addr().unwrap().port() == 9093);
+        assert!(n.controller_addr() == Some("127.0.0.1:9093".to_string()));
+    }
+
+    #[test]
+    fn node_controller_addr_keeps_dns_hostname_not_parsed_socketaddr() {
+        // A per-pod FQDN must come back verbatim as "<host>:<port>", NOT parsed
+        // to a SocketAddr (which is None for a hostname). The dialer re-resolves
+        // it per connect, so a peer on a new pod IP stays reachable.
+        let host = "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local";
+        let n = Node {
+            directory_id: uuid::Uuid::nil(),
+            endpoints: vec![crabka_metadata::VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: host.into(),
+                port: 9093,
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        };
+        assert!(n.controller_addr() == Some(format!("{host}:9093")));
     }
 }
