@@ -1,4 +1,7 @@
+use anyhow::Context as _;
 use clap::Parser;
+use crabka_replicator::config::ReplicatorConfig;
+use crabka_replicator::supervisor::FlowSupervisor;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -21,7 +24,16 @@ async fn main() -> anyhow::Result<()> {
         .with(crabka_logfmt::layer(filter, std::io::stdout))
         .init();
 
-    let _cli = Cli::parse();
-    tracing::info!("crabka-replicator starting");
+    let cli = Cli::parse();
+    let yaml = std::fs::read_to_string(&cli.config)
+        .with_context(|| format!("reading config {}", cli.config.display()))?;
+    let config = ReplicatorConfig::from_yaml(&yaml)?;
+    config.validate()?;
+
+    let supervisor = FlowSupervisor::run(config).await?;
+    tracing::info!("crabka-replicator running; send SIGINT/ctrl-c to stop");
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("shutdown requested; draining flows");
+    supervisor.shutdown().await;
     Ok(())
 }
