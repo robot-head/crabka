@@ -1,7 +1,7 @@
 //! Shared helpers for crabka-replicator integration tests. Included via `mod common;`
 //! in each `tests/*.rs` file. Uses the crate's public `admin_util` plus the real
 //! broker/producer/consumer clients.
-#![allow(dead_code, clippy::map_unwrap_or, clippy::manual_assert)]
+#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -69,8 +69,7 @@ pub async fn produce(bootstrap: &str, topic: &str, key: &[u8], value: &[u8]) {
 pub async fn count(bootstrap: &str, topic: &str) -> usize {
     crabka_replicator::admin_util::read_all(bootstrap, topic, None)
         .await
-        .map(|v| v.len())
-        .unwrap_or(0)
+        .map_or(0, |v| v.len())
 }
 
 /// Poll `count` until it reaches at least `n`, panicking on timeout.
@@ -80,9 +79,10 @@ pub async fn await_count(bootstrap: &str, topic: &str, n: usize, timeout: Durati
         if count(bootstrap, topic).await >= n {
             return;
         }
-        if start.elapsed() > timeout {
-            panic!("topic `{topic}` did not reach {n} records within {timeout:?}");
-        }
+        assert!(
+            start.elapsed() <= timeout,
+            "topic `{topic}` did not reach {n} records within {timeout:?}"
+        );
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 }
