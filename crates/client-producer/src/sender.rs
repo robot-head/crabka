@@ -249,12 +249,12 @@ struct PreparedBatch {
     /// (`ROUTING_RETRY_BUDGET`) is measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
-    /// Wall-clock time the batch was most recently handed to the transport.
-    /// Gates re-sends to one per [`SenderConfig::retry_backoff`]: a batch that
-    /// keeps failing (e.g. the leader's pod is bouncing and refusing
-    /// connections) backs off between attempts instead of hot-looping the
-    /// drain loop every linger tick.
-    last_attempt: Option<Instant>,
+    /// When `Some`, the batch is backing off after a **transport/connection**
+    /// failure and must not be resent until this instant. This keeps a leader
+    /// whose pod is down and refusing connections from hot-looping the drain
+    /// every linger tick. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
+    /// this `None` so they resend immediately at the freshly-resolved leader.
+    backoff_until: Option<Instant>,
 }
 
 /// One drain cycle. Builds the send list — each partition's pending resend
@@ -285,7 +285,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
     //    and returns batches whose routing budget elapsed, which we fail here
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
-    let (mut to_send, expired) = collect_retries(&mut state.retry, now, cfg.retry_backoff);
+    let (mut to_send, expired) = collect_retries(&mut state.retry, now);
     for pb in expired {
         fail_batch(
             pb.records,
@@ -342,7 +342,6 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         let Some(batch) = batch else { continue };
         let mut pb = prepare_batch(cfg, &key.0, key.1, batch).await;
         pb.first_sent = Some(now);
-        pb.last_attempt = Some(now);
         occupied.insert(key);
         to_send.push(pb);
     }
@@ -369,13 +368,11 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
-    retry_backoff: Duration,
 ) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
     let mut to_send: Vec<PreparedBatch> = Vec::new();
     let mut expired: Vec<PreparedBatch> = Vec::new();
-    // Batches not yet eligible for a resend (still within `retry_backoff` of
-    // their last attempt) are re-parked here so a persistently-failing leader
-    // doesn't hot-loop the drain on every linger tick.
+    // Batches still backing off after a transport failure are re-parked here so
+    // a down/refusing leader doesn't hot-loop the drain on every linger tick.
     let mut parked: Vec<((String, i32), PreparedBatch)> = Vec::new();
 
     for (key, mut pb) in retry.drain() {
@@ -386,19 +383,17 @@ fn collect_retries(
             expired.push(pb);
             continue;
         }
-        // Honour the retry backoff: a batch resent under `retry_backoff` ago
-        // waits in its slot until the backoff elapses.
-        if pb
-            .last_attempt
-            .is_some_and(|t| now.duration_since(t) < retry_backoff)
-        {
+        // Honour a connection-failure backoff: the batch waits in its slot until
+        // its `backoff_until` passes. Routing redirects leave `backoff_until`
+        // `None`, so they resend immediately at the re-resolved leader.
+        if pb.backoff_until.is_some_and(|t| now < t) {
             parked.push((key, pb));
             continue;
         }
         if pb.first_sent.is_none() {
             pb.first_sent = Some(now);
         }
-        pb.last_attempt = Some(now);
+        pb.backoff_until = None;
         to_send.push(pb);
     }
 
@@ -517,7 +512,7 @@ async fn prepare_batch(
         record_batch,
         records: batch.records,
         first_sent: None,
-        last_attempt: None,
+        backoff_until: None,
     }
 }
 
@@ -661,7 +656,7 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
 /// its transport/broker result to a [`BatchVerdict`]. The batch is returned
 /// alongside the verdict (the caller still owns its records). On a connection
 /// error the broker is evicted so a reconnect targets its current address.
-async fn send_one_batch(cfg: &SenderConfig, pb: PreparedBatch) -> BatchSendResult {
+async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendResult {
     let leader = resolve_leader(cfg, &pb.topic, pb.partition);
     let req = build_single_batch_request(cfg, &pb);
 
@@ -693,8 +688,11 @@ async fn send_one_batch(cfg: &SenderConfig, pb: PreparedBatch) -> BatchSendResul
                         "produce to leader failed {attempts}×; will re-route",
                     );
                     // Transport failure → retry (park in the retry slot, resend
-                    // verbatim). Force a metadata refresh so the resend
-                    // re-resolves to whatever leader the cluster (re-)elected.
+                    // verbatim). Back off before the resend so a down/refusing
+                    // leader isn't hammered every linger tick, and force a
+                    // metadata refresh so the resend re-resolves to whatever
+                    // leader the cluster (re-)elected.
+                    pb.backoff_until = Some(Instant::now() + cfg.retry_backoff);
                     return BatchSendResult {
                         pb,
                         verdict: BatchVerdict::Retry,
@@ -997,7 +995,7 @@ mod tests {
             },
             records: vec![record],
             first_sent,
-            last_attempt: None,
+            backoff_until: None,
         };
         (pb, rx)
     }
@@ -1042,8 +1040,7 @@ mod tests {
         retry.insert(("t".to_string(), 0), old);
         retry.insert(("t".to_string(), 1), recent);
 
-        let (to_send, expired) =
-            collect_retries(&mut retry, Instant::now(), Duration::from_millis(100));
+        let (to_send, expired) = collect_retries(&mut retry, Instant::now());
 
         assert!(expired.len() == 1);
         assert!(expired[0].base_sequence == 0);
@@ -1059,7 +1056,7 @@ mod tests {
         retry.insert(("t".to_string(), 0), pb);
 
         let now = Instant::now();
-        let (to_send, expired) = collect_retries(&mut retry, now, Duration::from_millis(100));
+        let (to_send, expired) = collect_retries(&mut retry, now);
 
         assert!(expired.is_empty());
         assert!(to_send.len() == 1);
@@ -1067,30 +1064,33 @@ mod tests {
     }
 
     #[test]
-    fn collect_retries_backs_off_recently_attempted_batch() {
-        // A batch resent `now` (last_attempt = now) must NOT be resent again
-        // until `retry_backoff` elapses — otherwise a leader that keeps refusing
-        // connections (a bouncing pod) hot-loops the drain on every linger tick.
-        // The three elapsed values (under / exactly at / past the backoff) pin
-        // the `<` comparison so no `<` → `<=`/`>`/`>=`/`==`/`!=` mutant survives.
+    fn collect_retries_honours_connection_backoff_until() {
+        // A batch parked with `backoff_until` set (after a transport failure)
+        // must NOT be resent until that instant passes — otherwise a leader
+        // whose pod is down and refusing connections hot-loops the drain every
+        // linger tick. The three sample points (before / exactly at / after the
+        // backoff instant) pin the `now < backoff_until` comparison so no
+        // `<` → `<=`/`>`/`>=`/`==`/`!=` mutant survives.
         let backoff = Duration::from_millis(100);
         let now = Instant::now();
-        // (to_send.len(), retry.len()) after collecting `elapsed` past the resend.
+        // (to_send.len(), retry.len()) collected `elapsed` after a batch that is
+        // backing off until `now + backoff`.
         let collect_after = |elapsed: Duration| -> (usize, usize) {
             let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
             let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
-            pb.last_attempt = Some(now);
+            pb.backoff_until = Some(now + backoff);
             retry.insert(("t".to_string(), 0), pb);
-            let (to_send, expired) = collect_retries(&mut retry, now + elapsed, backoff);
+            let (to_send, expired) = collect_retries(&mut retry, now + elapsed);
             assert!(expired.is_empty());
             (to_send.len(), retry.len())
         };
 
-        // Strictly within the backoff: parked in its slot, nothing sent.
+        // Before the backoff instant: parked in its slot, nothing sent.
         assert!(collect_after(Duration::from_millis(40)) == (0, 1));
-        // Exactly at the boundary: eligible — `<` resends here, `<=` would not.
+        // Exactly at the backoff instant: eligible — `now < t` is false here, so
+        // `<` resends while `<=` would keep it parked.
         assert!(collect_after(backoff) == (1, 0));
-        // Past the backoff: eligible and drained out to send.
+        // After the backoff instant: eligible and drained out to send.
         assert!(collect_after(Duration::from_millis(160)) == (1, 0));
     }
 }
