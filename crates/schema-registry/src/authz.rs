@@ -133,6 +133,9 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         // ---- /schemas ... -------------------------------------------------
         // GET /schemas/types — list the supported schema types (cluster info).
         ["schemas", "types"] if method == Method::GET => cluster(AclOperation::Describe),
+        // POST /schemas/import — bulk-register a FileDescriptorSet spanning
+        // multiple subjects, so authorize it as a cluster-level schema write.
+        ["schemas", "import"] if method == Method::POST => cluster(AclOperation::Write),
         // GET /schemas/ids/{id} and GET /schemas — read schemas by id / list all.
         ["schemas", "ids", _] | ["schemas"] if method == Method::GET => cluster(AclOperation::Read),
         // GET /schemas/ids/{id}/versions — subjects/versions using a schema id.
@@ -531,6 +534,20 @@ mod tests {
                 AclOperation::Read
             ))
         );
+    }
+
+    #[test]
+    fn schemas_import_post_is_write_cluster_only() {
+        assert_eq!(
+            t("POST", "/schemas/import"),
+            Some((
+                ResourceType::Cluster,
+                "kafka-cluster".to_string(),
+                AclOperation::Write
+            ))
+        );
+        assert_eq!(t("GET", "/schemas/import"), None);
+        assert_eq!(t("PUT", "/schemas/import"), None);
     }
 
     #[test]

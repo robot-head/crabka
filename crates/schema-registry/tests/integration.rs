@@ -10,6 +10,12 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use prost_reflect::prost::Message;
+use prost_reflect::prost_types::field_descriptor_proto::{Label as FieldLabel, Type as FieldType};
+use prost_reflect::prost_types::{
+    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+    MethodDescriptorProto, ServiceDescriptorProto,
+};
 use tower::ServiceExt;
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -222,6 +228,21 @@ async fn post_raw(app: &axum::Router, uri: &str, body: &str) -> axum::response::
         .unwrap()
 }
 
+/// POST bytes to `uri`, return the full response.
+async fn post_bytes(app: &axum::Router, uri: &str, body: Vec<u8>) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 /// DELETE `uri`, return (status, parsed body).
 async fn delete_req(app: &axum::Router, uri: &str) -> (axum::http::StatusCode, serde_json::Value) {
     let resp = app
@@ -356,6 +377,93 @@ async fn lookup_endpoint() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = body_json(resp).await;
     assert_eq!(body["error_code"], 40401);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── FileDescriptorSet import endpoint ───────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn import_file_descriptor_set_registers_dependencies_first() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let money = FileDescriptorProto {
+        name: Some("common/money.proto".into()),
+        package: Some("common".into()),
+        syntax: Some("proto3".into()),
+        message_type: vec![DescriptorProto {
+            name: Some("Money".into()),
+            field: vec![FieldDescriptorProto {
+                name: Some("cents".into()),
+                number: Some(1),
+                label: Some(FieldLabel::Optional as i32),
+                r#type: Some(FieldType::Int64 as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let order = FileDescriptorProto {
+        name: Some("orders/order.proto".into()),
+        package: Some("orders".into()),
+        syntax: Some("proto3".into()),
+        dependency: vec!["common/money.proto".into()],
+        message_type: vec![DescriptorProto {
+            name: Some("Order".into()),
+            field: vec![FieldDescriptorProto {
+                name: Some("total".into()),
+                number: Some(1),
+                label: Some(FieldLabel::Optional as i32),
+                r#type: Some(FieldType::Message as i32),
+                type_name: Some(".common.Money".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        service: vec![ServiceDescriptorProto {
+            name: Some("OrderService".into()),
+            method: vec![MethodDescriptorProto {
+                name: Some("GetOrder".into()),
+                input_type: Some(".orders.Order".into()),
+                output_type: Some(".orders.Order".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let bytes = FileDescriptorSet {
+        // Deliberately reverse dependency order. The endpoint must sort before
+        // registering so references can resolve.
+        file: vec![order, money],
+    }
+    .encode_to_vec();
+
+    let resp = post_bytes(&app, "/schemas/import", bytes).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(
+        body,
+        serde_json::json!([
+            {"subject":"common/money.proto","id":1,"version":1},
+            {"subject":"orders/order.proto","id":2,"version":1}
+        ])
+    );
+
+    let imported = get_json(&app, "/subjects/orders%2Forder.proto/versions/1").await;
+    assert_eq!(imported["schemaType"], "PROTOBUF");
+    assert_eq!(imported["references"][0]["name"], "common/money.proto");
+    assert_eq!(imported["references"][0]["subject"], "common/money.proto");
+    assert_eq!(imported["references"][0]["version"], 1);
+    assert!(
+        imported["schema"]
+            .as_str()
+            .unwrap()
+            .contains("service OrderService")
+    );
 
     cancel.cancel();
     broker.shutdown().await;

@@ -20,6 +20,14 @@ workspace = true
 name = "crabka-schema-registry"
 path = "src/bin/schema-registry.rs"
 
+[[bin]]
+name = "crabka-schema-push"
+path = "src/bin/schema-push.rs"
+
+[[bin]]
+name = "crabka-schema-compat-check"
+path = "src/bin/schema-compat-check.rs"
+
 [dependencies]
 crabka-client-core = { version = "0.3.6", path = "../client-core" }
 crabka-client-admin = { version = "0.3.6", path = "../client-admin" }
