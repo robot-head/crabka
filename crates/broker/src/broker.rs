@@ -1364,25 +1364,24 @@ impl BrokerHandle {
                 }
             }
         };
-        match tokio::time::timeout(timeout, wait).await {
-            Ok(()) => {
-                self.shutdown().await;
-                Ok(())
-            }
-            Err(_) => {
-                // Leadership did not fully drain in time (e.g. the controller
-                // is itself unreachable). Still stop cleanly via the regular
-                // hard shutdown so the process exits before the Kubernetes
-                // SIGKILL — a partly-drained graceful stop still beats an
-                // abrupt kill. The `ShutdownTimeout` return tells the caller
-                // the drain was incomplete.
-                tracing::warn!(
-                    ?timeout,
-                    "controlled shutdown drain timed out; falling back to hard shutdown"
-                );
-                self.shutdown().await;
-                Err(BrokerError::ShutdownTimeout(timeout))
-            }
+        // `if`/`else` rather than `match { Ok(()) => .., Err(_) => .. }` to
+        // satisfy `clippy::single_match_else`.
+        if tokio::time::timeout(timeout, wait).await.is_ok() {
+            self.shutdown().await;
+            Ok(())
+        } else {
+            // Leadership did not fully drain in time (e.g. the controller
+            // is itself unreachable). Still stop cleanly via the regular
+            // hard shutdown so the process exits before the Kubernetes
+            // SIGKILL — a partly-drained graceful stop still beats an
+            // abrupt kill. The `ShutdownTimeout` return tells the caller
+            // the drain was incomplete.
+            tracing::warn!(
+                ?timeout,
+                "controlled shutdown drain timed out; falling back to hard shutdown"
+            );
+            self.shutdown().await;
+            Err(BrokerError::ShutdownTimeout(timeout))
         }
     }
 

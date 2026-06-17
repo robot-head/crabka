@@ -95,7 +95,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         log_dir: dir.path().to_path_buf(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
