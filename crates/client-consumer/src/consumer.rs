@@ -69,6 +69,14 @@ pub struct Consumer {
     pub(crate) auto_offset_reset: AutoOffsetReset,
 }
 
+/// A per-record header key/value pair, as defined by the Kafka v2 record
+/// format. The key is a UTF-8 string; the value is optional raw bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header {
+    pub key: String,
+    pub value: Option<Bytes>,
+}
+
 /// One record returned by `Consumer::poll`.
 #[derive(Debug, Clone)]
 pub struct ConsumerRecord {
@@ -79,6 +87,7 @@ pub struct ConsumerRecord {
     pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
+    pub headers: Vec<Header>,
 }
 
 #[bon::bon]

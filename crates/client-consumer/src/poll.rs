@@ -10,7 +10,7 @@ use crabka_protocol::owned::list_offsets_request::{
 };
 
 use crate::builder::{AutoOffsetReset, IsolationLevel};
-use crate::consumer::{Consumer, ConsumerRecord};
+use crate::consumer::{Consumer, ConsumerRecord, Header};
 use crate::error::ConsumerError;
 
 /// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
@@ -389,6 +389,14 @@ impl Consumer {
                             timestamp: batch.base_timestamp + r.timestamp_delta,
                             key: r.key.clone(),
                             value: r.value.clone(),
+                            headers: r
+                                .headers
+                                .iter()
+                                .map(|h| Header {
+                                    key: h.key.clone(),
+                                    value: h.value.clone(),
+                                })
+                                .collect(),
                         });
                     }
                 }
