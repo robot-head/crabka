@@ -1071,29 +1071,27 @@ mod tests {
         // A batch resent `now` (last_attempt = now) must NOT be resent again
         // until `retry_backoff` elapses — otherwise a leader that keeps refusing
         // connections (a bouncing pod) hot-loops the drain on every linger tick.
-        let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
+        // The three elapsed values (under / exactly at / past the backoff) pin
+        // the `<` comparison so no `<` → `<=`/`>`/`>=`/`==`/`!=` mutant survives.
+        let backoff = Duration::from_millis(100);
         let now = Instant::now();
-        let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
-        pb.last_attempt = Some(now);
-        retry.insert(("t".to_string(), 0), pb);
+        // (to_send.len(), retry.len()) after collecting `elapsed` past the resend.
+        let collect_after = |elapsed: Duration| -> (usize, usize) {
+            let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
+            let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
+            pb.last_attempt = Some(now);
+            retry.insert(("t".to_string(), 0), pb);
+            let (to_send, expired) = collect_retries(&mut retry, now + elapsed, backoff);
+            assert!(expired.is_empty());
+            (to_send.len(), retry.len())
+        };
 
-        // Within the backoff window: parked, nothing sent, slot retained.
-        let (to_send, expired) = collect_retries(
-            &mut retry,
-            now + Duration::from_millis(40),
-            Duration::from_millis(100),
-        );
-        assert!(to_send.is_empty() && expired.is_empty());
-        assert!(retry.len() == 1);
-
-        // Past the backoff window: eligible again and drained out to send.
-        let (to_send, _expired) = collect_retries(
-            &mut retry,
-            now + Duration::from_millis(120),
-            Duration::from_millis(100),
-        );
-        assert!(to_send.len() == 1);
-        assert!(retry.is_empty());
+        // Strictly within the backoff: parked in its slot, nothing sent.
+        assert!(collect_after(Duration::from_millis(40)) == (0, 1));
+        // Exactly at the boundary: eligible — `<` resends here, `<=` would not.
+        assert!(collect_after(backoff) == (1, 0));
+        // Past the backoff: eligible and drained out to send.
+        assert!(collect_after(Duration::from_millis(160)) == (1, 0));
     }
 }
 
