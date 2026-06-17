@@ -17,7 +17,7 @@ use crate::record::ReplicatedRecord;
 /// offset, timestamp, headers) alongside the raw payload. The connect runtime
 /// never sees topic/partition directly — only the `ReplicatedRecord` value.
 pub struct SourceConsumer {
-    consumer: Consumer,
+    consumer: Option<Consumer>,
     buf: VecDeque<ReplicatedRecord>,
     /// Next-offset-to-read per `"<topic>-<partition>"` key (i.e. `last_offset + 1`).
     positions: BTreeMap<String, i64>,
@@ -52,7 +52,7 @@ impl SourceConsumer {
         .map_err(|e| ConnectError::Backend(e.to_string()))?;
 
         Ok(Self {
-            consumer,
+            consumer: Some(consumer),
             buf: VecDeque::new(),
             positions: BTreeMap::new(),
         })
@@ -74,6 +74,8 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         if self.buf.is_empty() {
             let recs = self
                 .consumer
+                .as_mut()
+                .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?
                 .poll(Duration::from_millis(500))
                 .await
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
@@ -125,6 +127,23 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
     ///
     /// Always returns `Ok(())`.
     async fn seek(&mut self, _offset: SourceOffset) -> Result<(), ConnectError> {
+        Ok(())
+    }
+
+    /// Close the underlying consumer, sending `LeaveGroup` so a restarted
+    /// replicator can rejoin the group immediately instead of waiting out the
+    /// departed member's session timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError::Backend`] if the consumer fails to close cleanly.
+    async fn close(&mut self) -> Result<(), ConnectError> {
+        if let Some(consumer) = self.consumer.take() {
+            consumer
+                .close()
+                .await
+                .map_err(|e| ConnectError::Backend(e.to_string()))?;
+        }
         Ok(())
     }
 }
