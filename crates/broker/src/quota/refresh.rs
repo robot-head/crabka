@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use crabka_metadata::EntityKey;
 use crabka_metadata::MetadataImage;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -47,9 +48,10 @@ pub async fn run(
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // quota rates are non-negative
 fn refresh_buckets(image: &MetadataImage, buckets: &QuotaBuckets) {
     for ((quota_key, entity_key), bucket) in buckets.iter() {
+        let persisted_key = persisted_quota_entity_key(&entity_key);
         let new_rate: u64 = image
             .client_quotas()
-            .get(&entity_key)
+            .get(&persisted_key)
             .and_then(|m| m.get(&quota_key))
             .copied()
             .map_or(0, |v| v.max(0.0) as u64);
@@ -63,6 +65,14 @@ fn refresh_buckets(image: &MetadataImage, buckets: &QuotaBuckets) {
             bucket.set_rate(new_rate);
         }
     }
+}
+
+fn persisted_quota_entity_key(entity_key: &EntityKey) -> EntityKey {
+    entity_key
+        .iter()
+        .filter(|(entity_type, _)| entity_type != "qos-tier")
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -113,5 +123,25 @@ mod tests {
         let empty = Arc::new(MetadataImage::new(uuid::Uuid::nil()));
         refresh_buckets(&empty, &buckets);
         assert!(b.rate() == 0);
+    }
+
+    #[test]
+    fn refresh_updates_qos_tier_bucket_from_base_quota_entity() {
+        let buckets = Arc::new(QuotaBuckets::new());
+        let tiered_key: EntityKey = vec![
+            ("client-id".into(), Some("app".into())),
+            ("user".into(), Some("alice".into())),
+            ("qos-tier".into(), Some("gold".into())),
+        ];
+        let b = buckets.get_or_create("producer_byte_rate", &tiered_key, 128);
+        assert!(b.rate() == 128);
+
+        let img = img_with_quota(
+            vec![("user", Some("alice")), ("client-id", Some("app"))],
+            "producer_byte_rate",
+            2048.0,
+        );
+        refresh_buckets(&img, &buckets);
+        assert!(b.rate() == 2048);
     }
 }

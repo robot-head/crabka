@@ -168,12 +168,7 @@ pub(crate) async fn handle(
     // ── KIP-13: measure total request bytes before consuming the topic_data ──
     // Computed here so the iterator doesn't conflict with `for topic in req.topic_data`
     // below (which moves the vector).
-    let total_produce_bytes: u64 = req
-        .topic_data
-        .iter()
-        .flat_map(|t| t.partition_data.iter())
-        .map(|p| p.payload.payload_len() as u64)
-        .sum();
+    let produce_bytes_by_qos_tier = produce_bytes_by_qos_tier(&image, &req.topic_data);
 
     for topic in req.topic_data {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
@@ -297,13 +292,20 @@ pub(crate) async fn handle(
     // their max, surface it in throttle_time_ms, and mute the channel once
     // before responding (KIP-219). The dispatch loop skips request_percentage
     // for Produce so it is charged exactly once, here.
-    let data_delay = consume_producer_quota(
-        &image,
-        &broker.quota_buckets,
-        &ctx.principal.name,
-        ctx.client_id,
-        total_produce_bytes,
-    );
+    let data_delay = produce_bytes_by_qos_tier
+        .iter()
+        .map(|(qos_tier, bytes)| {
+            crate::quota::consume_producer_quota(
+                &image,
+                &broker.quota_buckets,
+                &ctx.principal.name,
+                ctx.client_id,
+                qos_tier,
+                *bytes,
+            )
+        })
+        .max()
+        .unwrap_or(Duration::ZERO);
     #[allow(clippy::cast_possible_truncation)]
     let elapsed_micros = handler_start
         .elapsed()
@@ -761,36 +763,6 @@ async fn finalize_ack(
     }
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn consume_producer_quota(
-    image: &crabka_metadata::MetadataImage,
-    buckets: &crate::quota::QuotaBuckets,
-    principal: &str,
-    client_id: &str,
-    bytes: u64,
-) -> Duration {
-    let Some((entity_key, rate)) =
-        crate::quota::lookup_quota_with_key(image, principal, client_id, "producer_byte_rate")
-    else {
-        return Duration::ZERO;
-    };
-    if rate <= 0.0 {
-        return Duration::ZERO;
-    }
-    let bucket = buckets.get_or_create("producer_byte_rate", &entity_key, rate as u64);
-    let granted = bucket.try_consume(bytes);
-    if granted >= bytes {
-        return Duration::ZERO;
-    }
-    let overage = bytes - granted;
-    let delay_secs = overage as f64 / rate;
-    Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
-}
-
 /// Build a topic-level error response for KIP-516 id-resolution failures
 /// (`UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`). Every partition row in
 /// the request receives the same error code; `base_offset` is set to -1 to
@@ -940,6 +912,27 @@ impl ProduceFramed {
                 .collect(),
         }
     }
+}
+
+fn produce_bytes_by_qos_tier(
+    image: &crabka_metadata::MetadataImage,
+    topics: &[FramedTopic],
+) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    for topic in topics {
+        let topic_name = match crate::topic_resolve::resolve(image, &topic.name, topic.topic_id) {
+            Ok(rec) => rec.name.as_str(),
+            Err(_) => topic.name.as_str(),
+        };
+        let qos_tier = crate::config_keys::resolve_qos_tier(image, topic_name).to_string();
+        let topic_bytes: u64 = topic
+            .partition_data
+            .iter()
+            .map(|p| p.payload.payload_len() as u64)
+            .sum();
+        *out.entry(qos_tier).or_default() += topic_bytes;
+    }
+    out
 }
 
 /// Sum the `records_count` header field of every concatenated v2 batch in a
@@ -1237,8 +1230,12 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_INSYNC_REPLICAS, topic_min_insync_replicas};
+    use super::{
+        FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionPayload,
+        produce_bytes_by_qos_tier, topic_min_insync_replicas,
+    };
     use assert2::assert;
+    use bytes::Bytes;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -1275,6 +1272,30 @@ mod tests {
             topic: topic.into(),
             overrides: o,
         }));
+    }
+
+    fn set_qos_tier(img: &mut MetadataImage, topic: &str, tier: &str) {
+        let mut o = BTreeMap::new();
+        o.insert(crate::config_keys::QOS_TIER.into(), tier.into());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: topic.into(),
+            overrides: o,
+        }));
+    }
+
+    fn framed_topic(name: &str, payload_lens: &[usize]) -> FramedTopic {
+        FramedTopic {
+            name: name.into(),
+            topic_id: crabka_protocol::primitives::uuid::Uuid::ZERO,
+            partition_data: payload_lens
+                .iter()
+                .enumerate()
+                .map(|(idx, len)| FramedPartition {
+                    index: i32::try_from(idx).unwrap(),
+                    payload: PartitionPayload::Slice(Bytes::from(vec![0; *len])),
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -1329,6 +1350,30 @@ mod tests {
     }
 
     #[test]
+    fn produce_bytes_by_qos_tier_groups_topic_payload_bytes() {
+        let mut img = image_with_topic("gold-topic", &[1]);
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "default-topic".into(),
+            topic_id: Uuid::from_u128(2),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        set_qos_tier(&mut img, "gold-topic", "gold");
+
+        let topics = vec![
+            framed_topic("gold-topic", &[10, 15]),
+            framed_topic("default-topic", &[7]),
+            framed_topic("gold-topic", &[5]),
+        ];
+
+        let grouped = produce_bytes_by_qos_tier(&img, &topics);
+
+        assert!(grouped.get("gold") == Some(&30));
+        assert!(grouped.get(crate::config_keys::DEFAULT_QOS_TIER) == Some(&7));
+        assert!(grouped.len() == 2);
+    }
+
+    #[test]
     fn consume_producer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
         let mut img = MetadataImage::new(uuid::Uuid::nil());
@@ -1348,14 +1393,17 @@ mod tests {
         }));
         let buckets = crate::quota::QuotaBuckets::new();
         // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
-        let delay_match = super::consume_producer_quota(&img, &buckets, "alice", "app-x", 4096);
+        let delay_match =
+            crate::quota::consume_producer_quota(&img, &buckets, "alice", "app-x", "default", 4096);
         assert!(
             delay_match > std::time::Duration::ZERO,
             "tuple quota match should throttle on overage; got {delay_match:?}"
         );
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
         let buckets2 = crate::quota::QuotaBuckets::new();
-        let delay_other = super::consume_producer_quota(&img, &buckets2, "alice", "other", 4096);
+        let delay_other = crate::quota::consume_producer_quota(
+            &img, &buckets2, "alice", "other", "default", 4096,
+        );
         assert!(
             delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
