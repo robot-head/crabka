@@ -23,6 +23,24 @@ pub struct SourceConsumer {
     positions: BTreeMap<String, i64>,
 }
 
+/// Split a `"<topic>-<partition>"` checkpoint key back into its parts.
+///
+/// The key is built by [`SourceConsumer::poll`] / [`checkpoint`] as
+/// `format!("{topic}-{partition}")`. Kafka topic names may themselves contain
+/// `-`, so we split on the **last** `-` and parse the suffix as the partition
+/// index. Returns `None` if there is no `-`, the suffix is not a valid `i32`,
+/// or the topic part is empty.
+///
+/// [`checkpoint`]: SourceConsumer::checkpoint
+fn split_topic_partition(key: &str) -> Option<(String, i32)> {
+    let (topic, part) = key.rsplit_once('-')?;
+    if topic.is_empty() {
+        return None;
+    }
+    let partition: i32 = part.parse().ok()?;
+    Some((topic.to_string(), partition))
+}
+
 impl SourceConsumer {
     /// Build and start a [`SourceConsumer`] subscribed to `topics` on the
     /// cluster at `bootstrap`, joining `group_id`.
@@ -118,23 +136,60 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         Some(SourceOffset::new(BTreeMap::new(), position))
     }
 
-    /// No-op seek (Slice 1 limitation).
+    /// Restore the read position from a previously-checkpointed [`SourceOffset`].
     ///
-    /// The connect runtime persists this source's position to the target via the
-    /// checkpoint store, but `crabka-client-consumer` currently exposes no
-    /// `seek`/`assign` API, so the saved position cannot yet be applied on
-    /// restart — and the consumer does not commit group offsets either. A
-    /// restarted replicator therefore re-reads from the earliest available
-    /// offset: delivery stays **at-least-once with no data gap**, but records
-    /// produced before a crash are reprocessed rather than resumed-past. Wiring
-    /// true position recovery requires a consumer `seek` API and is tracked as a
-    /// follow-up; the durable checkpoint state is already written, ready to drive
-    /// it.
+    /// The runtime calls this once before the first [`poll`](Self::poll), passing
+    /// the position loaded from the durable checkpoint store on the target. Each
+    /// `position` entry is keyed `"<topic>-<partition>"` →
+    /// [`OffsetValue::Long`]`(next_offset)` (the value [`checkpoint`](Self::checkpoint)
+    /// wrote: `last_consumed + 1`). We decode each key back into `(topic,
+    /// partition)` and hand the offset to the consumer's
+    /// [`seek`](crabka_client_consumer::Consumer::seek).
+    ///
+    /// The consumer holds each seek as *pending* and materialises it at the top
+    /// of the first `poll` that sees the partition assigned — after the group's
+    /// post-assignment offset prime, but before any `Fetch` — so the sought
+    /// offset is the one fetched. That makes restart resume **from the last
+    /// fully-committed record** rather than re-reading the topic from offset 0:
+    /// no record below the sought offset is re-delivered, and none above it is
+    /// skipped (no data gap). Delivery remains **at-least-once** — a crash
+    /// between a sink flush and the checkpoint save can re-deliver the in-flight
+    /// batch, but never lose a record.
+    ///
+    /// A malformed key (no `-`, or a non-integer partition/offset) is skipped
+    /// with a warning rather than failing the restore: one corrupt entry must
+    /// not strand recovery for the partitions that decoded cleanly.
     ///
     /// # Errors
     ///
-    /// Always returns `Ok(())`.
-    async fn seek(&mut self, _offset: SourceOffset) -> Result<(), ConnectError> {
+    /// Returns [`ConnectError::Backend`] if the consumer is already closed.
+    async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
+        let consumer = self
+            .consumer
+            .as_ref()
+            .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?;
+
+        for (key, value) in &offset.position {
+            let OffsetValue::Long(next) = value else {
+                tracing::warn!(key, "checkpoint position value is not a Long; skipping");
+                continue;
+            };
+            let Some((topic, partition)) = split_topic_partition(key) else {
+                tracing::warn!(
+                    key,
+                    "checkpoint position key is not '<topic>-<partition>'; skipping"
+                );
+                continue;
+            };
+            // Seed our local position view too, so a `checkpoint()` taken before
+            // the first poll reflects the restored position rather than dropping
+            // back to empty.
+            self.positions.insert(key.clone(), *next);
+            consumer
+                .seek(topic, partition, *next)
+                .await
+                .map_err(|e| ConnectError::Backend(e.to_string()))?;
+        }
         Ok(())
     }
 

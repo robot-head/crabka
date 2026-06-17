@@ -1,9 +1,13 @@
-//! Integration test: replicator restart resumes with no data gap (at-least-once).
+//! Integration test: replicator restart *resumes* from the durable checkpoint
+//! (at-least-once), rather than re-reading the source topic from offset 0.
 //!
 //! Proves that when a `FlowSupervisor` is shut down and a new one is started
 //! with the same flow configuration (and therefore the same consumer group +
-//! checkpoint key), it picks up from the committed offset and delivers every
-//! record produced during both runs to the target — no gap across the restart.
+//! checkpoint key), it seeks to the committed position and delivers every record
+//! produced during both runs to the target — no gap across the restart — while
+//! NOT re-delivering the whole pre-crash batch. The position is restored via
+//! `SourceConsumer::seek` (the loaded `SourceOffset` → `Consumer::seek`), so the
+//! target count after a 10-then-restart-then-10 sequence is close to 20, not ~30.
 
 mod common;
 
@@ -118,18 +122,19 @@ async fn restart_resumes_with_no_gap() {
         .collect();
 
     let total = common::count(&target.bootstrap, "us-east.orders").await;
-    println!("target record count after restart: {total}  (>= 20 required)");
+    let duplicates = total.saturating_sub(20);
+    println!("target record count after restart: {total}  (resume target: ~20, ceiling: <30)");
     println!("distinct keys on target: {}", keys.len());
+    println!("duplicate (re-delivered) records: {duplicates}");
 
     // ── Step 7: assertions ────────────────────────────────────────────────────
 
-    // Every record must have made it across the restart (dups allowed).
+    // (a) No gap: every one of the 20 distinct keys made it across the restart.
     assert!(
-        total >= 20,
-        "expected at least 20 records on target after restart, got {total}"
+        keys.len() == 20,
+        "expected 20 distinct keys on target after restart, got {} — data gap",
+        keys.len()
     );
-
-    // All 20 distinct keys must be present — no gap.
     for i in 0..20u32 {
         let key = format!("k{i}").into_bytes();
         assert!(
@@ -138,12 +143,28 @@ async fn restart_resumes_with_no_gap() {
         );
     }
 
-    if total > 20 {
-        println!(
-            "note: {extra} duplicate record(s) observed — acceptable under at-least-once",
-            extra = total - 20
-        );
-    }
+    // (b) RESUMED, not re-read from 0. A full re-read would deliver the first
+    //     batch (k0..k9) twice → total ~30. A true resume re-reads at most the
+    //     in-flight batch at shutdown, so the count stays close to 20 and well
+    //     under 30. We allow a small at-least-once boundary re-delivery (a few
+    //     records), but not a wholesale reprocess of the 10 pre-crash records.
+    assert!(
+        total >= 20,
+        "expected at least 20 records on target after restart, got {total}"
+    );
+    assert!(
+        total < 30,
+        "target re-read the whole pre-crash batch (total {total} >= 30) — \
+         restart did NOT resume from the checkpoint"
+    );
+    // Bound the duplicates tightly: at-least-once permits the in-flight batch to
+    // re-deliver, not ~10 records. The runtime commits in 500ms intervals over a
+    // 10-record source, so at most a handful straddle the shutdown boundary.
+    assert!(
+        duplicates <= 5,
+        "too many duplicates after restart ({duplicates}) — expected a small \
+         boundary re-delivery, not a full re-read of the first batch"
+    );
 
     // ── Step 8: clean shutdown ────────────────────────────────────────────────
     sup2.shutdown().await;
