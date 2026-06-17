@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+description = "Postgres logical-decoding source connector for Crabka Connect"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-connect-postgres"
+keywords = ["kafka", "connect", "postgres", "cdc", "crabka"]
+categories = ["database", "asynchronous"]
 
 [lints]
 workspace = true

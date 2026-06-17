@@ -1,9 +1,9 @@
-use crabka_connect::ConnectorConfig;
+use crabka_connect::{ConnectorConfig, SecretString};
 
 #[derive(Debug, Clone, ConnectorConfig)]
 pub struct PostgresSourceConfig {
-    #[config(required)]
-    pub database_url: String,
+    #[config(required, secret)]
+    pub database_url: SecretString,
     #[config(required)]
     pub slot_name: String,
     #[config(default = "crabka_connect")]
@@ -18,7 +18,7 @@ pub struct PostgresSourceConfig {
 
 #[cfg(test)]
 mod tests {
-    use crabka_connect::{ConfigKind, ConnectorConfig, EnvSecretResolver};
+    use crabka_connect::{ConfigKind, ConnectorConfig, EnvSecretResolver, ResolveOptions};
     use serde_json::json;
 
     use super::PostgresSourceConfig;
@@ -31,7 +31,7 @@ mod tests {
             .map(|key| (key.name.as_str(), key.kind, key.required))
             .collect::<Vec<_>>();
 
-        assert!(keys.contains(&("database_url", ConfigKind::String, true)));
+        assert!(keys.contains(&("database_url", ConfigKind::Secret, true)));
         assert!(keys.contains(&("slot_name", ConfigKind::String, true)));
         assert!(keys.contains(&("publication_name", ConfigKind::String, false)));
         assert!(keys.contains(&("schema", ConfigKind::String, false)));
@@ -47,10 +47,22 @@ mod tests {
             ("tables".to_string(), json!(["accounts", "transactions"])),
         ]);
 
-        let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
+        let resolved = def
+            .resolve_with_options(
+                raw,
+                &EnvSecretResolver,
+                ResolveOptions {
+                    allow_literal_secrets: true,
+                },
+            )
+            .await
+            .unwrap();
         let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
-        assert_eq!(config.database_url, "postgres://localhost/app");
+        assert_eq!(
+            config.database_url.expose_secret(),
+            "postgres://localhost/app"
+        );
         assert_eq!(config.slot_name, "crabka_slot");
         assert_eq!(config.publication_name, "crabka_connect");
         assert_eq!(config.schema, "public");
