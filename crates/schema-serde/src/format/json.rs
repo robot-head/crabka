@@ -46,6 +46,7 @@ impl<T: JsonSchema> JsonSerde<T> {
                 role,
                 kind: SchemaKind::Json,
                 schema: schema_text,
+                message_type: None,
             },
             validate,
             _marker: PhantomData,

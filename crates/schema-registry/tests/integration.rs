@@ -886,11 +886,11 @@ async fn facade_soft_then_permanent_delete_version() {
     // match); NONE bypasses so we can register two versions to delete.
     store.set_subject_compat("av", "NONE".into()).await.unwrap();
     store
-        .register("av", SchemaType::Avro, &av("A"), &[], None, None)
+        .register("av", SchemaType::Avro, &av("A"), &[], None, None, None)
         .await
         .unwrap();
     store
-        .register("av", SchemaType::Avro, &av("B"), &[], None, None)
+        .register("av", SchemaType::Avro, &av("B"), &[], None, None, None)
         .await
         .unwrap();
     assert_eq!(store.soft_delete_version("av", 1).await.unwrap(), 1);
@@ -908,7 +908,7 @@ async fn facade_soft_then_permanent_delete_version() {
 async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     store
-        .register("ro", SchemaType::Avro, &av("A"), &[], None, None)
+        .register("ro", SchemaType::Avro, &av("A"), &[], None, None, None)
         .await
         .unwrap();
     store
@@ -916,7 +916,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         .await
         .unwrap();
     let err = store
-        .register("ro", SchemaType::Avro, &av("B"), &[], None, None)
+        .register("ro", SchemaType::Avro, &av("B"), &[], None, None, None)
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), 42205);
@@ -925,7 +925,15 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         .await
         .unwrap();
     let reg = store
-        .register("imp", SchemaType::Avro, &av("C"), &[], Some(42), Some(5))
+        .register(
+            "imp",
+            SchemaType::Avro,
+            &av("C"),
+            &[],
+            None,
+            Some(42),
+            Some(5),
+        )
         .await
         .unwrap();
     assert_eq!((reg.id, reg.version), (42, 5));
@@ -936,7 +944,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
     // IMPORT requires BOTH id and version: providing only one is rejected.
     assert!(
         store
-            .register("imp", SchemaType::Avro, &av("D"), &[], Some(7), None)
+            .register("imp", SchemaType::Avro, &av("D"), &[], None, Some(7), None)
             .await
             .is_err(),
         "IMPORT with id but no version must error"

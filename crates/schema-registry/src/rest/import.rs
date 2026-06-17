@@ -38,7 +38,15 @@ pub async fn file_descriptor_set(
         let schema = format::protobuf::normalize(file);
         let reg = st
             .store
-            .register(name, SchemaType::Protobuf, &schema, &references, None, None)
+            .register(
+                name,
+                SchemaType::Protobuf,
+                &schema,
+                &references,
+                None,
+                None,
+                None,
+            )
             .await?;
         registered.insert(name.clone(), reg.version);
         rows.push(serde_json::json!({
@@ -124,7 +132,7 @@ fn references_for(
                     .store
                     .read()
                     .version(dep, None, false)
-                    .map(|(_, version, _, _, _)| version)
+                    .map(|(_, version, _, _, _, _)| version)
                     .ok_or_else(|| SrError::ReferenceNotFound(dep.clone()))?,
             };
             Ok(SchemaReference {

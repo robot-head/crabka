@@ -24,6 +24,7 @@ pub struct RegisteredSchema {
     pub ty: SchemaType,
     pub schema: String,
     pub references: Vec<crate::kafkastore::record::SchemaReference>,
+    pub message_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,10 +60,11 @@ impl StoreState {
         ty: SchemaType,
         schema: &str,
         references: &[SchemaReference],
+        message_type: Option<&str>,
     ) -> Result<Registered, SrError> {
         let resolved = self.resolve_closure(references)?;
         let canonical = format::parse(ty, schema, &resolved)?.canonical_form();
-        let key = Self::dedup_key(&canonical, references);
+        let key = Self::dedup_key(&canonical, references, message_type);
         // Idempotent within subject?
         if let Some(existing) = self.find_under_subject_canonical(subject, &key, true) {
             return Ok(existing);
@@ -80,6 +82,7 @@ impl StoreState {
                     ty,
                     schema: schema.to_string(),
                     references: references.to_vec(),
+                    message_type: message_type.map(str::to_string),
                 },
             );
             id
@@ -104,8 +107,12 @@ impl StoreState {
 
     /// The id-dedup key: canonical form joined with a stable fingerprint of the
     /// references (so identical text with different refs gets a distinct id).
-    fn dedup_key(canonical: &str, references: &[SchemaReference]) -> String {
-        if references.is_empty() {
+    fn dedup_key(
+        canonical: &str,
+        references: &[SchemaReference],
+        message_type: Option<&str>,
+    ) -> String {
+        if references.is_empty() && message_type.is_none() {
             return canonical.to_string();
         }
         let mut refs: Vec<String> = references
@@ -113,7 +120,11 @@ impl StoreState {
             .map(|r| format!("{}\u{1}{}\u{1}{}", r.name, r.subject, r.version))
             .collect();
         refs.sort();
-        format!("{canonical}\u{0}{}", refs.join("\u{2}"))
+        format!(
+            "{canonical}\u{0}{}\u{0}{}",
+            refs.join("\u{2}"),
+            message_type.unwrap_or("")
+        )
     }
 
     /// Resolve a reference list into its transitive closure of
@@ -213,11 +224,16 @@ impl StoreState {
                 ty,
                 schema: value.schema.clone(),
                 references: value.references.clone(),
+                message_type: value.message_type.clone(),
             });
         if let Ok(resolved) = self.resolve_closure(&value.references)
             && let Ok(p) = format::parse(ty, &value.schema, &resolved)
         {
-            let key = Self::dedup_key(&p.canonical_form(), &value.references);
+            let key = Self::dedup_key(
+                &p.canonical_form(),
+                &value.references,
+                value.message_type.as_deref(),
+            );
             self.by_canonical.entry(key).or_insert(value.id);
         }
         let entry = self.subjects.entry(value.subject.clone()).or_default();
@@ -295,7 +311,7 @@ impl StoreState {
         if out.is_empty() { None } else { Some(out) }
     }
 
-    /// `(id, version, schemaType, schema, references)` for a subject+version.
+    /// `(id, version, schemaType, schema, references, messageType)` for a subject+version.
     /// `version=None` resolves to the latest qualifying version.
     #[must_use]
     pub fn version(
@@ -303,7 +319,14 @@ impl StoreState {
         subject: &str,
         version: Option<i32>,
         include_deleted: bool,
-    ) -> Option<(i32, i32, SchemaType, String, Vec<SchemaReference>)> {
+    ) -> Option<(
+        i32,
+        i32,
+        SchemaType,
+        String,
+        Vec<SchemaReference>,
+        Option<String>,
+    )> {
         let vs = self.subjects.get(subject)?;
         let entry = match version {
             Some(v) => vs
@@ -318,6 +341,7 @@ impl StoreState {
             reg.ty,
             reg.schema.clone(),
             reg.references.clone(),
+            reg.message_type.clone(),
         ))
     }
 
@@ -329,7 +353,7 @@ impl StoreState {
         &self,
         id: i32,
         include_deleted: bool,
-    ) -> Option<(SchemaType, String, Vec<SchemaReference>)> {
+    ) -> Option<(SchemaType, String, Vec<SchemaReference>, Option<String>)> {
         let reg = self.by_id.get(&id)?;
         let referenced = self
             .subjects
@@ -337,7 +361,12 @@ impl StoreState {
             .flatten()
             .any(|v| v.id == id && (include_deleted || !v.deleted));
         if referenced {
-            Some((reg.ty, reg.schema.clone(), reg.references.clone()))
+            Some((
+                reg.ty,
+                reg.schema.clone(),
+                reg.references.clone(),
+                reg.message_type.clone(),
+            ))
         } else {
             None
         }
@@ -357,14 +386,22 @@ impl StoreState {
         out
     }
 
-    /// Every `(subject, version, id, schemaType, schema, references)` (GET
+    /// Every `(subject, version, id, schemaType, schema, references, messageType)` (GET
     /// /schemas), sorted by subject then version (matches cp's `/schemas`
     /// ordering).
     #[must_use]
     pub fn all_schemas(
         &self,
         include_deleted: bool,
-    ) -> Vec<(String, i32, i32, SchemaType, String, Vec<SchemaReference>)> {
+    ) -> Vec<(
+        String,
+        i32,
+        i32,
+        SchemaType,
+        String,
+        Vec<SchemaReference>,
+        Option<String>,
+    )> {
         let mut out = Vec::new();
         for (subject, vs) in &self.subjects {
             for v in vs {
@@ -378,6 +415,7 @@ impl StoreState {
                         reg.ty,
                         reg.schema.clone(),
                         reg.references.clone(),
+                        reg.message_type.clone(),
                     ));
                 }
             }
@@ -472,13 +510,14 @@ impl StoreState {
         ty: SchemaType,
         schema: &str,
         references: &[SchemaReference],
+        message_type: Option<&str>,
         include_deleted: bool,
     ) -> Option<Registered> {
         let resolved = self.resolve_closure(references).ok()?;
         let canonical = format::parse(ty, schema, &resolved).ok()?.canonical_form();
         self.find_under_subject_canonical(
             subject,
-            &Self::dedup_key(&canonical, references),
+            &Self::dedup_key(&canonical, references, message_type),
             include_deleted,
         )
     }
@@ -505,11 +544,19 @@ mod tests {
     #[test]
     fn same_schema_different_refs_gets_distinct_id() {
         let mut s = StoreState::default();
-        s.register("base", SchemaType::Avro, &av("Base"), &[])
+        s.register("base", SchemaType::Avro, &av("Base"), &[], None)
             .unwrap();
-        let r1 = s.register("a", SchemaType::Avro, &av("A"), &[]).unwrap();
+        let r1 = s
+            .register("a", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
         let r2 = s
-            .register("b", SchemaType::Avro, &av("A"), &[sref("base", "base", 1)])
+            .register(
+                "b",
+                SchemaType::Avro,
+                &av("A"),
+                &[sref("base", "base", 1)],
+                None,
+            )
             .unwrap();
         assert_ne!(r1.id, r2.id, "refs are part of id identity");
     }
@@ -517,13 +564,25 @@ mod tests {
     #[test]
     fn same_schema_same_refs_is_idempotent() {
         let mut s = StoreState::default();
-        s.register("base", SchemaType::Avro, &av("Base"), &[])
+        s.register("base", SchemaType::Avro, &av("Base"), &[], None)
             .unwrap();
         let r1 = s
-            .register("d", SchemaType::Avro, &av("D"), &[sref("base", "base", 1)])
+            .register(
+                "d",
+                SchemaType::Avro,
+                &av("D"),
+                &[sref("base", "base", 1)],
+                None,
+            )
             .unwrap();
         let r2 = s
-            .register("d", SchemaType::Avro, &av("D"), &[sref("base", "base", 1)])
+            .register(
+                "d",
+                SchemaType::Avro,
+                &av("D"),
+                &[sref("base", "base", 1)],
+                None,
+            )
             .unwrap();
         assert_eq!(
             r1, r2,
@@ -534,13 +593,14 @@ mod tests {
     #[test]
     fn resolve_closure_is_transitive_and_cycle_guarded() {
         let mut s = StoreState::default();
-        s.register("base", SchemaType::Avro, &av("Base"), &[])
+        s.register("base", SchemaType::Avro, &av("Base"), &[], None)
             .unwrap();
         s.register(
             "mid",
             SchemaType::Avro,
             &av("Mid"),
             &[sref("base", "base", 1)],
+            None,
         )
         .unwrap();
         let closure = s.resolve_closure(&[sref("mid", "mid", 1)]).unwrap();
@@ -552,7 +612,7 @@ mod tests {
     #[test]
     fn referenced_by_lists_referrers() {
         let mut s = StoreState::default();
-        s.register("base", SchemaType::Avro, &av("Base"), &[])
+        s.register("base", SchemaType::Avro, &av("Base"), &[], None)
             .unwrap();
         let r = s
             .register(
@@ -560,6 +620,7 @@ mod tests {
                 SchemaType::Avro,
                 &av("Dep"),
                 &[sref("base", "base", 1)],
+                None,
             )
             .unwrap();
         assert_eq!(s.referenced_by("base", 1, false), vec![r.id]);
@@ -570,7 +631,7 @@ mod tests {
     fn first_registration_gets_id_1_version_1() {
         let mut s = StoreState::default();
         let r = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!((r.id, r.version), (1, 1));
     }
@@ -579,10 +640,10 @@ mod tests {
     fn identical_under_same_subject_is_idempotent() {
         let mut s = StoreState::default();
         let r1 = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         let r2 = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!(r1, r2);
         assert_eq!(s.versions("av-value", false).unwrap(), vec![1]);
@@ -592,10 +653,10 @@ mod tests {
     fn same_schema_new_subject_reuses_global_id_fresh_version() {
         let mut s = StoreState::default();
         let r1 = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         let r2 = s
-            .register("other-value", SchemaType::Avro, &av("A"), &[])
+            .register("other-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!(r1.id, r2.id);
         assert_eq!(r2.version, 1);
@@ -605,10 +666,10 @@ mod tests {
     fn different_schema_increments_id_and_version() {
         let mut s = StoreState::default();
         let r1 = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         let r2 = s
-            .register("av-value", SchemaType::Avro, &av("B"), &[])
+            .register("av-value", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         assert_eq!(r2.id, r1.id + 1);
         assert_eq!(r2.version, 2);
@@ -619,7 +680,7 @@ mod tests {
     fn invalid_schema_rejected_even_under_none() {
         let mut s = StoreState::default();
         assert!(
-            s.register("av-value", SchemaType::Avro, "{not avro}", &[])
+            s.register("av-value", SchemaType::Avro, "{not avro}", &[], None)
                 .is_err()
         );
     }
@@ -633,6 +694,7 @@ mod tests {
             version: 1,
             id: 1,
             schema_type: None,
+            message_type: None,
             references: vec![],
             schema: av("A"),
             deleted: false,
@@ -644,7 +706,7 @@ mod tests {
         assert_eq!(s.schema_by_id(1, false).unwrap().1, av("A"));
         // a fresh register of the same schema is now idempotent against replayed state
         let r = s
-            .register("av-value", SchemaType::Avro, &av("A"), &[])
+            .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!((r.id, r.version), (1, 1));
     }
@@ -652,9 +714,9 @@ mod tests {
     #[test]
     fn versions_schemas_returns_ordered_pairs() {
         let mut s = StoreState::default();
-        s.register("av-value", SchemaType::Avro, &av("A"), &[])
+        s.register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        s.register("av-value", SchemaType::Avro, &av("B"), &[])
+        s.register("av-value", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         let vs = s.versions_schemas("av-value");
         assert_eq!(vs.len(), 2);
@@ -678,8 +740,10 @@ mod tests {
     #[test]
     fn soft_delete_hides_then_deleted_shows_then_permanent_removes() {
         let mut s = StoreState::default();
-        s.register("av", SchemaType::Avro, &av("A"), &[]).unwrap();
-        s.register("av", SchemaType::Avro, &av("B"), &[]).unwrap();
+        s.register("av", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
+        s.register("av", SchemaType::Avro, &av("B"), &[], None)
+            .unwrap();
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
         assert_eq!(s.versions("av", false).unwrap(), vec![2]);
         assert_eq!(s.versions("av", true).unwrap(), vec![1, 2]);
@@ -696,8 +760,10 @@ mod tests {
     #[test]
     fn version_none_resolves_latest_skipping_deleted() {
         let mut s = StoreState::default();
-        s.register("av", SchemaType::Avro, &av("A"), &[]).unwrap(); // id1 / v1
-        s.register("av", SchemaType::Avro, &av("B"), &[]).unwrap(); // id2 / v2
+        s.register("av", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap(); // id1 / v1
+        s.register("av", SchemaType::Avro, &av("B"), &[], None)
+            .unwrap(); // id2 / v2
         apply_deleted(&mut s, "av", 2, 2, &av("B"));
         // latest LIVE version is v1; latest incl. deleted is v2
         assert_eq!(s.version("av", None, false).unwrap().1, 1);
@@ -707,8 +773,10 @@ mod tests {
     #[test]
     fn soft_delete_subject_flags_all_versions() {
         let mut s = StoreState::default();
-        s.register("av", SchemaType::Avro, &av("A"), &[]).unwrap();
-        s.register("av", SchemaType::Avro, &av("B"), &[]).unwrap();
+        s.register("av", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
+        s.register("av", SchemaType::Avro, &av("B"), &[], None)
+            .unwrap();
         assert_eq!(s.soft_delete_subject("av"), Some(vec![1, 2]));
         assert!(s.versions("av", false).is_none());
         assert_eq!(s.subjects(false), Vec::<String>::new());
@@ -718,7 +786,8 @@ mod tests {
     #[test]
     fn resurrect_on_reregister_clears_deleted() {
         let mut s = StoreState::default();
-        s.register("av", SchemaType::Avro, &av("A"), &[]).unwrap();
+        s.register("av", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
         assert!(s.versions("av", false).is_none());
         apply_live(&mut s, "av", 1, 1, &av("A"));
@@ -728,7 +797,8 @@ mod tests {
     #[test]
     fn schema_by_id_respects_reference_liveness() {
         let mut s = StoreState::default();
-        s.register("av", SchemaType::Avro, &av("A"), &[]).unwrap();
+        s.register("av", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
         assert!(s.schema_by_id(1, false).is_some());
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
         assert!(s.schema_by_id(1, false).is_none());
@@ -740,8 +810,10 @@ mod tests {
     #[test]
     fn schema_id_subject_versions_and_all_schemas() {
         let mut s = StoreState::default();
-        s.register("a", SchemaType::Avro, &av("A"), &[]).unwrap();
-        s.register("b", SchemaType::Avro, &av("A"), &[]).unwrap();
+        s.register("a", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
+        s.register("b", SchemaType::Avro, &av("A"), &[], None)
+            .unwrap();
         let mut sv = s.schema_id_subject_versions(1, false);
         sv.sort();
         assert_eq!(sv, vec![("a".to_string(), 1), ("b".to_string(), 1)]);
@@ -781,6 +853,7 @@ mod tests {
             version,
             id,
             schema_type: None,
+            message_type: None,
             references: vec![],
             schema: schema.into(),
             deleted,

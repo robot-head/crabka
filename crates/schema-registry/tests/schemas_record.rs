@@ -107,6 +107,7 @@ fn schema_value_round_trips() {
         version: 1,
         id: 1,
         schema_type: None,
+        message_type: None,
         references: vec![],
         schema: "{\"type\":\"int\"}".into(),
         deleted: false,

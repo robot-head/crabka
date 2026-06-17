@@ -20,6 +20,13 @@ pub struct RegistryClient {
     http: Client,
 }
 
+/// Schema text plus optional Crabka extension metadata fetched by global id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedSchema {
+    pub schema: String,
+    pub message_type: Option<String>,
+}
+
 impl RegistryClient {
     /// Build a client for a registry at `base_url` (e.g. `http://localhost:8081`).
     #[must_use]
@@ -37,11 +44,13 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions", self.base_url);
         let body = SchemaPayload {
             schema,
             schema_type: kind.wire_name(),
+            message_type,
             references: &[] as &[SchemaReference],
         };
         let resp: RegisterResponse = self.post_json(&url, &body).await?;
@@ -55,11 +64,13 @@ impl RegistryClient {
         subject: &str,
         kind: SchemaKind,
         schema: &str,
+        message_type: Option<&str>,
     ) -> Result<u32, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}", self.base_url);
         let body = SchemaPayload {
             schema,
             schema_type: kind.wire_name(),
+            message_type,
             references: &[] as &[SchemaReference],
         };
         let resp: SubjectVersionResponse = self.post_json(&url, &body).await?;
@@ -68,17 +79,25 @@ impl RegistryClient {
 
     /// Fetch the latest registered version's id under `subject`
     /// (`use.latest.version=true`).
-    pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
+    pub async fn latest(&self, subject: &str) -> Result<SubjectVersionResponse, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions/latest", self.base_url);
-        let resp: SubjectVersionResponse = self.get_json(&url).await?;
-        Ok(resp.id)
+        self.get_json(&url).await
     }
 
-    /// Fetch a schema's text by global id (deserialize path).
-    pub async fn schema_by_id(&self, id: u32) -> Result<String, SchemaSerdeError> {
+    /// Fetch the latest registered version's id under `subject`
+    /// (`use.latest.version=true`).
+    pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
+        Ok(self.latest(subject).await?.id)
+    }
+
+    /// Fetch a schema's text and optional metadata by global id (deserialize path).
+    pub async fn schema_by_id(&self, id: u32) -> Result<FetchedSchema, SchemaSerdeError> {
         let url = format!("{}/schemas/ids/{id}", self.base_url);
         let resp: SchemaByIdResponse = self.get_json(&url).await?;
-        Ok(resp.schema)
+        Ok(FetchedSchema {
+            schema: resp.schema,
+            message_type: resp.message_type,
+        })
     }
 
     async fn post_json<B: serde::Serialize, R: serde::de::DeserializeOwned>(
@@ -146,6 +165,7 @@ mod tests {
         let p = SchemaPayload {
             schema: "\"string\"",
             schema_type: SchemaKind::Avro.wire_name(),
+            message_type: None,
             references: &[],
         };
         let j = serde_json::to_string(&p).unwrap();
@@ -157,9 +177,11 @@ mod tests {
         let p = SchemaPayload {
             schema: "syntax = \"proto3\";",
             schema_type: SchemaKind::Protobuf.wire_name(),
+            message_type: Some("demo.Order"),
             references: &[],
         };
         let j = serde_json::to_string(&p).unwrap();
         check!(j.contains(r#""schemaType":"PROTOBUF""#));
+        check!(j.contains(r#""messageType":"demo.Order""#));
     }
 }

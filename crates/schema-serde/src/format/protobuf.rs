@@ -46,6 +46,7 @@ impl<T: ReflectMessage + Default> ProtobufSerde<T> {
                 role,
                 kind: SchemaKind::Protobuf,
                 schema: proto_text,
+                message_type: Some(descriptor.full_name().to_string()),
             },
             message_index,
             _marker: PhantomData,
@@ -95,8 +96,17 @@ where
     T: Message + ReflectMessage + Default + Send + Sync + 'static,
 {
     fn deserialize(&self, _topic: &str, bytes: &[u8]) -> Result<T, SchemaSerdeError> {
-        // prost decodes structurally; id/index validated by framing
-        let (_id, _idx, body) = wire::decode_protobuf(bytes)?;
+        // prost decodes structurally; id/index validated by framing and, when
+        // registry metadata is available, by the declared protobuf message type.
+        let (id, _idx, body) = wire::decode_protobuf(bytes)?;
+        if let Some(writer_message_type) = self.binding.cache.writer_message_type(id) {
+            let local_message_type = T::default().descriptor().full_name().to_string();
+            if writer_message_type != local_message_type {
+                return Err(SchemaSerdeError::Deserialize(format!(
+                    "protobuf messageType mismatch: writer {writer_message_type}, local {local_message_type}"
+                )));
+            }
+        }
         T::decode(body).map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))
     }
 }
@@ -183,7 +193,9 @@ pub(crate) mod print {
 
 #[cfg(test)]
 mod tests {
+    use super::ProtobufSerde;
     use super::print::file_to_proto;
+    use crate::format::SchemaDeserializer;
     use assert2::check;
     use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
 
@@ -264,5 +276,76 @@ mod tests {
             check!(text.contains(&format!("{kw} f_{kw} = {};", i + 1)));
         }
         check!(text.contains("demo.Other nested = 100;"));
+    }
+
+    #[test]
+    fn message_type_metadata_mismatch_rejects_typed_decode() {
+        use crate::cache::{CacheConfig, SchemaCache};
+        use crate::registry::RegistryClient;
+        use crate::wire;
+        use bytes::{Buf, BufMut};
+        use prost::encoding::{DecodeContext, WireType};
+        use prost::{DecodeError, Message};
+        use prost_reflect::ReflectMessage;
+        use prost_reflect::prost_types::{DescriptorProto, FileDescriptorProto, FileDescriptorSet};
+        use prost_reflect::{DescriptorPool, MessageDescriptor};
+
+        #[derive(Clone, Debug, Default, PartialEq, Eq)]
+        struct TestOrder;
+
+        impl Message for TestOrder {
+            fn encode_raw(&self, _buf: &mut impl BufMut) {}
+
+            fn merge_field(
+                &mut self,
+                _tag: u32,
+                _wire_type: WireType,
+                _buf: &mut impl Buf,
+                _ctx: DecodeContext,
+            ) -> Result<(), DecodeError> {
+                Ok(())
+            }
+
+            fn encoded_len(&self) -> usize {
+                0
+            }
+
+            fn clear(&mut self) {}
+        }
+
+        impl ReflectMessage for TestOrder {
+            fn descriptor(&self) -> MessageDescriptor {
+                static POOL: std::sync::OnceLock<DescriptorPool> = std::sync::OnceLock::new();
+                POOL.get_or_init(|| {
+                    DescriptorPool::from_file_descriptor_set(FileDescriptorSet {
+                        file: vec![FileDescriptorProto {
+                            name: Some("demo.proto".into()),
+                            package: Some("demo".into()),
+                            message_type: vec![DescriptorProto {
+                                name: Some("Order".into()),
+                                ..Default::default()
+                            }],
+                            syntax: Some("proto3".into()),
+                            ..Default::default()
+                        }],
+                    })
+                    .unwrap()
+                })
+                .get_message_by_name("demo.Order")
+                .unwrap()
+            }
+        }
+
+        let cache = SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default());
+        cache.seed_subject_id("orders-value", 11);
+        cache.seed_writer_message_type(11, "demo.Other");
+        let serde = ProtobufSerde::<TestOrder>::value(&cache);
+        let frame = wire::encode_protobuf(11, &[0], &[]);
+
+        let err = serde.deserialize("orders", &frame).unwrap_err();
+        assert!(
+            err.to_string().contains("messageType"),
+            "expected messageType mismatch error, got {err}"
+        );
     }
 }

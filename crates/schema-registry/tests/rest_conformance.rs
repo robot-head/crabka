@@ -103,6 +103,20 @@ async fn post_register(app: &axum::Router, subject: &str, body: &str) -> axum::r
         .unwrap()
 }
 
+async fn post_lookup(app: &axum::Router, subject: &str, body: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/subjects/{subject}"))
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn get_response(app: &axum::Router, uri: &str) -> axum::response::Response {
     app.clone()
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -326,6 +340,34 @@ async fn rest_conformance_vs_cp_fixtures() {
     );
 
     // ── teardown ──────────────────────────────────────────────────────────────
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn message_type_extension_round_trips_through_rest() {
+    let protobuf_schema = r#"syntax = "proto3"; package demo; message Order { int32 id = 1; }"#;
+    let (broker, store, cancel, _dir) = boot_registry().await;
+    let app = rest::router(AppState { store });
+
+    let body = serde_json::json!({
+        "schemaType": "PROTOBUF",
+        "messageType": "demo.Order",
+        "schema": protobuf_schema,
+    })
+    .to_string();
+    let r = post_register(&app, "orders-value", &body).await;
+    assert_eq!(r.status(), StatusCode::OK, "register orders-value");
+
+    let by_id = get_json(&app, "/schemas/ids/1").await;
+    assert_eq!(by_id["messageType"], "demo.Order");
+
+    let version = get_json(&app, "/subjects/orders-value/versions/1").await;
+    assert_eq!(version["messageType"], "demo.Order");
+
+    let lookup = body_json(post_lookup(&app, "orders-value", &body).await).await;
+    assert_eq!(lookup["messageType"], "demo.Order");
+
     cancel.cancel();
     broker.shutdown().await;
 }
