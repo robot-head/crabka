@@ -432,6 +432,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn issue_broker_cert_deduplicates_extra_sans() {
+        let ca = generate_cluster_ca("c1", 365).expect("CA");
+        let base_sans = vec![SubjectAltName::Dns("c1-broker-0".into())];
+        let extra_sans = vec![
+            SubjectAltName::Dns("external.example".into()),
+            SubjectAltName::Dns("c1-broker-0".into()),
+            SubjectAltName::Dns("external.example".into()),
+        ];
+
+        let cert = issue_broker_cert(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "c1-broker-0",
+            &base_sans,
+            &extra_sans,
+            365,
+        )
+        .expect("issue broker cert");
+
+        let der = pem_to_der(&cert.cert_pem);
+        let (_, leaf) = X509Certificate::from_der(der.as_ref()).expect("parse leaf");
+        let san_ext = leaf
+            .subject_alternative_name()
+            .expect("SAN parse")
+            .expect("SAN present");
+        let dns_names: Vec<_> = san_ext
+            .value
+            .general_names
+            .iter()
+            .filter_map(|gn| match gn {
+                x509_parser::extensions::GeneralName::DNSName(name) => Some(*name),
+                _ => None,
+            })
+            .collect();
+
+        assert!(dns_names == vec!["c1-broker-0", "external.example"]);
+    }
+
     fn spki_der(cert_pem: &str) -> Vec<u8> {
         let der = pem_to_der(cert_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");

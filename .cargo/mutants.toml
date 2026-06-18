@@ -10,6 +10,7 @@
 # .config/nextest.toml so the fixed-port broker/schema-registry binaries don't
 # race for ports inside a single mutant's test run.
 test_tool = "nextest"
+profile = "mutants"
 
 # A surviving mutant deep in the broker / log / raft paths is often only caught
 # by the (slower) in-process integration suites under each crate's tests/ dir.
@@ -97,6 +98,43 @@ exclude_re = [
     # `crabka_playground::Playground::*` wrappers are mutation-tested (and caught)
     # because that crate always enables `sim`.
     "kraft-core/src/sim\\.rs",
+    # crabka-security's SSPI provider is behind the optional `sspi-keytab`
+    # feature and is compiled out in the crate's default package run, so default
+    # cargo-mutants sees no behavioural difference. The provider's real contract
+    # test requires a live MIT KDC fixture and is intentionally ignored unless
+    # that fixture is running.
+    "security/src/gssapi/provider\\.rs",
+    # Equivalent mutants: Jwks::empty is intentionally identical to
+    # Default::default(), and Reader::at_end returning false at exact EOF still
+    # falls into the next size-read's Truncated => break EOF path.
+    "security/src/jwks\\.rs.*replace Jwks::empty -> Self with Default::default\\(\\)",
+    "security/src/gssapi/keytab\\.rs.*replace Reader<'a>::at_end -> bool with false",
+    # Mutating keytab entry-size reads to zero makes the parser loop on an
+    # endless stream of zero-length records, so cargo-mutants can only classify
+    # it as a timeout rather than a useful assertion gap.
+    "security/src/gssapi/keytab\\.rs.*replace Reader<'a>::i32 -> Result<i32, KeytabError> with Ok\\(0\\)",
+    # crabka-metadata feature-registry equivalent mutants: today, the default
+    # min floor for non-metadata.version features is genuinely 0, plain features
+    # declare no dependencies, share/streams default to 0 and support (0, 1),
+    # and validate_feature_dependencies is a no-op for the real dependency-free
+    # registry. Synthetic dependency behavior is unit-tested via check_deps.
+    "metadata/src/feature\\.rs.*replace Feature::min_required_floor -> i16 with 0",
+    "metadata/src/feature\\.rs.*replace Feature::dependencies -> &'static\\[\\(&'static str, i16\\)\\] with Vec::leak\\(Vec::new\\(\\)\\)",
+    "metadata/src/feature\\.rs.*replace <impl Feature for (GroupVersionFeature|ShareVersionFeature|StreamsVersionFeature)>::supported_range -> \\(i16, i16\\) with \\(0, 1\\)",
+    "metadata/src/feature\\.rs.*replace <impl Feature for (ShareVersionFeature|StreamsVersionFeature)>::default_level -> i16 with 0",
+    "metadata/src/feature\\.rs.*replace validate_feature_dependencies -> Result<\\(\\), String> with Ok\\(\\(\\)\\)",
+    # to_kafka_record explicitly sets key=None, which is the same value as
+    # Record::default().key; deleting the field is behaviourally equivalent.
+    "crates/metadata/src/kafka_record\\.rs:.*delete field key from struct Record expression in to_kafka_record",
+    # Metadata image dir-assignment: resizing an already-full directories vec to
+    # the same length is a Vec no-op, so `<` -> `<=` is equivalent.
+    "(crates/)?metadata/src/image\\.rs.*replace < with <= in MetadataImage::apply",
+    # KRaft translation default-field equivalents: ConfigRecord.value defaults
+    # to None for tombstones; the synthetic broker endpoint's name defaults to
+    # empty string and security_protocol defaults to PLAINTEXT.
+    "crates/metadata/src/kraft_translate\\.rs:.*delete field value from struct ConfigRecord expression",
+    "crates/metadata/src/kraft_translate\\.rs:.*delete field name from struct KBrokerEndpoint expression",
+    "crates/metadata/src/kraft_translate\\.rs:.*delete field security_protocol from struct KBrokerEndpoint expression",
     # crabka-schema-serde's format modules are gated behind optional features
     # (`avro`, `json`, `protobuf`) and the crate's default feature set enables
     # none of them. cargo-mutants' default package run mutates these source
@@ -140,4 +178,35 @@ exclude_re = [
     # forever (`transaction.is_some() || row.commit_lsn.is_none()`), so
     # cargo-mutants reports a timeout instead of an assertion gap.
     "connect-postgres/src/source\\.rs.*replace && with \\|\\| in <impl Source<Bytes, Bytes> for PostgresWalSource>::poll",
+    # client-core's high-level fetch helpers and broker-pool connection
+    # lifecycle methods are live-Connection glue: their request construction,
+    # response decoding, advertised-address registry, and fallback decisions are
+    # mutation-tested in socket-free helpers, while the actual send/connect/drop
+    # effects require a broker or an API-versions-speaking test connection.
+    "(crates/)?client-core/src/fetch\\.rs.*replace fetch_partition(_with_isolation)? ->",
+    "(crates/)?client-core/src/pool\\.rs.*replace BrokerPool::(evict|close_all) with \\(\\)",
+    "(crates/)?client-core/src/pool\\.rs.*delete - in BrokerPool::bootstrap_connection",
+    # The public Client facade and Connection wire helpers are exercised by
+    # `crates/client-core/tests/unit.rs`, which requires the crate's `mock`
+    # feature so the in-process MockBroker is exported. The default package
+    # mutation run does not enable package-specific features because this
+    # workspace-wide config must also work for crates with no `mock` feature.
+    "(crates/)?client-core/src/client\\.rs.*Client::(knows_broker|evict_broker|refresh_metadata|close)",
+    "(crates/)?client-core/src/client\\.rs.*BrokerHandle<'_>::send",
+    "(crates/)?client-core/src/connection\\.rs.*Connection::(send|raw_request|versions|close)",
+    # MockBroker is itself the feature-gated test harness used by the client-core
+    # unit target; mutating its stop/connection loop has no signal in the
+    # default-feature package run, which does not build that test target.
+    "(crates/)?client-core/src/mock\\.rs.*(MockBroker::stop|handle_connection)",
+    # The GSSAPI outbound client is behind the optional `sspi-keytab` feature.
+    # The default client-core package run compiles the feature-disabled stub, so
+    # cargo-mutants cannot observe the feature-enabled Kerberos state machine.
+    # The provider contract is covered by the feature/KDC fixture path.
+    "(crates/)?client-core/src/sasl\\.rs.*run_gssapi_client",
+    # `put_uvarint` mutants: changing the loop predicate's bit test can create
+    # non-terminating encoders for multi-byte values, and OR vs XOR is
+    # equivalent because `(v & 0x7F)` never overlaps the continuation bit 0x80.
+    "(crates/)?client-core/src/transport\\.rs.*replace != with == in put_uvarint",
+    "(crates/)?client-core/src/transport\\.rs.*replace & with (\\||\\^) in put_uvarint",
+    "(crates/)?client-core/src/transport\\.rs.*replace \\| with \\^ in put_uvarint",
 ]

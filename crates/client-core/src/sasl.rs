@@ -432,13 +432,15 @@ mod tests {
     use super::*;
     use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
     use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+    use crabka_security::{ScramServerExchange, StepResult, hash_scram_password};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{Duration, timeout};
 
     // Minimal server: read one request frame, reply with a response
     // header (corr_id, plus a 0x00 tagged-fields byte when `flex_header`)
     // carrying `body`. SaslHandshake uses a v0 response header; the
     // flexible SaslAuthenticate v2 uses a v1 response header.
-    async fn reply_frame<S>(stream: &mut S, body: &[u8], flex_header: bool)
+    async fn reply_frame<S>(stream: &mut S, body: &[u8], flex_header: bool) -> Vec<u8>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
@@ -459,6 +461,7 @@ mod tests {
             .unwrap();
         stream.write_all(&frame).await.unwrap();
         stream.flush().await.unwrap();
+        req
     }
 
     #[tokio::test]
@@ -473,7 +476,13 @@ mod tests {
             }
             .encode(&mut hs, 1)
             .unwrap();
-            reply_frame(&mut server, &hs, false).await;
+            let hs_req = reply_frame(&mut server, &hs, false).await;
+            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+            let mut hs_body = request_body(&hs_req, false);
+            let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
+            assert!(hs_decoded.mechanism == "PLAIN");
+            assert!(hs_body.is_empty());
+
             // 2. SaslAuthenticate v2 → error_code 0 (flexible response header).
             let mut au = BytesMut::new();
             SaslAuthenticateResponse {
@@ -482,7 +491,12 @@ mod tests {
             }
             .encode(&mut au, 2)
             .unwrap();
-            reply_frame(&mut server, &au, true).await;
+            let au_req = reply_frame(&mut server, &au, true).await;
+            assert_request_header(&au_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+            let mut au_body = request_body(&au_req, true);
+            let au_decoded = SaslAuthenticateRequest::decode(&mut au_body, 2).unwrap();
+            assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
+            assert!(au_body.is_empty());
         });
         let creds = SaslCredentials::Plain {
             username: "u".into(),
@@ -491,6 +505,237 @@ mod tests {
         outbound_sasl(&mut client, &creds, "localhost")
             .await
             .expect("PLAIN outbound handshake completes");
+        timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server observed both SASL client frames")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_sasl_authenticate_increments_correlation_id_and_sends_auth_bytes() {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            for (expected_corr, expected_payload) in
+                [(7, b"first".as_ref()), (8, b"second".as_ref())]
+            {
+                let mut au = BytesMut::new();
+                SaslAuthenticateResponse {
+                    error_code: 0,
+                    ..Default::default()
+                }
+                .encode(&mut au, 2)
+                .unwrap();
+                let req = reply_frame(&mut server, &au, true).await;
+                assert_request_header(&req, API_KEY_SASL_AUTHENTICATE, 2, expected_corr, true);
+                let mut body = request_body(&req, true);
+                let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
+                assert!(decoded.auth_bytes.as_ref() == expected_payload);
+                assert!(body.is_empty());
+            }
+        });
+
+        let mut corr_id = 7;
+        send_sasl_authenticate(&mut client, b"first".to_vec(), &mut corr_id)
+            .await
+            .unwrap();
+        assert!(corr_id == 8);
+        send_sasl_authenticate(&mut client, b"second".to_vec(), &mut corr_id)
+            .await
+            .unwrap();
+        assert!(corr_id == 9);
+        timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server observed both authenticate frames")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_scram_rejects_broker_error_on_first_round() {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            let mut hs = BytesMut::new();
+            SaslHandshakeResponse {
+                error_code: 0,
+                ..Default::default()
+            }
+            .encode(&mut hs, 1)
+            .unwrap();
+            let hs_req = reply_frame(&mut server, &hs, false).await;
+            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+            let mut hs_body = request_body(&hs_req, false);
+            let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
+            assert!(hs_decoded.mechanism == "SCRAM-SHA-256");
+
+            let mut au = BytesMut::new();
+            SaslAuthenticateResponse {
+                error_code: 42,
+                error_message: Some("nope".into()),
+                ..Default::default()
+            }
+            .encode(&mut au, 2)
+            .unwrap();
+            let au_req = reply_frame(&mut server, &au, true).await;
+            assert_request_header(&au_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+        });
+
+        let creds = SaslCredentials::Scram {
+            mechanism: SaslMechanism::ScramSha256,
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let err = outbound_sasl(&mut client, &creds, "localhost")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 1")));
+        timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server observed SCRAM first round")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn outbound_scram_rejects_broker_error_on_second_round() {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            let mut hs = BytesMut::new();
+            SaslHandshakeResponse {
+                error_code: 0,
+                ..Default::default()
+            }
+            .encode(&mut hs, 1)
+            .unwrap();
+            let hs_req = reply_frame(&mut server, &hs, false).await;
+            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+
+            let cred = hash_scram_password(b"p", SaslMechanism::ScramSha256, 4096);
+            let mut scram_server = ScramServerExchange::new("u".to_string(), cred);
+
+            let first_req_len = server.read_u32().await.unwrap();
+            let mut first_req = vec![0u8; first_req_len as usize];
+            server.read_exact(&mut first_req).await.unwrap();
+            assert_request_header(&first_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+            let mut first_body = request_body(&first_req, true);
+            let first_auth = SaslAuthenticateRequest::decode(&mut first_body, 2).unwrap();
+            let server_first = match scram_server.step(&first_auth.auth_bytes) {
+                StepResult::Continue(bytes) => bytes,
+                other => panic!("server first SCRAM step must continue, got {other:?}"),
+            };
+
+            let mut first_resp = BytesMut::new();
+            SaslAuthenticateResponse {
+                error_code: 0,
+                auth_bytes: bytes::Bytes::from(server_first),
+                ..Default::default()
+            }
+            .encode(&mut first_resp, 2)
+            .unwrap();
+            write_response_frame(&mut server, 2, &first_resp, true).await;
+
+            let mut second_resp = BytesMut::new();
+            SaslAuthenticateResponse {
+                error_code: 43,
+                error_message: Some("second nope".into()),
+                ..Default::default()
+            }
+            .encode(&mut second_resp, 2)
+            .unwrap();
+            let second_req = reply_frame(&mut server, &second_resp, true).await;
+            assert_request_header(&second_req, API_KEY_SASL_AUTHENTICATE, 2, 3, true);
+        });
+
+        let creds = SaslCredentials::Scram {
+            mechanism: SaslMechanism::ScramSha256,
+            username: "u".into(),
+            password: "p".into(),
+        };
+        let err = outbound_sasl(&mut client, &creds, "localhost")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 2")));
+        timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server observed SCRAM second round")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn round_trip_rejects_response_without_correlation_id() {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            let req_len = server.read_u32().await.unwrap();
+            let mut req = vec![0u8; req_len as usize];
+            server.read_exact(&mut req).await.unwrap();
+            server.write_u32(3).await.unwrap();
+            server.write_all(&[1, 2, 3]).await.unwrap();
+            server.flush().await.unwrap();
+        });
+
+        let err = round_trip(&mut client, API_KEY_SASL_HANDSHAKE, 1, 99, false, &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OutboundSaslError::Codec(msg) if msg == "response missing corr_id"));
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round_trip_rejects_flexible_response_without_tagged_fields_byte() {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let server_task = tokio::spawn(async move {
+            let req_len = server.read_u32().await.unwrap();
+            let mut req = vec![0u8; req_len as usize];
+            server.read_exact(&mut req).await.unwrap();
+            server.write_u32(4).await.unwrap();
+            server.write_i32(99).await.unwrap();
+            server.flush().await.unwrap();
+        });
+
+        let err = round_trip(&mut client, API_KEY_SASL_AUTHENTICATE, 2, 99, true, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OutboundSaslError::Codec(msg) if msg == "flexible response missing tagged-fields byte")
+        );
+        server_task.await.unwrap();
+    }
+
+    fn assert_request_header(
+        req: &[u8],
+        api_key: i16,
+        api_version: i16,
+        corr_id: i32,
+        flexible: bool,
+    ) {
+        assert!(i16::from_be_bytes([req[0], req[1]]) == api_key);
+        assert!(i16::from_be_bytes([req[2], req[3]]) == api_version);
+        assert!(i32::from_be_bytes([req[4], req[5], req[6], req[7]]) == corr_id);
+        let client_len = i16::from_be_bytes([req[8], req[9]]);
+        assert!(client_len == i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
+        assert!(&req[10..10 + OUTBOUND_CLIENT_ID.len()] == OUTBOUND_CLIENT_ID.as_bytes());
+        if flexible {
+            assert!(req[10 + OUTBOUND_CLIENT_ID.len()] == 0);
+        }
+    }
+
+    fn request_body(req: &[u8], flexible: bool) -> &[u8] {
+        let header_len = 10 + OUTBOUND_CLIENT_ID.len() + usize::from(flexible);
+        &req[header_len..]
+    }
+
+    async fn write_response_frame<S>(stream: &mut S, corr_id: i32, body: &[u8], flex_header: bool)
+    where
+        S: tokio::io::AsyncWrite + Unpin,
+    {
+        let mut frame = BytesMut::new();
+        frame.put_i32(corr_id);
+        if flex_header {
+            frame.put_u8(0);
+        }
+        frame.put_slice(body);
+        stream
+            .write_u32(u32::try_from(frame.len()).unwrap())
+            .await
+            .unwrap();
+        stream.write_all(&frame).await.unwrap();
+        stream.flush().await.unwrap();
     }
 }

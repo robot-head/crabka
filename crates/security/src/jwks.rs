@@ -464,6 +464,35 @@ mod tests {
     }
 
     #[test]
+    fn empty_jwks_has_no_keys() {
+        let jwks = Jwks::empty();
+        assert!(jwks.is_empty());
+        assert!(jwks.len() == 0);
+        assert!(!jwks.contains_kid("k1"));
+    }
+
+    #[test]
+    fn jwks_with_key_is_not_empty() {
+        let (_token, jwks_json) = rs256("k1", "{\"sub\":\"alice\",\"exp\":9999999999}");
+        let jwks = Jwks::from_json(&jwks_json, false).expect("parse jwks");
+        assert!(!jwks.is_empty());
+        assert!(jwks.len() == 1);
+        assert!(jwks.contains_kid("k1"));
+    }
+
+    #[test]
+    fn left_pad_32_accepts_short_and_exact_coordinates_only() {
+        assert!(left_pad_32(&[0xAA; 33]).is_none());
+
+        let short = left_pad_32(&[0x01, 0x02]).expect("short coordinate padded");
+        assert!(short[..30] == [0u8; 30]);
+        assert!(short[30..] == [0x01, 0x02]);
+
+        let exact = [0x7Fu8; 32];
+        assert!(left_pad_32(&exact).expect("exact coordinate") == exact);
+    }
+
+    #[test]
     fn parses_mixed_rsa_and_ec_set() {
         let (_kp, ec_jwks) = es256_key("ec1");
         let (_t, rsa_jwks) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
@@ -552,6 +581,17 @@ mod tests {
             jwks.verify(None, "ES256", signing_input.as_bytes(), sig.as_ref())
                 == Err(AuthError::InvalidToken)
         );
+    }
+
+    #[test]
+    fn accepts_missing_kid_when_set_has_single_key() {
+        let (token, jwks_json) =
+            mint_rs256_with_header("{\"alg\":\"RS256\"}", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let jwks = Jwks::from_json(&jwks_json, false).unwrap();
+        let (kid, alg, si, sig) = parts(&token);
+        assert!(kid.is_none());
+        jwks.verify(kid.as_deref(), &alg, &si, &sig)
+            .expect("single-key JWKS should verify a token without kid");
     }
 
     #[test]

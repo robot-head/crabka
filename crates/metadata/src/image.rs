@@ -1694,6 +1694,17 @@ mod tests {
     }
 
     #[test]
+    fn apply_v1_access_control_entry_replaces_identical_entry() {
+        let mut m = img();
+        let acl = topic_read_for_alice();
+        m.apply(&MetadataRecord::V1AccessControlEntry(acl.clone()));
+        m.apply(&MetadataRecord::V1AccessControlEntry(acl));
+
+        let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        assert!(hits.len() == 1);
+    }
+
+    #[test]
     fn apply_v1_access_control_entry_prefixed_stores_in_prefixed_vec() {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
@@ -2477,5 +2488,32 @@ mod tests {
         assert!(pr.directories.len() == 2);
         assert!(pr.directories[0] == dir); // replica 10 is slot 0
         assert!(pr.directories[1] == Uuid::nil()); // replica 20 still unassigned
+    }
+
+    #[test]
+    fn dir_assignment_updates_existing_full_length_directories() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        let old = Uuid::from_u128(0xAAA);
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 10,
+            replicas: vec![10, 20],
+            isr: vec![10, 20],
+            directories: vec![old, Uuid::nil()],
+            ..Default::default()
+        }));
+        let dir = Uuid::from_u128(0xD15);
+        image.apply(&MetadataRecord::V1PartitionDirAssignment(
+            crate::records::PartitionDirAssignmentRecord {
+                topic: "t".into(),
+                partition: 0,
+                replica: 20,
+                directory: dir,
+            },
+        ));
+
+        let pr = image.partition("t", 0).expect("partition present");
+        assert!(pr.directories == vec![old, dir]);
     }
 }

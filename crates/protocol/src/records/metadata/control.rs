@@ -71,7 +71,11 @@ mod tests {
     #[test]
     fn control_batch_sets_control_bit() {
         let key = control_record_key(ControlRecordType::LeaderChange);
-        let batch = encode_control_batch(0, key, bytes::Bytes::from_static(b"\x00\x00"));
+        let batch = encode_control_batch(42, key, bytes::Bytes::from_static(b"\x00\x00"));
+        let mut cur: &[u8] = &batch;
+        let decoded = RecordBatch::decode(&mut cur).expect("control batch decodes");
+        assert!(decoded.base_offset == 42);
+        assert!(cur.is_empty());
         // magic byte at offset 16, attributes i16 at offset 21..23; control bit = 0x20.
         let attrs = i16::from_be_bytes([batch[21], batch[22]]);
         assert!(attrs & 0x20 != 0);

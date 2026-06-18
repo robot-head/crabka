@@ -103,5 +103,31 @@ mod tests {
         let mut buf = BytesMut::new();
         put_uvarint(&mut buf, 128);
         assert!(buf.as_ref() == &[0x80u8, 0x01u8]);
+        buf.clear();
+        put_uvarint(&mut buf, 16_384);
+        assert!(buf.as_ref() == &[0x80u8, 0x80u8, 0x01u8]);
+        buf.clear();
+        put_uvarint(&mut buf, u32::MAX);
+        assert!(buf.as_ref() == &[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x0F]);
+    }
+
+    #[test]
+    fn max_frame_bytes_matches_kafka_default() {
+        assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn codec_accepts_frames_larger_than_tokio_util_default() {
+        let (client, server) = tokio::io::duplex(10 * 1024 * 1024);
+        let payload = Bytes::from(vec![0xA5; 9 * 1024 * 1024]);
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = frame_generic(server);
+            framed.next().await.unwrap().unwrap().len()
+        });
+        let mut framed = frame_generic(client);
+        framed.send(payload).await.unwrap();
+
+        assert!(server_task.await.unwrap() == 9 * 1024 * 1024);
     }
 }

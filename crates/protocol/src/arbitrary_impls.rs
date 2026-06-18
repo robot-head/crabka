@@ -56,3 +56,98 @@ impl<'a> Arbitrary<'a> for ApiVersionsResponse {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn ascii_uses_input_and_stays_printable() {
+        let mut found = None;
+        for seed in 0u8..=u8::MAX {
+            let data = [seed, seed.wrapping_mul(37), seed.wrapping_add(91), 0x7E];
+            let mut u = Unstructured::new(&data);
+            if let Ok(s) = ascii(&mut u, 1, 8)
+                && !s.is_empty()
+                && s != "xyzzy"
+            {
+                found = Some(s);
+                break;
+            }
+        }
+
+        let s = found.expect("expected at least one generated string");
+        assert!(s.bytes().all(|b| (0x20..=0x7E).contains(&b)));
+    }
+
+    #[test]
+    fn arbitrary_api_versions_request_can_be_non_default() {
+        let mut found = false;
+        for seed in 0u8..=u8::MAX {
+            let data = [seed, seed.wrapping_add(1), seed.wrapping_add(2), 0x55, 0xAA];
+            let mut u = Unstructured::new(&data);
+            if let Ok(req) = ApiVersionsRequest::arbitrary(&mut u)
+                && req != ApiVersionsRequest::default()
+            {
+                assert!(req.client_software_name.bytes().all(|b| b.is_ascii()));
+                assert!(req.client_software_version.bytes().all(|b| b.is_ascii()));
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found);
+    }
+
+    #[test]
+    fn arbitrary_api_version_can_be_non_default() {
+        let mut found = false;
+        for seed in 0u8..=u8::MAX {
+            let data = [
+                seed,
+                seed.wrapping_mul(3),
+                seed.wrapping_add(5),
+                seed.wrapping_add(8),
+                seed.wrapping_add(13),
+                seed.wrapping_add(21),
+            ];
+            let mut u = Unstructured::new(&data);
+            if let Ok(version) = ApiVersion::arbitrary(&mut u)
+                && version != ApiVersion::default()
+            {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found);
+    }
+
+    #[test]
+    fn arbitrary_api_versions_response_can_be_non_default() {
+        let mut found = false;
+        for seed in 0u8..=u8::MAX {
+            let data = [
+                seed,
+                seed.wrapping_add(1),
+                seed.wrapping_add(2),
+                seed.wrapping_add(3),
+                seed.wrapping_add(4),
+                seed.wrapping_add(5),
+                seed.wrapping_add(6),
+                seed.wrapping_add(7),
+                seed.wrapping_add(8),
+            ];
+            let mut u = Unstructured::new(&data);
+            if let Ok(resp) = ApiVersionsResponse::arbitrary(&mut u)
+                && resp != ApiVersionsResponse::default()
+            {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found);
+    }
+}

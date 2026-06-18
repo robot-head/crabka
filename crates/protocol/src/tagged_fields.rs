@@ -171,13 +171,64 @@ mod tests {
 
     #[test]
     fn unknown_tagged_fields_preserved() {
-        // count=1, tag=5, size=3, payload=[10,20,30]
-        let buf = [0x01, 0x05, 0x03, 10, 20, 30];
+        // count=2, tag=5, size=3, payload=[10,20,30], tag=8, size=1, payload=[40]
+        let buf = [0x02, 0x05, 0x03, 10, 20, 30, 0x08, 0x01, 40];
         let mut cur = &buf[..];
         let unknown = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap();
-        assert!(unknown.len() == 1);
+        assert!(!unknown.is_empty());
+        assert!(unknown.len() == 2);
         assert!(unknown.0[0].tag == 5);
         assert!(unknown.0[0].bytes.as_ref() == &[10, 20, 30]);
+        assert!(unknown.0[1].tag == 8);
+        assert!(unknown.0[1].bytes.as_ref() == &[40]);
+    }
+
+    #[test]
+    fn truncated_tagged_field_reports_missing_payload_bytes() {
+        // count=1, tag=5, size=4, payload has only one byte.
+        let buf = [0x01, 0x05, 0x04, 0xAA];
+        let mut cur = &buf[..];
+        let err = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap_err();
+
+        assert!(matches!(err, ProtocolError::UnexpectedEof { needed: 3 }));
+    }
+
+    #[test]
+    fn tagged_fields_len_matches_serialized_len_for_known_and_unknown() {
+        let known = [(1, 2), (300, 3)];
+        let unknown = UnknownTaggedFields(vec![
+            UnknownTaggedField {
+                tag: 7,
+                bytes: Bytes::from_static(&[0xA0]),
+            },
+            UnknownTaggedField {
+                tag: 400,
+                bytes: Bytes::from_static(&[0xB0, 0xB1, 0xB2, 0xB3]),
+            },
+        ]);
+        let mut w = WriteTaggedFields::new();
+        w.add(1, Bytes::from_static(&[0x01, 0x02]));
+        w.add(300, Bytes::from_static(&[0x03, 0x04, 0x05]));
+        let mut out = BytesMut::new();
+        w.write(&mut out, &unknown);
+
+        assert!(tagged_fields_len(&known, &unknown) == out.len());
+    }
+
+    #[test]
+    fn tagged_fields_len_accounts_for_count_varint_width() {
+        let unknown = UnknownTaggedFields(
+            (0..128)
+                .map(|tag| UnknownTaggedField {
+                    tag,
+                    bytes: Bytes::new(),
+                })
+                .collect(),
+        );
+        let mut out = BytesMut::new();
+        WriteTaggedFields::new().write(&mut out, &unknown);
+
+        assert!(tagged_fields_len(&[], &unknown) == out.len());
     }
 
     #[test]

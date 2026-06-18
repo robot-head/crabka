@@ -27,11 +27,7 @@ pub fn build_bootstrap_checkpoint(features: &[(&str, i16)]) -> Bytes {
     let mut out = BytesMut::new();
 
     // (1) SnapshotHeader control batch at offset 0.
-    let header = SnapshotHeaderRecord {
-        version: 0,
-        last_contained_log_timestamp: 0,
-        ..Default::default()
-    };
+    let header = SnapshotHeaderRecord::default();
     let mut header_body = BytesMut::new();
     header
         .encode(&mut header_body, 0)
@@ -72,10 +68,7 @@ pub fn build_bootstrap_checkpoint(features: &[(&str, i16)]) -> Bytes {
 
     // (3) SnapshotFooter control batch.
     let footer_offset = 1 + i64::try_from(features.len()).expect("few features");
-    let footer = SnapshotFooterRecord {
-        version: 0,
-        ..Default::default()
-    };
+    let footer = SnapshotFooterRecord::default();
     let mut footer_body = BytesMut::new();
     footer
         .encode(&mut footer_body, 0)
@@ -92,6 +85,7 @@ pub fn build_bootstrap_checkpoint(features: &[(&str, i16)]) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Decode;
     use crate::records::RecordBatch;
     use assert2::assert;
 
@@ -108,12 +102,48 @@ mod tests {
         let header = RecordBatch::decode(&mut cur).expect("header batch");
         assert!(header.base_offset == 0);
         assert!(header.attributes.is_control_batch());
+        assert!(header.records.len() == 1);
+        let header_value = header.records[0].value.as_ref().expect("header value");
+        let mut header_cur = &header_value[..];
+        let header_record =
+            SnapshotHeaderRecord::decode(&mut header_cur, 0).expect("snapshot header");
+        assert!(header_record.version == 0);
+        assert!(header_record.last_contained_log_timestamp == 0);
+        assert!(header_cur.is_empty());
+
         let data = RecordBatch::decode(&mut cur).expect("data batch");
         assert!(data.base_offset == 1);
+        assert!(data.last_offset_delta == 2);
         assert!(!data.attributes.is_control_batch());
         assert!(data.records.len() == 3);
+        let expected = [
+            ("metadata.version", 25),
+            ("group.version", 1),
+            ("transaction.version", 2),
+        ];
+        for (i, (record, (name, level))) in data.records.iter().zip(expected).enumerate() {
+            assert!(record.offset_delta == i32::try_from(i).expect("test index fits"));
+            let value = record.value.as_ref().expect("feature value");
+            let (decoded, version) =
+                KraftMetadataRecord::decode_value(value).expect("feature record");
+            assert!(version == FEATURE_LEVEL_API_VERSION);
+            let KraftMetadataRecord::FeatureLevel(feature) = decoded else {
+                panic!("expected feature level record");
+            };
+            assert!(feature.name == name);
+            assert!(feature.feature_level == level);
+        }
+
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
+        assert!(footer.base_offset == 4);
         assert!(footer.attributes.is_control_batch());
+        assert!(footer.records.len() == 1);
+        let footer_value = footer.records[0].value.as_ref().expect("footer value");
+        let mut footer_cur = &footer_value[..];
+        let footer_record =
+            SnapshotFooterRecord::decode(&mut footer_cur, 0).expect("snapshot footer");
+        assert!(footer_record.version == 0);
+        assert!(footer_cur.is_empty());
         assert!(cur.is_empty());
     }
 }

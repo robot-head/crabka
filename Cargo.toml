@@ -20,6 +20,10 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
+[profile.mutants]
+inherits = "test"
+debug = "none"
+
 [workspace.dependencies]
 # Columnar / dataframe support for the streams client (opt-in via crate
 # features). `polars` and `polars-arrow` MUST share the same version.
