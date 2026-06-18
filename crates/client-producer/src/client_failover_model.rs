@@ -5,6 +5,8 @@
 //! The batch either reaches the freshly elected leader quickly or fails within a
 //! bounded retry budget, and retry preserves producer identity.
 
+#![allow(clippy::struct_excessive_bools)]
+
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -33,6 +35,12 @@ enum Outcome {
     Acked,
     Failed,
 }
+
+type StateProjection = (
+    (i32, i32, Option<i32>, u8, u8, bool),
+    (bool, u8, u8, u8, u8, u8, bool),
+    (Outcome, Batch, Batch, bool),
+);
 
 #[derive(Clone, Debug)]
 struct State {
@@ -65,13 +73,7 @@ impl State {
         self.outcome != Outcome::Pending
     }
 
-    fn proj(
-        &self,
-    ) -> (
-        (i32, i32, Option<i32>, u8, u8, bool),
-        (bool, u8, u8, u8, u8, u8, bool),
-        (Outcome, Batch, Batch, bool),
-    ) {
+    fn proj(&self) -> StateProjection {
         (
             (
                 self.actual_leader,
@@ -176,10 +178,11 @@ impl Model for ClientFailoverModel {
         if !s.refresh_needed && s.sends < MAX_SENDS {
             acts.push(Act::Send);
         }
-        if let Some(broker) = s.leader_hint {
-            if s.refresh_needed && s.broker_live(broker) {
-                acts.push(Act::AdoptLeaderHint(broker));
-            }
+        if let Some(broker) = s.leader_hint
+            && s.refresh_needed
+            && s.broker_live(broker)
+        {
+            acts.push(Act::AdoptLeaderHint(broker));
         }
         if s.refresh_needed && s.refreshes < MAX_REFRESHES {
             acts.push(Act::RefreshMetadata);
