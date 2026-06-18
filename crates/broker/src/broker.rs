@@ -2288,6 +2288,14 @@ impl Broker {
         } else {
             crabka_audit::AuditLog::disabled()
         };
+        // Wrap the cluster authorizer with the deny-auditing decorator so every
+        // Deny decision is recorded as an AuthorizationDenied audit event.
+        if config.audit_enabled {
+            config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
+                config.authorizer.clone(),
+                audit_log.clone(),
+            ));
+        }
         // ───────────────────────────────────────────────────────────────────
 
         // KIP-113 offline-dir handling: feed the supervisor the online

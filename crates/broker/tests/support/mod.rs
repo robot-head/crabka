@@ -51,6 +51,82 @@ pub async fn start() -> InProcess {
     }
 }
 
+/// Start a broker whose authorizer is `SimpleAclAuthorizer` with no ACLs and no
+/// super-users (deny-all for the anonymous test client). Audit is enabled via
+/// `for_tests` defaults. The anonymous client will be denied every admin
+/// operation, triggering `AuthorizationDenied` audit events.
+pub async fn start_with_deny_all_authz() -> InProcess {
+    use crabka_broker::authorizer::SimpleAclAuthorizer;
+    use std::collections::HashSet;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
+    // Replace the default AllowAllAuthorizer with a deny-all SimpleAclAuthorizer
+    // (empty ACL store, no super-users). The anonymous test client connects
+    // with no credentials so it has no super-user bypass — every operation is
+    // denied and the auditing decorator emits AuthorizationDenied events.
+    config.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(HashSet::new()));
+    let broker = Broker::start(config).await.expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    let client = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("crabka-broker-test-deny")
+        .build()
+        .await
+        .expect("client build");
+    InProcess {
+        broker,
+        client,
+        _tempdir: tempdir,
+    }
+}
+
+/// Fetch all records from `AUDIT_TOPIC` partition 0 and JSON-decode each
+/// record value, returning the decoded objects. Mirrors the
+/// `broker_started_event_is_written_to_audit_topic` fetch pattern.
+pub async fn consume_audit_records(client: &crabka_client_core::Client) -> Vec<serde_json::Value> {
+    use crabka_broker::coordinator::AUDIT_TOPIC;
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+
+    let topic_id = topic_id_for(client, AUDIT_TOPIC).await;
+    let fr = client
+        .send(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            topics: vec![FetchTopic {
+                topic: AUDIT_TOPIC.into(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    partition_max_bytes: 1 << 20,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("FetchRequest for audit topic");
+
+    let mut records = Vec::new();
+    if let Some(part) = fr.responses.first().and_then(|r| r.partitions.first())
+        && let Some(batches) = part.records.as_ref().and_then(|r| r.as_v2())
+    {
+        for batch in batches {
+            for rec in &batch.records {
+                if let Some(value) = &rec.value
+                    && let Ok(j) = serde_json::from_slice::<serde_json::Value>(value)
+                {
+                    records.push(j);
+                }
+            }
+        }
+    }
+    records
+}
+
 /// Round-trip a Metadata request to learn the topic's assigned UUID.
 /// Produce / Fetch at v ≥ 13 carry only `topic_id` on the wire, so the
 /// caller must plumb the real UUID through.
