@@ -375,7 +375,16 @@ impl BrokerHandle {
                     "partition {topic}-{partition} not local"
                 ))
             })?;
-        part.truncate_to(offset).await
+        part.truncate_to(offset).await?;
+        // Mirror the production truncation path (the replicator): a log
+        // truncation also reverts idempotent-producer dedup entries for the
+        // dropped offsets, so a retried batch from the truncated tail re-appends
+        // instead of deduplicating against a vanished offset.
+        self._broker
+            .producer_state
+            .truncate(topic, partition, offset)
+            .await;
+        Ok(())
     }
 
     /// Test-only: advance this broker's local partition `log_start_offset`
