@@ -103,7 +103,7 @@ pub async fn bootstrap_audit_topic(
     for (p, replicas) in assignments.iter().enumerate() {
         records.push(MetadataRecord::V1Partition(PartitionRecord {
             topic: config.audit_topic.clone(),
-            partition: i32::try_from(p).unwrap_or(0),
+            partition: i32::try_from(p).expect("audit partition index overflows i32"),
             leader: replicas[0],
             replicas: replicas.clone(),
             isr: replicas.clone(),
