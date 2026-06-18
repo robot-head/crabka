@@ -85,4 +85,14 @@ mod tests {
         let s = Selector::compile(&[], &[]).unwrap();
         assert!(!s.matches("anything"));
     }
+
+    #[test]
+    fn regex_metacharacters_are_escaped_to_literals() {
+        // A literal `.` in a pattern must match only a literal `.`, never an
+        // arbitrary character. If the metachar-escape guard is disabled, `a.b`
+        // compiles to the regex `^a.b$` and would wrongly match `axb`.
+        let s = Selector::compile(&["a.b".into()], &[]).unwrap();
+        assert!(s.matches("a.b"));
+        assert!(!s.matches("axb"));
+    }
 }

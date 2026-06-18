@@ -255,6 +255,13 @@ mod tests {
         crate::test_util::create_topic(&sb, "orders", 1).await;
         crate::test_util::produce(&sb, "orders", b"k", b"v").await;
 
+        // A second LOCAL topic that is non-remote and non-internal but NOT in the
+        // flow's `topics.include`. It pins the topic filter's `selector.matches`
+        // conjunct: with `&&`→`||` the filter would replicate `noise` (since it
+        // is !remote && !internal), so `us-east.noise` must stay absent.
+        crate::test_util::create_topic(&sb, "noise", 1).await;
+        crate::test_util::produce(&sb, "noise", b"k", b"v").await;
+
         let mut clusters = BTreeMap::new();
         clusters.insert(
             "us-east".to_string(),
@@ -298,5 +305,8 @@ mod tests {
         .await;
         sup.shutdown().await;
         assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
+        // `noise` was excluded by the selector, so it must never have been
+        // replicated to the target.
+        assert!(crate::test_util::topic_record_count(&tb, "us-east.noise").await == 0);
     }
 }

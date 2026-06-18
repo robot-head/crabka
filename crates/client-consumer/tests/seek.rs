@@ -141,5 +141,12 @@ async fn seek_rejects_negative_offset() {
     let err = consumer.seek("n", 0, -1).await;
     assert!(err.is_err(), "negative seek offset must be rejected");
 
+    // Offset 0 is a valid seek target (re-read from the beginning): the reject
+    // boundary is strictly `offset < 0`, so 0 must be accepted.
+    assert!(
+        consumer.seek("n", 0, 0).await.is_ok(),
+        "seek to offset 0 must be accepted"
+    );
+
     consumer.close().await.unwrap();
 }

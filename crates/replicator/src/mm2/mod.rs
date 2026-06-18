@@ -147,6 +147,13 @@ mod tests {
     }
 
     #[test]
+    fn internal_topic_names_match_mm2() {
+        // MM2-compatible internal topic naming, pinned exactly.
+        assert!(Checkpoint::topic_name("us-east") == "us-east.checkpoints.internal");
+        assert!(OffsetSync::topic_name("us-east") == "mm2-offset-syncs.us-east.internal");
+    }
+
+    #[test]
     fn checkpoint_bytes_roundtrip() {
         let c = Checkpoint {
             group: "analytics".into(),

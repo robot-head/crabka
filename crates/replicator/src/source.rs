@@ -251,5 +251,40 @@ mod tests {
         assert!(payload.partition == 0);
         assert!(payload.offset == 0);
         assert!(payload.value.as_deref() == Some(b"v".as_slice()));
+
+        // The checkpoint position is the NEXT offset to read: `last_offset + 1`.
+        // Having consumed offset 0, the position for `orders-0` must be exactly
+        // 1 (not 0 from `*1` or -1 from `-1`).
+        let off = src.checkpoint().unwrap();
+        assert!(off.position.get("orders-0") == Some(&OffsetValue::Long(1)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_takes_consumer_so_poll_fails_afterwards() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let broker = crabka_broker::Broker::start(crabka_broker::BrokerConfig::for_tests(
+            dir.path().to_path_buf(),
+        ))
+        .await
+        .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+
+        crate::test_util::create_topic(&bootstrap, "orders", 1).await;
+
+        let mut src = SourceConsumer::start(
+            &bootstrap,
+            "crabka-replicator-flow-close",
+            &["orders".to_string()],
+            None,
+        )
+        .await
+        .unwrap();
+
+        // A real close takes (and closes) the inner consumer; after that the
+        // consumer is `None`, so a subsequent poll must surface a backend error.
+        // The `close -> Ok(())` mutant skips the take, leaving the consumer live
+        // and the poll succeeding.
+        src.close().await.unwrap();
+        assert!(src.poll().await.is_err());
     }
 }

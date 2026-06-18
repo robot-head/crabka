@@ -209,4 +209,34 @@ exclude_re = [
     "(crates/)?client-core/src/transport\\.rs.*replace != with == in put_uvarint",
     "(crates/)?client-core/src/transport\\.rs.*replace & with (\\||\\^) in put_uvarint",
     "(crates/)?client-core/src/transport\\.rs.*replace \\| with \\^ in put_uvarint",
+    # `read_all`'s consecutive-empty-poll drain bound (`consecutive_empty >=
+    # MAX_EMPTY`): breaking after 1 vs N consecutive empty polls both fully drain
+    # an already-populated topic (records arrive in non-empty batches first), so
+    # the boundary has no deterministic unit signal — a behavioural test of "how
+    # many empty polls before giving up" is inherently timing-flaky. The drain
+    # *result* (every record returned, in order) is covered by
+    # `ensure_produce_read_roundtrip` and every integration suite that reads a
+    # topic back.
+    "replicator/src/admin_util\\.rs.*replace >= with < in read_all",
+    # `FlowWorker::start`'s build-retry loop give-up/accumulation control
+    # (`elapsed >= MAX_BUILD_ELAPSED`, `elapsed += backoff`) is only exercised by
+    # a *persistently* unreachable cluster: a real assertion needs a cluster that
+    # stays down for the full ~30s retry budget (no non-flaky unit signal), same
+    # rationale as the serve-loop/entrypoint exclusions above. The backoff math
+    # itself is factored into the pure `next_backoff` helper, which IS
+    # unit-tested (doubling + cap), and the happy-path build is covered by
+    # `worker_replicates_one_flow`.
+    "replicator/src/worker\\.rs.*FlowWorker::start",
+    # Background-task graceful-shutdown teardown (`shutdown`): each signals a
+    # `watch` channel then awaits the spawned loop's `JoinHandle`. Dropping the
+    # handle merely detaches the task, so the *observable* difference between a
+    # real shutdown and the `-> ()` mutant (whether the loop is awaited to
+    # completion vs left running detached) is pure timing — any "did it actually
+    # stop?" assertion is flaky. Same teardown-glue rationale as the serve-loop
+    # entrypoints above; the start path and the work each task performs are
+    # tested. Covers FlowSupervisor, FlowWorker, HeartbeatTask, CheckpointTask.
+    "replicator/src/supervisor\\.rs.*FlowSupervisor::shutdown",
+    "replicator/src/worker\\.rs.*FlowWorker::shutdown",
+    "replicator/src/tasks/heartbeat\\.rs.*HeartbeatTask::shutdown",
+    "replicator/src/tasks/checkpoint\\.rs.*CheckpointTask::shutdown",
 ]

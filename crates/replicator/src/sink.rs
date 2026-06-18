@@ -18,6 +18,16 @@ use crate::naming::{PROVENANCE_HEADER, Renamer};
 use crate::record::ReplicatedRecord;
 use crate::residency::ResidencyGate;
 
+/// One in-flight produce awaiting its broker ack: the ack receiver plus the
+/// source-side `(topic, partition, upstream offset)` coordinates needed to build
+/// the [`OffsetSync`] once the ack supplies the downstream offset.
+type PendingProduce = (
+    Receiver<Result<RecordMetadata, ProducerError>>,
+    String,
+    i32,
+    i64,
+);
+
 /// Parameters required to start a [`TargetSink`].
 pub struct SinkParams {
     /// Bootstrap address of the target cluster.
@@ -53,8 +63,8 @@ pub struct TargetSink {
     security: Option<crabka_client_core::security::ClientSecurity>,
     /// Target topics that have already been ensured (to avoid redundant admin calls).
     created_topics: HashSet<String>,
-    /// Pairs of (ack receiver, offset-sync with downstream=-1 until acked).
-    pending: Vec<(Receiver<Result<RecordMetadata, ProducerError>>, OffsetSync)>,
+    /// In-flight produces awaiting broker acks (see [`PendingProduce`]).
+    pending: Vec<PendingProduce>,
     /// Completed offset-syncs, accessible via [`drain_offset_syncs`].
     offset_syncs: Vec<OffsetSync>,
 }
@@ -209,15 +219,7 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                 })
                 .await;
 
-            self.pending.push((
-                rx,
-                OffsetSync {
-                    topic: r.topic,
-                    partition: r.partition,
-                    upstream: r.offset,
-                    downstream: -1,
-                },
-            ));
+            self.pending.push((rx, r.topic, r.partition, r.offset));
         }
 
         Ok(())
@@ -228,14 +230,22 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
     async fn flush(&mut self) -> Result<(), ConnectError> {
         let pending = std::mem::take(&mut self.pending);
 
-        for (rx, mut offset_sync) in pending {
+        for (rx, topic, partition, upstream) in pending {
             // Await the broker ack for this produce.
             let meta = rx
                 .await
                 .map_err(|_| ConnectError::Backend("producer dropped sender".into()))?
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
 
-            offset_sync.downstream = meta.offset;
+            // The downstream offset is only known once the broker acks, so the
+            // full OffsetSync is assembled here rather than carrying a
+            // placeholder through `pending`.
+            let offset_sync = OffsetSync {
+                topic,
+                partition,
+                upstream,
+                downstream: meta.offset,
+            };
 
             // Write the offset-sync record to the target cluster.
             let sync_rx = self
@@ -339,5 +349,88 @@ mod tests {
                 .iter()
                 .any(|s| s.topic == "orders" && s.partition == 0 && s.upstream == 5)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identity_naming_loop_guard_skips_only_own_provenance() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let broker = crabka_broker::Broker::start(crabka_broker::BrokerConfig::for_tests(
+            dir.path().to_path_buf(),
+        ))
+        .await
+        .unwrap();
+        let target = broker.listen_addr().to_string();
+
+        // Identity naming (no rename) + permit-all residency. The loop-guard
+        // must skip ONLY a record whose `__crabka_origin` header equals our own
+        // source alias.
+        let mut sink = TargetSink::start(SinkParams {
+            target_bootstrap: target.clone(),
+            source_alias: "us-east".into(),
+            naming: crate::config::NamingPolicy::Identity,
+            target_zones: vec!["us".into()],
+            policies: vec![],
+            security: None,
+        })
+        .await
+        .unwrap();
+
+        // A: our own provenance -> loop -> MUST be skipped.
+        let a = ConnectRecord::new(
+            None,
+            Some(ReplicatedRecord {
+                topic: "orders".into(),
+                partition: 0,
+                offset: 1,
+                timestamp: 1,
+                key: Some("a".into()),
+                value: Some("v".into()),
+                headers: vec![(PROVENANCE_HEADER.into(), Some("us-east".into()))],
+            }),
+        );
+        // B: different origin -> MUST be produced.
+        let b = ConnectRecord::new(
+            None,
+            Some(ReplicatedRecord {
+                topic: "orders".into(),
+                partition: 0,
+                offset: 2,
+                timestamp: 1,
+                key: Some("b".into()),
+                value: Some("v".into()),
+                headers: vec![(PROVENANCE_HEADER.into(), Some("eu-west".into()))],
+            }),
+        );
+        // C: a non-provenance header carrying our alias -> MUST be produced.
+        let c = ConnectRecord::new(
+            None,
+            Some(ReplicatedRecord {
+                topic: "orders".into(),
+                partition: 0,
+                offset: 3,
+                timestamp: 1,
+                key: Some("c".into()),
+                value: Some("v".into()),
+                headers: vec![("other".into(), Some("us-east".into()))],
+            }),
+        );
+
+        sink.put(vec![a, b, c]).await.unwrap();
+        sink.flush().await.unwrap();
+
+        // Identity naming means the target topic is "orders" (no prefix). Read the
+        // produced records back and assert the EXACT set of keys: B and C land,
+        // A (our own provenance) is filtered. Checking the key set — not just the
+        // count — is what distinguishes the four loop-guard mutants, since some of
+        // them merely swap *which* record is skipped while keeping the count at 2.
+        let produced = crate::admin_util::read_all(&target, "orders", None)
+            .await
+            .unwrap();
+        let mut keys: Vec<Vec<u8>> = produced
+            .into_iter()
+            .filter_map(|(k, _)| k.map(|b| b.to_vec()))
+            .collect();
+        keys.sort();
+        assert!(keys == vec![b"b".to_vec(), b"c".to_vec()]);
     }
 }

@@ -74,6 +74,12 @@ fn now_ms() -> i64 {
     .unwrap_or(i64::MAX)
 }
 
+/// Compute the next build-retry backoff: double the current interval, capped at
+/// [`MAX_BACKOFF`].
+fn next_backoff(current: Duration) -> Duration {
+    (current * 2).min(MAX_BACKOFF)
+}
+
 impl FlowWorker {
     /// Build and start the pipeline, retrying transient build failures with
     /// bounded exponential backoff (a cluster may be briefly unreachable).
@@ -104,7 +110,7 @@ impl FlowWorker {
                     );
                     tokio::time::sleep(backoff).await;
                     elapsed += backoff;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
+                    backoff = next_backoff(backoff);
                 }
             }
         }
@@ -199,6 +205,21 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+
+    #[test]
+    fn now_ms_is_a_recent_epoch_millis() {
+        // Epoch millis for 2023-11-14T22:13:20Z; any sane current time exceeds
+        // it. The `-> -1 / 0 / 1` mutants all fall below this floor.
+        assert!(super::now_ms() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn next_backoff_doubles_and_caps() {
+        // Doubling: 250ms -> 500ms (the `*2`→`/2` mutant gives 125ms).
+        assert!(super::next_backoff(Duration::from_millis(250)) == Duration::from_millis(500));
+        // Cap: never exceeds MAX_BACKOFF even when already at the cap.
+        assert!(super::next_backoff(MAX_BACKOFF) == MAX_BACKOFF);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn worker_replicates_one_flow() {

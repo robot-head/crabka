@@ -91,5 +91,7 @@ mod tests {
         assert!(n.target_name("orders") == "orders");
         assert!(!n.is_remote("orders"));
         assert!(n.provenance_alias() == "us-east");
+        // `policy()` returns the configured policy verbatim, not the Default.
+        assert!(n.policy() == NamingPolicy::Identity);
     }
 }
