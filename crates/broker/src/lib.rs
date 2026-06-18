@@ -150,6 +150,7 @@ pub(crate) use sendfile_cfg;
 
 pub mod api_catalog;
 pub(crate) mod assign_dirs;
+pub mod audit_sink;
 pub mod authorizer;
 pub(crate) mod auto_join;
 pub mod bootstrap;

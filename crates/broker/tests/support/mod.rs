@@ -51,6 +51,32 @@ pub async fn start() -> InProcess {
     }
 }
 
+/// Round-trip a Metadata request to learn the topic's assigned UUID.
+/// Produce / Fetch at v ≥ 13 carry only `topic_id` on the wire, so the
+/// caller must plumb the real UUID through.
+pub async fn topic_id_for(
+    client: &crabka_client_core::Client,
+    name: &str,
+) -> crabka_protocol::primitives::uuid::Uuid {
+    use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata for topic_id");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
+
 // ── Multi-broker helpers ──────────────────────────────────────────────────────
 //
 // The functions below are only meaningful on non-Windows targets because

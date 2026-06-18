@@ -154,12 +154,26 @@ pub struct Broker {
     /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) offset_for_leader_epoch_requests: Arc<std::sync::atomic::AtomicU64>,
+    /// `FedRAMP` MLA (Slice 1): cloneable handle to the audit pipeline.
+    /// Handlers and lifecycle code call `emit` to record events; the
+    /// `AuditWriter` background task drains them into the
+    /// `KafkaTopicAuditSink`. Disabled (`AuditLog::disabled()`) when
+    /// `BrokerConfig::audit_enabled` is `false`.
+    pub(crate) audit_log: std::sync::Arc<crabka_audit::AuditLog>,
     handlers: HandlerTable,
 }
 
 impl Broker {
     pub(crate) fn handlers(&self) -> &HandlerTable {
         &self.handlers
+    }
+
+    pub(crate) fn audit_product() -> crabka_audit::ProductInfo {
+        crabka_audit::ProductInfo {
+            vendor_name: "Crabka".to_string(),
+            name: "crabka-broker".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
     }
 
     /// Test-only: clone the controller handle so the `auto_join` unit test can
@@ -1398,6 +1412,18 @@ impl BrokerHandle {
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
     pub async fn shutdown(mut self) {
+        // Emit the BrokerStopping lifecycle event before tearing down
+        // partitions. This record may be dropped if the audit partition is
+        // already gone — acceptable for Slice 1; durable shutdown auditing
+        // is Slice 3.
+        self._broker
+            .audit_log
+            .emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStopping,
+                node_id: i64::from(self._broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
+
         // Cancel the replicator supervisor BEFORE the controller drops:
         // in-flight replication tasks must observe a clean cancellation
         // rather than a torn-down metadata-watch channel.
@@ -2216,6 +2242,45 @@ impl Broker {
         // `/metrics` HTTP listener and any other later consumers
         // still reuse the same `metrics` value.
         let metrics = crate::metrics::BrokerMetrics::new();
+
+        // ── Audit pipeline (FedRAMP MLA, Slice 1) ──────────────────────────
+        // Wired after `bootstrap_audit_topic` (which submits the audit topic
+        // metadata record into raft) and after `partitions` + `metrics` are
+        // live. The `KafkaTopicAuditSink` resolves the local audit partition
+        // lazily at write time, so it is safe to construct here even though
+        // the replicator supervisor (spawned below) has not yet materialized
+        // the local partition replica.
+        let audit_log = if config.audit_enabled {
+            let (log, rx) = crabka_audit::AuditLog::new(8192);
+            // Resolve the audit partition this broker leads (broker-affinity).
+            let image = controller.current_image();
+            let mut my_partition: Option<i32> = None;
+            let mut idx = 0i32;
+            while let Some(part) = image.partition(&config.audit_topic, idx) {
+                if part.leader == config.node_id {
+                    my_partition = Some(idx);
+                    break;
+                }
+                idx += 1;
+            }
+            if let Some(pidx) = my_partition {
+                let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
+                    partitions.clone(),
+                    config.audit_topic.clone(),
+                    pidx,
+                    metrics.clone(),
+                ));
+                let writer = crabka_audit::AuditWriter::new(rx, sink, Self::audit_product());
+                tokio::spawn(writer.run());
+            } else {
+                tracing::warn!("no audit partition led by this broker; audit records will drop");
+            }
+            log
+        } else {
+            crabka_audit::AuditLog::disabled()
+        };
+        // ───────────────────────────────────────────────────────────────────
+
         // KIP-113 offline-dir handling: feed the supervisor the online
         // subset so newly materialized partitions never land on a dir
         // the startup probe flagged unwritable.
@@ -3095,6 +3160,7 @@ impl Broker {
             client_metrics,
             #[cfg(any(test, feature = "test-helpers"))]
             offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            audit_log,
             handlers,
         });
 
@@ -3109,6 +3175,33 @@ impl Broker {
             ));
             listener_tasks.push(task);
         }
+
+        // Emit the BrokerStarted lifecycle event now that the broker Arc is
+        // live and listeners are bound. We must wait for the replicator
+        // supervisor to materialize the audit partition in the local registry
+        // before emitting, so the `KafkaTopicAuditSink` can actually write
+        // the record. We poll with a bounded timeout; if the partition never
+        // appears (non-broker nodes, disabled audit, no led partition) we emit
+        // anyway and accept that the record may be dropped.
+        if broker.config.audit_enabled {
+            let audit_topic = broker.config.audit_topic.clone();
+            let partitions_for_wait = broker.partitions.clone();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    // Check if audit partition 0 is present in the local registry.
+                    if partitions_for_wait.contains(&audit_topic, 0) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+        }
+        broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
+            kind: crabka_audit::LifecycleKind::BrokerStarted,
+            node_id: i64::from(broker.config.broker_id),
+            time_ms: crate::time_util::now_ms(),
+        });
 
         // Now that the listener accept loops are spawned, launch the
         // topic-backed RLMM bootstrap task.  The broker already serves
