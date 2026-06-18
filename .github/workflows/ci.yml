@@ -324,7 +324,14 @@ jobs:
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov nextest --workspace --profile ci --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
+          cargo llvm-cov nextest --workspace --profile ci \
+            --exclude crabka-client-core \
+            --exclude crabka-log \
+            --exclude crabka-broker \
+            --exclude crabka-grpc-gateway \
+            --filterset 'not binary(capture_corpus)' \
+            --lcov --output-path coverage/jvm-differential.lcov \
+            -- --include-ignored
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
