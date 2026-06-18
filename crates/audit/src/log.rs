@@ -152,6 +152,6 @@ mod tests {
         for i in 0..10 {
             log.emit(life(i));
         }
-        check!(log.dropped() >= 1);
+        check!(log.dropped() == 9);
     }
 }
