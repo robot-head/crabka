@@ -240,11 +240,17 @@ mod tests {
         .await
         .unwrap();
 
-        let rec = loop {
+        // Poll until the produced record surfaces. Bounded (not an open `loop`)
+        // so the `poll -> Ok(None)` mutant — a source that never yields — fails
+        // this test fast instead of spinning to the cargo-mutants timeout.
+        let mut rec = None;
+        for _ in 0..200 {
             if let Some(r) = src.poll().await.unwrap() {
-                break r;
+                rec = Some(r);
+                break;
             }
-        };
+        }
+        let rec = rec.expect("source did not yield the produced record");
 
         let payload = rec.value.unwrap();
         assert!(payload.topic == "orders");
