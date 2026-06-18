@@ -150,3 +150,19 @@ impl StreamsApp {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn application_id_returns_configured_value() {
+        let app = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("orders-app")
+            .schema_registry("http://127.0.0.1:8081")
+            .build();
+
+        assert_eq!(app.application_id(), "orders-app");
+    }
+}
