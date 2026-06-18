@@ -2250,20 +2250,29 @@ impl Broker {
         // lazily at write time, so it is safe to construct here even though
         // the replicator supervisor (spawned below) has not yet materialized
         // the local partition replica.
-        let audit_log = if config.audit_enabled {
-            let (log, rx) = crabka_audit::AuditLog::new(8192);
-            // Resolve the audit partition this broker leads (broker-affinity).
+        // Resolve the audit partition this broker leads (broker-affinity).
+        // Hoisted out of the audit_enabled block so block 2 (BrokerStarted
+        // wait) can key on the actual led partition index rather than
+        // hardcoding partition 0.
+        let audit_led_partition: Option<i32> = if config.audit_enabled {
             let image = controller.current_image();
-            let mut my_partition: Option<i32> = None;
+            let mut led: Option<i32> = None;
             let mut idx = 0i32;
             while let Some(part) = image.partition(&config.audit_topic, idx) {
                 if part.leader == config.node_id {
-                    my_partition = Some(idx);
+                    led = Some(idx);
                     break;
                 }
                 idx += 1;
             }
-            if let Some(pidx) = my_partition {
+            led
+        } else {
+            None
+        };
+
+        let audit_log = if config.audit_enabled {
+            let (log, rx) = crabka_audit::AuditLog::new(8192);
+            if let Some(pidx) = audit_led_partition {
                 let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
                     partitions.clone(),
                     config.audit_topic.clone(),
@@ -3183,25 +3192,30 @@ impl Broker {
         // the record. We poll with a bounded timeout; if the partition never
         // appears (non-broker nodes, disabled audit, no led partition) we emit
         // anyway and accept that the record may be dropped.
-        if broker.config.audit_enabled {
+        // Only emit BrokerStarted when this node actually leads an audit
+        // partition; otherwise the sink would silently drop the record
+        // (it binds to the led partition index, not partition 0).
+        // When audit_led_partition is None (controller-only node, follower,
+        // or audit disabled) we skip both the wait and the emit.
+        if let Some(led_pidx) = audit_led_partition {
             let audit_topic = broker.config.audit_topic.clone();
             let partitions_for_wait = broker.partitions.clone();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
-                    // Check if audit partition 0 is present in the local registry.
-                    if partitions_for_wait.contains(&audit_topic, 0) {
+                    // Wait for this broker's led audit partition to materialise.
+                    if partitions_for_wait.contains(&audit_topic, led_pidx) {
                         return;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             })
             .await;
+            broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStarted,
+                node_id: i64::from(broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
         }
-        broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
-            kind: crabka_audit::LifecycleKind::BrokerStarted,
-            node_id: i64::from(broker.config.broker_id),
-            time_ms: crate::time_util::now_ms(),
-        });
 
         // Now that the listener accept loops are spawned, launch the
         // topic-backed RLMM bootstrap task.  The broker already serves
