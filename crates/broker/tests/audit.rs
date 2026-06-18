@@ -95,11 +95,18 @@ async fn broker_started_event_is_written_to_audit_topic() {
     p.broker.shutdown().await;
 }
 
-/// Integration-level smoke test for the deny-auditing authorizer decorator.
+/// Verifies the authorizer-decorator path denies an unauthorized operation.
 ///
-/// FALLBACK NOTE: The full end-to-end path (send-denied-request → observe
+/// This test asserts that:
+///   1. A `CreateTopics` request is denied with `CLUSTER_AUTHORIZATION_FAILED`.
+///   2. The broker remains healthy and does not crash.
+///
+/// What this test does NOT assert:
+///   - That an `AuthorizationDenied` audit record was emitted to the audit topic.
+///
+/// Why not: The full end-to-end path (send-denied-request → observe
 /// `AuthorizationDenied` record in the audit topic via the same client) is
-/// impractical here because:
+/// impractical because:
 ///   - The test client connects anonymously (principal `"ANONYMOUS"`).
 ///   - `SimpleAclAuthorizer` with no ACLs and no super-users denies
 ///     every request, including the `Fetch` needed to read back the
@@ -107,20 +114,14 @@ async fn broker_started_event_is_written_to_audit_topic() {
 ///   - There is no plaintext SASL path that would give the anonymous
 ///     reader an elevated principal without setting up SCRAM credentials.
 ///
-/// The unit test (`audit_authorizer::tests::deny_decision_emits_audit_record`)
-/// already proves emit-on-deny with a controlled `DenyAll` inner authorizer and
-/// a direct channel receive. This integration test instead validates the
-/// end-to-end plumbing at a higher level: the broker starts with a deny-all
-/// authorizer AND audit enabled, the `CreateTopics` request is denied, and the
-/// audit topic itself remains consumable.
+/// The audit emit on deny is already proven by the unit test
+/// `deny_decision_emits_audit_record` in `crates/broker/src/audit_authorizer.rs`.
 #[tokio::test]
-async fn denied_operation_is_audited() {
+async fn denied_operation_returns_cluster_authorization_failed() {
     // Start a broker with a deny-all authorizer.
     let p = support::start_with_deny_all_authz().await;
 
-    // Attempt a create that will be denied. The AuditingAuthorizer decorator
-    // wrapping the SimpleAclAuthorizer emits an AuthorizationDenied event when
-    // the Cluster::Create check fails.
+    // Attempt a create that will be denied.
     let resp = p
         .client
         .send(CreateTopicsRequest {
@@ -144,10 +145,7 @@ async fn denied_operation_is_audited() {
         .any(|t| t.error_code == crabka_broker::codes::CLUSTER_AUTHORIZATION_FAILED);
     assert2::check!(denied, "expected CreateTopics to be denied; resp: {resp:?}");
 
-    // Verify the audit topic is still reachable (consume returns no error,
-    // i.e. the topic exists and the write path works). The deny-on-Fetch means
-    // the anonymous client cannot read the records back; the unit test already
-    // proves the event was emitted. See fallback note above.
+    // Verify the broker is still alive by checking the audit topic is reachable.
     let topic_id = support::topic_id_for(&p.client, AUDIT_TOPIC).await;
     let fr = p
         .client
@@ -170,10 +168,7 @@ async fn denied_operation_is_audited() {
         })
         .await
         .unwrap();
-    // The Fetch itself succeeds (no transport error) — the broker is healthy.
-    // The partition may return an error code if the anonymous Fetch is denied,
-    // which is acceptable; the point is that the broker did not crash and the
-    // audit pipeline is alive.
+    // The broker responded to the Fetch request without crashing.
     let _ = fr;
 
     p.broker.shutdown().await;
