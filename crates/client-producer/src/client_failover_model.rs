@@ -65,7 +65,9 @@ impl State {
         self.outcome != Outcome::Pending
     }
 
-    fn proj(&self) -> (
+    fn proj(
+        &self,
+    ) -> (
         (i32, i32, Option<i32>, u8, u8, bool),
         (bool, u8, u8, u8, u8, u8, bool),
         (Outcome, Batch, Batch, bool),
@@ -264,7 +266,9 @@ impl Model for ClientFailoverModel {
         vec![
             Property::always("identity_preserved", |_, s: &State| s.identity_preserved),
             Property::always("send_attempts_capped", |_, s: &State| s.sends <= MAX_SENDS),
-            Property::always("refreshes_capped", |_, s: &State| s.refreshes <= MAX_REFRESHES),
+            Property::always("refreshes_capped", |_, s: &State| {
+                s.refreshes <= MAX_REFRESHES
+            }),
             Property::always("quick_recovery_or_failure", |_, s: &State| {
                 !s.failover_started
                     || s.terminal()
@@ -313,8 +317,14 @@ fn run_model() {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "client_failover depth cap hit");
-    assert!(checker.state_count() < MAX_STATES, "client_failover truncated");
+    assert!(
+        checker.max_depth() < MAX_DEPTH,
+        "client_failover depth cap hit"
+    );
+    assert!(
+        checker.state_count() < MAX_STATES,
+        "client_failover truncated"
+    );
     checker.assert_properties();
 }
 

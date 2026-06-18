@@ -55,6 +55,8 @@
 
 mod accumulator;
 mod builder;
+#[cfg(test)]
+mod client_failover_model;
 mod compression;
 mod error;
 mod partitioner;
@@ -63,8 +65,6 @@ mod record;
 mod sender;
 mod transactional;
 mod transport;
-#[cfg(test)]
-mod client_failover_model;
 
 pub use compression::Compression;
 pub use crabka_client_consumer::ConsumerGroupMetadata;

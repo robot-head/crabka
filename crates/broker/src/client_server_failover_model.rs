@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use crate::producer_state::{check_pure, Decision, ProducerEntry};
+use crate::producer_state::{Decision, ProducerEntry, check_pure};
 use stateright::{Checker, Model, Property};
 
 const NB: usize = 3;
