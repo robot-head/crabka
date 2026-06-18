@@ -736,8 +736,8 @@ async fn finalize_ack(
     producer_state: &Arc<crate::producer_state::ProducerState>,
     key: &CommitKey<'_>,
 ) {
+    let target = base_offset + i64::from(key.last_offset_delta) + 1;
     if acks == -1 {
-        let target = base_offset + i64::from(key.last_offset_delta) + 1;
         let deadline = std::time::Instant::now() + timeout;
         out.error_code = match part.await_hw_at_least(target, deadline).await {
             Ok(()) => codes::NONE,
@@ -747,7 +747,34 @@ async fn finalize_ack(
         out.error_code = codes::NONE;
     }
     out.base_offset = base_offset;
-    if key.pid >= 0 {
+    // Only record the idempotent-producer commit if the appended batch is still
+    // on the leader's log. A failover-rejoin divergence truncation can remove
+    // the batch while the acks=all HW gate above is waiting (the gate then times
+    // out); recording the truncated batch would make a retry dedup against an
+    // offset the log no longer holds, and the retry's HW gate would wait forever
+    // for a high watermark that can never reach the vanished offset. Skipping
+    // the commit lets the retry re-append fresh instead.
+    //
+    // This is a best-effort check: a truncation racing in between this read and
+    // the commit below could still record a stale entry. That is tolerated
+    // because the replicator calls `ProducerState::truncate` after *every* log
+    // truncation, so any entry stranded by such a race is dropped by the next
+    // truncation/failover. Do not "harden" this by removing the check — the
+    // check is what avoids recording the common (already-truncated) case.
+    if key.pid >= 0 && part.log_end_offset() < target {
+        // Evidence for the on-cluster failover verification: the appended batch
+        // was truncated before its dedup commit, so we skip the commit (the
+        // retry re-appends). Seeing this fire confirms the Bug-D path executed.
+        tracing::warn!(
+            topic = key.topic,
+            partition = key.partition,
+            base_offset,
+            target,
+            leo = part.log_end_offset(),
+            "produce: appended batch truncated before dedup commit; skipping commit so retry re-appends"
+        );
+    }
+    if key.pid >= 0 && part.log_end_offset() >= target {
         producer_state
             .commit(
                 key.topic,

@@ -191,7 +191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_config: LogConfig::default(),
         node_id,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(node_id, controller_addr)],
+        controller_quorum_voters: vec![(node_id, controller_addr.to_string())],
         bootstrap_servers: args.controller_bootstrap_servers,
         // Placeholder — replaced from `meta.properties.json` (written by
         // `crabka format`) once `log_dir` is resolved against the TOML.
@@ -237,9 +237,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut shutdown_rx = handle.should_shutdown_rx();
     tokio::select! {
-        r = tokio::signal::ctrl_c() => {
-            r?;
-            tracing::info!("shutdown signal received");
+        signal = wait_for_termination_signal() => {
+            tracing::info!(signal, "shutdown signal received");
         }
         () = async {
             // Wait until the self-shutdown flag flips true.
@@ -252,10 +251,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::error!("self-shutdown triggered (all log dirs offline); stopping broker");
         }
     }
-    handle.shutdown().await;
+    // KIP-500 controlled shutdown: ask the controller to move leadership of
+    // every partition this broker leads onto its other in-sync replicas
+    // BEFORE we stop. This is the difference between a near-seamless failover
+    // and stranding producers on a dead leader until their request timeout —
+    // `kubectl delete pod` sends SIGTERM, and without this hand-off the
+    // partition has no leader until the controller fences us (~tens of
+    // seconds). Bounded well under the pod's terminationGracePeriod (30s); on
+    // timeout `controlled_shutdown` falls back to a hard stop internally.
+    match handle
+        .controlled_shutdown(CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT)
+        .await
+    {
+        Ok(()) => tracing::info!("controlled shutdown complete (leadership drained)"),
+        Err(e) => tracing::warn!(error = %e, "controlled shutdown incomplete; hard-stopped"),
+    }
     tracing::info!("crabka-broker stopped");
     telemetry.shutdown();
     Ok(())
+}
+
+/// How long controlled shutdown waits for the controller to drain this
+/// broker's partition leaderships before falling back to a hard stop. Kept
+/// well under the pod `terminationGracePeriodSeconds` (30s) so the hard-stop
+/// fallback + process exit still complete before the Kubernetes SIGKILL.
+const CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Block until a process-termination signal arrives, returning its name for
+/// logging. On Unix this is SIGINT (Ctrl-C) **or SIGTERM** — `kubectl delete
+/// pod` (and the default container stop) sends SIGTERM, so catching only
+/// SIGINT meant the broker was hard-killed by SIGKILL with no controlled
+/// shutdown. On non-Unix targets, Ctrl-C only.
+#[cfg(unix)]
+async fn wait_for_termination_signal() -> &'static str {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut sigterm) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        },
+        Err(e) => {
+            // Couldn't install the SIGTERM handler; fall back to SIGINT only
+            // rather than refusing to start.
+            tracing::warn!(error = %e, "failed to install SIGTERM handler; SIGINT only");
+            let _ = tokio::signal::ctrl_c().await;
+            "SIGINT"
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_termination_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "SIGINT"
 }
 
 /// Map the `--metrics-listen-addr` CLI value onto an `Option<SocketAddr>`.

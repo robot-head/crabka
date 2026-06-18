@@ -226,11 +226,23 @@ pub async fn run(
                         continue;
                     }
                 };
+                let ok = result.is_ok();
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
                 }
                 let _ = ack.send(result);
-                // No `append_notify` — truncate doesn't deliver new data.
+                // No `append_notify` — truncate doesn't deliver new data. But a
+                // truncation that drops records below the high-watermark must
+                // lower the HW to preserve HW <= LEO: otherwise an acks=all gate
+                // can be satisfied by a stale HW pointing past the truncated end
+                // of the log (and a consumer told to read vanished offsets).
+                if ok {
+                    let new_leo = lock_log(&log).log_end_offset();
+                    replica_state
+                        .lock()
+                        .await
+                        .recompute_hw_for_leader_append(new_leo);
+                }
             }
             WriterMessage::ResetTo { new_base, ack } => {
                 let log_for_blocking = log.clone();
@@ -248,12 +260,22 @@ pub async fn run(
                         continue;
                     }
                 };
+                let ok = result.is_ok();
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
                 }
                 let _ = ack.send(result);
                 // No `append_notify` — reset_to drops data rather than
-                // delivering it.
+                // delivering it. Clamp the HW to the new (empty-at-new_base) LEO
+                // so a stale HW can't satisfy an acks=all gate for a vanished
+                // offset (see the Truncate handler).
+                if ok {
+                    let new_leo = lock_log(&log).log_end_offset();
+                    replica_state
+                        .lock()
+                        .await
+                        .recompute_hw_for_leader_append(new_leo);
+                }
             }
             WriterMessage::TrimToOffset { new_start, ack } => {
                 let log_for_blocking = log.clone();

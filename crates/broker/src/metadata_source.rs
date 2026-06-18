@@ -190,7 +190,9 @@ impl MetadataSource for ObserverSource {
 /// voter list. Mirrors the `API_KEY_SUBMIT_CHANGE` request the controller
 /// already serves.
 pub struct QuorumForwarder {
-    pub(crate) voters: Vec<(NodeId, SocketAddr)>,
+    /// Voter map `(id, "<host>:<port>")` — host carried verbatim; the dialer
+    /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
+    pub(crate) voters: Vec<(NodeId, String)>,
     pub(crate) dialer: Arc<dyn OutboundDialer>,
     pub(crate) client_id: String,
     pub(crate) leader: watch::Receiver<Option<NodeId>>,
@@ -200,7 +202,7 @@ impl QuorumForwarder {
     async fn try_submit(
         &self,
         target: NodeId,
-        addr: SocketAddr,
+        addr: &str,
         body: &[u8],
     ) -> Result<crabka_raft::CrabkaSubmitChangeResponse, RaftError> {
         let opts = crabka_client_core::ConnectionOptions {
@@ -209,7 +211,7 @@ impl QuorumForwarder {
         };
         let conn = self
             .dialer
-            .dial(target, &addr.to_string(), opts)
+            .dial(target, addr, opts)
             .await
             .map_err(RaftError::Network)?;
         let resp_body = conn
@@ -224,6 +226,25 @@ impl QuorumForwarder {
         let mut cur: &[u8] = &resp_body;
         crabka_raft::CrabkaSubmitChangeResponse::decode_v0(&mut cur).map_err(RaftError::Protocol)
     }
+}
+
+/// Order the voters to try when forwarding `submit_change`: the hinted leader
+/// first (when known and present in the set), then every OTHER voter as a
+/// fallback. Pure so the ordering — especially the "every voter except the
+/// hint" fallback — is unit-tested without standing up a live quorum.
+fn build_forward_order(voters: &[(NodeId, String)], hint: Option<NodeId>) -> Vec<(NodeId, String)> {
+    let mut order: Vec<(NodeId, String)> = Vec::new();
+    if let Some(l) = hint
+        && let Some(t) = voters.iter().find(|(id, _)| *id == l)
+    {
+        order.push(t.clone());
+    }
+    for v in voters {
+        if Some(v.0) != hint {
+            order.push(v.clone());
+        }
+    }
+    order
 }
 
 #[async_trait::async_trait]
@@ -242,23 +263,13 @@ impl MetadataWriter for QuorumForwarder {
         req.encode_v0(&mut body).map_err(RaftError::Protocol)?;
 
         let hint = *self.leader.borrow();
-        let mut order: Vec<(NodeId, SocketAddr)> = Vec::new();
-        if let Some(l) = hint
-            && let Some(t) = self.voters.iter().find(|(id, _)| *id == l)
-        {
-            order.push(*t);
-        }
-        for v in &self.voters {
-            if Some(v.0) != hint {
-                order.push(*v);
-            }
-        }
+        let order = build_forward_order(&self.voters, hint);
 
         let mut last_err = RaftError::NotLeader {
             current_leader: hint,
         };
         for (target, addr) in order {
-            match self.try_submit(target, addr, &body).await {
+            match self.try_submit(target, &addr, &body).await {
                 Ok(resp) if resp.error_code == 0 => return Ok(()),
                 // error_code 2 => leader rejected at apply-time. Match the
                 // controller's own forward path (`forward_submit_to`), which
@@ -280,5 +291,52 @@ impl MetadataWriter for QuorumForwarder {
             }
         }
         Err(last_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_forward_order;
+    use assert2::assert;
+
+    fn voters() -> Vec<(crabka_raft::NodeId, String)> {
+        vec![
+            (1, "h1:9093".to_string()),
+            (2, "h2:9093".to_string()),
+            (3, "h3:9093".to_string()),
+        ]
+    }
+
+    #[test]
+    fn forward_order_hinted_leader_first_then_every_other_voter() {
+        // Hint = 2 → try the leader first, then the OTHER voters as fallback.
+        // A flipped `Some(v.0) != hint` (i.e. `== hint`) would re-push only the
+        // hinted voter and drop the fallbacks, leaving no peer to retry when the
+        // hint is stale.
+        let order = build_forward_order(&voters(), Some(2));
+        assert!(
+            order
+                == vec![
+                    (2, "h2:9093".to_string()),
+                    (1, "h1:9093".to_string()),
+                    (3, "h3:9093".to_string()),
+                ]
+        );
+    }
+
+    #[test]
+    fn forward_order_no_hint_tries_all_voters() {
+        // No leader hint → fall back to trying every voter. A flipped predicate
+        // (`== None`) would push nothing, so the forward could reach no peer.
+        let order = build_forward_order(&voters(), None);
+        assert!(order == voters());
+    }
+
+    #[test]
+    fn forward_order_unknown_hint_still_tries_all_voters() {
+        // Hint names a voter not in the set → no leader-first entry, but every
+        // voter is still tried (hint 9 != each id).
+        let order = build_forward_order(&voters(), Some(9));
+        assert!(order == voters());
     }
 }

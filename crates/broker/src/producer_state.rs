@@ -12,8 +12,10 @@ use tokio::sync::Mutex;
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
-    /// Assigned base offset of the last accepted batch for this producer.
-    #[allow(dead_code)]
+    /// Last absolute offset of the last accepted batch for this producer
+    /// (`base_offset + last_offset_delta`). Read by
+    /// [`ProducerState::truncate`] to drop entries whose batch was truncated
+    /// off the log.
     pub last_offset: i64,
     pub base_offset: i64,
     /// Timestamp of the last accepted batch for this producer.
@@ -149,6 +151,30 @@ impl ProducerState {
                 last_activity_ms: crate::txn::util::now_millis(),
             },
         );
+    }
+
+    /// Drop idempotent-producer entries whose last accepted batch has been
+    /// truncated off the log — i.e. `last_offset >= offset`. Called after the
+    /// partition log is truncated below the recorded batch (KIP-320 divergence
+    /// truncation on rejoin, or `OFFSET_OUT_OF_RANGE` reset).
+    ///
+    /// Without this, a producer retrying a batch from the truncated tail is
+    /// deduplicated against a `base_offset` no longer in the log, and the
+    /// `acks=all` HW gate (`await_hw_at_least(base_offset + delta + 1)`) waits
+    /// forever for a high watermark that can never reach the truncated offset —
+    /// a permanent produce stall after failover. Dropping the entry makes the
+    /// retry re-append fresh instead. Mirrors Kafka's
+    /// `ProducerStateManager.truncateAndReload`. Does not create state for a
+    /// partition that has never been tracked.
+    pub async fn truncate(&self, topic: &str, partition: i32, offset: i64) {
+        let Some(parts) = self.by_topic.get(topic).map(|e| e.value().clone()) else {
+            return;
+        };
+        let Some(handle) = parts.get(&partition).map(|e| e.value().clone()) else {
+            return;
+        };
+        let mut s = handle.lock().await;
+        s.entries.retain(|_pid, e| e.last_offset < offset);
     }
 
     /// Resolve (creating on miss) the per-partition state handle. The
@@ -332,6 +358,50 @@ mod tests {
         s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 0, 0, 4).await;
         assert!(d == Decision::Duplicate { base_offset: 0 });
+    }
+
+    #[tokio::test]
+    async fn truncate_drops_dedup_entry_above_offset_so_retry_reappends() {
+        // The failover-stall regression: a batch was appended at base_offset
+        // 1471686 (last_offset 1471699), then the divergent tail was truncated
+        // back to 1471686 on rejoin. A retry must NOT be deduplicated against
+        // the now-truncated offset — otherwise the acks=all HW gate
+        // (await_hw_at_least(1471700)) waits forever for a high watermark the
+        // log can never reach, stalling the producer.
+        let s = ProducerState::new();
+        s.commit(
+            "t", 0, 1000, 0, /*base_seq*/ 0, /*delta*/ 13, 1_471_686, 1,
+        )
+        .await;
+        assert!(
+            s.check("t", 0, 1000, 0, 0, 13).await
+                == Decision::Duplicate {
+                    base_offset: 1_471_686
+                }
+        );
+        s.truncate("t", 0, 1_471_686).await;
+        assert!(
+            s.check("t", 0, 1000, 0, 0, 13).await == Decision::Append,
+            "after truncation the retried batch must re-append, not dedup against the truncated offset"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncate_keeps_dedup_entry_below_offset() {
+        // A batch whose records survive the truncation (last_offset < offset)
+        // must stay deduplicated.
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 0, 0, 4, /*base_offset*/ 100, 1)
+            .await; // last_offset 104
+        s.truncate("t", 0, 200).await;
+        assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Duplicate { base_offset: 100 });
+    }
+
+    #[tokio::test]
+    async fn truncate_unknown_partition_is_noop() {
+        let s = ProducerState::new();
+        s.truncate("never-seen", 7, 0).await; // must not panic or create state
+        assert!(s.snapshot("never-seen", 7).await.is_empty());
     }
 
     #[tokio::test]

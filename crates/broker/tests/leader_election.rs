@@ -265,7 +265,7 @@ async fn isr_expand_on_catchup() {
     //    sends AppendEntries at a higher term and causes node 3 to
     //    step down and follow the real leader.
     let reborn_dir = TempDir::new().unwrap();
-    let voters = vec![(3u64, dead_controller_addr)];
+    let voters = [(3u64, dead_controller_addr)];
     let reborn_cfg = BrokerConfig {
         broker_id: 3,
         listen_addr: dead_listen_addr,
@@ -274,7 +274,7 @@ async fn isr_expand_on_catchup() {
         log_config: Default::default(),
         node_id: 3,
         controller_listen_addr: dead_controller_addr,
-        controller_quorum_voters: voters,
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,
