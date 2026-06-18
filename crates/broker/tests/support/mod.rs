@@ -159,7 +159,10 @@ pub fn broker_config(
     cfg.advertised_listener = listen.to_string();
     cfg.node_id = u64::try_from(i + 1).unwrap();
     cfg.controller_listen_addr = controller_addrs[i];
-    cfg.controller_quorum_voters = voters.to_vec();
+    // `controller_quorum_voters` carries `<host>:<port>` strings (the dialer
+    // re-resolves per connect); test voter sets are built from `SocketAddr`s,
+    // so stringify here.
+    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     cfg.bootstrap_mode = mode;
     cfg
 }
@@ -191,7 +194,7 @@ fn static_voter_broker_config(
     cfg.controller_listen_addr = own_controller_addr;
     cfg.directory_id = uuid::Uuid::from_u128(u128::from(cfg.node_id));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.to_vec();
+    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg

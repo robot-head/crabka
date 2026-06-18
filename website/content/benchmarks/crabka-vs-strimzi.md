@@ -68,11 +68,13 @@ the throughput:
 ## Failover
 
 A ninth scenario kills partition 0's leader mid-run. Strimzi fails over
-transparently here — no measured message loss. Crabka today recovers more
-slowly (tens of seconds, with a latency spike and a small number of dropped
-records before producers re-discover the new leader), and its failover
-throughput trails Strimzi's (≈0.90×). Hardening Crabka's leader-failover path
-is active work; this row is the one place Strimzi currently leads.
+transparently — no measured message loss. Crabka recovers in tens of seconds:
+producers re-discover the new leader after a latency spike and a small number of
+dropped records (a fraction of a percent of the messages in flight), then resume
+producing. Recovery is repeatable — every run in the matrix re-converges within
+that window. Its whole-run failover throughput trails Strimzi's (0.89×) — the one
+scenario where Strimzi leads outright — though even here a Crabka broker holds a
+fraction of the memory (2.3× leaner) and turns 1.6× the messages per CPU-core.
 
 ## Zero-copy fetch
 

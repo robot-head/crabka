@@ -301,6 +301,24 @@ enum LoopAction {
     StopNotLeader,
 }
 
+/// `true` if the committed metadata image now lists THIS broker as the leader of
+/// the partition this replicator follows.
+///
+/// A follower-replicator's cancellation on a leadership change is cooperative —
+/// the run loop only checks the shutdown token between fetches — so an in-flight
+/// Fetch response can still be processed after this broker has been promoted to
+/// leader. Truncating/resetting our own log from such a stale response would
+/// drop the new leader's freshly-appended (possibly acknowledged) data, both
+/// stalling `acks=all` produces and silently losing records. Callers consult
+/// this immediately before any truncation and stop the replicator instead.
+fn became_partition_leader(cfg: &Config) -> bool {
+    cfg.controller
+        .current_image()
+        .partition(&cfg.topic, cfg.partition)
+        .map(|pr| pr.leader)
+        == Some(cfg.node_id)
+}
+
 #[allow(clippy::too_many_lines)] // KIP-320 in-band truncation + KIP-101 epoch fence add match arms
 async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     // The replicator only ever requests one (topic, partition) per Fetch.
@@ -334,15 +352,32 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // `EpochEndOffset` defaults to (epoch:-1, end_offset:-1); a
             // populated `end_offset >= 0` means "truncate here".
             if part_resp.diverging_epoch.end_offset >= 0 {
+                // Stale-response guard: never truncate from a Fetch response if
+                // we have since become this partition's leader (see
+                // `became_partition_leader`).
+                if became_partition_leader(cfg) {
+                    warn!(topic = %cfg.topic, partition = cfg.partition,
+                        "replicator: skipping diverging_epoch truncation — this broker is now the partition leader (stale fetch response)");
+                    return LoopAction::StopNotLeader;
+                }
                 let end_offset = part_resp.diverging_epoch.end_offset;
                 if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
                     match part.truncate_to(end_offset).await {
-                        Ok(()) => info!(
-                            topic = %cfg.topic,
-                            partition = cfg.partition,
-                            end_offset,
-                            "replicator: truncated to diverging_epoch (KIP-320 in-band)"
-                        ),
+                        Ok(()) => {
+                            // Drop idempotent-producer dedup entries for the
+                            // truncated tail, or a retried batch deduplicates
+                            // against an offset the log no longer holds and its
+                            // acks=all HW gate stalls forever (failover stall).
+                            cfg.producer_state
+                                .truncate(&cfg.topic, cfg.partition, end_offset)
+                                .await;
+                            info!(
+                                topic = %cfg.topic,
+                                partition = cfg.partition,
+                                end_offset,
+                                "replicator: truncated to diverging_epoch (KIP-320 in-band)"
+                            );
+                        }
                         Err(e) => warn!(
                             topic = %cfg.topic,
                             partition = cfg.partition,
@@ -404,6 +439,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // segment at `leader_log_start`, after which the next loop
             // iteration's `log_end_offset()` equals `leader_log_start`
             // and the fetch lands inside the leader's retained range.
+            // Stale-response guard: never reset from a Fetch response if we have
+            // since become this partition's leader (see `became_partition_leader`).
+            if became_partition_leader(cfg) {
+                warn!(topic = %cfg.topic, partition = cfg.partition,
+                    "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
+                return LoopAction::StopNotLeader;
+            }
             let leader_log_start = part_resp.log_start_offset;
             warn!(
                 topic = %cfg.topic,
@@ -411,10 +453,21 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 leader_log_start,
                 "replicator.out_of_range; resetting local log to leader log_start"
             );
-            if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition)
-                && let Err(e) = part.reset_to(leader_log_start).await
-            {
-                warn!(error = %e, "replicator: reset_to(leader_log_start) failed");
+            if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
+                match part.reset_to(leader_log_start).await {
+                    Ok(()) => {
+                        // The log restarts empty at leader_log_start; drop
+                        // idempotent-producer dedup entries at/above it so a
+                        // retried batch re-appends instead of stalling its
+                        // acks=all HW gate against a vanished offset.
+                        cfg.producer_state
+                            .truncate(&cfg.topic, cfg.partition, leader_log_start)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "replicator: reset_to(leader_log_start) failed");
+                    }
+                }
             }
             LoopAction::Continue
         }
@@ -426,6 +479,19 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
         codes::FENCED_LEADER_EPOCH | codes::UNKNOWN_LEADER_EPOCH => {
+            // Stale-response guard: if we have become this partition's leader,
+            // a fenced response from our former leader means this
+            // follower-replicator is stale — STOP it. Without this it neither
+            // truncates (the `became_partition_leader` guard in
+            // `handle_epoch_fence` skips that) nor stops, so it hot-loops the
+            // Fetch at ~full CPU, starving metadata propagation and the
+            // cooperative cancellation that would otherwise retire it — the
+            // broker then never becomes ready and crashloops.
+            if became_partition_leader(cfg) {
+                warn!(topic = %cfg.topic, partition = cfg.partition,
+                    "replicator: stopping on fenced epoch — this broker is now the partition leader");
+                return LoopAction::StopNotLeader;
+            }
             warn!(
                 topic = %cfg.topic,
                 partition = cfg.partition,
@@ -433,6 +499,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
             );
             let _ = handle_epoch_fence(cfg).await;
+            // Back off before re-fetching so a persistent fence (e.g. our
+            // leader_epoch hasn't caught up to the new leader's yet) doesn't
+            // hot-spin the CPU between fetch and fence.
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => return LoopAction::StopNotLeader,
+                () = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
             LoopAction::Continue
         }
         other => {
@@ -514,6 +587,15 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         return Ok(());
     };
 
+    // Stale-response guard: never truncate/reset from an OffsetForLeaderEpoch
+    // response if we have since become this partition's leader (see
+    // `became_partition_leader`).
+    if became_partition_leader(cfg) {
+        warn!(topic = %cfg.topic, partition = cfg.partition,
+            "replicator: skipping epoch-fence truncation — this broker is now the partition leader (stale response)");
+        return Ok(());
+    }
+
     if end_offset >= 0 {
         // Truncate to the epoch boundary.
         if let Err(e) = part.truncate_to(end_offset).await {
@@ -525,6 +607,9 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 "handle_epoch_fence: truncate_to failed"
             );
         } else {
+            cfg.producer_state
+                .truncate(&cfg.topic, cfg.partition, end_offset)
+                .await;
             info!(
                 topic = %cfg.topic,
                 partition = cfg.partition,
@@ -543,6 +628,9 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 "handle_epoch_fence: reset_to(0) failed"
             );
         } else {
+            cfg.producer_state
+                .truncate(&cfg.topic, cfg.partition, 0)
+                .await;
             info!(
                 topic = %cfg.topic,
                 partition = cfg.partition,

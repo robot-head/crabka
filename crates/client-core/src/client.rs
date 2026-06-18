@@ -96,7 +96,21 @@ impl Client {
         &self,
     ) -> Result<crabka_protocol::owned::metadata_response::MetadataResponse, ClientError> {
         use crabka_protocol::owned::metadata_request::MetadataRequest;
-        let resp = self.send(MetadataRequest::default()).await?;
+        let resp = match self.send(MetadataRequest::default()).await {
+            Ok(resp) => resp,
+            // The cached bootstrap connection's broker may have died (e.g. it was
+            // the failed-over partition leader). A dead socket is never evicted by
+            // `evict_broker` (that keys on real broker ids, not the bootstrap's
+            // synthetic `-1`), so without this the producer/consumer would keep
+            // refreshing over the same dead connection and stay pinned to a stale
+            // leader forever. Drop the bootstrap connection and retry once so the
+            // refresh re-resolves to a live bootstrap address.
+            Err(ClientError::Timeout(_) | ClientError::Disconnected | ClientError::Io(_)) => {
+                self.pool.evict_bootstrap();
+                self.send(MetadataRequest::default()).await?
+            }
+            Err(e) => return Err(e),
+        };
         let brokers: Vec<BrokerInfo> = resp
             .brokers
             .iter()
@@ -208,5 +222,112 @@ impl BrokerHandle<'_> {
             Err(e) => return Err(e),
         };
         conn.send(req).await
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_failover_tests {
+    use super::*;
+    use crate::mock::MockBroker;
+    use bytes::BytesMut;
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request;
+    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::owned::metadata_request;
+    use crabka_protocol::owned::metadata_response::{
+        FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
+    };
+
+    fn api_versions_v0() -> Vec<u8> {
+        let resp = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: metadata_request::API_KEY,
+                    min_version: 0,
+                    max_version: 12,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn metadata_v(version: i16, node_id: i32) -> Vec<u8> {
+        let resp = MetadataResponse {
+            brokers: vec![MetadataResponseBroker {
+                node_id,
+                host: "127.0.0.1".into(),
+                port: 9092,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        if version >= META_FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0x00u8]); // empty tagged fields
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn handler(
+        node_id: i32,
+    ) -> impl FnMut(i16, i16, i32, &[u8]) -> Option<Vec<u8>> + Send + 'static {
+        move |api_key, version, _corr, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_v0());
+            }
+            if api_key == metadata_request::API_KEY {
+                return Some(metadata_v(version, node_id));
+            }
+            None
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_metadata_fails_over_when_bootstrap_broker_dies() {
+        // Two bootstrap brokers. The client pins its bootstrap connection to the
+        // first; when that broker is killed, `refresh_metadata` must evict the
+        // dead bootstrap connection and reconnect to the second live broker
+        // instead of failing forever on the dead socket — the client-side cause
+        // of the on-cluster producer stall where a failover whose killed leader
+        // was also the bootstrap-pinned broker left the producer stranded.
+        let a = MockBroker::start(handler(0)).await;
+        let b = MockBroker::start(handler(1)).await;
+        let bootstrap = format!("{},{}", a.addr, b.addr);
+        let client = Client::builder()
+            .bootstrap(bootstrap)
+            .request_timeout(std::time::Duration::from_millis(500))
+            .build()
+            .await
+            .expect("client connects to bootstrap A");
+
+        // First refresh pins the bootstrap connection to broker A.
+        client
+            .refresh_metadata()
+            .await
+            .expect("first refresh succeeds via A");
+
+        // Broker A is killed.
+        a.stop();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The next refresh must transparently fail over to the live broker B,
+        // not hang/error on the dead A socket.
+        let md = client
+            .refresh_metadata()
+            .await
+            .expect("refresh must fail over to live bootstrap B after A dies");
+        assert2::assert!(!md.brokers.is_empty());
     }
 }

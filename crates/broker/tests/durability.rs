@@ -143,6 +143,105 @@ async fn produce_acks(
     }
 }
 
+/// An idempotent batch with explicit `(producer_id, base_sequence)` so a
+/// "retry" can be replayed deterministically by re-sending the same batch.
+fn idempotent_batch(pid: i64, base_seq: i32, values: &[&str]) -> RecordBatch {
+    let mut b = record_batch_with_values(values);
+    b.producer_id = pid;
+    b.producer_epoch = 0;
+    b.base_sequence = base_seq;
+    b
+}
+
+/// Send one explicit `RecordBatch` as a single-partition Produce and return
+/// `Ok(base_offset)` or `Err(error_code)`.
+async fn produce_batch(
+    bootstrap: &str,
+    topic: &str,
+    batch: RecordBatch,
+    acks: i16,
+    timeout_ms: i32,
+) -> Result<i64, i16> {
+    let client = Client::builder()
+        .bootstrap(bootstrap.to_string())
+        .build()
+        .await
+        .unwrap();
+    let topic_id = topic_id_for(&client, topic).await;
+    let resp = client
+        .send(ProduceRequest {
+            acks,
+            timeout_ms,
+            topic_data: vec![TopicProduceData {
+                name: topic.into(),
+                topic_id,
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(batch.into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("Produce");
+    let pr = &resp.responses[0].partition_responses[0];
+    if pr.error_code == 0 {
+        Ok(pr.base_offset)
+    } else {
+        Err(pr.error_code)
+    }
+}
+
+/// Bug D regression: after a failover-rejoin divergence TRUNCATES an
+/// idempotent batch off the leader's log (which also reverts producer-state),
+/// a retry of that same batch must RE-APPEND — not deduplicate against the
+/// now-truncated offset and stall its `acks=all` high-watermark gate forever.
+///
+/// Without the producer-state revert on truncation, the retry resolves to
+/// `Decision::Duplicate{base_offset}` and waits for `HW >= base_offset + N`,
+/// which the truncated log can never reach → `NOT_ENOUGH_REPLICAS_AFTER_APPEND`
+/// on every attempt (the on-cluster permanent stall).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idempotent_retry_reappends_after_truncation_instead_of_stalling() {
+    let (broker, bootstrap, _dir) = boot_single().await;
+    create_topic(&broker, &bootstrap, "trunc", 1).await;
+
+    let base = produce_batch(
+        &bootstrap,
+        "trunc",
+        idempotent_batch(42, 0, &["a", "b", "c"]),
+        -1,
+        5_000,
+    )
+    .await
+    .expect("first idempotent produce succeeds");
+
+    // Drop the just-appended batch off the leader's log (a divergence
+    // truncation also reverts the dedup state, like the replicator does).
+    broker
+        .test_truncate_local_log("trunc", 0, base)
+        .await
+        .expect("truncate local log");
+
+    // The retry of the SAME idempotent batch must re-append and complete fast,
+    // not stall. A short timeout makes a regression (dedup-against-truncated
+    // stall) fail as Err(NOT_ENOUGH_REPLICAS_AFTER_APPEND) rather than hang.
+    let retry = produce_batch(
+        &bootstrap,
+        "trunc",
+        idempotent_batch(42, 0, &["a", "b", "c"]),
+        -1,
+        3_000,
+    )
+    .await;
+    assert!(
+        retry.is_ok(),
+        "idempotent retry after truncation must re-append (not dedup-stall); got {retry:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acks_one_returns_quickly_on_rf1_broker() {
     let (broker, bootstrap, _dir) = boot_single().await;

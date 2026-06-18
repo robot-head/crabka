@@ -76,7 +76,7 @@ jobs:
           cp docs/*.png website/static/images/ || true
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.1
+          version: v4.2.2
 
       - name: Install cosign
         if: ${{ github.event_name != 'pull_request' }}

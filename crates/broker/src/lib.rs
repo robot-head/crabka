@@ -156,6 +156,10 @@ pub mod bootstrap;
 mod broker;
 pub(crate) mod cleaner;
 mod client_metrics;
+/// Client-visible failover model: producer retry/routing composed with broker
+/// `acks=all` durability and idempotent producer-state checks.
+#[cfg(test)]
+mod client_server_failover_model;
 pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;

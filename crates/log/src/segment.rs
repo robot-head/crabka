@@ -791,6 +791,22 @@ impl Segment {
         self.sealed = true;
     }
 
+    /// Seal a segment loaded via the no-scan [`Segment::open`] path, fixing its
+    /// `last_offset` to `last` (callers pass `next_segment.base_offset - 1`, the
+    /// highest offset this sealed segment can hold).
+    ///
+    /// `Segment::open` leaves `last_offset = base_offset - 1` because it does
+    /// not scan the `.log`. Without this fix a sealed segment recovered on
+    /// [`Log::open`](crate::Log) reports that stale `last_offset`, and
+    /// `Log::read_raw` — which skips any segment whose `last_offset() <
+    /// fetch_offset` — would skip the first sealed segment after a restart and
+    /// serve a later segment's base offset, manufacturing an offset gap (a
+    /// follower fetching at 0 then loops on the resulting append mismatch).
+    pub fn seal_at(&mut self, last: i64) {
+        self.sealed = true;
+        self.last_offset = last;
+    }
+
     /// Directory holding this segment's `.log`/`.index`/`.timeindex` files.
     /// Used by the compactor to read the underlying `.log` file directly,
     /// bypassing the `Segment::read` path which depends on the in-memory

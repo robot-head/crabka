@@ -59,12 +59,21 @@ impl OutboundDialer for PlaintextDialer {
         addr: &str,
         options: ConnectionOptions,
     ) -> Result<Connection, ClientError> {
-        let sock: SocketAddr = addr.parse().map_err(|e: std::net::AddrParseError| {
-            ClientError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("invalid raft peer address {addr:?}: {e}"),
-            ))
-        })?;
+        // Re-resolve `addr` (a `<host>:<port>`) on every dial. A `StatefulSet`
+        // peer that restarts keeps its stable DNS name but gets a fresh pod IP;
+        // resolving here (rather than once at startup) reaches the new IP.
+        // `lookup_host` also accepts a literal `ip:port` (returns it verbatim),
+        // so this stays correct for IP-form addresses.
+        let sock: SocketAddr = tokio::net::lookup_host(addr)
+            .await
+            .map_err(ClientError::Io)?
+            .next()
+            .ok_or_else(|| {
+                ClientError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("raft peer address {addr:?} resolved to no addresses"),
+                ))
+            })?;
         Connection::connect(sock, options).await
     }
 }

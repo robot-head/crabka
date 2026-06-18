@@ -96,6 +96,10 @@ impl ControllerLivenessState {
         entry.last_heartbeat = now;
         entry.state = BrokerLivenessState::Alive;
         if prev == BrokerLivenessState::Dead {
+            tracing::info!(
+                broker_id,
+                "broker liveness: DEAD -> ALIVE (heartbeat resumed)"
+            );
             Some(LivenessTransition::DeadToAlive(broker_id))
         } else {
             None
@@ -114,6 +118,14 @@ impl ControllerLivenessState {
                 && now.duration_since(entry.last_heartbeat) > self.timeout
             {
                 entry.state = BrokerLivenessState::Dead;
+                tracing::warn!(
+                    broker_id = id,
+                    since_last_heartbeat_ms =
+                        u64::try_from(now.duration_since(entry.last_heartbeat).as_millis())
+                            .unwrap_or(u64::MAX),
+                    timeout_ms = u64::try_from(self.timeout.as_millis()).unwrap_or(u64::MAX),
+                    "broker liveness: ALIVE -> DEAD (heartbeat session timeout) — triggers partition-leader failover"
+                );
                 transitions.push(LivenessTransition::AliveToDead(id));
             }
         }

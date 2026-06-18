@@ -80,10 +80,15 @@ pub struct FileConfig {
 
     /// KIP-595 static controller quorum voter set. Each entry is
     /// `<node_id>@<host>:<port>` pointing at a broker's controller listener
-    /// (port 9093). At apply time each host is DNS-resolved to a `SocketAddr`
-    /// (with retry, to ride out the `StatefulSet` headless-Service DNS startup
-    /// race) and the result replaces `BrokerConfig::controller_quorum_voters`.
-    /// Empty leaves the single self-voter the binary seeds (standalone).
+    /// (port 9093). At apply time each entry is parsed (NOT DNS-resolved) and
+    /// its `<host>:<port>` is carried verbatim into
+    /// `BrokerConfig::controller_quorum_voters`. The inter-broker dialer
+    /// re-resolves the host on every (re)connect (`TcpStream::connect`), so a
+    /// peer that restarts on a new pod IP (a `StatefulSet` pod keeps its stable
+    /// DNS name but gets a fresh A record) is reached again without restarting
+    /// this broker — pre-resolving here would freeze the peer's boot-time IP
+    /// and strand a rejoining voter. Empty leaves the single self-voter the
+    /// binary seeds (standalone).
     #[serde(default)]
     pub controller_quorum_voters: Vec<String>,
 
@@ -581,12 +586,6 @@ pub struct FileOAuthBearerConfig {
 
 /// Kafka protocol default for `sasl.kerberos.service.name`.
 const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
-
-/// Max DNS-resolution attempts per `controller_quorum_voters` entry, one
-/// second apart — a ~60s total budget to ride out the `StatefulSet`
-/// headless-Service DNS startup race for a peer pod that hasn't published
-/// its A record yet when this broker boots.
-const QUORUM_VOTER_DNS_ATTEMPTS: u32 = 60;
 
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
@@ -1203,13 +1202,14 @@ impl FileConfig {
 
         // KIP-595 static multi-voter quorum. A non-empty list wholesale
         // replaces the single self-voter the binary seeds; an empty list
-        // (standalone) is left untouched. `apply_to` is sync and runs once
-        // at startup before serving traffic, so blocking DNS + sleep is fine.
+        // (standalone) is left untouched. Entries are parsed but NOT resolved
+        // here — the dialer re-resolves each peer host per connect, so a
+        // rejoining peer on a new pod IP stays reachable.
         if !self.controller_quorum_voters.is_empty() {
-            let mut voters: Vec<(crabka_raft::NodeId, SocketAddr)> =
+            let mut voters: Vec<(crabka_raft::NodeId, String)> =
                 Vec::with_capacity(self.controller_quorum_voters.len());
             for entry in &self.controller_quorum_voters {
-                voters.push(Self::resolve_quorum_voter(entry)?);
+                voters.push(Self::parse_quorum_voter(entry)?);
             }
             cfg.controller_quorum_voters = voters;
         }
@@ -1224,23 +1224,20 @@ impl FileConfig {
     }
 
     /// Parse a single `controller_quorum_voters` entry of the form
-    /// `<node_id>@<host>:<port>` into a `(NodeId, SocketAddr)`. The host is
-    /// DNS-resolved in a bounded retry loop (up to
-    /// [`QUORUM_VOTER_DNS_ATTEMPTS`] attempts, one second apart) so a peer
-    /// pod's headless-Service DNS record that isn't yet populated when this
-    /// broker boots gets a chance to appear. Returns the first resolved
-    /// address.
+    /// `<node_id>@<host>:<port>` into `(NodeId, "<host>:<port>")`. The host is
+    /// **not** DNS-resolved — it is carried verbatim so the dialer can
+    /// re-resolve it on every (re)connect. Freezing a peer's boot-time IP here
+    /// would strand a `StatefulSet` peer that restarts on a new pod IP (its
+    /// stable DNS name still resolves, but to a different address). Only the
+    /// shape is validated: a numeric node id and a `<host>:<port>` with a
+    /// non-empty host and a numeric port.
     ///
     /// # Errors
     ///
     /// [`FileConfigError::InvalidQuorumVoter`] when the entry has no `@`, a
-    /// non-numeric node id, or its `<host>:<port>` cannot be resolved within
-    /// the retry budget.
-    fn resolve_quorum_voter(
-        entry: &str,
-    ) -> Result<(crabka_raft::NodeId, SocketAddr), FileConfigError> {
-        use std::net::ToSocketAddrs;
-
+    /// non-numeric node id, or a malformed `<host>:<port>` (missing port,
+    /// empty host, or non-numeric port).
+    fn parse_quorum_voter(entry: &str) -> Result<(crabka_raft::NodeId, String), FileConfigError> {
         let (id_str, host_port) = entry.split_once('@').ok_or_else(|| {
             FileConfigError::InvalidQuorumVoter(format!(
                 "{entry:?}: expected `<node_id>@<host>:<port>` (missing `@`)"
@@ -1251,27 +1248,25 @@ impl FileConfig {
                 "{entry:?}: invalid node id {id_str:?}: {e}"
             ))
         })?;
-
-        let mut last_err: Option<String> = None;
-        for attempt in 0..QUORUM_VOTER_DNS_ATTEMPTS {
-            match host_port.to_socket_addrs() {
-                Ok(mut addrs) => {
-                    if let Some(addr) = addrs.next() {
-                        return Ok((node_id, addr));
-                    }
-                    last_err = Some("resolved to zero addresses".to_string());
-                }
-                Err(e) => last_err = Some(e.to_string()),
-            }
-            // Don't sleep after the final attempt.
-            if attempt + 1 < QUORUM_VOTER_DNS_ATTEMPTS {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
+        // Validate the `<host>:<port>` shape without resolving. Split on the
+        // LAST ':' so the port is taken from the end (the dialer splits the
+        // same way), then carry `<host>:<port>` verbatim for per-dial lookup.
+        let (host, port_str) = host_port.rsplit_once(':').ok_or_else(|| {
+            FileConfigError::InvalidQuorumVoter(format!(
+                "{entry:?}: expected `<host>:<port>` after `@` (missing `:port`)"
+            ))
+        })?;
+        if host.is_empty() {
+            return Err(FileConfigError::InvalidQuorumVoter(format!(
+                "{entry:?}: empty host"
+            )));
         }
-        Err(FileConfigError::InvalidQuorumVoter(format!(
-            "{entry:?}: could not resolve {host_port:?} after {QUORUM_VOTER_DNS_ATTEMPTS} attempts: {}",
-            last_err.unwrap_or_else(|| "unknown error".to_string())
-        )))
+        port_str.parse::<u16>().map_err(|e| {
+            FileConfigError::InvalidQuorumVoter(format!(
+                "{entry:?}: invalid port {port_str:?}: {e}"
+            ))
+        })?;
+        Ok((node_id, host_port.to_string()))
     }
 }
 
@@ -1595,10 +1590,9 @@ max_connections_per_ip = 8
     }
 
     #[test]
-    fn apply_to_resolves_multi_voter_quorum_in_order() {
+    fn apply_to_parses_multi_voter_quorum_in_order() {
         use crate::config::BrokerConfig;
 
-        // Literal IPs → resolution is offline and deterministic; no DNS.
         let src = r#"
 controller_quorum_voters = ["0@127.0.0.1:9093", "1@127.0.0.2:9093", "2@127.0.0.3:9093"]
 "#;
@@ -1606,12 +1600,63 @@ controller_quorum_voters = ["0@127.0.0.1:9093", "1@127.0.0.2:9093", "2@127.0.0.3
         let mut cfg = BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
 
-        let expected: Vec<(crabka_raft::NodeId, std::net::SocketAddr)> = vec![
-            (0, "127.0.0.1:9093".parse().unwrap()),
-            (1, "127.0.0.2:9093".parse().unwrap()),
-            (2, "127.0.0.3:9093".parse().unwrap()),
+        // Host:port carried verbatim (parsed, NOT DNS-resolved) so the dialer
+        // re-resolves each peer per connect.
+        let expected: Vec<(crabka_raft::NodeId, String)> = vec![
+            (0, "127.0.0.1:9093".to_string()),
+            (1, "127.0.0.2:9093".to_string()),
+            (2, "127.0.0.3:9093".to_string()),
         ];
         assert!(cfg.controller_quorum_voters == expected);
+    }
+
+    #[test]
+    fn apply_to_keeps_unresolvable_hostname_without_dns() {
+        use crate::config::BrokerConfig;
+
+        // A peer FQDN that does not resolve right now (a `StatefulSet` peer
+        // whose A record isn't published yet, or simply offline) MUST be
+        // accepted and carried verbatim — the old resolve-at-startup path
+        // would have failed the whole broker boot here. The dialer resolves it
+        // later, per connect, so a peer coming up on a new pod IP is reachable.
+        let src = r#"
+controller_quorum_voters = ["0@demo-broker-0-0.demo-broker-headless.default.svc.cluster.local:9093"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        let expected: Vec<(crabka_raft::NodeId, String)> = vec![(
+            0,
+            "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
+        )];
+        assert!(cfg.controller_quorum_voters == expected);
+    }
+
+    #[test]
+    fn apply_to_rejects_quorum_voter_missing_port() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"
+controller_quorum_voters = ["0@just-a-host"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
+    }
+
+    #[test]
+    fn apply_to_rejects_quorum_voter_non_numeric_port() {
+        use crate::config::BrokerConfig;
+
+        let src = r#"
+controller_quorum_voters = ["0@host:nine-thousand"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        assert!(matches!(err, FileConfigError::InvalidQuorumVoter(_)));
     }
 
     #[test]
@@ -1649,8 +1694,7 @@ controller_quorum_voters = ["foo@127.0.0.1:9093"]
         assert!(file.controller_quorum_voters.is_empty());
 
         // Seed a pre-existing single self-voter as the binary would.
-        let seeded: Vec<(crabka_raft::NodeId, std::net::SocketAddr)> =
-            vec![(7, "127.0.0.1:9093".parse().unwrap())];
+        let seeded: Vec<(crabka_raft::NodeId, String)> = vec![(7, "127.0.0.1:9093".to_string())];
         let mut cfg = BrokerConfig {
             controller_quorum_voters: seeded.clone(),
             ..BrokerConfig::default()

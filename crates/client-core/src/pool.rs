@@ -27,6 +27,10 @@ pub struct BrokerPool {
     options: ConnectionOptions,
 }
 
+/// Synthetic broker id under which the shared bootstrap connection is cached.
+/// Never a real Kafka node id (those are `>= 0`).
+const BOOTSTRAP_ID: i32 = -1;
+
 impl BrokerPool {
     /// Create a new pool with the given bootstrap addresses and connection options.
     #[must_use]
@@ -66,10 +70,21 @@ impl BrokerPool {
         self.by_id.remove(&broker_id);
     }
 
+    /// Drop the cached bootstrap connection so the next
+    /// [`bootstrap_connection`](BrokerPool::bootstrap_connection) re-iterates the
+    /// bootstrap addresses and reconnects to a live broker. Required because the
+    /// bootstrap connection is keyed by the synthetic id `-1`, which no real
+    /// broker id matches — so [`evict`](BrokerPool::evict) can never reach it.
+    /// Call this after a bootstrap send fails: the broker backing the bootstrap
+    /// connection may have been killed (e.g. it was the failed-over partition
+    /// leader), and the dead socket must not be reused for metadata refreshes.
+    pub fn evict_bootstrap(&self) {
+        self.by_id.remove(&BOOTSTRAP_ID);
+    }
+
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
     pub async fn bootstrap_connection(&self) -> Result<Arc<Connection>, ClientError> {
-        const BOOTSTRAP_ID: i32 = -1;
         if let Some(entry) = self.by_id.get(&BOOTSTRAP_ID) {
             return Ok(entry.clone());
         }

@@ -101,6 +101,19 @@ impl LeaderEpochCheckpoint {
         Ok(())
     }
 
+    /// Drop every recorded epoch (mirrors Kafka's
+    /// `LeaderEpochFileCache.clearAndFlush`, invoked by
+    /// `LocalLog.truncateFullyAndStartAt`). Used by [`Log::reset_to`]: once the
+    /// log has been emptied, no offset has a backing record, so no epoch may be
+    /// advertised. Persists the now-empty file only when something was removed.
+    pub fn clear(&mut self) -> Result<(), LogError> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+        self.entries.clear();
+        self.flush()
+    }
+
     fn flush(&self) -> Result<(), LogError> {
         let mut s = String::new();
         s.push_str("0\n");
@@ -342,6 +355,32 @@ mod tests {
         assert!(c.end_offset_for_epoch(7, 4) == -1);
         // Epoch 1 survives; its end is now the log end (4).
         assert!(c.end_offset_for_epoch(1, 4) == 4);
+    }
+
+    #[test]
+    fn clear_removes_all_entries_and_persists_empty() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path.clone()).unwrap();
+        c.append(1, 0).unwrap();
+        c.append(2, 50).unwrap();
+        c.clear().unwrap();
+        assert!(c.entries().is_empty());
+        assert!(c.latest_epoch() == None);
+        // Persisted: a reopen sees no entries.
+        let reopened = LeaderEpochCheckpoint::open(path).unwrap();
+        assert!(reopened.entries().is_empty());
+    }
+
+    #[test]
+    fn clear_on_empty_cache_skips_flush_and_writes_no_file() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path.clone()).unwrap();
+        c.clear().unwrap();
+        assert!(c.entries().is_empty());
+        // The early-return skips the flush for an already-empty cache, so no
+        // checkpoint file is written. A forced-`false` empty-guard would flush
+        // an empty file here instead.
+        assert!(!path.exists());
     }
 
     #[test]

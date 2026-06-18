@@ -2624,7 +2624,7 @@ mod two_broker_sasl {
         cfg.advertised_listener = listen.to_string();
         cfg.node_id = u64::try_from(i + 1).unwrap();
         cfg.controller_listen_addr = controller_addrs[i];
-        cfg.controller_quorum_voters = voters.to_vec();
+        cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
         cfg.bootstrap_mode = mode;
         cfg.listeners = vec![
             ListenerSpec {

@@ -123,10 +123,13 @@ pub struct BrokerConfig {
     /// host as `listen_addr`, port 9093. Test default: `127.0.0.1:0`.
     pub controller_listen_addr: SocketAddr,
 
-    /// Static voter set: `[(node_id, controller_addr), …]`. Defaults to
-    /// a single-voter cluster of just this broker, so single-broker
-    /// setups upgrade to quorum-of-1 without config changes.
-    pub controller_quorum_voters: Vec<(NodeId, SocketAddr)>,
+    /// Static voter set: `[(node_id, "<host>:<port>"), …]`. The address is the
+    /// peer controller listener's `<host>:<port>` carried verbatim (NOT
+    /// pre-resolved): the dialer re-resolves the host on every (re)connect so a
+    /// peer that restarts on a new pod IP stays reachable. Defaults to a
+    /// single-voter cluster of just this broker, so single-broker setups
+    /// upgrade to quorum-of-1 without config changes.
+    pub controller_quorum_voters: Vec<(NodeId, String)>,
 
     /// TLS server name (SNI) presented when dialing a peer's controller
     /// listener for the KIP-595 quorum. Set to a SAN shared by every
@@ -610,7 +613,7 @@ impl BrokerConfig {
             log_config: LogConfig::default(),
             node_id: 1,
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr)],
+            controller_quorum_voters: vec![(1, controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -886,7 +889,7 @@ impl Default for BrokerConfig {
             log_config: LogConfig::default(),
             node_id: 1,
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr)],
+            controller_quorum_voters: vec![(1, controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -1197,7 +1200,7 @@ mod tests {
         let c = BrokerConfig {
             roles: vec![NodeRole::Broker],
             node_id: 1,
-            controller_quorum_voters: vec![(1, "127.0.0.1:9093".parse().unwrap())],
+            controller_quorum_voters: vec![(1, "127.0.0.1:9093".to_string())],
             ..BrokerConfig::default()
         };
         assert!(matches!(

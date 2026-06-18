@@ -82,7 +82,7 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -618,7 +618,7 @@ async fn three_node_jvm_round_trip() {
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
             .parse()
             .expect("static addr"),
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -645,7 +645,7 @@ async fn three_node_jvm_round_trip() {
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -886,7 +886,7 @@ async fn three_node_replication_byte_compare() {
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
             .parse()
             .expect("static addr"),
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -913,7 +913,7 @@ async fn three_node_replication_byte_compare() {
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1151,7 +1151,7 @@ async fn transactional_console_producer_eos() {
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1319,7 +1319,7 @@ async fn acks_all_durability() {
         log_config: crabka_log::LogConfig::default(),
         node_id: 1,
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -1346,7 +1346,7 @@ async fn acks_all_durability() {
             log_config: crabka_log::LogConfig::default(),
             node_id: u64::try_from(i + 1).unwrap(),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i]).parse().unwrap(),
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1511,7 +1511,7 @@ async fn acks_all_survives_leader_crash() {
         log_config: crabka_log::LogConfig::default(),
         node_id: 1,
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,
@@ -1538,7 +1538,7 @@ async fn acks_all_survives_leader_crash() {
             log_config: crabka_log::LogConfig::default(),
             node_id: u64::try_from(i + 1).unwrap(),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i]).parse().unwrap(),
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
@@ -2279,7 +2279,7 @@ async fn start_sasl_plaintext_broker(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -2348,7 +2348,7 @@ async fn start_dual_mech_broker(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -2617,7 +2617,7 @@ async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::T
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3176,7 +3176,7 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3436,7 +3436,7 @@ async fn start_sasl_ssl_broker(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3713,7 +3713,7 @@ async fn start_two_sasl_brokers(
     let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
     let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1)];
 
     let mk_cfg = |idx: u64,
                   listen: std::net::SocketAddr,
@@ -3730,7 +3730,7 @@ async fn start_two_sasl_brokers(
             log_config: LogConfig::default(),
             node_id: idx,
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -4012,7 +4012,7 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
     let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1)];
 
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let cert_path = manifest_dir
@@ -4043,7 +4043,7 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
             log_config: LogConfig::default(),
             node_id: idx,
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -4392,7 +4392,7 @@ async fn start_sasl_plaintext_broker_with_super_user(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -5320,7 +5320,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
     let ctrl2: std::net::SocketAddr = "0.0.0.0:9097".parse().expect("static addr");
 
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
 
     let mk_cfg = |idx: u64,
                   listen: std::net::SocketAddr,
@@ -5337,7 +5337,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
             log_config: LogConfig::default(),
             node_id: idx,
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -6231,7 +6231,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
     let ctrl2: std::net::SocketAddr = "0.0.0.0:9097".parse().expect("static addr");
 
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
 
     let mk_cfg = |idx: u64,
                   listen: std::net::SocketAddr,
@@ -6248,7 +6248,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
             log_config: LogConfig::default(),
             node_id: idx,
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -6901,7 +6901,7 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         log_config: crabka_log::LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -7082,7 +7082,7 @@ async fn start_host_broker_jbod() -> (
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -7212,7 +7212,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
     let ctrl2: std::net::SocketAddr = "0.0.0.0:9097".parse().expect("static addr");
 
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1), (3_u64, ctrl2)];
 
     let mk_cfg = |idx: u64,
                   listen: std::net::SocketAddr,
@@ -7229,7 +7229,7 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
             log_config: LogConfig::default(),
             node_id: idx,
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.clone(),
+            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -7888,7 +7888,7 @@ async fn start_host_broker_with_minio_tier(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr)],
+        controller_quorum_voters: vec![(1, controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -8876,7 +8876,7 @@ async fn start_two_brokers_with_minio_tier(
     let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
     let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
     let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
-    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+    let voters = [(1_u64, ctrl0), (2_u64, ctrl1)];
 
     // Both brokers point their RLMM client at broker 1's loopback so that
     // (a) broker 1's producer reaches the __remote_log_metadata partition 0
@@ -8909,7 +8909,7 @@ async fn start_two_brokers_with_minio_tier(
         log_config: LogConfig::default(),
         node_id: 1,
         controller_listen_addr: ctrl0,
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         // Accelerated timers for fast failover — matches acks_all_survives_leader_crash.
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
@@ -8931,7 +8931,7 @@ async fn start_two_brokers_with_minio_tier(
         log_config: LogConfig::default(),
         node_id: 2,
         controller_listen_addr: ctrl1,
-        controller_quorum_voters: voters.clone(),
+        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,

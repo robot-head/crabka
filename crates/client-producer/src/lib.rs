@@ -55,6 +55,8 @@
 
 mod accumulator;
 mod builder;
+#[cfg(test)]
+mod client_failover_model;
 mod compression;
 mod error;
 mod partitioner;

@@ -66,7 +66,7 @@ fn crabka_controller_config(
     cfg.controller_listen_addr = own_controller_addr;
     cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.to_vec();
+    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
