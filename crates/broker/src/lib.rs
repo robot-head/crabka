@@ -165,6 +165,10 @@ pub mod coordinator;
 /// leader-epoch-truncation, failover-selection, and fetch-visibility cores.
 #[cfg(test)]
 mod data_path_model;
+/// Client-visible failover model: producer retry/routing composed with broker
+/// `acks=all` durability and idempotent producer-state checks.
+#[cfg(test)]
+mod client_server_failover_model;
 pub(crate) mod delegation_token_cleanup;
 pub mod disk_scanner;
 mod error;
