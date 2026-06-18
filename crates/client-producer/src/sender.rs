@@ -1208,6 +1208,8 @@ mod harness {
         /// One-shot transport error: the next send to this `base_sequence`
         /// returns `Err(Disconnected)` exactly once, then is cleared.
         fail_once_seq: StdMutex<Option<i32>>,
+        /// One-shot transport error for the next send to a specific broker id.
+        fail_once_leader: StdMutex<Option<i32>>,
         /// One-shot injected broker response, keyed by `base_sequence`. The next
         /// send to that sequence returns a synthesized `ProduceResponse` (custom
         /// name / `topic_id` / error code / offset / leader hint) once, then is
@@ -1259,6 +1261,7 @@ mod harness {
                 reorder_delay,
                 applied: AtomicUsize::new(0),
                 fail_once_seq: StdMutex::new(None),
+                fail_once_leader: StdMutex::new(None),
                 inject_once: StdMutex::new(None),
                 evicted: StdMutex::new(Vec::new()),
                 last_timeout_ms: AtomicI64::new(0),
@@ -1272,6 +1275,10 @@ mod harness {
 
         fn fail_once_on(self: &Arc<Self>, seq: i32) {
             *self.fail_once_seq.lock().unwrap() = Some(seq);
+        }
+
+        fn fail_once_on_leader(self: &Arc<Self>, leader: i32) {
+            *self.fail_once_leader.lock().unwrap() = Some(leader);
         }
 
         /// Make the next send to `seq` return a `ProduceResponse` carrying
@@ -1394,6 +1401,17 @@ mod harness {
             self.sent_leaders.lock().unwrap().push(leader);
             self.last_timeout_ms
                 .store(i64::from(req.timeout_ms), Ordering::Relaxed);
+
+            {
+                let mut guard = self.fail_once_leader.lock().unwrap();
+                if let (Some(target), Some(actual)) = (*guard, leader)
+                    && target == actual
+                {
+                    *guard = None;
+                    drop(guard);
+                    return Err(ClientError::Disconnected);
+                }
+            }
 
             let batch_seq = req.topic_data[0].partition_data[0]
                 .records
@@ -1758,6 +1776,55 @@ mod harness {
             h.transport.refresh_count() >= 1,
             "transport failure must trigger a metadata refresh"
         );
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn dead_leader_failover_refreshes_and_reroutes_before_timeout_churn() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(0);
+        transport.add_known_broker(1);
+        transport.fail_once_on_leader(0);
+        transport.set_refresh_response(MetadataResponse {
+            brokers: Vec::new(),
+            topics: vec![MetadataResponseTopic {
+                name: Some("t".to_string()),
+                partitions: vec![MetadataResponsePartition {
+                    partition_index: 0,
+                    leader_id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let h = spawn_sender(transport.clone(), 5);
+        h.partition_leaders.insert(("t".to_string(), 0), 0);
+
+        let mut rxs = produce_single_batch(&h, "t", 0, 1).await;
+        let md = tokio::time::timeout(Duration::from_secs(5), rxs.remove(0))
+            .await
+            .expect("record ack should resolve after failover reroute")
+            .expect("oneshot sender should stay alive")
+            .expect("record should ack after reroute");
+
+        assert!(md.partition == 0);
+        assert!(md.offset == 0);
+        assert!(
+            h.transport.refresh_count() >= 1,
+            "first transport failure must force a metadata refresh"
+        );
+        assert!(
+            h.transport.refresh_count() <= 2,
+            "failover should not spin through repeated refreshes"
+        );
+        assert!(
+            h.transport.sent_leaders() == vec![Some(0), Some(1)],
+            "sender should try stale leader once, then reroute to fresh leader"
+        );
+        assert!(h.transport.evicted() == vec![0]);
+
         shutdown(h).await;
     }
 

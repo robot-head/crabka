@@ -2022,6 +2022,7 @@ dependencies = [
  "crabka-security",
  "dashmap",
  "futures",
+ "stateright",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
