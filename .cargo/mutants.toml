@@ -239,4 +239,16 @@ exclude_re = [
     "replicator/src/worker\\.rs.*FlowWorker::shutdown",
     "replicator/src/tasks/heartbeat\\.rs.*HeartbeatTask::shutdown",
     "replicator/src/tasks/checkpoint\\.rs.*CheckpointTask::shutdown",
+    # Two infinite-loop mutants that HANG rather than yield a wrong result, so
+    # cargo-mutants reports a TIMEOUT, not an assertion gap (same category as the
+    # connect-postgres `poll` requeue exclusion above):
+    # - `Consumer::poll -> Ok(vec![])`: an always-empty poll makes every
+    #   poll-until-data loop (the drain helpers, the connect runtime driver) spin
+    #   forever — no assertion can observe a hang. The real poll's fetch/decode/
+    #   seek/commit logic is unit- and integration-tested.
+    "client-consumer/src/poll\\.rs.*replace Consumer::poll .* with Ok\\(vec!\\[\\]\\)",
+    # - `read_all`'s `consecutive_empty += 1` -> `*= 1` pins the empty-poll
+    #   counter at 0 so the drain loop never terminates (companion to the `>=`
+    #   drain-bound exclusion above).
+    "replicator/src/admin_util\\.rs.*replace \\+= with \\*= in read_all",
 ]
