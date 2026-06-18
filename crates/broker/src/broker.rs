@@ -2122,6 +2122,7 @@ impl Broker {
             &producer_state,
         )
         .await?;
+        crate::coordinator::bootstrap::bootstrap_audit_topic(&config, &controller).await?;
 
         // 4a. Construct the transaction coordinator. All dependencies
         //     (controller, partitions, producer_ids) are ready at this point.

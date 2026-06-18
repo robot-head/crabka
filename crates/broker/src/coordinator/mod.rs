@@ -5,6 +5,8 @@
 //! single registry, one persistence path, and one actor model.
 
 pub(crate) mod bootstrap;
+
+pub use bootstrap::AUDIT_TOPIC;
 pub mod unified;
 pub(crate) mod persistence {
     pub(crate) use crate::coordinator::unified::persistence::*;
