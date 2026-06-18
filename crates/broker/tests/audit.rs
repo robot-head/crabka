@@ -95,6 +95,43 @@ async fn broker_started_event_is_written_to_audit_topic() {
     p.broker.shutdown().await;
 }
 
+/// Verifies that a successful `CreateTopics` call emits an `AdminOperation`
+/// audit record with `class_uid == 6003`, `api.operation == "CreateTopics"`,
+/// `status_id == 1`, and the topic name in `resources[0].name`.
+#[tokio::test]
+async fn successful_create_topics_is_audited() {
+    let p = support::start().await;
+
+    let cr = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "audited-orders".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert2::check!(cr.topics[0].error_code == 0);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let recs = support::consume_audit_records(&p.client).await;
+    let saw = recs.iter().any(|j| {
+        j["class_uid"] == 6003
+            && j["api"]["operation"] == "CreateTopics"
+            && j["status_id"] == 1
+            && j["resources"][0]["name"] == "audited-orders"
+    });
+    assert2::check!(saw);
+
+    p.broker.shutdown().await;
+}
+
 /// Verifies the authorizer-decorator path denies an unauthorized operation.
 ///
 /// This test asserts that:

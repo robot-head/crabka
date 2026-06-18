@@ -93,6 +93,27 @@ pub(crate) async fn handle(
         }
     }
 
+    // Audit: emit one AdminOperation record for successfully-created ACLs.
+    // `to_submit` carries (result_idx, record) for every creation that passed
+    // validation; entries whose result slot still has error_code == 0 were committed.
+    let created_acls: Vec<crabka_audit::AuditResource> = to_submit
+        .iter()
+        .filter(|(idx, _)| results[*idx].error_code == 0)
+        .map(|(idx, _)| crabka_audit::AuditResource {
+            resource_type: "Acl".to_string(),
+            name: req.creations[*idx].resource_name.clone(),
+        })
+        .collect();
+    if !created_acls.is_empty() {
+        crate::handlers::audit_admin(
+            broker,
+            ctx,
+            "CreateAcls",
+            crabka_audit::AuditOutcome::Success,
+            created_acls,
+        );
+    }
+
     encode_response(
         &CreateAclsResponse {
             throttle_time_ms: 0,

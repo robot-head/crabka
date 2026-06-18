@@ -155,6 +155,36 @@ pub(crate) mod unregister_broker;
 pub(crate) mod update_features;
 pub(crate) mod update_raft_voter;
 
+/// Emit an `AdminOperation` audit event for a completed admin request.
+///
+/// Call this on the SUCCESS path of each admin handler after the operation
+/// has been applied and the set of successfully-affected resources is known.
+/// A no-op when `resources` is empty (caller guards with `if !resources.is_empty()`).
+pub(crate) fn audit_admin(
+    broker: &crate::broker::Broker,
+    ctx: &RequestContext<'_>,
+    operation: &str,
+    outcome: crabka_audit::AuditOutcome,
+    resources: Vec<crabka_audit::AuditResource>,
+) {
+    broker
+        .audit_log
+        .emit(crabka_audit::AuditEvent::AdminOperation {
+            outcome,
+            principal: crabka_audit::AuditPrincipal {
+                name: ctx.principal.name.clone(),
+                auth_method: format!("{:?}", ctx.principal.auth_method),
+            },
+            source: crabka_audit::AuditEndpoint {
+                ip: ctx.peer.ip().to_string(),
+                port: ctx.peer.port(),
+            },
+            operation: operation.to_string(),
+            resources,
+            time_ms: crate::time_util::now_ms(),
+        });
+}
+
 /// Build the dispatch table for plain 4-arg handlers. Inline-intercepted
 /// handlers are documented below and registered in `network::dispatch`.
 #[must_use]

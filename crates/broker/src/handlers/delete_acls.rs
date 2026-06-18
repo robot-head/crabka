@@ -16,6 +16,7 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
     broker: &Broker,
     req: DeleteAclsRequest,
@@ -108,6 +109,28 @@ pub(crate) async fn handle(
                 r.error_message = Some(format!("submit failed: {e}"));
             }
         }
+    }
+
+    // Audit: emit one AdminOperation record for successfully-deleted ACLs.
+    // Collect resource_name from each matching ACL in every filter result that
+    // committed without error (error_code == 0).
+    let deleted_acls: Vec<crabka_audit::AuditResource> = filter_results
+        .iter()
+        .filter(|r| r.error_code == 0)
+        .flat_map(|r| r.matching_acls.iter())
+        .map(|m| crabka_audit::AuditResource {
+            resource_type: "Acl".to_string(),
+            name: m.resource_name.clone(),
+        })
+        .collect();
+    if !deleted_acls.is_empty() {
+        crate::handlers::audit_admin(
+            broker,
+            ctx,
+            "DeleteAcls",
+            crabka_audit::AuditOutcome::Success,
+            deleted_acls,
+        );
     }
 
     encode_response(
