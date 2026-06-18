@@ -1,0 +1,177 @@
+//! Internal audit event model — the source of truth for the KSI-MLA-LET catalog.
+
+use serde::Serialize;
+
+/// Outcome of an audited action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum AuditOutcome {
+    Success,
+    Failure,
+}
+
+/// The actor responsible for an audited action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditPrincipal {
+    pub name: String,
+    pub auth_method: String,
+}
+
+/// Network source of the action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditEndpoint {
+    pub ip: String,
+    pub port: u16,
+}
+
+/// A resource affected by an admin operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditResource {
+    pub resource_type: String,
+    pub name: String,
+}
+
+/// Broker lifecycle transitions worth auditing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum LifecycleKind {
+    BrokerStarted,
+    BrokerStopping,
+    ConfigApplied,
+    TlsReloaded,
+}
+
+/// OCSF class grouping used for record headers/routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventClass {
+    Authentication,
+    Authorization,
+    ApiActivity,
+    ApplicationLifecycle,
+}
+
+impl AuditEventClass {
+    /// Stable lowercase identifier, used as the `event_class` record header value.
+    #[must_use]
+    pub fn as_header(self) -> &'static str {
+        match self {
+            AuditEventClass::Authentication => "authentication",
+            AuditEventClass::Authorization => "authorization",
+            AuditEventClass::ApiActivity => "api_activity",
+            AuditEventClass::ApplicationLifecycle => "application_lifecycle",
+        }
+    }
+}
+
+/// A single auditable security event. Times are caller-supplied epoch-millis so
+/// the crate stays pure and deterministically testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditEvent {
+    Authentication {
+        outcome: AuditOutcome,
+        mechanism: String,
+        principal: AuditPrincipal,
+        source: AuditEndpoint,
+        reason: Option<String>,
+        time_ms: i64,
+    },
+    AuthorizationDenied {
+        principal: AuditPrincipal,
+        source: AuditEndpoint,
+        resource_type: String,
+        resource_name: String,
+        operation: String,
+        time_ms: i64,
+    },
+    AdminOperation {
+        outcome: AuditOutcome,
+        principal: AuditPrincipal,
+        source: AuditEndpoint,
+        operation: String,
+        resources: Vec<AuditResource>,
+        time_ms: i64,
+    },
+    Lifecycle {
+        kind: LifecycleKind,
+        node_id: i64,
+        time_ms: i64,
+    },
+}
+
+impl AuditEvent {
+    /// The OCSF class this event maps to.
+    #[must_use]
+    pub fn class(&self) -> AuditEventClass {
+        match self {
+            AuditEvent::Authentication { .. } => AuditEventClass::Authentication,
+            AuditEvent::AuthorizationDenied { .. } => AuditEventClass::Authorization,
+            AuditEvent::AdminOperation { .. } => AuditEventClass::ApiActivity,
+            AuditEvent::Lifecycle { .. } => AuditEventClass::ApplicationLifecycle,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::check;
+
+    #[test]
+    fn event_class_maps_each_variant() {
+        let authn = AuditEvent::Authentication {
+            outcome: AuditOutcome::Failure,
+            mechanism: "SASL/PLAIN".into(),
+            principal: AuditPrincipal {
+                name: "alice".into(),
+                auth_method: "SaslPlain".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.1".into(),
+                port: 51120,
+            },
+            reason: Some("authentication failed".into()),
+            time_ms: 1_700_000_000_000,
+        };
+        check!(authn.class() == AuditEventClass::Authentication);
+
+        let denied = AuditEvent::AuthorizationDenied {
+            principal: AuditPrincipal {
+                name: "bob".into(),
+                auth_method: "MTls".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.2".into(),
+                port: 4444,
+            },
+            resource_type: "Topic".into(),
+            resource_name: "secrets".into(),
+            operation: "Write".into(),
+            time_ms: 1,
+        };
+        check!(denied.class() == AuditEventClass::Authorization);
+
+        let admin = AuditEvent::AdminOperation {
+            outcome: AuditOutcome::Success,
+            principal: AuditPrincipal {
+                name: "admin".into(),
+                auth_method: "MTls".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.3".into(),
+                port: 9092,
+            },
+            operation: "CreateTopics".into(),
+            resources: vec![AuditResource {
+                resource_type: "Topic".into(),
+                name: "orders".into(),
+            }],
+            time_ms: 2,
+        };
+        check!(admin.class() == AuditEventClass::ApiActivity);
+
+        let life = AuditEvent::Lifecycle {
+            kind: LifecycleKind::BrokerStarted,
+            node_id: 1,
+            time_ms: 3,
+        };
+        check!(life.class() == AuditEventClass::ApplicationLifecycle);
+    }
+}
