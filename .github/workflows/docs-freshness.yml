@@ -30,7 +30,7 @@ jobs:
       contents: read
       issues: write # open/update a tracking issue when docs drift is detected
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
 

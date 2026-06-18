@@ -46,7 +46,7 @@ jobs:
       id-token: write # keyless cosign signing + Sigstore attestation (OIDC)
       attestations: write # write chart provenance to GitHub's attestation store
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
