@@ -1947,7 +1947,10 @@ dependencies = [
  "assert2",
  "async-trait",
  "bytes",
+ "crabka-broker",
+ "crabka-client-consumer",
  "crabka-client-core",
+ "crabka-client-producer",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
@@ -1967,7 +1970,9 @@ dependencies = [
  "assert2",
  "bon",
  "bytes",
+ "crabka-broker",
  "crabka-client-core",
+ "crabka-client-producer",
  "crabka-protocol",
  "crabka-security",
  "futures-util",
@@ -2519,6 +2524,35 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "crabka-replicator"
+version = "0.3.7"
+dependencies = [
+ "anyhow",
+ "assert2",
+ "async-trait",
+ "bytes",
+ "clap",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-client-consumer",
+ "crabka-client-core",
+ "crabka-client-producer",
+ "crabka-connect",
+ "crabka-logfmt",
+ "crabka-security",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

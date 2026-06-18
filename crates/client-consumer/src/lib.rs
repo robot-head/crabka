@@ -82,12 +82,13 @@ mod group_metadata;
 mod offset_wire;
 mod poll;
 mod position;
+mod seek;
 mod share;
 mod validate;
 
 pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
-pub use consumer::{Consumer, ConsumerRecord};
+pub use consumer::{Consumer, ConsumerRecord, Header};
 pub use error::ConsumerError;
 pub use group_metadata::ConsumerGroupMetadata;
 pub use share::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};

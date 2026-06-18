@@ -21,6 +21,9 @@ pub enum ConsumerError {
     #[error("illegal state: {0}")]
     IllegalState(String),
 
+    #[error("invalid seek offset {0}: must be non-negative")]
+    InvalidOffset(i64),
+
     #[error("commit conflict: rejoined since this poll")]
     CommitInvalid,
 

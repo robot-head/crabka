@@ -10,7 +10,7 @@ use crabka_protocol::owned::list_offsets_request::{
 };
 
 use crate::builder::{AutoOffsetReset, IsolationLevel};
-use crate::consumer::{Consumer, ConsumerRecord};
+use crate::consumer::{Consumer, ConsumerRecord, Header};
 use crate::error::ConsumerError;
 
 /// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
@@ -36,6 +36,14 @@ impl Consumer {
     /// simply reads it on each call.
     #[allow(clippy::too_many_lines)]
     pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
+        // 0. Materialise any pending `seek` whose partition is now assigned,
+        //    BEFORE the fetch is built. This must run after the coordinator's
+        //    post-assignment prime (which it does — the prime happens off the
+        //    poll path) so a sought position wins over the prime, and before the
+        //    FetchRequest below so no record below the sought offset is ever
+        //    fetched (and none above it skipped). See `seek.rs`.
+        self.apply_pending_seeks().await;
+
         // 1. Resolve any i64::MAX sentinels (auto.offset.reset=Latest) via
         //    ListOffsets(timestamp=-1).
         self.resolve_latest_sentinels().await?;
@@ -389,6 +397,14 @@ impl Consumer {
                             timestamp: batch.base_timestamp + r.timestamp_delta,
                             key: r.key.clone(),
                             value: r.value.clone(),
+                            headers: r
+                                .headers
+                                .iter()
+                                .map(|h| Header {
+                                    key: h.key.clone(),
+                                    value: h.value.clone(),
+                                })
+                                .collect(),
                         });
                     }
                 }

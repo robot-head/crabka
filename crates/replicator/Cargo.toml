@@ -1,0 +1,47 @@
+[package]
+name = "crabka-replicator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Cross-cluster geo-replication service for Crabka (MirrorMaker-2 equivalent)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-replicator"
+keywords = ["kafka", "replication", "mirrormaker", "crabka"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-replicator"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+crabka-connect = { version = "0.3.7", path = "../connect" }
+crabka-client-core = { version = "0.3.7", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
+crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
+crabka-logfmt = { version = "0.3.7", path = "../logfmt" }
+crabka-security = { workspace = true }
+regex = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+tempfile = { workspace = true }
+crabka-broker = { path = "../broker", features = ["test-helpers"] }

@@ -494,6 +494,7 @@ mod tests {
             timestamp: 1_700_000_000_000,
             key: Some(Bytes::from_static(b"k1")),
             value: value.map(|v| Bytes::from(v.to_vec())),
+            headers: vec![],
         }
     }
 

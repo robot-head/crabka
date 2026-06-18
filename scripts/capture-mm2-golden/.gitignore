@@ -1,0 +1,4 @@
+# Extracted Kafka jars and compiled classes — large, reproduced on demand.
+# See README.md. Never commit these.
+/libs/
+/out/
