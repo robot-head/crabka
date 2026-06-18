@@ -168,6 +168,11 @@ pub struct FileConfig {
     /// (inter-broker initiate path). Only the `gssapi` variant is supported.
     #[serde(default)]
     pub inter_broker_credentials: Option<FileInterBrokerCredentials>,
+
+    /// `FedRAMP` 20x MLA audit subsystem configuration.
+    /// Absent → secure default (enabled, standard internal topic name).
+    #[serde(default)]
+    pub audit: Option<FileAuditConfig>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -622,6 +627,35 @@ pub enum FileInterBrokerCredentials {
         service_name: Option<String>,
         kdc_url: String,
     },
+}
+
+/// `[audit]` section of `broker.toml` (`FedRAMP` 20x MLA).
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileAuditConfig {
+    /// Whether the audit subsystem is active.
+    #[serde(default = "default_audit_enabled")]
+    pub enabled: bool,
+    /// Internal topic name for audit records.
+    #[serde(default = "default_audit_topic")]
+    pub topic: String,
+}
+
+impl Default for FileAuditConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_audit_enabled(),
+            topic: default_audit_topic(),
+        }
+    }
+}
+
+fn default_audit_enabled() -> bool {
+    true
+}
+
+fn default_audit_topic() -> String {
+    "__crabka_audit".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
@@ -1219,6 +1253,12 @@ impl FileConfig {
         if self.controller_server_name.is_some() {
             cfg.controller_server_name = self.controller_server_name;
         }
+
+        // `FedRAMP` 20x MLA audit config. Absent → secure default (enabled,
+        // standard internal topic name).
+        let audit = self.audit.clone().unwrap_or_default();
+        cfg.audit_enabled = audit.enabled;
+        cfg.audit_topic = audit.topic;
 
         Ok(())
     }
@@ -2870,5 +2910,33 @@ in_memory = true
             "in_memory = true must opt out to RlmmKind::InMemory, got {:?}",
             cfg.remote_log_metadata
         );
+    }
+
+    #[test]
+    fn audit_section_parses_and_applies() {
+        let toml = r#"
+            [audit]
+            enabled = true
+            topic = "__crabka_audit"
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse audit section");
+        let audit = fc.audit.clone().expect("audit present");
+        assert2::check!(audit.enabled);
+        assert2::check!(audit.topic == "__crabka_audit");
+
+        let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc.apply_to(&mut cfg).expect("apply");
+        assert2::check!(cfg.audit_enabled);
+        assert2::check!(cfg.audit_topic == "__crabka_audit");
+    }
+
+    #[test]
+    fn audit_defaults_to_enabled_with_internal_topic() {
+        // Absent [audit] section → secure default (enabled, standard topic name).
+        let fc: FileConfig = toml::from_str("").expect("parse empty");
+        let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc.apply_to(&mut cfg).expect("apply");
+        assert2::check!(cfg.audit_enabled);
+        assert2::check!(cfg.audit_topic == "__crabka_audit");
     }
 }

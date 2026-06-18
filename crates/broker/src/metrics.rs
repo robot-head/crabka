@@ -259,6 +259,14 @@ pub struct BrokerMetrics {
     /// alert on `rate(unclean_leader_elections_total[5m]) > 0`
     /// flags the data-loss footgun.
     pub unclean_leader_elections_total: Counter,
+    /// `FedRAMP` MLA: cumulative audit records successfully written to the
+    /// audit topic. Incremented by the audit subsystem on each successful
+    /// produce to `__crabka_audit`.
+    pub audit_events_total: Counter,
+    /// `FedRAMP` MLA: cumulative audit records that failed to write to the
+    /// audit topic. Incremented on each produce error; operators alert on
+    /// `rate(audit_write_failures_total[5m]) > 0`.
+    pub audit_write_failures_total: Counter,
 }
 
 impl BrokerMetrics {
@@ -305,6 +313,8 @@ impl BrokerMetrics {
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let unclean_leader_elections_total = Counter::default();
+        let audit_events_total = Counter::default();
+        let audit_write_failures_total = Counter::default();
 
         registry.register(
             "topic_bytes_in",
@@ -590,6 +600,16 @@ impl BrokerMetrics {
              flags the data-loss footgun.",
             unclean_leader_elections_total.clone(),
         );
+        registry.register(
+            "audit_events_total",
+            "Cumulative audit records successfully written to the audit topic",
+            audit_events_total.clone(),
+        );
+        registry.register(
+            "audit_write_failures_total",
+            "Cumulative audit records that failed to write to the audit topic",
+            audit_write_failures_total.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -628,6 +648,8 @@ impl BrokerMetrics {
             produce_message_conversions,
             fetch_message_conversions,
             unclean_leader_elections_total,
+            audit_events_total,
+            audit_write_failures_total,
         }
     }
 
@@ -1189,6 +1211,15 @@ mod tests {
         assert!(m.api_requests.get_or_create(&produce).get() == 2);
         assert!(m.api_requests.get_or_create(&fetch).get() == 1);
         assert!(m.api_requests.get_or_create(&unknown).get() == 1);
+    }
+
+    #[test]
+    fn audit_counters_present() {
+        let m = BrokerMetrics::new();
+        m.audit_events_total.inc();
+        m.audit_write_failures_total.inc();
+        assert2::check!(m.audit_events_total.get() == 1);
+        assert2::check!(m.audit_write_failures_total.get() == 1);
     }
 
     #[test]

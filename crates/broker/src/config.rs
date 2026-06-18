@@ -490,6 +490,11 @@ pub struct BrokerConfig {
     /// Defaults to [`RlmmKind::TopicBacked`] in production; [`RlmmKind::InMemory`]
     /// for in-process tests. Ignored when `remote_storage_backend` is `None`.
     pub remote_log_metadata: RlmmKind,
+
+    /// Whether the audit subsystem is active (`FedRAMP` MLA).
+    pub audit_enabled: bool,
+    /// Internal topic name for audit records.
+    pub audit_topic: String,
 }
 
 /// Parameters for the topic-backed
@@ -715,6 +720,9 @@ impl BrokerConfig {
             remote_log_manager_interval: std::time::Duration::from_secs(2),
             // Tests use the in-memory RLMM fixture.
             remote_log_metadata: RlmmKind::InMemory,
+            // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
+            audit_enabled: true,
+            audit_topic: "__crabka_audit".to_string(),
         }
     }
 
@@ -983,6 +991,9 @@ impl Default for BrokerConfig {
             // Production default: topic-backed RLMM. `bootstrap` and
             // `snapshot_dir` are empty; the broker derives them at startup.
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
+            // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
+            audit_enabled: true,
+            audit_topic: "__crabka_audit".to_string(),
         }
     }
 }

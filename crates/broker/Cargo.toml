@@ -30,6 +30,7 @@ name = "crabka-broker"
 path = "src/bin/broker.rs"
 
 [dependencies]
+crabka-audit = { workspace = true }
 crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
 crabka-telemetry = { version = "0.3.7", path = "../telemetry" }
 crabka-records-legacy = { version = "0.3.7", path = "../records-legacy" }

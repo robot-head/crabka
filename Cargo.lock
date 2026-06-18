@@ -1803,6 +1803,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-audit"
+version = "0.3.7"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crabka-authz"
 version = "0.3.7"
 dependencies = [
@@ -1854,6 +1867,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crabka-audit",
  "crabka-authz",
  "crabka-broker-test-helpers",
  "crabka-client-consumer",
