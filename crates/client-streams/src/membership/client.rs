@@ -81,16 +81,14 @@ impl StreamsMembership {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let join = loop {
             let resp = client
-                .send(StreamsGroupHeartbeatRequest {
-                    group_id: group_id.clone(),
-                    member_id: member_id.clone(),
-                    member_epoch: 0,
-                    process_id: Some(process_id.clone()),
-                    instance_id: instance_id.clone(),
+                .send(build_join_heartbeat(
+                    &group_id,
+                    &member_id,
+                    &process_id,
+                    instance_id.clone(),
                     rebalance_timeout_ms,
-                    topology: Some(topology.to_wire_request()),
-                    ..Default::default()
-                })
+                    &topology,
+                ))
                 .await?;
             if resp.error_code == COORDINATOR_LOAD_IN_PROGRESS {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -100,15 +98,10 @@ impl StreamsMembership {
         };
 
         let member_epoch_val = join.member_epoch;
-        let hb_interval = if join.heartbeat_interval_ms > 0 {
-            Duration::from_millis(u64::try_from(join.heartbeat_interval_ms).unwrap_or(3000))
-        } else {
-            Duration::from_secs(3)
-        };
+        let hb_interval = heartbeat_interval(join.heartbeat_interval_ms);
 
-        if let Some(statuses) = &join.status
-            && !statuses.is_empty()
-        {
+        if should_emit_statuses(join.status.as_ref()) {
+            let statuses = join.status.as_ref().expect("checked above");
             let _ = events_tx.send(StreamsEvent::NotReady(
                 statuses.iter().map(map_status).collect(),
             ));
@@ -218,6 +211,37 @@ impl StreamsMembership {
     }
 }
 
+fn build_join_heartbeat(
+    group_id: &str,
+    member_id: &str,
+    process_id: &str,
+    instance_id: Option<String>,
+    rebalance_timeout_ms: i32,
+    topology: &crate::topology::BuiltTopology,
+) -> StreamsGroupHeartbeatRequest {
+    StreamsGroupHeartbeatRequest {
+        group_id: group_id.to_string(),
+        member_id: member_id.to_string(),
+        process_id: Some(process_id.to_string()),
+        instance_id,
+        rebalance_timeout_ms,
+        topology: Some(topology.to_wire_request()),
+        ..Default::default()
+    }
+}
+
+fn heartbeat_interval(heartbeat_interval_ms: i32) -> Duration {
+    if heartbeat_interval_ms > 0 {
+        Duration::from_millis(u64::try_from(heartbeat_interval_ms).unwrap_or(3000))
+    } else {
+        Duration::from_secs(3)
+    }
+}
+
+fn should_emit_statuses<T>(statuses: Option<&Vec<T>>) -> bool {
+    statuses.is_some_and(|statuses| !statuses.is_empty())
+}
+
 /// Map a join-response error code to a typed error (0 = ok).
 fn map_error(
     resp: crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
@@ -254,10 +278,15 @@ fn map_error(
 
 #[cfg(test)]
 mod tests {
-    use super::map_error;
+    use super::{build_join_heartbeat, heartbeat_interval, map_error, should_emit_statuses};
     use crate::error::StreamsClientError;
+    use crate::membership::types::TaskOffsetTracker;
+    use crate::topology::Topology;
     use assert2::check;
     use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, mpsc};
+    use tokio_util::sync::CancellationToken;
 
     fn resp(code: i16) -> StreamsGroupHeartbeatResponse {
         StreamsGroupHeartbeatResponse {
@@ -270,6 +299,72 @@ mod tests {
     #[test]
     fn ok_code_passes_through() {
         check!(map_error(resp(0)).is_ok());
+    }
+
+    #[test]
+    fn build_join_heartbeat_preserves_join_identity_and_topology() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("streams-app").unwrap();
+
+        let req = build_join_heartbeat(
+            "streams-group",
+            "member-1",
+            "process-1",
+            Some("instance-1".into()),
+            45_000,
+            &topology,
+        );
+
+        check!(req.group_id == "streams-group");
+        check!(req.member_id == "member-1");
+        check!(req.member_epoch == 0);
+        check!(req.process_id.as_deref() == Some("process-1"));
+        check!(req.instance_id.as_deref() == Some("instance-1"));
+        check!(req.rebalance_timeout_ms == 45_000);
+        check!(req.topology.is_some());
+    }
+
+    #[test]
+    fn heartbeat_interval_uses_positive_broker_value_or_default() {
+        check!(heartbeat_interval(1) == std::time::Duration::from_millis(1));
+        check!(heartbeat_interval(3_000) == std::time::Duration::from_secs(3));
+        check!(heartbeat_interval(0) == std::time::Duration::from_secs(3));
+        check!(heartbeat_interval(-1) == std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn should_emit_statuses_only_for_non_empty_status_list() {
+        check!(!should_emit_statuses::<i32>(None));
+        check!(!should_emit_statuses(Some(&Vec::<i32>::new())));
+        check!(should_emit_statuses(Some(&vec![1])));
+    }
+
+    #[tokio::test]
+    async fn accessors_return_membership_identity_and_tracker() {
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let member_epoch = Arc::new(Mutex::new(42));
+        let tracker = Arc::new(Mutex::new(TaskOffsetTracker::default()));
+        let membership = super::StreamsMembership {
+            member_id: "member-1".into(),
+            group_id: "group-1".into(),
+            member_epoch,
+            events: rx,
+            shutdown: CancellationToken::new(),
+            hb_handle: None,
+            tracker: tracker.clone(),
+        };
+
+        check!(membership.member_id() == "member-1");
+        check!(membership.group_id() == "group-1");
+        check!(Arc::ptr_eq(&membership.tracker(), &tracker));
+
+        let meta = membership.group_metadata().await;
+        check!(meta.member_id == "member-1");
+        check!(meta.group_id == "group-1");
+        check!(meta.generation_id == 42);
+        check!(meta.group_instance_id.is_none());
     }
 
     #[test]
