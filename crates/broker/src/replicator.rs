@@ -479,6 +479,19 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
         codes::FENCED_LEADER_EPOCH | codes::UNKNOWN_LEADER_EPOCH => {
+            // Stale-response guard: if we have become this partition's leader,
+            // a fenced response from our former leader means this
+            // follower-replicator is stale — STOP it. Without this it neither
+            // truncates (the `became_partition_leader` guard in
+            // `handle_epoch_fence` skips that) nor stops, so it hot-loops the
+            // Fetch at ~full CPU, starving metadata propagation and the
+            // cooperative cancellation that would otherwise retire it — the
+            // broker then never becomes ready and crashloops.
+            if became_partition_leader(cfg) {
+                warn!(topic = %cfg.topic, partition = cfg.partition,
+                    "replicator: stopping on fenced epoch — this broker is now the partition leader");
+                return LoopAction::StopNotLeader;
+            }
             warn!(
                 topic = %cfg.topic,
                 partition = cfg.partition,
@@ -486,6 +499,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
             );
             let _ = handle_epoch_fence(cfg).await;
+            // Back off before re-fetching so a persistent fence (e.g. our
+            // leader_epoch hasn't caught up to the new leader's yet) doesn't
+            // hot-spin the CPU between fetch and fence.
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => return LoopAction::StopNotLeader,
+                () = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
             LoopAction::Continue
         }
         other => {
