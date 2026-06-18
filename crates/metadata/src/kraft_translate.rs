@@ -597,7 +597,6 @@ fn to_kraft_iter(
                         resource_type: 2, // TOPIC
                         resource_name: c.topic.clone(),
                         name: k.clone(),
-                        value: None, // tombstone: removed key
                         ..Default::default()
                     }));
                 }
@@ -690,10 +689,8 @@ fn register_broker_to_kraft(
     // survives the round-trip; the real listeners follow.
     let mut end_points = Vec::with_capacity(b.endpoints.len() + 1);
     end_points.push(KBrokerEndpoint {
-        name: String::new(),
         host: b.host.clone(),
         port: b.port,
-        security_protocol: protocol_to_wire(ListenerProtocol::Plaintext),
         ..Default::default()
     });
     for e in &b.endpoints {
@@ -1188,6 +1185,35 @@ mod tests {
     }
 
     #[test]
+    fn register_broker_to_kraft_preserves_endpoint_details_and_unfenced_state() {
+        let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id: 1,
+            broker_epoch: 7,
+            incarnation_id: uuid::Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
+            host: "broker.local".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![BrokerEndpoint {
+                name: "EXTERNAL".into(),
+                host: "ext.example.com".into(),
+                port: 9093,
+                protocol: ListenerProtocol::SaslSsl,
+            }],
+        });
+
+        let KraftMetadataRecord::RegisterBroker(k) = to_kraft(&rec, &img()).unwrap() else {
+            panic!("expected RegisterBroker");
+        };
+
+        assert!(!k.fenced);
+        assert!(k.end_points.len() == 2);
+        assert!(k.end_points[0].name == "");
+        assert!(k.end_points[0].security_protocol == protocol_to_wire(ListenerProtocol::Plaintext));
+        assert!(k.end_points[1].name == "EXTERNAL");
+        assert!(k.end_points[1].security_protocol == protocol_to_wire(ListenerProtocol::SaslSsl));
+    }
+
+    #[test]
     fn register_broker_incarnation_id_survives_round_trip() {
         let id = uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
         round_trip(
@@ -1606,6 +1632,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn topic_config_to_kraft_preserves_set_values() {
+        let mut image = img();
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: uuid::Uuid::from_u128(7),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let cfg = MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: [("retention.ms".to_string(), "9".to_string())].into(),
+        });
+        let records = to_kraft_records(&cfg, &image).unwrap();
+        assert!(records.len() == 1);
+        let KraftMetadataRecord::Config(c) = &records[0] else {
+            panic!("expected Config");
+        };
+        assert!(c.name == "retention.ms");
+        assert!(c.value == Some("9".to_string()));
+    }
+
     /// Seed `image` with topic `t` and the config map `kv`.
     fn seed_topic_config(image: &mut MetadataImage, kv: &[(&str, &str)]) {
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
@@ -1709,6 +1757,115 @@ mod tests {
         assert!(
             decoded == rec,
             "directories must survive the KRaft round trip"
+        );
+    }
+
+    #[test]
+    fn partition_to_kraft_preserves_reassignment_vectors() {
+        let topic_id = uuid::Uuid::from_u128(0x11);
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        let rec = MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2],
+            leader_epoch: 4,
+            adding_replicas: vec![3],
+            removing_replicas: vec![2],
+            directories: vec![],
+            partition_epoch: 9,
+        });
+
+        let KraftMetadataRecord::Partition(k) = to_kraft(&rec, &image).unwrap() else {
+            panic!("expected Partition");
+        };
+
+        assert!(k.adding_replicas == vec![3]);
+        assert!(k.removing_replicas == vec![2]);
+    }
+
+    #[test]
+    fn non_private_unknown_has_no_counterpart() {
+        let err = from_kraft(
+            &KraftMetadataRecord::Unknown {
+                api_key: 999_999,
+                api_version: 0,
+                body: bytes::Bytes::from_static(b"not a private carrier"),
+            },
+            &img(),
+        )
+        .unwrap_err();
+
+        assert!(err == TranslateError::NoCounterpart("Unknown"));
+    }
+
+    #[test]
+    fn remove_acl_with_unknown_id_is_rejected() {
+        let remove_unknown =
+            KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord {
+                id: to_kuuid(uuid::Uuid::from_u128(0xA11CE)),
+                ..Default::default()
+            });
+        let err = from_kraft(&remove_unknown, &img()).unwrap_err();
+
+        assert!(matches!(err, TranslateError::UnknownAclId(_)));
+
+        let mut image_with_different_acl = img();
+        image_with_different_acl.apply(&MetadataRecord::V1AccessControlEntry(acl(
+            ResourceType::Topic,
+            "topic-a",
+            "User:alice",
+        )));
+        let err = from_kraft(&remove_unknown, &image_with_different_acl).unwrap_err();
+
+        assert!(matches!(err, TranslateError::UnknownAclId(_)));
+    }
+
+    #[test]
+    fn kraft_variant_name_reports_unmodeled_variants() {
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::BrokerRegistrationChange(
+                crabka_protocol::owned::broker_registration_change_record::BrokerRegistrationChangeRecord::default(),
+            )) == "BrokerRegistrationChange"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::NoOp(
+                crabka_protocol::owned::no_op_record::NoOpRecord::default(),
+            )) == "NoOp"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::BeginTransaction(
+                crabka_protocol::owned::begin_transaction_record::BeginTransactionRecord::default(),
+            )) == "BeginTransaction"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::EndTransaction(
+                crabka_protocol::owned::end_transaction_record::EndTransactionRecord::default(),
+            )) == "EndTransaction"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::RegisterController(
+                crabka_protocol::owned::register_controller_record::RegisterControllerRecord::default(),
+            )) == "RegisterController"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::RemoveAccessControlEntry(
+                RemoveAccessControlEntryRecord::default(),
+            )) == "RemoveAccessControlEntry"
+        );
+        assert!(
+            kraft_variant_name(&KraftMetadataRecord::Unknown {
+                api_key: 42,
+                api_version: 0,
+                body: bytes::Bytes::new(),
+            }) == "Unknown"
         );
     }
 

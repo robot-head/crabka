@@ -160,4 +160,13 @@ mod tests {
         let bad = vec![0x04u8, 0x00, 0x10, 0x00]; // confidentiality
         assert!(ex.step(&bad).is_err());
     }
+
+    #[test]
+    fn debug_includes_observable_state_and_max_receive_size() {
+        let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
+        let rendered = format!("{ex:?}");
+        assert!(rendered.contains("GssapiServerExchange"));
+        assert!(rendered.contains("AcceptingContext"));
+        assert!(rendered.contains("max_recv_size"));
+    }
 }

@@ -212,6 +212,12 @@ mod tests {
     }
 
     #[test]
+    fn rule_substitution_accepts_no_trailing_flags_segment() {
+        let r = rules(&["RULE:[1:$1]s/A/a"]);
+        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
+    }
+
+    #[test]
     fn rule_lowercase_modifier() {
         let r = rules(&["RULE:[1:$1]/L"]);
         assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
@@ -249,5 +255,10 @@ mod tests {
             Rule::Translate { num_components, .. } => assert!(num_components == 2),
             Rule::Default => panic!("expected Translate"),
         }
+    }
+
+    #[test]
+    fn parse_rejects_rule_with_empty_component_count() {
+        assert!(Rule::parse("RULE:[:$1]").is_err());
     }
 }

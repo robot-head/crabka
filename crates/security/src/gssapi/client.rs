@@ -133,4 +133,19 @@ mod tests {
         // reply = wrapped (identity) choice: selected 0x01 auth + 3-byte size
         assert!(reply[0] == 0x01);
     }
+
+    #[test]
+    fn rejects_offer_without_auth_layer_even_when_other_layers_present() {
+        let mut ex =
+            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
+
+        let _ = ex.step(None).unwrap();
+        let _ = ex.step(Some(b"AP-REP")).unwrap();
+
+        let integrity_only_offer = vec![0x02u8, 0x00, 0x10, 0x00];
+        assert!(matches!(
+            ex.step(Some(&integrity_only_offer)),
+            Err(ClientExchangeError::NoCommonLayer)
+        ));
+    }
 }

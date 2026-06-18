@@ -37,7 +37,6 @@ pub fn to_kafka_record(rec: &MetadataRecord) -> Result<Record, KafkaRecordError>
     let payload = <SerdeCompat<MetadataRecord>>::serialize(rec)
         .map_err(|e| KafkaRecordError::Encode(e.to_string()))?;
     Ok(Record {
-        key: None,
         value: Some(Bytes::from(payload)),
         ..Default::default()
     })
@@ -84,6 +83,12 @@ mod tests {
         let kafka = to_kafka_record(&sample_topic()).expect("encode");
         assert!(kafka.key.is_none());
         assert!(kafka.value.is_some());
+    }
+
+    #[test]
+    fn record_key_is_none_even_when_default_record_has_key() {
+        let kafka = to_kafka_record(&sample_topic()).expect("encode");
+        assert!(kafka.key == None);
     }
 
     #[test]

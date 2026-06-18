@@ -85,26 +85,47 @@ pub async fn fetch_partition_with_isolation(
     isolation_level: i8,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
     let resp = conn
-        .send(FetchRequest {
+        .send(build_fetch_request(
+            topic,
+            topic_id,
+            partition,
+            fetch_offset,
             max_wait_ms,
-            min_bytes: 1,
-            max_bytes: 50 * 1024 * 1024,
+            partition_max_bytes,
             isolation_level,
-            topics: vec![FetchTopic {
-                topic: topic.to_string(),
-                topic_id,
-                partitions: vec![FetchPartition {
-                    partition,
-                    fetch_offset,
-                    partition_max_bytes,
-                    ..Default::default()
-                }],
+        ))
+        .await?;
+    decode_fetch_response(&resp, partition)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_fetch_request(
+    topic: &str,
+    topic_id: WireUuid,
+    partition: i32,
+    fetch_offset: i64,
+    max_wait_ms: i32,
+    partition_max_bytes: i32,
+    isolation_level: i8,
+) -> FetchRequest {
+    FetchRequest {
+        max_wait_ms,
+        min_bytes: 1,
+        max_bytes: 50 * 1024 * 1024,
+        isolation_level,
+        topics: vec![FetchTopic {
+            topic: topic.to_string(),
+            topic_id,
+            partitions: vec![FetchPartition {
+                partition,
+                fetch_offset,
+                partition_max_bytes,
                 ..Default::default()
             }],
             ..Default::default()
-        })
-        .await?;
-    decode_fetch_response(&resp, partition)
+        }],
+        ..Default::default()
+    }
 }
 
 /// Decode every v2 `RecordBatch` for `partition` in `resp` into
@@ -169,12 +190,14 @@ mod tests {
             .enumerate()
             .map(|(i, v)| Record {
                 offset_delta: i32::try_from(i).unwrap(),
+                timestamp_delta: i64::try_from(i).unwrap() * 10,
                 value: Some(Bytes::copy_from_slice(v)),
                 ..Default::default()
             })
             .collect();
         RecordBatch {
             base_offset,
+            base_timestamp: 1_000,
             last_offset_delta: i32::try_from(values.len().saturating_sub(1)).unwrap(),
             records,
             ..Default::default()
@@ -209,9 +232,31 @@ mod tests {
         let got = decode_fetch_response(&resp, 0).unwrap();
         assert!(got.len() == 2);
         assert!(got[0].offset == 5);
+        assert!(got[0].timestamp == 1_000);
         assert!(got[0].value.as_deref() == Some(b"a".as_ref()));
         assert!(got[1].offset == 6);
+        assert!(got[1].timestamp == 1_010);
         assert!(got[1].value.as_deref() == Some(b"b".as_ref()));
+    }
+
+    #[test]
+    fn build_fetch_request_preserves_single_partition_settings() {
+        let topic_id = WireUuid([7; 16]);
+        let req = build_fetch_request("orders", topic_id, 3, 123, 250, 64 * 1024, 1);
+
+        assert!(req.max_wait_ms == 250);
+        assert!(req.min_bytes == 1);
+        assert!(req.max_bytes == 50 * 1024 * 1024);
+        assert!(req.isolation_level == 1);
+        assert!(req.topics.len() == 1);
+        let topic = &req.topics[0];
+        assert!(topic.topic == "orders");
+        assert!(topic.topic_id == topic_id);
+        assert!(topic.partitions.len() == 1);
+        let partition = &topic.partitions[0];
+        assert!(partition.partition == 3);
+        assert!(partition.fetch_offset == 123);
+        assert!(partition.partition_max_bytes == 64 * 1024);
     }
 
     #[test]

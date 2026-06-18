@@ -451,6 +451,35 @@ mod tests {
     }
 
     #[test]
+    fn load_service_keys_keeps_first_key_when_duplicate_kvno_ties() {
+        let first = vec![0x11u8; 32];
+        let second = vec![0x22u8; 32];
+        let kt = keytab(&[
+            entry_body(&EntrySpec {
+                components: &["kafka", "localhost"],
+                realm: "R",
+                kvno8: 7,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &first,
+                kvno32: None,
+            }),
+            entry_body(&EntrySpec {
+                components: &["kafka", "localhost"],
+                realm: "R",
+                kvno8: 7,
+                enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+                key: &second,
+                kvno32: None,
+            }),
+        ]);
+
+        let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
+        assert!(keys.len() == 1);
+        assert!(keys[0].kvno == 7);
+        assert!(keys[0].key == first);
+    }
+
+    #[test]
     fn load_service_keys_empty_when_no_match() {
         let key = vec![0x42u8; 32];
         let kt = keytab(&[entry_body(&EntrySpec {
@@ -487,6 +516,25 @@ mod tests {
 
         let entries = parse_keytab(&kt).expect("parse");
         assert!(entries.len() == 1, "hole must not produce an entry");
+        assert!(entries[0].key == key);
+    }
+
+    #[test]
+    fn parse_accepts_trailing_padding_shorter_than_size_field() {
+        let key = vec![0x42u8; 32];
+        let body = entry_body(&EntrySpec {
+            components: &["kafka", "host"],
+            realm: "R",
+            kvno8: 1,
+            enctype: ENCTYPE_AES256_CTS_HMAC_SHA1_96,
+            key: &key,
+            kvno32: None,
+        });
+        let mut kt = keytab(&[body]);
+        kt.extend_from_slice(&[0x00, 0x00, 0x00]);
+
+        let entries = parse_keytab(&kt).expect("parse");
+        assert!(entries.len() == 1);
         assert!(entries[0].key == key);
     }
 

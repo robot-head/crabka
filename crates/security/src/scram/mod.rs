@@ -223,6 +223,7 @@ mod tests {
         assert!(a.salt != b.salt, "fresh salt each call");
     }
 
+    use crate::AuthError;
     use crate::scram::client::ScramClientExchange;
     use crate::scram::server::{ScramServerExchange, StepResult};
 
@@ -261,6 +262,12 @@ mod tests {
         // Client verifies server signature
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
+
+        let replay_check = client.verify_server_final(&s2);
+        assert!(
+            replay_check == Err(AuthError::MalformedMessage),
+            "server final must only verify once"
+        );
     }
 
     /// Mirror of the SHA-512 round-trip with SHA-256 — proves the
@@ -296,6 +303,68 @@ mod tests {
         assert!(principal.auth_method == crate::AuthMethod::SaslScramSha256);
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
+    }
+
+    #[test]
+    fn scram_client_rejects_tampered_server_final_signature() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha256,
+        );
+
+        let c1 = client.client_first().expect("client first");
+        let s1 = match server.step(&c1) {
+            StepResult::Continue(b) => b,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        let c2 = client.step(&s1).expect("client final");
+        match server.step(&c2) {
+            StepResult::Done(_, _) => {}
+            other => panic!("server step 2 must Done, got {other:?}"),
+        }
+
+        assert!(client.verify_server_final(b"v=AAAA").is_err());
+    }
+
+    #[test]
+    fn scram_server_rejects_wrong_length_client_proof() {
+        let password = b"hunter2";
+        let cred = hash_scram_password_with_salt(
+            password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.to_vec(),
+            SaslMechanism::ScramSha256,
+        );
+
+        let c1 = client.client_first().expect("client first");
+        let s1 = match server.step(&c1) {
+            StepResult::Continue(b) => b,
+            other => panic!("server step 1 must continue, got {other:?}"),
+        };
+        let mut c2 = String::from_utf8(client.step(&s1).expect("client final")).unwrap();
+        let proof_start = c2.find("p=").expect("proof attribute") + 2;
+        c2.truncate(proof_start);
+        c2.push_str("AAAA");
+
+        assert!(matches!(
+            server.step(c2.as_bytes()),
+            StepResult::Failed(AuthError::MalformedMessage)
+        ));
     }
 
     #[test]

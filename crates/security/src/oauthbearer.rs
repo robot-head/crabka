@@ -975,6 +975,38 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_exp_and_iat_at_skew_boundaries() {
+        let v = UnsecuredJwsValidator {
+            allowable_clock_skew_ms: 1_000,
+            ..Default::default()
+        };
+
+        let exp_boundary = make_unsecured_jws(&serde_json::json!({
+            "sub": "admin",
+            "exp": 1_999,
+        }));
+        assert!(v.validate(&exp_boundary, 2_000_000).is_err());
+        let exp_inside = make_unsecured_jws(&serde_json::json!({
+            "sub": "admin",
+            "exp": 2_000,
+        }));
+        assert!(v.validate(&exp_inside, 2_000_000).is_ok());
+
+        let iat_boundary = make_unsecured_jws(&serde_json::json!({
+            "sub": "admin",
+            "iat": 2_001,
+            "exp": 3_000,
+        }));
+        assert!(v.validate(&iat_boundary, 2_000_000).is_ok());
+        let iat_outside = make_unsecured_jws(&serde_json::json!({
+            "sub": "admin",
+            "iat": 2_002,
+            "exp": 3_000,
+        }));
+        assert!(v.validate(&iat_outside, 2_000_000).is_err());
+    }
+
+    #[test]
     fn validate_rejects_signed_token() {
         let v = UnsecuredJwsValidator::default();
         let now = 1_000_000_000_000;
@@ -1019,6 +1051,22 @@ mod tests {
         };
         let result = v.validate(&token, now_ms);
         assert!(result.unwrap_err() == AuthError::InvalidToken);
+    }
+
+    #[test]
+    fn custom_claim_check_rejects_false_and_null_matches() {
+        assert!(!evaluate_custom_claim_check(
+            &parse_jp("$.enabled"),
+            &serde_json::json!({"enabled": false}),
+        ));
+        assert!(!evaluate_custom_claim_check(
+            &parse_jp("$.enabled"),
+            &serde_json::json!({"enabled": null}),
+        ));
+        assert!(evaluate_custom_claim_check(
+            &parse_jp("$.enabled"),
+            &serde_json::json!({"enabled": true}),
+        ));
     }
 
     #[test]
@@ -1313,6 +1361,20 @@ mod tests {
     }
 
     #[test]
+    fn signed_rejects_malformed_compact_jws_segments() {
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (v, _h) = signed(&jwks);
+        let header = B64URL.encode(b"{\"alg\":\"RS256\",\"kid\":\"k1\"}");
+        let payload = B64URL.encode(b"{\"sub\":\"a\",\"exp\":9999999999}");
+
+        let empty_signature = format!("{header}.{payload}.");
+        assert!(v.validate(&empty_signature, 1_000_000_000_000).is_err());
+
+        let extra_segment = format!("{token}.extra");
+        assert!(v.validate(&extra_segment, 1_000_000_000_000).is_err());
+    }
+
+    #[test]
     fn signed_rejects_expired() {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":1000}");
         let (mut v, _h) = signed(&jwks);
@@ -1481,6 +1543,71 @@ mod tests {
     }
 
     #[test]
+    fn signed_key_handle_shares_validator_key_cell() {
+        let (token_a, jwks_a) = mint_es256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (v, _handle) = signed(&jwks_a);
+        assert!(v.validate(&token_a, 1_000_000_000_000).is_ok());
+
+        let handle = v.key_handle();
+        let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
+        handle.store(Jwks::from_json(&jwks_b, false).expect("parse rotated jwks"));
+
+        assert!(v.validate(&token_a, 1_000_000_000_000).is_err());
+        assert!(
+            v.validate(&token_b, 1_000_000_000_000)
+                .expect("rotated key validates")
+                .principal
+                .name
+                == "b"
+        );
+    }
+
+    #[test]
+    fn signed_rejects_tokens_with_expected_issuer_or_audience_missing() {
+        let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
+        let (mut issuer_validator, _h) = signed(&jwks);
+        issuer_validator.valid_issuer = Some("https://idp".to_string());
+        assert!(
+            issuer_validator.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken)
+        );
+
+        let (mut audience_validator, _h) = signed(&jwks);
+        audience_validator.expected_audience = Some("kafka".to_string());
+        assert!(
+            audience_validator.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn signed_accepts_temporal_claims_at_skew_boundaries() {
+        let (token, jwks) = mint_rs256(
+            "k1",
+            "{\"sub\":\"a\",\"exp\":2000,\"iat\":2001,\"nbf\":2001}",
+        );
+        let (mut v, _h) = signed(&jwks);
+        v.allowable_clock_skew_ms = 1_000;
+        assert!(v.validate(&token, 2_000_000).is_ok());
+    }
+
+    #[test]
+    fn signed_rejects_temporal_claims_outside_skew_boundaries() {
+        let (expired, expired_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":1999}");
+        let (mut expired_v, _h) = signed(&expired_jwks);
+        expired_v.allowable_clock_skew_ms = 1_000;
+        assert!(expired_v.validate(&expired, 2_000_000).is_err());
+
+        let (future_iat, iat_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":3000,\"iat\":2002}");
+        let (mut iat_v, _h) = signed(&iat_jwks);
+        iat_v.allowable_clock_skew_ms = 1_000;
+        assert!(iat_v.validate(&future_iat, 2_000_000).is_err());
+
+        let (future_nbf, nbf_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":3000,\"nbf\":2002}");
+        let (mut nbf_v, _h) = signed(&nbf_jwks);
+        nbf_v.allowable_clock_skew_ms = 1_000;
+        assert!(nbf_v.validate(&future_nbf, 2_000_000).is_err());
+    }
+
+    #[test]
     fn signed_rejects_when_keyset_empty() {
         let (token, _jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let v = SignedJwsValidator::new(JwksHandle::default());
@@ -1555,6 +1682,17 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         // Last fetch 500ms ago; expiry threshold 1s ⇒ still fresh.
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 500);
+        v.expiry_ms = Some(1_000);
+        let outcome = v.validate(&token, now_ms).expect("valid");
+        assert!(outcome.principal.name == "alice");
+    }
+
+    #[test]
+    fn signed_validate_accepts_when_jwks_cache_age_equals_expiry() {
+        let now_ms: i64 = 10_000_000;
+        let exp_secs: i64 = (now_ms / 1000) + 60;
+        let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
+        let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 1_000);
         v.expiry_ms = Some(1_000);
         let outcome = v.validate(&token, now_ms).expect("valid");
         assert!(outcome.principal.name == "alice");
@@ -2042,6 +2180,22 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.principal_claim_name = "client_id".into();
         assert!(v.validate("tok", NOW_MS).await.unwrap().principal.name == "my-client");
+    }
+
+    #[tokio::test]
+    async fn introspection_rejects_empty_fallback_principal_claim() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({
+                "active": true,
+                "exp": NOW_MS/1000 + 60,
+                "client_id": "",
+            })),
+        );
+        let mut v = validator(mock.clone());
+        v.fallback_user_name_claim = Some("client_id".into());
+        assert!(v.validate("tok", NOW_MS).await == Err(AuthError::InvalidToken));
     }
 
     #[tokio::test]

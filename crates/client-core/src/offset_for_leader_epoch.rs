@@ -38,22 +38,36 @@ pub async fn offset_for_leader_epoch(
     leader_epoch: i32,
 ) -> Result<EpochEndOffset, ClientError> {
     let resp: OffsetForLeaderEpochResponse = conn
-        .send(OffsetForLeaderEpochRequest {
-            replica_id: -1,
-            topics: vec![OffsetForLeaderTopic {
-                topic: topic.to_string(),
-                partitions: vec![OffsetForLeaderPartition {
-                    partition,
-                    current_leader_epoch,
-                    leader_epoch,
-                    ..Default::default()
-                }],
+        .send(build_request(
+            topic,
+            partition,
+            current_leader_epoch,
+            leader_epoch,
+        ))
+        .await?;
+    parse_single(&resp, topic, partition)
+}
+
+fn build_request(
+    topic: &str,
+    partition: i32,
+    current_leader_epoch: i32,
+    leader_epoch: i32,
+) -> OffsetForLeaderEpochRequest {
+    OffsetForLeaderEpochRequest {
+        replica_id: -1,
+        topics: vec![OffsetForLeaderTopic {
+            topic: topic.to_string(),
+            partitions: vec![OffsetForLeaderPartition {
+                partition,
+                current_leader_epoch,
+                leader_epoch,
                 ..Default::default()
             }],
             ..Default::default()
-        })
-        .await?;
-    parse_single(&resp, topic, partition)
+        }],
+        ..Default::default()
+    }
 }
 
 fn parse_single(
@@ -111,8 +125,23 @@ mod tests {
     }
 
     #[test]
+    fn build_request_preserves_partition_epoch_query() {
+        let req = build_request("orders", 2, 17, 11);
+
+        assert!(req.replica_id == -1);
+        assert!(req.topics.len() == 1);
+        assert!(req.topics[0].topic == "orders");
+        assert!(req.topics[0].partitions.len() == 1);
+        let partition = &req.topics[0].partitions[0];
+        assert!(partition.partition == 2);
+        assert!(partition.current_leader_epoch == 17);
+        assert!(partition.leader_epoch == 11);
+    }
+
+    #[test]
     fn parse_single_missing_partition_is_error() {
         let resp = OffsetForLeaderEpochResponse::default();
-        assert!(parse_single(&resp, "t", 0).is_err());
+        let err = parse_single(&resp, "t", 0).unwrap_err();
+        assert!(matches!(err, ClientError::Server { error_code: -1 }));
     }
 }

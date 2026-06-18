@@ -947,7 +947,7 @@ jobs:
         # fails the job.
         run: |
           set +e
-          timeout --signal=INT 165m cargo mutants --no-shuffle -vV --in-diff git.diff
+          timeout --signal=INT 165m cargo mutants --no-shuffle -vV --in-place --in-diff git.diff
           code=$?
           case "$code" in
             0)

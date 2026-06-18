@@ -338,6 +338,25 @@ mod tests {
     }
 
     #[test]
+    fn registry_feature_contracts_are_pinned() {
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let expected = [
+            ("metadata.version", (7, 25), 25, 7),
+            ("group.version", (0, 1), 1, 0),
+            ("transaction.version", (0, 2), 2, 0),
+            ("share.version", (0, 1), 0, 0),
+            ("streams.version", (0, 1), 0, 0),
+        ];
+
+        for (name, range, default_at_25, floor) in expected {
+            let f = feature(name).expect("registered");
+            assert!(f.supported_range() == range, "range for {name}");
+            assert!(f.default_level(25) == default_at_25, "default for {name}");
+            assert!(f.min_required_floor(&image) == floor, "floor for {name}");
+        }
+    }
+
+    #[test]
     fn group_version_default_follows_release() {
         let f = feature("group.version").unwrap();
         assert!(f.default_level(crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1) == 0);

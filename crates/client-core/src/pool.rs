@@ -184,4 +184,27 @@ mod tests {
         .await;
         assert!(pool.knows_broker(7));
     }
+
+    #[tokio::test]
+    async fn refresh_skips_undialable_ports() {
+        let pool = BrokerPool::new(vec![], ConnectionOptions::default());
+        pool.refresh_brokers(&[
+            BrokerInfo {
+                id: 1,
+                host: "127.0.0.1".into(),
+                port: 0,
+                rack: None,
+            },
+            BrokerInfo {
+                id: 2,
+                host: "127.0.0.1".into(),
+                port: -1,
+                rack: None,
+            },
+        ])
+        .await;
+
+        assert!(!pool.knows_broker(1));
+        assert!(!pool.knows_broker(2));
+    }
 }
