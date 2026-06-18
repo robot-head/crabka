@@ -31,6 +31,16 @@ exclude_globs = [
     "crates/protocol/generated/**",
     "crates/grpc-gateway/src/bin/**",
     "crates/schema-registry/src/bin/**",
+    # `crabka-broker`'s `main` is pure entrypoint glue: parse CLI args, derive the
+    # controller listener + self single-voter set, build `BrokerConfig`, hand it to
+    # `Broker::start`, then wait for a termination signal and controlled-shutdown.
+    # No unit-testable signal (no test constructs the live broker from CLI args);
+    # it is exercised end-to-end by `tests/cli_smoke.rs` (boots the real binary)
+    # and every in-process broker/integration test. Same rationale as the
+    # grpc-gateway / schema-registry `src/bin/**` globs above. NB: a file glob is
+    # used rather than an `exclude_re` on the mutant name because name-regex
+    # exclusions do not reliably match struct-field-deletion mutants here.
+    "crates/broker/src/bin/**",
     "crates/operator/src/run.rs",
     # KIP-939 idle-transaction reaper background task: a `tokio::interval` run
     # loop + `current_image`/leader-refresh orchestration. Pure serve-loop glue
@@ -101,19 +111,10 @@ exclude_re = [
     # timeout from, so no unit test can kill a mutation of it. The function's
     # actual add-partition logic is covered by the broker txn integration suite.
     "add_partitions_to_txn\\.rs.*process_one_txn",
-    # The broker binary's `main` is pure entrypoint glue (parse args, build the
-    # `BrokerConfig`, `Broker::start`, await a shutdown signal, controlled-stop)
-    # exercised end-to-end by every in-process broker test — same rationale as
-    # the `src/bin/**` globs for grpc-gateway / schema-registry above. Mutating
-    # the `BrokerConfig` field wiring it hands to `Broker::start` has no
-    # unit-testable signal (no test constructs the live broker from CLI args);
-    # the fields' behavior is covered where they are consumed in the lib.
-    "broker/src/bin/broker\\.rs.*from struct BrokerConfig",
-    # `wait_for_termination_signal` blocks on real OS signals (SIGTERM/SIGINT/
-    # ctrl-c) and returns the signal name solely for a log line — there is no
-    # way to deliver a signal to the test process and assert the returned name
-    # in a unit test. Pure signal-handler glue.
-    "broker/src/bin/broker\\.rs.*wait_for_termination_signal",
+    # NB: `crates/broker/src/bin/**` (the broker entrypoint, incl. its
+    # `BrokerConfig` field wiring and `wait_for_termination_signal`) is excluded
+    # via `exclude_globs` above — name-regex exclusions don't reliably match the
+    # struct-field-deletion mutants the entrypoint generates.
     # `ControllerHandle::voter_addr` is a one-line delegation to the free
     # function `controller_endpoint_addr` (which IS unit-tested, including the
     # CONTROLLER-endpoint preference). Killing the wrapper's mutants would need
