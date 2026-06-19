@@ -2300,15 +2300,94 @@ impl Broker {
                         );
                         None
                     };
+
+                // Open the durable spool (resolve relative dir under the log dir).
+                let spool_dir = if config.audit_spool_dir.is_absolute() {
+                    config.audit_spool_dir.clone()
+                } else {
+                    config.log_dir.join(&config.audit_spool_dir)
+                };
+                let spool = match crabka_audit::Spool::open(
+                    &spool_dir,
+                    config.audit_spool_max_bytes,
+                ) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to open audit spool; spooling disabled");
+                        None
+                    }
+                };
+
+                // Recover the chain: prefer the spool's last record, else the topic tail.
+                let resume = spool
+                    .as_ref()
+                    .and_then(|s| s.resume_point().ok().flatten())
+                    .or_else(|| {
+                        partitions
+                            .get(&config.audit_topic, pidx)
+                            .and_then(|p| crate::audit_recovery::recover_from_partition_tail(&p))
+                    });
+                let chain = match resume {
+                    Some((next_seq, head)) => {
+                        tracing::info!(next_seq, "audit chain resumed");
+                        crabka_audit::ChainState::resume(next_seq, head)
+                    }
+                    None => crabka_audit::ChainState::new(),
+                };
+
+                let stats = std::sync::Arc::new(crabka_audit::AuditStats::new());
                 let writer = crabka_audit::AuditWriter::new(
                     rx,
-                    sink,
-                    Self::audit_product(),
-                    audit_signer,
-                    config.audit_checkpoint_every_n,
-                    std::time::Duration::from_secs(config.audit_checkpoint_every_secs),
+                    crabka_audit::AuditWriterParams {
+                        sink,
+                        product: Self::audit_product(),
+                        signer: audit_signer,
+                        checkpoint_every_n: config.audit_checkpoint_every_n,
+                        checkpoint_every: std::time::Duration::from_secs(
+                            config.audit_checkpoint_every_secs,
+                        ),
+                        chain,
+                        spool,
+                        stats: stats.clone(),
+                        replay_every: std::time::Duration::from_secs(2),
+                    },
                 );
                 tokio::spawn(writer.run());
+
+                // Poll spool stats into Prometheus once a second.
+                let poll_metrics = metrics.clone();
+                let poll_log = log.clone();
+                tokio::spawn(async move {
+                    let mut last_spooled = 0u64;
+                    let mut last_replayed = 0u64;
+                    let mut last_dropped = 0u64;
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        tick.tick().await;
+                        let spooled = stats.spooled();
+                        let replayed = stats.replayed();
+                        // dropped = spool-full/io drops (stats) + channel-full drops (AuditLog)
+                        let dropped = stats.dropped() + poll_log.dropped();
+                        poll_metrics
+                            .audit_records_spooled_total
+                            .inc_by(spooled - last_spooled);
+                        poll_metrics
+                            .audit_records_replayed_total
+                            .inc_by(replayed - last_replayed);
+                        poll_metrics
+                            .audit_records_dropped_total
+                            .inc_by(dropped - last_dropped);
+                        last_spooled = spooled;
+                        last_replayed = replayed;
+                        last_dropped = dropped;
+                        poll_metrics
+                            .audit_spool_depth
+                            .set(i64::try_from(stats.depth()).unwrap_or(i64::MAX));
+                        poll_metrics
+                            .audit_spool_bytes
+                            .set(i64::try_from(stats.spool_bytes()).unwrap_or(i64::MAX));
+                    }
+                });
             } else {
                 tracing::warn!("no audit partition led by this broker; audit records will drop");
             }

@@ -254,3 +254,60 @@ async fn denied_operation_returns_cluster_authorization_failed() {
 
     p.broker.shutdown().await;
 }
+
+/// Verifies that the audit hash-chain sequence numbers are contiguous and
+/// duplicate-free across a broker restart — i.e. chain recovery worked and
+/// the second boot did NOT reset the chain to seq 0.
+#[tokio::test]
+async fn audit_chain_continues_across_restart() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // First boot: generate some audit events, then shut down cleanly.
+    {
+        let (broker, client) = support::start_with_dir(dir.path()).await;
+        let _ = client
+            .send(CreateTopicsRequest {
+                topics: vec![CreatableTopic {
+                    name: "r1".into(),
+                    num_partitions: 1,
+                    replication_factor: 1,
+                    ..Default::default()
+                }],
+                timeout_ms: 5_000,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        broker.shutdown().await;
+    }
+
+    // Second boot on the SAME data dir: more events.
+    let (broker, client) = support::start_with_dir(dir.path()).await;
+    let _ = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "r2".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Consume the audit topic and assert seqs are a contiguous, duplicate-free
+    // chain (recovery worked — no reset to 0 on the second boot).
+    let seqs = support::audit_record_seqs(&client).await;
+    assert2::check!(seqs.len() >= 4); // 2 BrokerStarted + 2 CreateTopics (at least)
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert2::check!(sorted.len() == seqs.len()); // no duplicate seqs
+    assert2::check!(sorted == (0..seqs.len() as u64).collect::<Vec<_>>()); // contiguous from 0
+
+    broker.shutdown().await;
+}

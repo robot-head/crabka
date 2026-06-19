@@ -645,6 +645,9 @@ pub struct FileAuditConfig {
     /// Checkpoint emission cadence. `None` → use defaults.
     #[serde(default)]
     pub checkpoint: Option<FileAuditCheckpointConfig>,
+    /// Durable spool for the AU-5 degraded path. `None` → use defaults.
+    #[serde(default)]
+    pub spool: Option<FileAuditSpoolConfig>,
 }
 
 impl Default for FileAuditConfig {
@@ -654,8 +657,36 @@ impl Default for FileAuditConfig {
             topic: default_audit_topic(),
             signing: None,
             checkpoint: None,
+            spool: None,
         }
     }
+}
+
+/// `[audit.spool]` — durable spool for the AU-5 degraded path.
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileAuditSpoolConfig {
+    #[serde(default = "default_spool_dir")]
+    pub dir: String,
+    #[serde(default = "default_spool_max_bytes")]
+    pub max_bytes: u64,
+}
+
+impl Default for FileAuditSpoolConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_spool_dir(),
+            max_bytes: default_spool_max_bytes(),
+        }
+    }
+}
+
+fn default_spool_dir() -> String {
+    "audit-spool".to_string()
+}
+
+fn default_spool_max_bytes() -> u64 {
+    1_073_741_824
 }
 
 /// `[audit.signing]` — Ed25519 checkpoint signing key.
@@ -1309,6 +1340,9 @@ impl FileConfig {
         let checkpoint = audit.checkpoint.unwrap_or_default();
         cfg.audit_checkpoint_every_n = checkpoint.every_n;
         cfg.audit_checkpoint_every_secs = checkpoint.every_secs;
+        let spool = audit.spool.unwrap_or_default();
+        cfg.audit_spool_dir = std::path::PathBuf::from(spool.dir);
+        cfg.audit_spool_max_bytes = spool.max_bytes;
 
         Ok(())
     }
@@ -3024,5 +3058,29 @@ in_memory = true
         assert2::check!(cfg.audit_signing_key_id == None);
         assert2::check!(cfg.audit_checkpoint_every_n == 1000);
         assert2::check!(cfg.audit_checkpoint_every_secs == 60);
+    }
+
+    #[test]
+    fn audit_spool_parses_and_defaults() {
+        let toml = r#"
+            [audit]
+            enabled = true
+            [audit.spool]
+            dir = "/var/lib/crabka/audit-spool"
+            max_bytes = 2048
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc.apply_to(&mut cfg).expect("apply");
+        assert2::check!(
+            cfg.audit_spool_dir == std::path::PathBuf::from("/var/lib/crabka/audit-spool")
+        );
+        assert2::check!(cfg.audit_spool_max_bytes == 2048);
+
+        let fc2: FileConfig = toml::from_str("[audit]\nenabled = true\n").expect("parse");
+        let mut cfg2 = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc2.apply_to(&mut cfg2).expect("apply");
+        assert2::check!(cfg2.audit_spool_dir == std::path::PathBuf::from("audit-spool"));
+        assert2::check!(cfg2.audit_spool_max_bytes == 1_073_741_824);
     }
 }

@@ -267,6 +267,16 @@ pub struct BrokerMetrics {
     /// audit topic. Incremented on each produce error; operators alert on
     /// `rate(audit_write_failures_total[5m]) > 0`.
     pub audit_write_failures_total: Counter,
+    /// Current count of audit records buffered in the durable spool (gauge).
+    pub audit_spool_depth: Gauge,
+    /// Current bytes buffered in the durable audit spool (gauge).
+    pub audit_spool_bytes: Gauge,
+    /// Cumulative audit records diverted to the spool on topic-write failure.
+    pub audit_records_spooled_total: Counter,
+    /// Cumulative audit records drained from the spool back to the topic.
+    pub audit_records_replayed_total: Counter,
+    /// Cumulative audit records lost (channel-full or spool-full).
+    pub audit_records_dropped_total: Counter,
 }
 
 impl BrokerMetrics {
@@ -315,6 +325,11 @@ impl BrokerMetrics {
         let unclean_leader_elections_total = Counter::default();
         let audit_events_total = Counter::default();
         let audit_write_failures_total = Counter::default();
+        let audit_spool_depth = Gauge::default();
+        let audit_spool_bytes = Gauge::default();
+        let audit_records_spooled_total = Counter::default();
+        let audit_records_replayed_total = Counter::default();
+        let audit_records_dropped_total = Counter::default();
 
         registry.register(
             "topic_bytes_in",
@@ -610,6 +625,31 @@ impl BrokerMetrics {
             "Cumulative audit records that failed to write to the audit topic",
             audit_write_failures_total.clone(),
         );
+        registry.register(
+            "audit_spool_depth",
+            "Current count of audit records buffered in the durable spool",
+            audit_spool_depth.clone(),
+        );
+        registry.register(
+            "audit_spool_bytes",
+            "Current bytes buffered in the durable audit spool",
+            audit_spool_bytes.clone(),
+        );
+        registry.register(
+            "audit_records_spooled",
+            "Cumulative audit records diverted to the spool on topic-write failure",
+            audit_records_spooled_total.clone(),
+        );
+        registry.register(
+            "audit_records_replayed",
+            "Cumulative audit records drained from the spool back to the topic",
+            audit_records_replayed_total.clone(),
+        );
+        registry.register(
+            "audit_records_dropped",
+            "Cumulative audit records lost (channel-full or spool-full)",
+            audit_records_dropped_total.clone(),
+        );
 
         Self {
             registry: Arc::new(Mutex::new(registry)),
@@ -650,6 +690,11 @@ impl BrokerMetrics {
             unclean_leader_elections_total,
             audit_events_total,
             audit_write_failures_total,
+            audit_spool_depth,
+            audit_spool_bytes,
+            audit_records_spooled_total,
+            audit_records_replayed_total,
+            audit_records_dropped_total,
         }
     }
 
@@ -1246,5 +1291,18 @@ mod tests {
         assert!(m.replication_bytes_in.get_or_create(&lbl4).get() == 100);
         assert!(m.replication_bytes_out.get_or_create(&lbl3).get() == 4_000);
         assert!(m.replication_bytes_out.get_or_create(&lbl4).get() == 0);
+    }
+
+    #[test]
+    fn audit_spool_metrics_present() {
+        let m = BrokerMetrics::new();
+        m.audit_records_spooled_total.inc();
+        m.audit_records_replayed_total.inc();
+        m.audit_records_dropped_total.inc();
+        m.audit_spool_depth.set(7);
+        m.audit_spool_bytes.set(123);
+        assert2::check!(m.audit_records_spooled_total.get() == 1);
+        assert2::check!(m.audit_spool_depth.get() == 7);
+        assert2::check!(m.audit_spool_bytes.get() == 123);
     }
 }

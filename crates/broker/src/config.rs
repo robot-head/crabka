@@ -503,6 +503,10 @@ pub struct BrokerConfig {
     pub audit_checkpoint_every_n: u64,
     /// Emit a checkpoint at least this often (seconds).
     pub audit_checkpoint_every_secs: u64,
+    /// Directory for the durable audit spool (relative paths resolve under the broker's log dir).
+    pub audit_spool_dir: std::path::PathBuf,
+    /// Cap on the audit spool size in bytes.
+    pub audit_spool_max_bytes: u64,
 }
 
 /// Parameters for the topic-backed
@@ -735,6 +739,8 @@ impl BrokerConfig {
             audit_signing_key_id: None,
             audit_checkpoint_every_n: 1000,
             audit_checkpoint_every_secs: 60,
+            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
+            audit_spool_max_bytes: 1_073_741_824,
         }
     }
 
@@ -1010,6 +1016,8 @@ impl Default for BrokerConfig {
             audit_signing_key_id: None,
             audit_checkpoint_every_n: 1000,
             audit_checkpoint_every_secs: 60,
+            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
+            audit_spool_max_bytes: 1_073_741_824,
         }
     }
 }
