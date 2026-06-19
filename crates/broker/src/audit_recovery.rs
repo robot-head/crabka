@@ -13,8 +13,10 @@ pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64,
     if leo <= 0 {
         return None;
     }
-    // Read a bounded tail window (audit records are small).
-    let start = (leo - 256).max(0);
+    // Read a bounded tail window (audit records are small).  4096 offsets
+    // comfortably exceeds the worst-case run of consecutive checkpoints
+    // between chained records; the 1 MiB byte cap keeps the read cheap.
+    let start = (leo - 4096).max(0);
     let out = partition.read_log(start, 1 << 20).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {

@@ -12,6 +12,7 @@ assert2 = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.7", features = ["test-helpers"] }
+crabka-raft = { path = "../raft", version = "0.3.7" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.7" }

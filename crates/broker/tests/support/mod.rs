@@ -58,8 +58,13 @@ pub async fn start() -> InProcess {
 /// Automatically detects if a raft log already exists and uses `Rejoin`.
 pub async fn start_with_dir(dir: &std::path::Path) -> (BrokerHandle, crabka_client_core::Client) {
     let mut config = BrokerConfig::for_tests(dir.to_path_buf());
-    // If a raft log already exists, we're restarting an initialized broker.
-    if dir.join("__cluster_metadata").exists() {
+    // Mirror the production heuristic from `detect_bootstrap_mode` in
+    // broker.rs: key Rejoin on `metadata_log_nonempty` (committed
+    // quorum-state), NOT bare directory presence.  The segment dir is created
+    // before the first raft commit, so dir-existence would re-bootstrap a node
+    // killed mid-election instead of letting it rejoin correctly.
+    let metadata_dir = dir.join("__cluster_metadata");
+    if crabka_raft::metadata_log_nonempty(&metadata_dir) {
         config.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
     }
     let broker = Broker::start(config).await.expect("broker start");
