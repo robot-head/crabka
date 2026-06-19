@@ -3194,17 +3194,13 @@ impl Broker {
         }
 
         // Emit the BrokerStarted lifecycle event now that the broker Arc is
-        // live and listeners are bound. We must wait for the replicator
-        // supervisor to materialize the audit partition in the local registry
-        // before emitting, so the `KafkaTopicAuditSink` can actually write
-        // the record. We poll with a bounded timeout; if the partition never
-        // appears (non-broker nodes, disabled audit, no led partition) we emit
-        // anyway and accept that the record may be dropped.
-        // Only emit BrokerStarted when this node actually leads an audit
-        // partition; otherwise the sink would silently drop the record
-        // (it binds to the led partition index, not partition 0).
-        // When audit_led_partition is None (controller-only node, follower,
-        // or audit disabled) we skip both the wait and the emit.
+        // live and listeners are bound. A broker that leads no audit partition
+        // (e.g. a controller-only node, or one that bootstrapped before brokers
+        // registered) has nowhere to durably write its own BrokerStarted record
+        // in Slice 1, so we deliberately skip both the partition-wait and the
+        // emit rather than emit a guaranteed-dropped record. Multi-broker / RF>1
+        // durability is Slice 3. When audit_led_partition is Some, we wait for
+        // the partition to materialize in the local registry before emitting.
         if let Some(led_pidx) = audit_led_partition {
             let audit_topic = broker.config.audit_topic.clone();
             let partitions_for_wait = broker.partitions.clone();
