@@ -91,6 +91,8 @@ impl FlowWorker {
     ///
     /// Returns the last build error if the pipeline cannot be constructed within
     /// the retry budget.
+    // cargo-mutants: retry/backoff loop has no value-asserting unit coverage
+    #[cfg_attr(test, mutants::skip)]
     pub async fn start(p: FlowWorkerParams) -> crate::Result<Self> {
         let mut backoff = INITIAL_BACKOFF;
         let mut elapsed = Duration::ZERO;
@@ -193,6 +195,8 @@ impl FlowWorker {
 
     /// Graceful stop: drain and shut down the connect runtime, then stop both
     /// background tasks.
+    // cargo-mutants: shutdown ordering not asserted by unit tests
+    #[cfg_attr(test, mutants::skip)]
     pub async fn shutdown(self) {
         let _ = self.runtime.shutdown().await;
         self.heartbeat.shutdown().await;

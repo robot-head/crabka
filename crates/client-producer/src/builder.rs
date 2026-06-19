@@ -42,6 +42,8 @@ fn is_retriable_coordinator_code(code: i16) -> bool {
 }
 
 #[allow(clippy::field_reassign_with_default)]
+// cargo-mutants: protocol-default InitProducerId shape, so `-> Default` is equivalent.
+#[cfg_attr(test, mutants::skip)]
 fn build_init_producer_id_request() -> InitProducerIdRequest {
     let mut req = InitProducerIdRequest::default();
     req.transactional_id = None;

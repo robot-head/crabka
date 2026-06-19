@@ -204,6 +204,8 @@ impl<C: BrokerConnector> BrokerPool<C> {
     }
 
     /// Close every open connection in the pool. Consumes the pool.
+    // cargo-mutants: teardown; no observable return to assert against
+    #[cfg_attr(test, mutants::skip)]
     pub fn close_all(self) {
         let conns: Vec<_> = self.by_id.iter().map(|e| e.value().clone()).collect();
         drop(self.by_id);

@@ -48,6 +48,8 @@ impl Jwks {
     /// An empty key set — nothing validates until the broker's refresher
     /// populates it.
     #[must_use]
+    // cargo-mutants: trivial constructor.
+    #[cfg_attr(test, mutants::skip)]
     pub fn empty() -> Self {
         Self {
             keys: HashMap::new(),

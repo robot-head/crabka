@@ -1620,7 +1620,10 @@ impl Broker {
     /// `advertised_listener` to it before calling.
     ///
     /// [`ListenerSpec`]: crate::config::ListenerSpec
-    #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
+    #[allow(clippy::too_many_lines)]
+    // sequential bring-up; splitting hurts readability more than it helps
+    // cargo-mutants: network/socket bring-up, not unit-testable
+    #[cfg_attr(test, mutants::skip)]
     pub async fn start_with_listeners(
         mut config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,

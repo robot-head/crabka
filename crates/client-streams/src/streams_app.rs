@@ -111,6 +111,8 @@ impl StreamsApp {
 impl StreamsApp {
     /// A fresh DSL builder; the schema registry is already installed.
     #[must_use]
+    // cargo-mutants: trivial builder accessor.
+    #[cfg_attr(test, mutants::skip)]
     pub fn streams_builder(&self) -> StreamsBuilder {
         StreamsBuilder::new()
     }

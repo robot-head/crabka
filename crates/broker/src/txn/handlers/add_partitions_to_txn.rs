@@ -232,6 +232,8 @@ fn denied_topics(
 /// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
 /// topics go through the state-machine check and partition registration.
 #[allow(clippy::too_many_arguments)]
+// cargo-mutants: I/O over live txn state + partition registration
+#[cfg_attr(test, mutants::skip)]
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,

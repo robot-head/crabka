@@ -21,6 +21,8 @@ pub struct KafkaTopicAuditSink {
 }
 
 impl std::fmt::Debug for KafkaTopicAuditSink {
+    // cargo-mutants: Debug formatting, no behavioral contract
+    #[cfg_attr(test, mutants::skip)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaTopicAuditSink")
             .field("topic", &self.topic)

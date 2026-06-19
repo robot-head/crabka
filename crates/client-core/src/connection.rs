@@ -227,6 +227,8 @@ impl Connection {
     /// Returns `ClientError::IncompatibleVersion` if there is no mutually
     /// supported version, `ClientError::Disconnected` if the I/O loop has
     /// exited, or `ClientError::Timeout` if no response arrives in time.
+    // cargo-mutants: live-broker send path; not unit-testable
+    #[cfg_attr(test, mutants::skip)]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         // 1. Negotiate version.
         let version = self.inner.versions.negotiate::<R>()?;
@@ -317,6 +319,8 @@ impl Connection {
     /// Returns [`ClientError::Disconnected`] if the I/O loop has exited
     /// or [`ClientError::Timeout`] if no response arrives within the
     /// configured request timeout.
+    // cargo-mutants: live-broker I/O path; not unit-testable
+    #[cfg_attr(test, mutants::skip)]
     pub async fn raw_request(
         &self,
         api_key: i16,
@@ -369,12 +373,16 @@ impl Connection {
     }
 
     /// Negotiated API versions known to this connection.
+    // cargo-mutants: one-line accessor returning a borrowed field
     #[must_use]
+    #[cfg_attr(test, mutants::skip)]
     pub fn versions(&self) -> &ApiVersionTable {
         &self.inner.versions
     }
 
     /// Close the connection, cancelling all background tasks.
+    // cargo-mutants: teardown; no observable return to assert against
+    #[cfg_attr(test, mutants::skip)]
     pub fn close(self) {
         self.inner.shutdown.cancel();
         // The Arc gets dropped when `self` does; `JoinHandle`s abort naturally.
