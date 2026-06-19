@@ -5,8 +5,8 @@
 {% endblock body %}
 
 {% block header %}
-  {# Derive the top-level section from the page path (e.g. "guide" or "reference").
-     page.path is "/guide/overview/", so strip the leading slash before splitting
+  {# Derive the top-level section from the page path (e.g. "docs" or "benchmarks").
+     page.path is "/docs/start-here/quickstart/", so strip the leading slash before splitting
      or `first` would be the empty string. #}
   {% set path_parts = page.path | trim_start_matches(pat="/") | split(pat="/") %}
   {% set current_section = path_parts | first %}

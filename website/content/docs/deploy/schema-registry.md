@@ -1,13 +1,19 @@
 +++
-title = "Deploying Schema Registry"
-weight = 30
+title = "Schema Registry Deployment"
+weight = 20
 template = "docs/page.html"
 
 [extra]
 mermaid = true
 +++
 
-## What a schema registry is and why you'd want it
+Crabka includes a Confluent Schema Registry-compatible REST service. It runs as
+a separate Kafka client, stores state in the compacted `_schemas` topic, and can
+be deployed by the operator or as a standalone Helm release.
+
+Use it when producers and consumers exchange structured records and need schema
+IDs, compatibility checks, and existing Confluent serializer/tooling
+compatibility.
 
 When producers and consumers exchange structured records, they need to agree on
 the shape of the data. A schema registry is the shared source of truth for those
@@ -18,8 +24,7 @@ out a change that would break the consumers reading from a topic. That is how yo
 evolve a data format (add a field, widen a type) without a flag-day coordination
 across every team.
 
-Crabka's registry is a separate binary that runs as a Kafka **client**, not part
-of the broker. It:
+The registry:
 
 - supports **Avro, Protobuf, and JSON Schema**, each with configurable
   compatibility checking (backward, forward, full, and their transitive
@@ -59,7 +64,7 @@ spec:
 
 The operator creates a Deployment, a ClusterIP Service
 (`sr-sr.<ns>.svc.cluster.local:8081`), and a headless Service for write
-forwarding. The generated [SchemaRegistry CRD reference](../../reference/operator/schemaregistry/)
+forwarding. The generated [SchemaRegistry CRD reference](/docs/reference/operator/schemaregistry/)
 lists every field.
 
 ## Standalone (Helm, external broker)
@@ -74,3 +79,10 @@ helm install sr charts/crabka-schema-registry \
 `spec.tls`, `spec.authentication` (Basic / unsecured Bearer), and
 `spec.authorization` (Kafka-ACL super-users) map to mounted Secrets + SR flags.
 Credentials are always referenced Secrets, never inline.
+
+## Next steps
+
+- Build schema-aware stream processors with
+  [Streams and Data Formats](/docs/develop/streams/).
+- Look up all Schema Registry fields in the
+  [SchemaRegistry CRD reference](/docs/reference/operator/schemaregistry/).

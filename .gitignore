@@ -31,13 +31,7 @@ crabka-operator.tar
 docs/superpowers/plans/
 
 # Generated docs-site content (produced by crabka-docgen / cargo doc at build time)
-/website/content/reference/_index.md
-/website/content/reference/operator/
-/website/content/reference/broker/_index.md
-/website/content/reference/broker/server-config.md
-/website/content/reference/broker/topic-configs.md
-/website/content/reference/broker/protocol-apis.md
-/website/content/reference/concepts/
+/website/content/docs/reference/
 /website/static/api/
 /website/static/images/
 /website/static/charts/

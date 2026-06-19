@@ -24,4 +24,4 @@ cp /tmp/package/dist/mermaid.min.js website/static/js/mermaid.min.js
 ```
 
 Then bump the pinned version above and confirm `zola build` renders the
-diagrams on a page such as `/reference/concepts/failure-scenarios/`.
+diagrams on a page such as `/docs/reference/concepts/failure-scenarios/`.
