@@ -298,4 +298,11 @@ exclude_re = [
     #   counter at 0 so the drain loop never terminates (companion to the `>=`
     #   drain-bound exclusion above).
     "replicator/src/admin_util\\.rs.*replace \\+= with \\*= in read_all",
+    # StreamsApp::streams_builder intentionally returns a fresh empty builder;
+    # `StreamsBuilder::default()` is implemented as the same `StreamsBuilder::new()`.
+    "(crates/)?client-streams/src/streams_app\\.rs.*replace StreamsApp::streams_builder -> StreamsBuilder with Default::default\\(\\)",
+    # Changing the COORDINATOR_LOAD_IN_PROGRESS retry guard from `==` to `!=`
+    # makes a successful StreamsMembership join retry forever, so cargo-mutants
+    # can only classify it as a timeout rather than an assertion gap.
+    "(crates/)?client-streams/src/membership/client\\.rs.*replace == with != in StreamsMembership::start",
 ]
