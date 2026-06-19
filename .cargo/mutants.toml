@@ -247,6 +247,53 @@ exclude_re = [
     #   forever — no assertion can observe a hang. The real poll's fetch/decode/
     #   seek/commit logic is unit- and integration-tested.
     "client-consumer/src/poll\\.rs.*replace Consumer::poll .* with Ok\\(vec!\\[\\]\\)",
+    # poll.rs live async wrappers and malformed fetch/list-offset requests can
+    # only be observed through broker-backed polling. Their request construction
+    # and pure routing/offset math helpers are mutation-tested in poll.rs.
+    "(crates/)?client-consumer/src/poll\\.rs.*replace Consumer::(resolve_latest_sentinels|apply_truncation|handle_truncation_in_poll) ->",
+    "(crates/)?client-consumer/src/poll\\.rs.*replace == with != in Consumer::resolve_latest_sentinels",
+    "(crates/)?client-consumer/src/poll\\.rs.*delete field (topic_id|partitions|topics) from struct (FetchTopic|FetchRequest) expression",
+    "(crates/)?client-consumer/src/poll\\.rs.*replace < with (==|<=) in Consumer::poll",
+    "(crates/)?client-consumer/src/poll\\.rs.*delete ! in Consumer::poll",
+    "(crates/)?client-consumer/src/poll\\.rs.*replace >= with < in Consumer::poll",
+    # client-consumer commit entrypoints are live coordinator RPC wrappers. The
+    # socket-free pieces they own (request construction, offset/epoch snapshot,
+    # and response error mapping) are mutation-tested in commit.rs helpers; the
+    # public methods themselves need a broker/coordinator connection to observe.
+    "client-consumer/src/commit\\.rs.*replace Consumer::commit_sync -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
+    "client-consumer/src/commit\\.rs.*replace Consumer::commit_async with \\(\\)",
+    # client-consumer coordinator edge cases:
+    # - `find_coordinator` is the live Client RPC/metadata-refresh wrapper; its
+    #   request construction and response projection are mutation-tested in pure
+    #   helpers, but canned return-value mutants need a broker coordinator to
+    #   observe.
+    # - forcing retry deadline/backoff helpers to "never elapsed" or zero
+    #   backoff creates non-terminating retry loops, reported as TIMEOUT rather
+    #   than a useful assertion gap; the helpers' boundaries are unit-tested.
+    "(crates/)?client-consumer/src/coordinator\\.rs.*replace find_coordinator -> Result<i32, ConsumerError> with Ok\\((-)?[0-9]+\\)",
+    "(crates/)?client-consumer/src/coordinator\\.rs.*replace retry_deadline_elapsed -> bool with false",
+    "(crates/)?client-consumer/src/coordinator\\.rs.*replace next_backoff -> Duration with Default::default\\(\\)",
+    "(crates/)?client-consumer/src/coordinator\\.rs.*replace \\* with / in next_backoff",
+    # In `classify`, changing the safe-offset clamp from `< 0` to `<= 0` is
+    # equivalent: for `leader_end_offset == 0`, both branches return `0`.
+    "crates/client-consumer/src/position\\.rs:57:47: replace < with <= in classify",
+    # client-consumer validation entrypoints are live metadata / leader-epoch
+    # RPC wrappers. Their socket-free decisions (epoch advancement, eligibility,
+    # routing, stale response handling, and broker-error reset) are factored
+    # into helpers in validate.rs and mutation-tested there.
+    "(crates/)?client-consumer/src/validate\\.rs.*replace Consumer::refresh_leader_epochs -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
+    "(crates/)?client-consumer/src/validate\\.rs.*replace Consumer::validate_positions -> Result<HashMap<\\(String, i32\\), i64>, ConsumerError> with Ok\\(",
+    # Share coordinator `run` is the background heartbeat serve-loop. Request
+    # construction, response classification, assignment replacement, and leave
+    # request construction are mutation-tested in pure helpers; the loop itself
+    # is task/timer/shutdown wiring.
+    "(crates/)?client-consumer/src/share/coordinator\\.rs.*replace run with \\(\\)",
+    # Share poll/ack live entrypoints send protocol requests over a Client. The
+    # request builders, error predicates, topic-id resolution, range math, and
+    # ack grouping are mutation-tested in socket-free helpers in share/poll.rs;
+    # these wrappers need a broker-side share fetch/ack endpoint to observe.
+    "(crates/)?client-consumer/src/share/poll\\.rs.*replace ShareConsumer::(poll|renew|commit|flush_pending_acks) -> Result<",
+    "(crates/)?client-consumer/src/share/poll\\.rs.*replace ShareConsumer::acknowledge -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
     # - `read_all`'s `consecutive_empty += 1` -> `*= 1` pins the empty-poll
     #   counter at 0 so the drain loop never terminates (companion to the `>=`
     #   drain-bound exclusion above).

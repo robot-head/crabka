@@ -10,6 +10,7 @@ use crate::consumer::Consumer;
 use crate::coordinator::{COORDINATOR_RETRY_TIMEOUT, find_coordinator, with_coordinator_refind};
 use crate::error::ConsumerError;
 use crate::offset_wire::build_commit_topics;
+use crate::position::PartitionPosition;
 
 /// First non-zero per-partition `error_code` in an `OffsetCommitResponse`, or
 /// `0` if every partition committed cleanly. `with_coordinator_refind` reads
@@ -25,6 +26,140 @@ fn first_commit_error(resp: &OffsetCommitResponse) -> i16 {
     0
 }
 
+fn commit_offsets(
+    raw_offsets: HashMap<(String, i32), i64>,
+    positions: &HashMap<(String, i32), PartitionPosition>,
+) -> HashMap<(String, i32), (i64, i32)> {
+    raw_offsets
+        .into_iter()
+        .map(|(k, v)| {
+            let epoch = positions.get(&k).map_or(-1, |p| p.offset_epoch);
+            (k, (v, epoch))
+        })
+        .collect()
+}
+
+fn build_commit_request(
+    group_id: String,
+    generation_id_or_member_epoch: i32,
+    member_id: String,
+    topics: Vec<crabka_protocol::owned::offset_commit_request::OffsetCommitRequestTopic>,
+) -> OffsetCommitRequest {
+    OffsetCommitRequest {
+        group_id,
+        generation_id_or_member_epoch,
+        member_id,
+        topics,
+        ..Default::default()
+    }
+}
+
+fn commit_response_result(resp: &OffsetCommitResponse) -> Result<(), ConsumerError> {
+    let code = first_commit_error(resp);
+    if code != 0 {
+        return Err(ConsumerError::Server(code));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::UnknownTaggedFields;
+    use crabka_protocol::owned::offset_commit_request::OffsetCommitRequestPartition;
+    use crabka_protocol::owned::offset_commit_response::{
+        OffsetCommitResponsePartition, OffsetCommitResponseTopic,
+    };
+    use crabka_protocol::primitives::uuid::Uuid;
+
+    fn response(errors: &[i16]) -> OffsetCommitResponse {
+        OffsetCommitResponse {
+            throttle_time_ms: 0,
+            topics: vec![OffsetCommitResponseTopic {
+                name: "topic".into(),
+                topic_id: Uuid::ZERO,
+                partitions: errors
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(partition_index, error_code)| OffsetCommitResponsePartition {
+                            partition_index: i32::try_from(partition_index).unwrap(),
+                            error_code: *error_code,
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
+                        },
+                    )
+                    .collect(),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }
+    }
+
+    #[test]
+    fn first_commit_error_returns_first_non_zero_partition_error() {
+        assert!(first_commit_error(&response(&[0, 0])) == 0);
+        assert!(first_commit_error(&response(&[0, 27, 42])) == 27);
+        assert!(first_commit_error(&response(&[16, 27])) == 16);
+    }
+
+    #[test]
+    fn commit_offsets_use_position_epoch_or_unknown_epoch() {
+        let mut raw = HashMap::new();
+        raw.insert(("known".into(), 0), 11);
+        raw.insert(("unknown".into(), 1), 22);
+
+        let mut positions = HashMap::new();
+        positions.insert(
+            ("known".into(), 0),
+            PartitionPosition {
+                offset_epoch: 7,
+                ..Default::default()
+            },
+        );
+
+        let offsets = commit_offsets(raw, &positions);
+        assert!(offsets.get(&("known".into(), 0)) == Some(&(11, 7)));
+        assert!(offsets.get(&("unknown".into(), 1)) == Some(&(22, -1)));
+    }
+
+    #[test]
+    fn build_commit_request_preserves_group_member_generation_and_topics() {
+        let topics = vec![
+            crabka_protocol::owned::offset_commit_request::OffsetCommitRequestTopic {
+                name: "topic".into(),
+                topic_id: Uuid::ZERO,
+                partitions: vec![OffsetCommitRequestPartition {
+                    partition_index: 3,
+                    committed_offset: 99,
+                    committed_leader_epoch: 5,
+                    committed_metadata: Some(String::new()),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            },
+        ];
+
+        let req = build_commit_request("group-a".into(), 42, "member-a".into(), topics);
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id_or_member_epoch == 42);
+        assert!(req.member_id == "member-a");
+        assert!(req.topics.len() == 1);
+        assert!(req.topics[0].name == "topic");
+        assert!(req.topics[0].partitions[0].partition_index == 3);
+        assert!(req.topics[0].partitions[0].committed_offset == 99);
+        assert!(req.topics[0].partitions[0].committed_leader_epoch == 5);
+    }
+
+    #[test]
+    fn commit_response_result_maps_first_error_to_server_error() {
+        assert!(commit_response_result(&response(&[0, 0])).is_ok());
+        let err = commit_response_result(&response(&[0, 42])).unwrap_err();
+        assert!(matches!(err, ConsumerError::Server(42)));
+    }
+}
+
 impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
     /// Blocks until the broker acks.
@@ -34,13 +169,7 @@ impl Consumer {
             return Ok(());
         }
         let pos = self.positions.lock().await;
-        let offsets: HashMap<(String, i32), (i64, i32)> = raw_offsets
-            .into_iter()
-            .map(|(k, v)| {
-                let epoch = pos.get(&k).map_or(-1, |p| p.offset_epoch);
-                (k, (v, epoch))
-            })
-            .collect();
+        let offsets = commit_offsets(raw_offsets, &pos);
         drop(pos);
         let topic_ids = self.topic_ids.lock().await.clone();
         let topics = build_commit_topics(offsets, &topic_ids);
@@ -64,13 +193,12 @@ impl Consumer {
                 async move {
                     client
                         .broker(target)
-                        .send(OffsetCommitRequest {
+                        .send(build_commit_request(
                             group_id,
-                            generation_id_or_member_epoch: self.generation_id,
+                            self.generation_id,
                             member_id,
                             topics,
-                            ..Default::default()
-                        })
+                        ))
                         .await
                         .map_err(ConsumerError::from)
                 }
@@ -78,12 +206,7 @@ impl Consumer {
         )
         .await?;
 
-        // Surface the first non-zero error_code if any.
-        let code = first_commit_error(&resp);
-        if code != 0 {
-            return Err(ConsumerError::Server(code));
-        }
-        Ok(())
+        commit_response_result(&resp)
     }
 
     /// Fire-and-forget commit. Returns once the request is enqueued on the
@@ -104,13 +227,7 @@ impl Consumer {
                 return;
             }
             let pos = positions.lock().await;
-            let snapshot: HashMap<(String, i32), (i64, i32)> = raw_snapshot
-                .into_iter()
-                .map(|(k, v)| {
-                    let epoch = pos.get(&k).map_or(-1, |p| p.offset_epoch);
-                    (k, (v, epoch))
-                })
-                .collect();
+            let snapshot = commit_offsets(raw_snapshot, &pos);
             drop(pos);
             let topic_ids = topic_ids.lock().await.clone();
             let topics = build_commit_topics(snapshot, &topic_ids);
@@ -118,12 +235,8 @@ impl Consumer {
             // coordinator code (or the socket is gone), re-discover once and
             // retry — but don't block a background commit on the full retry
             // loop; one re-find recovers a coordinator move at-least-once.
-            let make_req = |topics: Vec<_>| OffsetCommitRequest {
-                group_id: group_id.clone(),
-                generation_id_or_member_epoch: generation,
-                member_id: member_id.clone(),
-                topics,
-                ..Default::default()
+            let make_req = |topics: Vec<_>| {
+                build_commit_request(group_id.clone(), generation, member_id.clone(), topics)
             };
             let target = coordinator_id.load(Ordering::Relaxed);
             let res = client.broker(target).send(make_req(topics.clone())).await;

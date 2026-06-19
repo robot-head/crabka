@@ -96,6 +96,107 @@ pub struct ConsumerRecord {
     pub headers: Vec<Header>,
 }
 
+fn initial_subscription_bytes(subscribe: &[String], client_rack: Option<&str>) -> bytes::Bytes {
+    encode_subscription(subscribe, &[], -1, client_rack)
+}
+
+fn build_join_request(
+    group_id: String,
+    member_id: String,
+    protocol_name: String,
+    subscription_bytes: bytes::Bytes,
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+) -> JoinGroupRequest {
+    JoinGroupRequest {
+        group_id,
+        protocol_type: "consumer".into(),
+        member_id,
+        session_timeout_ms,
+        rebalance_timeout_ms,
+        protocols: vec![JoinGroupRequestProtocol {
+            name: protocol_name,
+            metadata: subscription_bytes,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn first_join_member_id(resp: &JoinGroupResponse) -> Result<String, ConsumerError> {
+    let member_id = if resp.error_code == 79 || resp.error_code == 0 {
+        resp.member_id.clone()
+    } else {
+        return Err(ConsumerError::Server(resp.error_code));
+    };
+    if member_id.is_empty() {
+        return Err(ConsumerError::RebalanceFailed(
+            "broker did not assign a member_id".into(),
+        ));
+    }
+    Ok(member_id)
+}
+
+fn is_subscribed_topic(subscribe: &[String], name: &str) -> bool {
+    subscribe.iter().any(|s| s == name)
+}
+
+fn is_group_leader(leader: &str, member_id: &str) -> bool {
+    leader == member_id
+}
+
+fn build_sync_assignment(
+    member_id: String,
+    partitions: &[(String, i32)],
+) -> SyncGroupRequestAssignment {
+    SyncGroupRequestAssignment {
+        member_id,
+        assignment: encode_assignment(partitions),
+        ..Default::default()
+    }
+}
+
+fn build_sync_request(
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    protocol_name: String,
+    assignments: Vec<SyncGroupRequestAssignment>,
+) -> SyncGroupRequest {
+    SyncGroupRequest {
+        group_id,
+        generation_id,
+        member_id,
+        protocol_type: Some("consumer".into()),
+        protocol_name: Some(protocol_name),
+        assignments,
+        ..Default::default()
+    }
+}
+
+fn has_assigned_partitions(assigned_partitions: &[(String, i32)]) -> bool {
+    !assigned_partitions.is_empty()
+}
+
+fn starting_offset(committed: i64, auto_offset_reset: AutoOffsetReset) -> i64 {
+    if committed >= 0 {
+        committed
+    } else {
+        match auto_offset_reset {
+            AutoOffsetReset::Earliest => 0,
+            // Resolved by poll() on first call.
+            AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
+        }
+    }
+}
+
+fn primed_position(committed_epoch: i32) -> crate::position::PartitionPosition {
+    crate::position::PartitionPosition {
+        offset_epoch: committed_epoch,
+        ..Default::default()
+    }
+}
+
 #[bon::bon]
 impl Consumer {
     /// Build a [`Consumer`] subscribed to the given topics: resolve bootstrap,
@@ -150,7 +251,7 @@ impl Consumer {
         // First JoinGroup uses empty `owned_partitions` + `generation_id=-1`:
         // we've never been in the group before, so we have nothing to claim
         // and no prior generation to defend against zombie ownership.
-        let subscription_bytes = encode_subscription(&subscribe, &[], -1, client_rack.as_deref());
+        let subscription_bytes = initial_subscription_bytes(&subscribe, client_rack.as_deref());
         let protocol_name = assignor.protocol_name().to_string();
 
         // 1. First JoinGroup — empty member_id, expect MEMBER_ID_REQUIRED (79)
@@ -172,35 +273,21 @@ impl Consumer {
                 async move {
                     client
                         .broker(target)
-                        .send(JoinGroupRequest {
+                        .send(build_join_request(
                             group_id,
-                            protocol_type: "consumer".into(),
-                            member_id: String::new(),
+                            String::new(),
+                            protocol_name,
+                            subscription_bytes,
                             session_timeout_ms,
                             rebalance_timeout_ms,
-                            protocols: vec![JoinGroupRequestProtocol {
-                                name: protocol_name,
-                                metadata: subscription_bytes,
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        })
+                        ))
                         .await
                         .map_err(ConsumerError::from)
                 }
             },
         )
         .await?;
-        let member_id = if r1.error_code == 79 || r1.error_code == 0 {
-            r1.member_id.clone()
-        } else {
-            return Err(ConsumerError::Server(r1.error_code));
-        };
-        if member_id.is_empty() {
-            return Err(ConsumerError::RebalanceFailed(
-                "broker did not assign a member_id".into(),
-            ));
-        }
+        let member_id = first_join_member_id(&r1)?;
 
         // 2. Second JoinGroup with the assigned member_id, on the coordinator.
         let r2 = with_coordinator_refind(
@@ -219,19 +306,14 @@ impl Consumer {
                 async move {
                     client
                         .broker(target)
-                        .send(JoinGroupRequest {
+                        .send(build_join_request(
                             group_id,
-                            protocol_type: "consumer".into(),
                             member_id,
+                            protocol_name,
+                            subscription_bytes,
                             session_timeout_ms,
                             rebalance_timeout_ms,
-                            protocols: vec![JoinGroupRequestProtocol {
-                                name: protocol_name,
-                                metadata: subscription_bytes,
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        })
+                        ))
                         .await
                         .map_err(ConsumerError::from)
                 }
@@ -254,14 +336,14 @@ impl Consumer {
         let mut topic_partitions: HashMap<String, i32> = HashMap::new();
         for t in &md.topics {
             let Some(name) = &t.name else { continue };
-            if subscribe.iter().any(|s| s == name) {
+            if is_subscribed_topic(&subscribe, name) {
                 let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
                 topic_partitions.insert(name.clone(), count);
                 topic_ids.insert(name.clone(), t.topic_id);
             }
         }
 
-        let is_leader = r2.leader == member_id;
+        let is_leader = is_group_leader(&r2.leader, &member_id);
         let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
             let assignments = match assignor {
                 Assignor::Range => {
@@ -289,11 +371,7 @@ impl Consumer {
             };
             assignments
                 .into_iter()
-                .map(|(m, partitions)| SyncGroupRequestAssignment {
-                    member_id: m,
-                    assignment: encode_assignment(&partitions),
-                    ..Default::default()
-                })
+                .map(|(m, partitions)| build_sync_assignment(m, &partitions))
                 .collect()
         } else {
             Vec::new()
@@ -319,15 +397,13 @@ impl Consumer {
                 async move {
                     client
                         .broker(target)
-                        .send(SyncGroupRequest {
+                        .send(build_sync_request(
                             group_id,
                             generation_id,
                             member_id,
-                            protocol_type: Some("consumer".into()),
-                            protocol_name: Some(protocol_name),
-                            assignments: assignments_for_sync,
-                            ..Default::default()
-                        })
+                            protocol_name,
+                            assignments_for_sync,
+                        ))
                         .await
                         .map_err(ConsumerError::from)
                 }
@@ -343,7 +419,7 @@ impl Consumer {
         let mut next_offsets: HashMap<(String, i32), i64> = HashMap::new();
         let mut positions: HashMap<(String, i32), crate::position::PartitionPosition> =
             HashMap::new();
-        if !assigned_partitions.is_empty() {
+        if has_assigned_partitions(&assigned_partitions) {
             let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
             for (t, p) in &assigned_partitions {
                 by_topic.entry(t.clone()).or_default().push(*p);
@@ -360,23 +436,9 @@ impl Consumer {
             for (name, partition_index, committed, committed_epoch) in
                 crate::offset_wire::parse_offset_fetch(&of, &id_to_name)
             {
-                let starting = if committed >= 0 {
-                    committed
-                } else {
-                    match auto_offset_reset {
-                        AutoOffsetReset::Earliest => 0,
-                        // Resolved by poll() on first call.
-                        AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
-                    }
-                };
+                let starting = starting_offset(committed, auto_offset_reset);
                 next_offsets.insert((name.clone(), partition_index), starting);
-                positions.insert(
-                    (name, partition_index),
-                    crate::position::PartitionPosition {
-                        offset_epoch: committed_epoch,
-                        ..Default::default()
-                    },
-                );
+                positions.insert((name, partition_index), primed_position(committed_epoch));
             }
         }
 
@@ -524,6 +586,194 @@ mod security_arg_tests {
     use assert2::assert;
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
+
+    #[test]
+    fn initial_subscription_uses_unknown_generation_and_empty_owned_partitions() {
+        let bytes = initial_subscription_bytes(&["topic".into()], Some("rack-a"));
+        let decoded = decode_subscription(&bytes);
+
+        assert!(decoded.topics == vec!["topic"]);
+        assert!(decoded.owned.is_empty());
+        assert!(decoded.generation_id == -1);
+        assert!(decoded.rack_id.as_deref() == Some("rack-a"));
+    }
+
+    #[test]
+    fn build_join_request_preserves_group_member_timeouts_and_protocol() {
+        let metadata = bytes::Bytes::from_static(b"metadata");
+        let req = build_join_request(
+            "group-a".into(),
+            "member-a".into(),
+            "range".into(),
+            metadata.clone(),
+            45_000,
+            60_000,
+        );
+
+        assert!(req.group_id == "group-a");
+        assert!(req.protocol_type == "consumer");
+        assert!(req.member_id == "member-a");
+        assert!(req.session_timeout_ms == 45_000);
+        assert!(req.rebalance_timeout_ms == 60_000);
+        assert!(req.protocols.len() == 1);
+        assert!(req.protocols[0].name == "range");
+        assert!(req.protocols[0].metadata == metadata);
+    }
+
+    #[test]
+    fn first_join_member_id_accepts_required_or_success_and_rejects_errors() {
+        let required = JoinGroupResponse {
+            error_code: 79,
+            member_id: "member-a".into(),
+            ..Default::default()
+        };
+        assert!(first_join_member_id(&required).unwrap() == "member-a");
+
+        let success = JoinGroupResponse {
+            error_code: 0,
+            member_id: "member-b".into(),
+            ..Default::default()
+        };
+        assert!(first_join_member_id(&success).unwrap() == "member-b");
+
+        let server = JoinGroupResponse {
+            error_code: 42,
+            member_id: "member-c".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            first_join_member_id(&server),
+            Err(ConsumerError::Server(42))
+        ));
+
+        let empty_member = JoinGroupResponse {
+            error_code: 0,
+            member_id: String::new(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            first_join_member_id(&empty_member),
+            Err(ConsumerError::RebalanceFailed(_))
+        ));
+    }
+
+    #[test]
+    fn is_subscribed_topic_matches_exact_topic_names() {
+        let subscribe = vec!["orders".to_string(), "payments".to_string()];
+
+        assert!(is_subscribed_topic(&subscribe, "orders"));
+        assert!(is_subscribed_topic(&subscribe, "payments"));
+        assert!(!is_subscribed_topic(&subscribe, "shipments"));
+        assert!(!is_subscribed_topic(&subscribe, "order"));
+    }
+
+    #[test]
+    fn is_group_leader_matches_exact_member_id() {
+        assert!(is_group_leader("member-a", "member-a"));
+        assert!(!is_group_leader("member-a", "member-b"));
+        assert!(!is_group_leader("member-a", ""));
+    }
+
+    #[test]
+    fn build_sync_assignment_preserves_member_and_assignment_payload() {
+        let assignment = build_sync_assignment("member-a".into(), &[("orders".into(), 3)]);
+        let decoded = decode_assignment(&assignment.assignment);
+
+        assert!(assignment.member_id == "member-a");
+        assert!(decoded == vec![("orders".into(), 3)]);
+    }
+
+    #[test]
+    fn build_sync_request_preserves_group_generation_member_protocol_and_assignments() {
+        let assignment = build_sync_assignment("member-a".into(), &[("orders".into(), 3)]);
+        let req = build_sync_request(
+            "group-a".into(),
+            7,
+            "member-a".into(),
+            "range".into(),
+            vec![assignment.clone()],
+        );
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id == 7);
+        assert!(req.member_id == "member-a");
+        assert!(req.protocol_type.as_deref() == Some("consumer"));
+        assert!(req.protocol_name.as_deref() == Some("range"));
+        assert!(req.assignments == vec![assignment]);
+    }
+
+    #[test]
+    fn offset_prime_helpers_preserve_assignment_presence_offsets_and_epochs() {
+        assert!(!has_assigned_partitions(&[]));
+        assert!(has_assigned_partitions(&[("orders".into(), 0)]));
+
+        assert!(starting_offset(12, AutoOffsetReset::Earliest) == 12);
+        assert!(starting_offset(-1, AutoOffsetReset::Earliest) == 0);
+        assert!(starting_offset(-1, AutoOffsetReset::Latest) == i64::MAX);
+        assert!(starting_offset(-1, AutoOffsetReset::None) == i64::MAX);
+
+        let position = primed_position(9);
+        assert!(position.offset_epoch == 9);
+        assert!(position.leader_id == -1);
+        assert!(position.leader_epoch == -1);
+        assert!(!position.awaiting_validation);
+    }
+
+    async fn test_consumer() -> Consumer {
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .client_id("test-client")
+            .build()
+            .await
+            .unwrap();
+        Consumer {
+            client,
+            group_id: "group-a".into(),
+            coordinator_id: Arc::new(AtomicI32::new(3)),
+            member_id: "member-a".into(),
+            generation_id: 7,
+            subscribed_topics: vec!["orders".into(), "payments".into()],
+            assigned: Arc::new(Mutex::new(vec![("orders".into(), 0)])),
+            next_offsets: Arc::new(Mutex::new(HashMap::new())),
+            positions: Arc::new(Mutex::new(HashMap::new())),
+            pending_seeks: Arc::new(Mutex::new(HashMap::new())),
+            topic_ids: Arc::new(Mutex::new(HashMap::new())),
+            session_timeout: std::time::Duration::from_secs(45),
+            heartbeat_interval: std::time::Duration::from_secs(3),
+            assignor: Assignor::Range,
+            coordinator_shutdown: CancellationToken::new(),
+            coordinator_handle: None,
+            isolation_level: IsolationLevel::ReadUncommitted,
+            auto_offset_reset: AutoOffsetReset::Latest,
+        }
+    }
+
+    #[tokio::test]
+    async fn accessors_return_consumer_identity_subscription_and_assignment() {
+        let consumer = test_consumer().await;
+
+        assert!(consumer.group_id() == "group-a");
+        assert!(consumer.member_id() == "member-a");
+        assert!(consumer.generation_id() == 7);
+        assert!(consumer.subscribed_topics() == ["orders".to_string(), "payments".to_string()]);
+        assert!(consumer.assignment().await == vec![("orders".into(), 0)]);
+
+        let metadata = consumer.group_metadata();
+        assert!(metadata.group_id == "group-a");
+        assert!(metadata.member_id == "member-a");
+        assert!(metadata.generation_id == 7);
+        assert!(metadata.group_instance_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_cancels_shutdown_token_even_without_spawned_handle() {
+        let consumer = test_consumer().await;
+        let shutdown = consumer.coordinator_shutdown.clone();
+
+        consumer.close().await.unwrap();
+
+        assert!(shutdown.is_cancelled());
+    }
 
     #[tokio::test]
     async fn consumer_builder_accepts_security() {

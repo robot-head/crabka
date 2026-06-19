@@ -17,6 +17,8 @@ use crate::error::ConsumerError;
 /// Matches `BrokerPool`'s bootstrap slot so a fallback Fetch is sent via
 /// `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
+const UNKNOWN_FETCH_OFFSET: i64 = -1;
+const UNKNOWN_LEADER_ID: i32 = -1;
 
 /// One fetchable partition's request fields:
 /// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
@@ -24,6 +26,109 @@ type FetchSpec = (i32, i64, i32, i32);
 
 /// Partitions to fetch, grouped first by leader id, then by topic.
 type FetchByLeader = HashMap<i32, HashMap<String, Vec<FetchSpec>>>;
+
+fn fetch_leader_id(leader_id: i32, knows_leader: bool) -> i32 {
+    if leader_id >= 0 && knows_leader {
+        leader_id
+    } else {
+        BOOTSTRAP_LEADER
+    }
+}
+
+fn should_use_bootstrap_leader(leader: i32) -> bool {
+    leader == BOOTSTRAP_LEADER
+}
+
+fn fetch_offset_or_unknown(offsets: &HashMap<(String, i32), i64>, key: &(String, i32)) -> i64 {
+    offsets.get(key).copied().unwrap_or(UNKNOWN_FETCH_OFFSET)
+}
+
+fn is_read_committed(isolation_level: IsolationLevel) -> bool {
+    isolation_level == IsolationLevel::ReadCommitted
+}
+
+fn aborted_txn_started(first_offset: i64, batch_base_offset: i64) -> bool {
+    first_offset <= batch_base_offset
+}
+
+fn should_drop_aborted_batch(
+    read_committed: bool,
+    is_transactional: bool,
+    producer_is_aborted: bool,
+) -> bool {
+    read_committed && is_transactional && producer_is_aborted
+}
+
+fn record_offset(base_offset: i64, offset_delta: i32) -> i64 {
+    base_offset + i64::from(offset_delta)
+}
+
+fn record_timestamp(base_timestamp: i64, timestamp_delta: i64) -> i64 {
+    base_timestamp + timestamp_delta
+}
+
+fn build_fetch_topic(
+    name: String,
+    topic_id: crabka_protocol::primitives::uuid::Uuid,
+    partitions: Vec<FetchSpec>,
+) -> FetchTopic {
+    FetchTopic {
+        topic: name,
+        topic_id,
+        partitions: partitions
+            .into_iter()
+            .map(
+                |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
+                    partition: p,
+                    fetch_offset: off,
+                    current_leader_epoch: leader_epoch,
+                    last_fetched_epoch,
+                    partition_max_bytes: 1 << 20,
+                    ..Default::default()
+                },
+            )
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn build_fetch_request(
+    timeout_ms: i32,
+    isolation_level: IsolationLevel,
+    topics: Vec<FetchTopic>,
+) -> FetchRequest {
+    FetchRequest {
+        max_wait_ms: timeout_ms,
+        min_bytes: 1,
+        max_bytes: 50 * 1024 * 1024,
+        isolation_level: isolation_level.wire(),
+        topics,
+        ..Default::default()
+    }
+}
+
+fn build_latest_offsets_request(by_topic: HashMap<String, Vec<i32>>) -> ListOffsetsRequest {
+    let topics: Vec<ListOffsetsTopic> = by_topic
+        .into_iter()
+        .map(|(name, partitions)| ListOffsetsTopic {
+            name,
+            partitions: partitions
+                .into_iter()
+                .map(|p| ListOffsetsPartition {
+                    partition_index: p,
+                    timestamp: -1, // LATEST
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    ListOffsetsRequest {
+        replica_id: -1,
+        topics,
+        ..Default::default()
+    }
+}
 
 impl Consumer {
     /// Returns the records from every v2 batch the broker returned per
@@ -108,11 +213,8 @@ impl Consumer {
                 // (e.g. port 0 from an in-process test broker) is treated as
                 // unknown — the bootstrap broker is the leader in that
                 // single-broker case anyway.
-                let leader = if pos.leader_id >= 0 && self.client.knows_broker(pos.leader_id) {
-                    pos.leader_id
-                } else {
-                    BOOTSTRAP_LEADER
-                };
+                let leader =
+                    fetch_leader_id(pos.leader_id, self.client.knows_broker(pos.leader_id));
                 by_leader
                     .entry(leader)
                     .or_default()
@@ -135,35 +237,11 @@ impl Consumer {
                 .into_iter()
                 .map(|(name, plist)| {
                     let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
-                    FetchTopic {
-                        topic: name,
-                        topic_id,
-                        partitions: plist
-                            .into_iter()
-                            .map(
-                                |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
-                                    partition: p,
-                                    fetch_offset: off,
-                                    current_leader_epoch: leader_epoch,
-                                    last_fetched_epoch,
-                                    partition_max_bytes: 1 << 20,
-                                    ..Default::default()
-                                },
-                            )
-                            .collect(),
-                        ..Default::default()
-                    }
+                    build_fetch_topic(name, topic_id, plist)
                 })
                 .collect();
-            let req = FetchRequest {
-                max_wait_ms: timeout_ms,
-                min_bytes: 1,
-                max_bytes: 50 * 1024 * 1024,
-                isolation_level: self.isolation_level.wire(),
-                topics,
-                ..Default::default()
-            };
-            let resp = if leader == BOOTSTRAP_LEADER {
+            let req = build_fetch_request(timeout_ms, self.isolation_level, topics);
+            let resp = if should_use_bootstrap_leader(leader) {
                 self.client.send(req).await?
             } else {
                 self.client.broker(leader).send(req).await?
@@ -238,7 +316,7 @@ impl Consumer {
                         // log_start forward, re-fetching from 0 re-triggers OOR
                         // forever. Mirrors what the replicator does on OOR.
                         // No RPC needed — log_start_offset is already in `part`.
-                        let fetch_offset = offsets.get(&key).copied().unwrap_or(-1);
+                        let fetch_offset = fetch_offset_or_unknown(&offsets, &key);
                         let log_start = part.log_start_offset;
                         let (topic, partition) = (key.0.clone(), key.1);
                         match self.auto_offset_reset {
@@ -281,7 +359,7 @@ impl Consumer {
                             // stale leader id so the bootstrap fallback (and a
                             // re-flag, if metadata advances the epoch) kicks in.
                             if let Some(p) = positions.get_mut(&key) {
-                                p.leader_id = -1;
+                                p.leader_id = UNKNOWN_LEADER_ID;
                             }
                             drop(positions);
                             refresh_after_processing = true;
@@ -294,7 +372,7 @@ impl Consumer {
                         if let Some(p) = positions.get_mut(&key) {
                             // Force refresh_leader_epochs to re-flag against
                             // fresher metadata next poll (any real epoch >= 0 > -1).
-                            p.leader_epoch = -1;
+                            p.leader_epoch = UNKNOWN_LEADER_ID;
                             // Only gate on validation when we have a consumed epoch
                             // to validate against. A never-consumed partition
                             // (offset_epoch < 0) has nothing to validate; flagging it
@@ -333,7 +411,7 @@ impl Consumer {
                 // list. We replay Kafka's algorithm — walk batches in offset
                 // order, tracking which producer_ids have an open aborted
                 // transaction, and drop transactional records from those.
-                let read_committed = self.isolation_level == IsolationLevel::ReadCommitted;
+                let read_committed = is_read_committed(self.isolation_level);
                 // Aborted txns sorted by first_offset; consumed front-to-back
                 // as batch offsets advance past each entry's start.
                 let mut aborted: std::collections::VecDeque<(i64, i64)> = if read_committed {
@@ -357,7 +435,7 @@ impl Consumer {
                     // batch into the active set.
                     if read_committed {
                         while let Some(&(first_offset, pid)) = aborted.front() {
-                            if first_offset <= batch.base_offset {
+                            if aborted_txn_started(first_offset, batch.base_offset) {
                                 aborted_pids.insert(pid);
                                 aborted.pop_front();
                             } else {
@@ -375,14 +453,15 @@ impl Consumer {
                         continue;
                     }
                     // Drop transactional records belonging to an aborted txn.
-                    if read_committed
-                        && batch.attributes.is_transactional()
-                        && aborted_pids.contains(&batch.producer_id)
-                    {
+                    if should_drop_aborted_batch(
+                        read_committed,
+                        batch.attributes.is_transactional(),
+                        aborted_pids.contains(&batch.producer_id),
+                    ) {
                         continue;
                     }
                     for r in &batch.records {
-                        let offset = batch.base_offset + i64::from(r.offset_delta);
+                        let offset = record_offset(batch.base_offset, r.offset_delta);
                         // Skip records that precede the fetch floor: the broker
                         // returned a whole batch whose base_offset < our
                         // position (straddle case — see fetch_floor comment).
@@ -394,7 +473,7 @@ impl Consumer {
                             partition: part.partition_index,
                             offset,
                             leader_epoch: batch.partition_leader_epoch,
-                            timestamp: batch.base_timestamp + r.timestamp_delta,
+                            timestamp: record_timestamp(batch.base_timestamp, r.timestamp_delta),
                             key: r.key.clone(),
                             value: r.value.clone(),
                             headers: r
@@ -465,28 +544,9 @@ impl Consumer {
         for (t, p) in &sentinels {
             by_topic.entry(t.clone()).or_default().push(*p);
         }
-        let topics: Vec<ListOffsetsTopic> = by_topic
-            .into_iter()
-            .map(|(name, partitions)| ListOffsetsTopic {
-                name,
-                partitions: partitions
-                    .into_iter()
-                    .map(|p| ListOffsetsPartition {
-                        partition_index: p,
-                        timestamp: -1, // LATEST
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            })
-            .collect();
         let lo = self
             .client
-            .send(ListOffsetsRequest {
-                replica_id: -1,
-                topics,
-                ..Default::default()
-            })
+            .send(build_latest_offsets_request(by_topic))
             .await?;
         for t in &lo.topics {
             for p in &t.partitions {
@@ -508,7 +568,7 @@ impl Consumer {
         let mut offsets = self.next_offsets.lock().await;
         for (key, safe_offset) in truncated {
             if let AutoOffsetReset::None = self.auto_offset_reset {
-                let fetch_offset = offsets.get(key).copied().unwrap_or(-1);
+                let fetch_offset = fetch_offset_or_unknown(&offsets, key);
                 return Err(ConsumerError::LogTruncation {
                     topic: key.0.clone(),
                     partition: key.1,
@@ -530,7 +590,7 @@ impl Consumer {
         safe_offset: i64,
     ) -> Result<(), ConsumerError> {
         if let AutoOffsetReset::None = self.auto_offset_reset {
-            let fetch_offset = offsets.get(key).copied().unwrap_or(-1);
+            let fetch_offset = fetch_offset_or_unknown(offsets, key);
             return Err(ConsumerError::LogTruncation {
                 topic: key.0.clone(),
                 partition: key.1,
@@ -545,8 +605,85 @@ impl Consumer {
 
 #[cfg(test)]
 mod offset_advance_tests {
+    use std::collections::HashMap;
+
+    use super::*;
     use assert2::assert;
+    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
     use crabka_protocol::records::{RecordBatch, RecordsPayload};
+
+    fn id(n: u8) -> WireUuid {
+        let mut b = [0u8; 16];
+        b[15] = n;
+        WireUuid(b)
+    }
+
+    #[test]
+    fn fetch_leader_id_uses_known_non_negative_leader_or_bootstrap() {
+        assert!(BOOTSTRAP_LEADER == -1);
+        assert!(UNKNOWN_LEADER_ID == -1);
+        assert!(UNKNOWN_FETCH_OFFSET == -1);
+        assert!(fetch_leader_id(3, true) == 3);
+        assert!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
+        assert!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
+        assert!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
+        assert!(!should_use_bootstrap_leader(3));
+    }
+
+    #[test]
+    fn poll_helpers_preserve_sentinel_filter_and_record_math_boundaries() {
+        let key = ("topic-a".to_string(), 2);
+        let mut offsets = HashMap::new();
+
+        assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
+        offsets.insert(key.clone(), 42);
+        assert!(fetch_offset_or_unknown(&offsets, &key) == 42);
+
+        assert!(is_read_committed(IsolationLevel::ReadCommitted));
+        assert!(!is_read_committed(IsolationLevel::ReadUncommitted));
+        assert!(aborted_txn_started(10, 10));
+        assert!(aborted_txn_started(10, 11));
+        assert!(!aborted_txn_started(11, 10));
+        assert!(should_drop_aborted_batch(true, true, true));
+        assert!(!should_drop_aborted_batch(false, true, true));
+        assert!(!should_drop_aborted_batch(true, false, true));
+        assert!(!should_drop_aborted_batch(true, true, false));
+        assert!(record_offset(100, 7) == 107);
+        assert!(record_timestamp(1000, 33) == 1033);
+    }
+
+    #[test]
+    fn build_fetch_request_preserves_topic_partition_and_limits() {
+        let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)]);
+        assert!(topic.topic == "topic-a");
+        assert!(topic.topic_id == id(7));
+        assert!(topic.partitions.len() == 1);
+        assert!(topic.partitions[0].partition == 2);
+        assert!(topic.partitions[0].fetch_offset == 42);
+        assert!(topic.partitions[0].current_leader_epoch == 5);
+        assert!(topic.partitions[0].last_fetched_epoch == 4);
+        assert!(topic.partitions[0].partition_max_bytes == 1 << 20);
+
+        let req = build_fetch_request(123, IsolationLevel::ReadCommitted, vec![topic]);
+        assert!(req.max_wait_ms == 123);
+        assert!(req.min_bytes == 1);
+        assert!(req.max_bytes == 50 * 1024 * 1024);
+        assert!(req.isolation_level == IsolationLevel::ReadCommitted.wire());
+        assert!(req.topics.len() == 1);
+    }
+
+    #[test]
+    fn latest_offsets_request_uses_latest_timestamp_and_replica_sentinel() {
+        let mut by_topic = HashMap::new();
+        by_topic.insert("topic-a".to_string(), vec![3]);
+        let req = build_latest_offsets_request(by_topic);
+
+        assert!(req.replica_id == -1);
+        assert!(req.topics.len() == 1);
+        assert!(req.topics[0].name == "topic-a");
+        assert!(req.topics[0].partitions[0].partition_index == 3);
+        assert!(req.topics[0].partitions[0].timestamp == -1);
+    }
 
     #[test]
     fn advance_target_uses_last_offset_delta_not_record_count() {

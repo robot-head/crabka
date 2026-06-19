@@ -55,10 +55,6 @@ pub(crate) const NOT_COORDINATOR: i16 = 16;
 /// surfacing the last error. Matches a typical client `request.timeout.ms`.
 pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `FindCoordinator` `key_type` for a consumer group (vs. `1` = TRANSACTION,
-/// `2` = SHARE). With this key-type the request `key` is the group id.
-const KEY_TYPE_GROUP: i8 = 0;
-
 pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
         code,
@@ -86,7 +82,7 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 /// Discover the broker that currently coordinates `group_id` and return its
 /// node id.
 ///
-/// Sends `FindCoordinator(key = group_id, key_type = GROUP)` over the bootstrap
+/// Sends `FindCoordinator(key = group_id)` over the bootstrap
 /// connection (any broker can answer `FindCoordinator`), retrying cold/loading
 /// coordinator codes (14/15/16) with backoff. On success we `refresh_metadata`
 /// so the pool learns the coordinator broker's address (it appears in the
@@ -105,15 +101,7 @@ pub(crate) async fn find_coordinator(
         let group_id = group_id.to_string();
         async move {
             client
-                .send(FindCoordinatorRequest {
-                    key: group_id.clone(),
-                    key_type: KEY_TYPE_GROUP,
-                    // v4+ carries the key(s) in `coordinator_keys`; older
-                    // versions ignore it and use `key`. Populating both
-                    // keeps us version-agnostic on the negotiated wire form.
-                    coordinator_keys: vec![group_id],
-                    ..Default::default()
-                })
+                .send(build_find_coordinator_request(group_id))
                 .await
                 .map_err(ConsumerError::from)
         }
@@ -135,6 +123,50 @@ pub(crate) async fn find_coordinator(
     // the coordinator isn't a separately dialable broker.
     client.refresh_metadata().await?;
     Ok(node_id)
+}
+
+fn build_find_coordinator_request(group_id: String) -> FindCoordinatorRequest {
+    FindCoordinatorRequest {
+        key: group_id.clone(),
+        // v4+ carries the key(s) in `coordinator_keys`; older versions ignore
+        // it and use `key`. Populating both keeps us version-agnostic on the
+        // negotiated wire form.
+        coordinator_keys: vec![group_id],
+        ..Default::default()
+    }
+}
+
+fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> bool {
+    start.elapsed() >= timeout
+}
+
+fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
+    (backoff * 2).min(max_backoff)
+}
+
+fn build_leave_group_request(group_id: String, member_id: String) -> LeaveGroupRequest {
+    LeaveGroupRequest {
+        group_id,
+        member_id: member_id.clone(),
+        members: vec![MemberIdentity {
+            member_id,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn build_heartbeat_request(
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+) -> HeartbeatRequest {
+    HeartbeatRequest {
+        group_id,
+        generation_id,
+        member_id,
+        ..Default::default()
+    }
 }
 
 /// Send a group-coordinator RPC to the *current* coordinator broker, and on a
@@ -168,14 +200,14 @@ where
         let needs_refind = match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Ok(r);
                 }
                 // Retriable broker code: the coordinator likely moved.
                 true
             }
             Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
                 // The socket to the coordinator is gone (bounced / failed
@@ -201,7 +233,7 @@ where
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff, MAX_BACKOFF);
     }
 }
 
@@ -228,19 +260,19 @@ where
         match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Ok(r);
                 }
             }
             Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
             }
             Err(e) => return Err(e),
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff, MAX_BACKOFF);
     }
 }
 
@@ -378,28 +410,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
 /// from-scratch rejoin that never re-completed), which the broker wouldn't
 /// recognize anyway.
 async fn leave_group(state: &CoordinatorState) {
-    if state.member_id.is_empty() {
-        return;
-    }
-    // `member_id` is populated for both the v0–v2 (top-level) and v3+
-    // (`members` array) wire shapes so the negotiated version picks up
-    // whichever it serializes. Routed to the coordinator broker like every
-    // other group RPC; on close it's best-effort, so a stale/unknown
-    // coordinator id (Disconnected) just falls back to session-timeout
-    // eviction — no re-discovery is worth the wall-clock on shutdown.
-    let coordinator = state
-        .client
-        .broker(state.coordinator_id.load(Ordering::Relaxed));
-    let send = coordinator.send(LeaveGroupRequest {
-        group_id: state.group_id.clone(),
-        member_id: state.member_id.clone(),
-        members: vec![MemberIdentity {
-            member_id: state.member_id.clone(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
-    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+    () /* ~ changed by cargo-mutants ~ */
 }
 
 /// Send one `Heartbeat` to the coordinator broker and translate the response
@@ -413,12 +424,11 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
     let result = state
         .client
         .broker(state.coordinator_id.load(Ordering::Relaxed))
-        .send(HeartbeatRequest {
-            group_id: state.group_id.clone(),
-            generation_id: state.generation_id,
-            member_id: state.member_id.clone(),
-            ..Default::default()
-        })
+        .send(build_heartbeat_request(
+            state.group_id.clone(),
+            state.generation_id,
+            state.member_id.clone(),
+        ))
         .await;
     match result {
         Ok(r) if r.error_code == 0 => HeartbeatOutcome::Ok,
@@ -930,6 +940,58 @@ mod retry_tests {
 
     struct Resp {
         error_code: i16,
+    }
+
+    #[test]
+    fn find_coordinator_request_populates_legacy_and_batched_group_keys() {
+        let req = build_find_coordinator_request("group-a".into());
+
+        assert!(req.key == "group-a");
+        assert!(req.key_type == 0);
+        assert!(req.coordinator_keys == vec!["group-a"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_deadline_elapsed_uses_elapsed_timeout_boundary() {
+        let start = tokio::time::Instant::now();
+
+        assert!(!retry_deadline_elapsed(start, Duration::from_millis(1)));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(retry_deadline_elapsed(start, Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn next_backoff_doubles_until_cap() {
+        assert!(
+            next_backoff(Duration::from_millis(100), Duration::from_secs(1))
+                == Duration::from_millis(200)
+        );
+        assert!(
+            next_backoff(Duration::from_millis(800), Duration::from_secs(1))
+                == Duration::from_secs(1)
+        );
+        assert!(
+            next_backoff(Duration::from_secs(1), Duration::from_secs(1)) == Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn leave_group_request_populates_legacy_and_batched_member_fields() {
+        let req = build_leave_group_request("group-a".into(), "member-a".into());
+
+        assert!(req.group_id == "group-a");
+        assert!(req.member_id == "member-a");
+        assert!(req.members.len() == 1);
+        assert!(req.members[0].member_id == "member-a");
+    }
+
+    #[test]
+    fn heartbeat_request_preserves_group_generation_and_member() {
+        let req = build_heartbeat_request("group-a".into(), 42, "member-a".into());
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id == 42);
+        assert!(req.member_id == "member-a");
     }
 
     #[tokio::test(start_paused = true)]

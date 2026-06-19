@@ -113,4 +113,20 @@ mod tests {
         assert!(a["m1"].len() == 2);
         assert!(a["m2"].len() == 0);
     }
+
+    #[test]
+    fn non_positive_partition_count_assigns_nothing() {
+        let mut tp = HashMap::new();
+        tp.insert("t".into(), 0);
+        let a = assign(vec![("m1".into(), vec!["t".into()])], &tp);
+        assert!(a["m1"].is_empty());
+    }
+
+    #[test]
+    fn topic_with_no_subscribers_assigns_nothing() {
+        let mut tp = HashMap::new();
+        tp.insert("t".into(), 2);
+        let a = assign(vec![("m1".into(), vec!["other".into()])], &tp);
+        assert!(a["m1"].is_empty());
+    }
 }
