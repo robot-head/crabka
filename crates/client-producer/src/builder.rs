@@ -41,6 +41,47 @@ fn is_retriable_coordinator_code(code: i16) -> bool {
     )
 }
 
+#[allow(clippy::field_reassign_with_default)]
+fn build_init_producer_id_request() -> InitProducerIdRequest {
+    let mut req = InitProducerIdRequest::default();
+    req.transactional_id = None;
+    req.transaction_timeout_ms = 0;
+    req
+}
+
+fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> bool {
+    start.elapsed() >= timeout
+}
+
+fn next_backoff(backoff: Duration) -> Duration {
+    const MAX_BACKOFF: Duration = Duration::from_secs(1);
+    (backoff * 2).min(MAX_BACKOFF)
+}
+
+fn validated_acks(enable_idempotence: bool, acks: Acks) -> Result<Acks, ProducerError> {
+    if enable_idempotence && acks == Acks::Zero {
+        return Err(ProducerError::InvalidConfig(
+            "enable_idempotence=true requires acks=all (not Zero)",
+        ));
+    }
+    Ok(if enable_idempotence { Acks::All } else { acks })
+}
+
+fn disabled_idempotence_identity() -> (i64, i16) {
+    (-1, -1)
+}
+
+fn initial_txn_pid_epoch() -> (i64, i16) {
+    (-1, -1)
+}
+
+fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i16), ProducerError> {
+    if init.error_code != 0 {
+        return Err(ProducerError::Server(init.error_code));
+    }
+    Ok((init.producer_id, init.producer_epoch))
+}
+
 /// Send `InitProducerId` for an idempotent-only producer, retrying on the
 /// cold-coordinator codes (14/15/16) and transient `Disconnected` transport
 /// errors with capped exponential backoff until the deadline elapses.
@@ -51,23 +92,15 @@ fn is_retriable_coordinator_code(code: i16) -> bool {
 /// producers carry no `transactional_id`, so the id is allocated from any broker
 /// — no `FindCoordinator` routing is needed here.
 async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, ProducerError> {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
     let mut backoff = Duration::from_millis(100);
     loop {
-        match client
-            .send(InitProducerIdRequest {
-                transactional_id: None,
-                transaction_timeout_ms: 0,
-                ..Default::default()
-            })
-            .await
-        {
+        match client.send(build_init_producer_id_request()).await {
             Ok(resp) if !is_retriable_coordinator_code(resp.error_code) => return Ok(resp),
             Ok(resp) => {
                 // Cold coordinator: retry until the deadline, then surface the
                 // last response so the caller maps it to ProducerError::Server.
-                if start.elapsed() >= INIT_PRODUCER_ID_RETRY_TIMEOUT {
+                if retry_deadline_elapsed(start, INIT_PRODUCER_ID_RETRY_TIMEOUT) {
                     return Ok(resp);
                 }
             }
@@ -75,14 +108,14 @@ async fn init_producer_id(client: &Client) -> Result<InitProducerIdResponse, Pro
                 // Transient transport failure (e.g. the broker dropped the
                 // connection while still loading): retry until the deadline,
                 // then surface the disconnect.
-                if start.elapsed() >= INIT_PRODUCER_ID_RETRY_TIMEOUT {
+                if retry_deadline_elapsed(start, INIT_PRODUCER_ID_RETRY_TIMEOUT) {
                     return Err(ProducerError::Client(ClientError::Disconnected));
                 }
             }
             Err(e) => return Err(ProducerError::Client(e)),
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff);
     }
 }
 
@@ -113,12 +146,7 @@ impl Producer {
     ) -> Result<Self, ProducerError> {
         // Validate config: idempotence forces acks=All, and acks=Zero is
         // incompatible with idempotence.
-        if enable_idempotence && acks == Acks::Zero {
-            return Err(ProducerError::InvalidConfig(
-                "enable_idempotence=true requires acks=all (not Zero)",
-            ));
-        }
-        let acks = if enable_idempotence { Acks::All } else { acks };
+        let acks = validated_acks(enable_idempotence, acks)?;
 
         // 1. Build inner client. `security` is cloned (not moved) so it can be
         //    retained on the `Producer` and reused for the secondary
@@ -143,12 +171,9 @@ impl Producer {
         // does that retry and returns the final response.
         let (producer_id, producer_epoch) = if enable_idempotence {
             let init = init_producer_id(&client).await?;
-            if init.error_code != 0 {
-                return Err(ProducerError::Server(init.error_code));
-            }
-            (init.producer_id, init.producer_epoch)
+            producer_identity_from_init(&init)?
         } else {
-            (-1, -1)
+            disabled_idempotence_identity()
         };
 
         // 3. Spawn the sender.
@@ -164,7 +189,7 @@ impl Producer {
         let in_flight = Arc::new(AtomicUsize::new(0));
 
         let txn_state = Arc::new(Mutex::new(TxnState::Uninitialized));
-        let txn_pid_epoch = Arc::new(Mutex::new((-1i64, -1i16)));
+        let txn_pid_epoch = Arc::new(Mutex::new(initial_txn_pid_epoch()));
 
         let sender_handle = tokio::spawn(sender::run(sender::SenderConfig {
             transport: Box::new(ClientTransport::new(client.clone())),
@@ -230,6 +255,68 @@ mod security_arg_tests {
     use assert2::assert;
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
+
+    #[test]
+    fn coordinator_retry_classifier_matches_cold_start_codes_only() {
+        assert!(is_retriable_coordinator_code(COORDINATOR_LOAD_IN_PROGRESS));
+        assert!(is_retriable_coordinator_code(COORDINATOR_NOT_AVAILABLE));
+        assert!(is_retriable_coordinator_code(NOT_COORDINATOR));
+        assert!(!is_retriable_coordinator_code(0));
+        assert!(!is_retriable_coordinator_code(42));
+    }
+
+    #[test]
+    fn init_producer_id_request_is_idempotent_only_shape() {
+        let req = build_init_producer_id_request();
+
+        assert!(req.transactional_id.is_none());
+        assert!(req.transaction_timeout_ms == 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_helpers_preserve_deadline_and_backoff_boundaries() {
+        let start = tokio::time::Instant::now();
+        assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
+        assert!(next_backoff(Duration::from_millis(100)) == Duration::from_millis(200));
+        assert!(next_backoff(Duration::from_millis(800)) == Duration::from_secs(1));
+        assert!(next_backoff(Duration::from_secs(1)) == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn validated_acks_forces_idempotence_to_all_and_rejects_zero() {
+        assert!(validated_acks(true, Acks::One).unwrap() == Acks::All);
+        assert!(validated_acks(false, Acks::One).unwrap() == Acks::One);
+        assert!(validated_acks(false, Acks::Zero).unwrap() == Acks::Zero);
+        assert!(validated_acks(true, Acks::Zero).is_err());
+    }
+
+    #[test]
+    fn disabled_idempotence_identity_uses_kafka_sentinel_values() {
+        assert!(disabled_idempotence_identity() == (-1, -1));
+        assert!(initial_txn_pid_epoch() == (-1, -1));
+    }
+
+    #[test]
+    fn producer_identity_from_init_maps_error_and_success() {
+        let success = InitProducerIdResponse {
+            error_code: 0,
+            producer_id: 42,
+            producer_epoch: 7,
+            ..Default::default()
+        };
+        assert!(producer_identity_from_init(&success).unwrap() == (42, 7));
+
+        let error = InitProducerIdResponse {
+            error_code: 51,
+            ..Default::default()
+        };
+        assert!(matches!(
+            producer_identity_from_init(&error),
+            Err(ProducerError::Server(51))
+        ));
+    }
 
     #[tokio::test]
     async fn producer_builder_accepts_security() {
