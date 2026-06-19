@@ -2279,7 +2279,35 @@ impl Broker {
                     pidx,
                     metrics.clone(),
                 ));
-                let writer = crabka_audit::AuditWriter::new(rx, sink, Self::audit_product());
+                let audit_signer: Option<std::sync::Arc<dyn crabka_audit::SigningKeyProvider>> =
+                    if let (Some(path), Some(key_id)) =
+                        (&config.audit_signing_key_path, &config.audit_signing_key_id)
+                    {
+                        match crabka_audit::FileEd25519Signer::from_pkcs8_file(path, key_id.clone())
+                        {
+                            Ok(s) => Some(std::sync::Arc::new(s)),
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "failed to load audit signing key; checkpoints disabled"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "no audit signing key configured; audit checkpoints disabled"
+                        );
+                        None
+                    };
+                let writer = crabka_audit::AuditWriter::new(
+                    rx,
+                    sink,
+                    Self::audit_product(),
+                    audit_signer,
+                    config.audit_checkpoint_every_n,
+                    std::time::Duration::from_secs(config.audit_checkpoint_every_secs),
+                );
                 tokio::spawn(writer.run());
             } else {
                 tracing::warn!("no audit partition led by this broker; audit records will drop");

@@ -132,6 +132,50 @@ async fn successful_create_topics_is_audited() {
     p.broker.shutdown().await;
 }
 
+/// Verifies that when a broker is configured with an audit signing key and a
+/// checkpoint cadence of `every_n = 1`, sending a `CreateTopics` request causes
+/// a `checkpoint` record to appear on the audit topic with the expected `key_id`.
+#[tokio::test]
+async fn signed_checkpoints_appear_on_audit_topic() {
+    use ring::signature::Ed25519KeyPair;
+
+    // Generate a key, write it to a temp file, start a broker configured to use it.
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+    let keydir = tempfile::tempdir().unwrap();
+    let keypath = keydir.path().join("audit.pk8");
+    std::fs::write(&keypath, pkcs8.as_ref()).unwrap();
+
+    // Start a broker with audit signing + a tiny checkpoint cadence (every 1 record).
+    let p = support::start_with_audit_key(&keypath, "k-test", 1).await;
+
+    // Cause some audit events (a create succeeds; super-user path).
+    let _ = p
+        .client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "cp-topic".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let recs = support::consume_audit_records(&p.client).await;
+    let saw_checkpoint = recs
+        .iter()
+        .any(|j| j["type"] == "checkpoint" && j["key_id"] == "k-test");
+    assert2::check!(saw_checkpoint);
+
+    p.broker.shutdown().await;
+}
+
 /// Verifies the authorizer-decorator path denies an unauthorized operation.
 ///
 /// This test asserts that:

@@ -639,6 +639,12 @@ pub struct FileAuditConfig {
     /// Internal topic name for audit records.
     #[serde(default = "default_audit_topic")]
     pub topic: String,
+    /// Ed25519 checkpoint signing key. `None` → chaining only, no checkpoints.
+    #[serde(default)]
+    pub signing: Option<FileAuditSigningConfig>,
+    /// Checkpoint emission cadence. `None` → use defaults.
+    #[serde(default)]
+    pub checkpoint: Option<FileAuditCheckpointConfig>,
 }
 
 impl Default for FileAuditConfig {
@@ -646,8 +652,45 @@ impl Default for FileAuditConfig {
         Self {
             enabled: default_audit_enabled(),
             topic: default_audit_topic(),
+            signing: None,
+            checkpoint: None,
         }
     }
+}
+
+/// `[audit.signing]` — Ed25519 checkpoint signing key.
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileAuditSigningConfig {
+    pub key_path: String,
+    pub key_id: String,
+}
+
+/// `[audit.checkpoint]` — checkpoint cadence.
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileAuditCheckpointConfig {
+    #[serde(default = "default_checkpoint_every_n")]
+    pub every_n: u64,
+    #[serde(default = "default_checkpoint_every_secs")]
+    pub every_secs: u64,
+}
+
+impl Default for FileAuditCheckpointConfig {
+    fn default() -> Self {
+        Self {
+            every_n: default_checkpoint_every_n(),
+            every_secs: default_checkpoint_every_secs(),
+        }
+    }
+}
+
+fn default_checkpoint_every_n() -> u64 {
+    1000
+}
+
+fn default_checkpoint_every_secs() -> u64 {
+    60
 }
 
 fn default_audit_enabled() -> bool {
@@ -1259,6 +1302,13 @@ impl FileConfig {
         let audit = self.audit.clone().unwrap_or_default();
         cfg.audit_enabled = audit.enabled;
         cfg.audit_topic = audit.topic;
+        if let Some(sign) = audit.signing {
+            cfg.audit_signing_key_path = Some(std::path::PathBuf::from(sign.key_path));
+            cfg.audit_signing_key_id = Some(sign.key_id);
+        }
+        let checkpoint = audit.checkpoint.unwrap_or_default();
+        cfg.audit_checkpoint_every_n = checkpoint.every_n;
+        cfg.audit_checkpoint_every_secs = checkpoint.every_secs;
 
         Ok(())
     }
@@ -2938,5 +2988,40 @@ in_memory = true
         fc.apply_to(&mut cfg).expect("apply");
         assert2::check!(cfg.audit_enabled);
         assert2::check!(cfg.audit_topic == "__crabka_audit");
+    }
+
+    #[test]
+    fn audit_signing_and_checkpoint_parse_and_apply() {
+        let toml = r#"
+            [audit]
+            enabled = true
+
+            [audit.signing]
+            key_path = "/etc/crabka/audit.pk8"
+            key_id = "audit-2026"
+
+            [audit.checkpoint]
+            every_n = 500
+            every_secs = 30
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc.apply_to(&mut cfg).expect("apply");
+        assert2::check!(
+            cfg.audit_signing_key_path == Some(std::path::PathBuf::from("/etc/crabka/audit.pk8"))
+        );
+        assert2::check!(cfg.audit_signing_key_id.as_deref() == Some("audit-2026"));
+        assert2::check!(cfg.audit_checkpoint_every_n == 500);
+        assert2::check!(cfg.audit_checkpoint_every_secs == 30);
+    }
+
+    #[test]
+    fn audit_checkpoint_has_sane_defaults_when_absent() {
+        let fc: FileConfig = toml::from_str("[audit]\nenabled = true\n").expect("parse");
+        let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
+        fc.apply_to(&mut cfg).expect("apply");
+        assert2::check!(cfg.audit_signing_key_path == None);
+        assert2::check!(cfg.audit_checkpoint_every_n == 1000);
+        assert2::check!(cfg.audit_checkpoint_every_secs == 60);
     }
 }
