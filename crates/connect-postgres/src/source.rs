@@ -3,8 +3,8 @@ use std::collections::{HashSet, VecDeque};
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
-use tokio_postgres::{Client, NoTls};
 
+use crate::catalog::{PgCatalog, TokioPgCatalog};
 use crate::model::Operation;
 use crate::pgoutput::{
     DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message,
@@ -36,7 +36,7 @@ struct TransactionState {
 pub struct PostgresWalSource {
     config: PostgresSourceConfig,
     database_name: String,
-    client: Option<Client>,
+    catalog: Option<Box<dyn PgCatalog>>,
     relation_cache: RelationCache,
     encoder: PostgresProtoEncoder,
     pending: VecDeque<LogicalEvent>,
@@ -47,18 +47,19 @@ pub struct PostgresWalSource {
 }
 
 impl PostgresWalSource {
-    pub fn scripted(
+    fn build(
         config: PostgresSourceConfig,
-        database_name: impl Into<String>,
-        events: impl IntoIterator<Item = LogicalEvent>,
+        database_name: String,
+        catalog: Option<Box<dyn PgCatalog>>,
+        pending: VecDeque<LogicalEvent>,
     ) -> Result<Self, ConnectError> {
         Ok(Self {
             config,
-            database_name: database_name.into(),
-            client: None,
+            database_name,
+            catalog,
             relation_cache: RelationCache::default(),
             encoder: PostgresProtoEncoder::new()?,
-            pending: events.into_iter().collect(),
+            pending,
             transaction: None,
             transaction_rows: Vec::new(),
             checkpoint: None,
@@ -66,53 +67,37 @@ impl PostgresWalSource {
         })
     }
 
+    pub fn scripted(
+        config: PostgresSourceConfig,
+        database_name: impl Into<String>,
+        events: impl IntoIterator<Item = LogicalEvent>,
+    ) -> Result<Self, ConnectError> {
+        Self::build(
+            config,
+            database_name.into(),
+            None,
+            events.into_iter().collect(),
+        )
+    }
+
     pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
-        let (client, connection) =
-            tokio_postgres::connect(config.database_url.expose_secret(), NoTls)
-                .await
-                .map_err(|error| ConnectError::Backend(error.to_string()))?;
-
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::warn!(%error, "postgres source connection task failed");
-            }
-        });
-
-        let database_name = current_database(&client).await?;
-
-        if !config.table_names.is_empty() {
-            client
-                .batch_execute(&create_publication_sql(
-                    &config.publication_name,
-                    &config.schema,
-                    &config.table_names,
-                ))
-                .await
-                .map_err(|error| ConnectError::Backend(error.to_string()))?;
-            validate_publication_tables(
-                &client,
-                &config.publication_name,
-                &config.schema,
-                &config.table_names,
-            )
-            .await?;
-            validate_publication_settings(&client, &config.publication_name).await?;
-        }
-
-        ensure_slot(&client, &config.slot_name, &database_name).await?;
-
-        Ok(Self {
+        let catalog = TokioPgCatalog::connect(config.database_url.expose_secret()).await?;
+        let database_name = initialize(&catalog, &config).await?;
+        Self::build(
             config,
             database_name,
-            client: Some(client),
-            relation_cache: RelationCache::default(),
-            encoder: PostgresProtoEncoder::new()?,
-            pending: VecDeque::new(),
-            transaction: None,
-            transaction_rows: Vec::new(),
-            checkpoint: None,
-            resume_lsn: None,
-        })
+            Some(Box::new(catalog)),
+            VecDeque::new(),
+        )
+    }
+
+    #[cfg(test)]
+    fn with_catalog(
+        config: PostgresSourceConfig,
+        database_name: impl Into<String>,
+        catalog: Box<dyn PgCatalog>,
+    ) -> Result<Self, ConnectError> {
+        Self::build(config, database_name.into(), Some(catalog), VecDeque::new())
     }
 
     #[cfg(test)]
@@ -121,7 +106,7 @@ impl PostgresWalSource {
     }
 
     async fn fill_pending_from_slot(&mut self) -> Result<(), ConnectError> {
-        let Some(client) = &self.client else {
+        let Some(catalog) = &self.catalog else {
             return Ok(());
         };
 
@@ -129,24 +114,18 @@ impl PostgresWalSource {
         // avoids advancing the Postgres replication slot before downstream sink
         // durability is known; acknowledge advances the slot only after the
         // runtime has committed the sink and saved the checkpoint.
-        let rows = client
-            .query(
-                &peek_binary_changes_sql(
-                    &self.config.slot_name,
-                    self.config.max_messages_per_poll,
-                    &self.config.publication_name,
-                ),
-                &[],
+        let changes = catalog
+            .peek_changes(
+                &self.config.slot_name,
+                self.config.max_messages_per_poll,
+                &self.config.publication_name,
             )
-            .await
-            .map_err(|error| ConnectError::Backend(error.to_string()))?;
+            .await?;
 
-        for row in rows {
-            let lsn: String = row.get("lsn");
-            let data: Vec<u8> = row.get("data");
-            let lsn = lsn.parse::<PgLsn>()?;
+        for change in changes {
+            let lsn = change.lsn.parse::<PgLsn>()?;
 
-            self.apply_decoded_message(decode_pgoutput_message(&data, lsn, None)?);
+            self.apply_decoded_message(decode_pgoutput_message(&change.data, lsn, None)?);
         }
 
         Ok(())
@@ -333,12 +312,11 @@ impl Source<Bytes, Bytes> for PostgresWalSource {
         validate_database(offset, &self.database_name)?;
         let lsn = PgLsn::from_source_offset(offset, &self.config.slot_name)?;
 
-        if let Some(client) = &self.client {
+        if let Some(catalog) = &self.catalog {
             let lsn_text = lsn.to_string();
-            client
-                .execute(advance_slot_sql(), &[&self.config.slot_name, &lsn_text])
-                .await
-                .map_err(|error| ConnectError::Backend(error.to_string()))?;
+            catalog
+                .advance_slot(&self.config.slot_name, &lsn_text)
+                .await?;
         }
 
         self.resume_lsn = Some(lsn);
@@ -373,7 +351,7 @@ fn create_publication_sql(publication: &str, schema: &str, tables: &[String]) ->
     )
 }
 
-fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
+pub(crate) fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> String {
     format!(
         "SELECT lsn::text AS lsn, data FROM pg_logical_slot_peek_binary_changes({}, NULL, {}, 'proto_version', '1', 'publication_names', {})",
         sql_string(slot),
@@ -382,36 +360,66 @@ fn peek_binary_changes_sql(slot: &str, max_messages: u32, publication: &str) -> 
     )
 }
 
-fn publication_tables_sql() -> &'static str {
+pub(crate) fn publication_tables_sql() -> &'static str {
     "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
 }
 
-fn publication_settings_sql() -> &'static str {
+pub(crate) fn publication_settings_sql() -> &'static str {
     "SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = $1"
 }
 
-fn replication_slot_sql() -> &'static str {
+pub(crate) fn replication_slot_sql() -> &'static str {
     "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
 }
 
-fn advance_slot_sql() -> &'static str {
+pub(crate) fn create_logical_slot_sql() -> &'static str {
+    "SELECT * FROM pg_create_logical_replication_slot($1, 'pgoutput')"
+}
+
+pub(crate) fn advance_slot_sql() -> &'static str {
     "SELECT pg_replication_slot_advance($1, $2::pg_lsn)"
 }
 
+/// Run the one-time connection setup against `catalog`: resolve the database
+/// name, create + validate the publication (when tables are configured), and
+/// ensure the replication slot. Split out of [`PostgresWalSource::connect`] so
+/// the orchestration is unit-testable against a [`PgCatalog`] mock.
+async fn initialize(
+    catalog: &dyn PgCatalog,
+    config: &PostgresSourceConfig,
+) -> Result<String, ConnectError> {
+    let database_name = catalog.current_database().await?;
+
+    if !config.table_names.is_empty() {
+        catalog
+            .ensure_publication(&create_publication_sql(
+                &config.publication_name,
+                &config.schema,
+                &config.table_names,
+            ))
+            .await?;
+        validate_publication_tables(
+            catalog,
+            &config.publication_name,
+            &config.schema,
+            &config.table_names,
+        )
+        .await?;
+        validate_publication_settings(catalog, &config.publication_name).await?;
+    }
+
+    ensure_slot(catalog, &config.slot_name, &database_name).await?;
+
+    Ok(database_name)
+}
+
 async fn validate_publication_tables(
-    client: &Client,
+    catalog: &dyn PgCatalog,
     publication: &str,
     schema: &str,
     tables: &[String],
 ) -> Result<(), ConnectError> {
-    let rows = client
-        .query(publication_tables_sql(), &[&publication, &schema])
-        .await
-        .map_err(|error| ConnectError::Backend(error.to_string()))?;
-    let published_tables = rows
-        .into_iter()
-        .map(|row| row.get::<_, String>("tablename"))
-        .collect::<Vec<_>>();
+    let published_tables = catalog.published_tables(publication, schema).await?;
     let missing_tables = missing_publication_tables(tables, published_tables);
 
     if missing_tables.is_empty() {
@@ -437,23 +445,14 @@ fn missing_publication_tables(
 }
 
 async fn validate_publication_settings(
-    client: &Client,
+    catalog: &dyn PgCatalog,
     publication: &str,
 ) -> Result<(), ConnectError> {
-    let Some(row) = client
-        .query_opt(publication_settings_sql(), &[&publication])
-        .await
-        .map_err(|error| ConnectError::Backend(error.to_string()))?
-    else {
+    let Some(flags) = catalog.publication_settings(publication).await? else {
         return Ok(());
     };
 
-    let pubinsert: bool = row.get("pubinsert");
-    let pubupdate: bool = row.get("pubupdate");
-    let pubdelete: bool = row.get("pubdelete");
-    let pubtruncate: bool = row.get("pubtruncate");
-
-    if publication_settings_are_compatible([pubinsert, pubupdate, pubdelete, pubtruncate]) {
+    if publication_settings_are_compatible(flags) {
         Ok(())
     } else {
         Err(ConnectError::Backend(format!(
@@ -467,34 +466,20 @@ fn publication_settings_are_compatible([insert, update, delete, truncate]: [bool
 }
 
 async fn ensure_slot(
-    client: &Client,
+    catalog: &dyn PgCatalog,
     slot_name: &str,
     database_name: &str,
 ) -> Result<(), ConnectError> {
-    let slot = client
-        .query_opt(replication_slot_sql(), &[&slot_name])
-        .await
-        .map_err(|error| ConnectError::Backend(error.to_string()))?;
-
-    let Some(slot) = slot else {
-        client
-            .query(
-                "SELECT * FROM pg_create_logical_replication_slot($1, 'pgoutput')",
-                &[&slot_name],
-            )
-            .await
-            .map_err(|error| ConnectError::Backend(error.to_string()))?;
+    let Some(slot) = catalog.replication_slot(slot_name).await? else {
+        catalog.create_logical_slot(slot_name).await?;
         return Ok(());
     };
 
-    let plugin: Option<String> = slot.get("plugin");
-    let slot_type: String = slot.get("slot_type");
-    let database: Option<String> = slot.get("database");
     validate_slot_metadata(
         slot_name,
-        plugin.as_deref(),
-        &slot_type,
-        database.as_deref(),
+        slot.plugin.as_deref(),
+        &slot.slot_type,
+        slot.database.as_deref(),
         database_name,
     )
 }
@@ -528,14 +513,6 @@ fn validate_slot_metadata(
     }
 }
 
-async fn current_database(client: &Client) -> Result<String, ConnectError> {
-    client
-        .query_one("SELECT current_database()", &[])
-        .await
-        .map(|row| row.get(0))
-        .map_err(|error| ConnectError::Backend(error.to_string()))
-}
-
 fn validate_database(offset: &SourceOffset, expected_database: &str) -> Result<(), ConnectError> {
     match offset.partition.get("database") {
         Some(OffsetValue::String(database)) if database == expected_database => Ok(()),
@@ -561,10 +538,19 @@ mod sql_tests {
     use assert2::check;
 
     use super::{
-        advance_slot_sql, create_publication_sql, missing_publication_tables,
-        peek_binary_changes_sql, publication_settings_are_compatible, publication_settings_sql,
-        publication_tables_sql, replication_slot_sql, validate_slot_metadata,
+        advance_slot_sql, create_logical_slot_sql, create_publication_sql,
+        missing_publication_tables, peek_binary_changes_sql, publication_settings_are_compatible,
+        publication_settings_sql, publication_tables_sql, replication_slot_sql,
+        validate_slot_metadata,
     };
+
+    #[test]
+    fn create_logical_slot_sql_uses_pgoutput_plugin() {
+        check!(
+            create_logical_slot_sql()
+                == "SELECT * FROM pg_create_logical_replication_slot($1, 'pgoutput')"
+        );
+    }
 
     #[test]
     fn publication_sql_quotes_identifiers() {
@@ -1072,5 +1058,261 @@ mod tests {
         check!(row.commit_lsn == Some(PgLsn(0x42)));
         check!(row.txid == Some(123));
         check!(row.commit_timestamp_ms == Some(1_700_000_000_123));
+    }
+}
+
+/// Mock-driven coverage for the connection-setup decision logic. The `PgCatalog`
+/// seam lets these run entirely offline: every excluded-by-necessity live query
+/// is replaced by a `mockall` expectation, so the validation/orchestration
+/// branches carry real mutation signal without a running `PostgreSQL`.
+#[cfg(test)]
+mod catalog_tests {
+    use assert2::check;
+    use crabka_connect::{ConnectError, SecretString, Source as _};
+
+    use super::{
+        PostgresWalSource, ensure_slot, initialize, validate_publication_settings,
+        validate_publication_tables,
+    };
+    use crate::catalog::{MockPgCatalog, SlotChange, SlotMetadata};
+    use crate::{PgLsn, PostgresSourceConfig};
+
+    fn config_with_tables(tables: Vec<String>) -> PostgresSourceConfig {
+        PostgresSourceConfig {
+            database_url: SecretString::new("postgres://localhost/app"),
+            slot_name: "slot_a".to_owned(),
+            publication_name: "crabka_connect".to_owned(),
+            schema: "public".to_owned(),
+            table_names: tables,
+            max_messages_per_poll: 1000,
+        }
+    }
+
+    fn valid_slot() -> SlotMetadata {
+        SlotMetadata {
+            plugin: Some("pgoutput".to_owned()),
+            slot_type: "logical".to_owned(),
+            database: Some("app".to_owned()),
+        }
+    }
+
+    /// A minimal valid pgoutput `Begin` frame (tag, then the final-LSN,
+    /// commit-time, and xid fields); decoding it stages a transaction without
+    /// needing real WAL bytes.
+    fn begin_frame() -> Vec<u8> {
+        let mut data = vec![b'B'];
+        data.extend_from_slice(&0u64.to_be_bytes()); // final_lsn
+        data.extend_from_slice(&0i64.to_be_bytes()); // commit_time
+        data.extend_from_slice(&0u32.to_be_bytes()); // xid
+        data
+    }
+
+    #[tokio::test]
+    async fn validate_publication_tables_accepts_full_coverage_and_reports_gaps() {
+        let mut catalog = MockPgCatalog::new();
+        catalog
+            .expect_published_tables()
+            .returning(|_, _| Ok(vec!["orders".to_owned()]));
+
+        validate_publication_tables(&catalog, "crabka_connect", "public", &["orders".to_owned()])
+            .await
+            .expect("full coverage validates");
+
+        let mut missing = MockPgCatalog::new();
+        missing
+            .expect_published_tables()
+            .returning(|_, _| Ok(Vec::new()));
+
+        let error = validate_publication_tables(
+            &missing,
+            "crabka_connect",
+            "public",
+            &["orders".to_owned()],
+        )
+        .await
+        .expect_err("uncovered table fails");
+        match error {
+            ConnectError::Backend(message) => {
+                check!(message.contains("does not cover configured tables"));
+                check!(message.contains("orders"));
+            }
+            error => panic!("expected backend error, got {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_publication_settings_requires_insert_update_delete_without_truncate() {
+        let mut compatible = MockPgCatalog::new();
+        compatible
+            .expect_publication_settings()
+            .returning(|_| Ok(Some([true, true, true, false])));
+        validate_publication_settings(&compatible, "crabka_connect")
+            .await
+            .expect("compatible flags validate");
+
+        let mut truncating = MockPgCatalog::new();
+        truncating
+            .expect_publication_settings()
+            .returning(|_| Ok(Some([true, true, true, true])));
+        let error = validate_publication_settings(&truncating, "crabka_connect")
+            .await
+            .expect_err("publishing truncate fails");
+        check!(matches!(error, ConnectError::Backend(_)));
+
+        // An absent publication row is tolerated (the create path handles it).
+        let mut absent = MockPgCatalog::new();
+        absent.expect_publication_settings().returning(|_| Ok(None));
+        validate_publication_settings(&absent, "crabka_connect")
+            .await
+            .expect("missing publication row is tolerated");
+    }
+
+    #[tokio::test]
+    async fn ensure_slot_creates_when_absent_and_validates_when_present() {
+        let mut absent = MockPgCatalog::new();
+        absent.expect_replication_slot().returning(|_| Ok(None));
+        absent
+            .expect_create_logical_slot()
+            .times(1)
+            .returning(|_| Ok(()));
+        ensure_slot(&absent, "slot_a", "app")
+            .await
+            .expect("absent slot is created");
+
+        // A present, compatible slot must not be recreated.
+        let mut present = MockPgCatalog::new();
+        present
+            .expect_replication_slot()
+            .returning(|_| Ok(Some(valid_slot())));
+        ensure_slot(&present, "slot_a", "app")
+            .await
+            .expect("compatible slot validates");
+
+        let mut mismatched = MockPgCatalog::new();
+        mismatched.expect_replication_slot().returning(|_| {
+            Ok(Some(SlotMetadata {
+                plugin: Some("test_decoding".to_owned()),
+                slot_type: "physical".to_owned(),
+                database: Some("other".to_owned()),
+            }))
+        });
+        let error = ensure_slot(&mismatched, "slot_a", "app")
+            .await
+            .expect_err("incompatible slot fails");
+        check!(matches!(error, ConnectError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn initialize_runs_publication_setup_only_when_tables_configured() {
+        let mut with_tables = MockPgCatalog::new();
+        with_tables
+            .expect_current_database()
+            .returning(|| Ok("app".to_owned()));
+        with_tables
+            .expect_ensure_publication()
+            .times(1)
+            .returning(|_| Ok(()));
+        with_tables
+            .expect_published_tables()
+            .returning(|_, _| Ok(vec!["orders".to_owned()]));
+        with_tables
+            .expect_publication_settings()
+            .returning(|_| Ok(Some([true, true, true, false])));
+        with_tables
+            .expect_replication_slot()
+            .returning(|_| Ok(Some(valid_slot())));
+
+        let database = initialize(&with_tables, &config_with_tables(vec!["orders".to_owned()]))
+            .await
+            .expect("initialize succeeds");
+        check!(database == "app");
+
+        // With no tables configured, the publication path is skipped entirely
+        // (no `ensure_publication` expectation set — calling it would panic).
+        let mut no_tables = MockPgCatalog::new();
+        no_tables
+            .expect_current_database()
+            .returning(|| Ok("app".to_owned()));
+        no_tables
+            .expect_replication_slot()
+            .returning(|_| Ok(Some(valid_slot())));
+        initialize(&no_tables, &config_with_tables(Vec::new()))
+            .await
+            .expect("initialize without tables succeeds");
+    }
+
+    #[tokio::test]
+    async fn fill_pending_applies_peeked_changes_and_propagates_decode_input() {
+        let mut catalog = MockPgCatalog::new();
+        catalog.expect_peek_changes().returning(|_, _, _| {
+            Ok(vec![SlotChange {
+                lsn: "0/2A".to_owned(),
+                data: begin_frame(),
+            }])
+        });
+
+        let mut source = PostgresWalSource::with_catalog(
+            config_with_tables(Vec::new()),
+            "app",
+            Box::new(catalog),
+        )
+        .expect("source builds");
+        source
+            .fill_pending_from_slot()
+            .await
+            .expect("fill succeeds");
+        // The Begin frame opened a transaction — proof the peeked change was
+        // decoded and applied rather than dropped.
+        check!(source.transaction.is_some());
+    }
+
+    #[tokio::test]
+    async fn fill_pending_surfaces_unparsable_lsn() {
+        let mut catalog = MockPgCatalog::new();
+        catalog.expect_peek_changes().returning(|_, _, _| {
+            Ok(vec![SlotChange {
+                lsn: "not-a-lsn".to_owned(),
+                data: begin_frame(),
+            }])
+        });
+
+        let mut source = PostgresWalSource::with_catalog(
+            config_with_tables(Vec::new()),
+            "app",
+            Box::new(catalog),
+        )
+        .expect("source builds");
+        check!(source.fill_pending_from_slot().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fill_pending_without_catalog_is_a_noop() {
+        let mut source =
+            PostgresWalSource::scripted(config_with_tables(Vec::new()), "app", []).unwrap();
+        source
+            .fill_pending_from_slot()
+            .await
+            .expect("noop succeeds");
+        check!(source.pending_len() == 0);
+    }
+
+    #[tokio::test]
+    async fn acknowledge_advances_slot_through_catalog() {
+        let mut catalog = MockPgCatalog::new();
+        catalog
+            .expect_advance_slot()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let mut source = PostgresWalSource::with_catalog(
+            config_with_tables(Vec::new()),
+            "app",
+            Box::new(catalog),
+        )
+        .expect("source builds");
+        source
+            .acknowledge(&PgLsn(0x2a).to_source_offset("app", "slot_a"))
+            .await
+            .expect("acknowledge advances the slot");
     }
 }

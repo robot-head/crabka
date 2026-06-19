@@ -113,6 +113,9 @@ nix = { version = "0.31", default-features = false, features = ["zerocopy"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+# Trait mocks for the KIP-939 reaper orchestration unit tests
+# (`txn::coordinator::ReaperBackend`).
+mockall = { workspace = true }
 stateright = { workspace = true }
 # Large-N randomized fuzz of the idempotent-producer dedup core (`check_pure`),
 # complementing the exhaustive stateright model (`producer_state_model.rs`).

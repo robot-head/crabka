@@ -42,6 +42,11 @@ assert2 = "0.4"
 # consensus). Dev-dependency only — never linked into a shipped binary.
 # Pinned: pre-1.0, minor bumps can be breaking.
 stateright = "=0.31.0"
+# mockall: generate test mocks for trait seams so engine-IO decision logic is
+# unit-testable (and mutation-killable) without a live broker/quorum/database.
+# Dev-dependency only — `#[cfg_attr(test, mockall::automock)]` keeps it out of
+# shipped builds.
+mockall = "0.13"
 arbitrary = { version = "1", features = ["derive"] }
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }

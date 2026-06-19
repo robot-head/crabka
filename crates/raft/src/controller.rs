@@ -304,58 +304,23 @@ impl ControllerHandle {
     /// Open a one-shot authenticated connection to the leader's controller
     /// listener, send a wincode-encoded `Vec<MetadataRecord>` as
     /// `API_KEY_SUBMIT_CHANGE`, and translate the response into a `RaftError`.
+    ///
+    /// Decomposed into three killable steps: [`encode_submit_change_body`] builds
+    /// the exact wire bytes, the [`SubmitChangeTransport`] seam performs the
+    /// (un-mockable) dial→`raw_request`→close round trip and hands back the raw
+    /// response body, and [`translate_submit_change_response`] decodes that body
+    /// and maps the transport `error_code` into a `RaftError`.
     async fn forward_submit_to(
         &self,
         leader: NodeId,
         addr: &str,
         records: &[crabka_metadata::MetadataRecord],
     ) -> Result<(), RaftError> {
-        let body_bytes = <serde_wincode::SerdeCompat<Vec<crabka_metadata::MetadataRecord>> as wincode::Serialize>::serialize(
-            &records.to_vec(),
-        )
-        .map_err(crate::error::RaftError::from)?;
-        let payload = crate::wire::CrabkaSubmitChangeRequest {
-            records: bytes::Bytes::from(body_bytes),
+        let transport = DialerSubmitTransport {
+            dialer: self.dialer.as_ref(),
+            client_id: &self.client_id,
         };
-        let mut body = Vec::with_capacity(payload.records.len() + 4);
-        payload.encode_v0(&mut body)?;
-
-        let opts = crabka_client_core::ConnectionOptions {
-            client_id: self.client_id.clone(),
-            ..crabka_client_core::ConnectionOptions::default()
-        };
-        let conn = self
-            .dialer
-            .dial(leader, addr, opts)
-            .await
-            .map_err(RaftError::Network)?;
-
-        let resp_body = conn
-            .raw_request(
-                crate::wire::API_KEY_SUBMIT_CHANGE,
-                0,
-                bytes::Bytes::from(body),
-            )
-            .await
-            .map_err(RaftError::Network)?;
-        conn.close();
-
-        let mut cur: &[u8] = &resp_body;
-        let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
-        match resp.error_code {
-            0 => Ok(()),
-            // The leader rejected at apply-time. The wire carries only an error
-            // code; the topic name is what the caller had in hand.
-            2 => Err(RaftError::Metadata(
-                crabka_metadata::MetadataError::TopicExists(String::new()),
-            )),
-            // not-leader / other collapse to NotLeader — CreateTopics maps that
-            // to NOT_CONTROLLER (retryable).
-            _ => Err(RaftError::NotLeader {
-                current_leader: (resp.leader_hint >= 0)
-                    .then(|| u64::try_from(resp.leader_hint).unwrap_or(leader)),
-            }),
-        }
+        forward_submit_via(&transport, leader, addr, records).await
     }
 
     /// Dial a controller-listener `addr` and issue one `API_KEY_METADATA_FETCH`.
@@ -440,6 +405,119 @@ fn controller_endpoint_addr(voters: &crabka_metadata::VoterSet, node_id: NodeId)
         .find(|e| e.name == "CONTROLLER")
         .or_else(|| voter.endpoints.first())?;
     Some(format!("{}:{}", endpoint.host, endpoint.port))
+}
+
+/// The single un-mockable step of leader-forwarding a `submit_change`: dial the
+/// leader's controller listener, issue one `API_KEY_SUBMIT_CHANGE` request with
+/// the already-encoded `body`, and return the raw response body bytes. The
+/// concrete [`crabka_client_core::Connection`] is opaque (it cannot be built in
+/// a test), so this seam returns plain `Bytes` — every serialize/translate
+/// decision around it stays unit-testable against a mock.
+#[cfg_attr(test, mockall::automock)]
+#[async_trait::async_trait]
+trait SubmitChangeTransport: Send + Sync {
+    /// Round-trip the encoded `API_KEY_SUBMIT_CHANGE` `body` to the leader and
+    /// return the raw response body.
+    async fn send_submit_change(
+        &self,
+        leader: NodeId,
+        addr: &str,
+        body: Vec<u8>,
+    ) -> Result<bytes::Bytes, crabka_client_core::ClientError>;
+}
+
+/// Live [`SubmitChangeTransport`] over the injected [`OutboundDialer`]: dials a
+/// one-shot authenticated connection, sends the request at `API_KEY_SUBMIT_CHANGE`
+/// version 0, closes the connection, and returns the response body. This is the
+/// only part of the forward path that touches a real socket.
+struct DialerSubmitTransport<'a> {
+    dialer: &'a dyn OutboundDialer,
+    client_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl SubmitChangeTransport for DialerSubmitTransport<'_> {
+    async fn send_submit_change(
+        &self,
+        leader: NodeId,
+        addr: &str,
+        body: Vec<u8>,
+    ) -> Result<bytes::Bytes, crabka_client_core::ClientError> {
+        let opts = crabka_client_core::ConnectionOptions {
+            client_id: self.client_id.to_owned(),
+            ..crabka_client_core::ConnectionOptions::default()
+        };
+        let conn = self.dialer.dial(leader, addr, opts).await?;
+        let resp_body = conn
+            .raw_request(
+                crate::wire::API_KEY_SUBMIT_CHANGE,
+                0,
+                bytes::Bytes::from(body),
+            )
+            .await?;
+        conn.close();
+        Ok(resp_body)
+    }
+}
+
+/// `forward_submit_to`'s testable core: serialize → send (via the injected
+/// [`SubmitChangeTransport`]) → translate. The real path supplies a
+/// [`DialerSubmitTransport`]; tests supply a mock so the serialize/translate
+/// decisions carry mutation signal without a live quorum.
+async fn forward_submit_via(
+    transport: &dyn SubmitChangeTransport,
+    leader: NodeId,
+    addr: &str,
+    records: &[crabka_metadata::MetadataRecord],
+) -> Result<(), RaftError> {
+    let body = encode_submit_change_body(records)?;
+    let resp_body = transport
+        .send_submit_change(leader, addr, body)
+        .await
+        .map_err(RaftError::Network)?;
+    translate_submit_change_response(&resp_body, leader)
+}
+
+/// Build the exact `API_KEY_SUBMIT_CHANGE` v0 request body for `records`:
+/// wincode-encode the `Vec<MetadataRecord>`, then frame it with the
+/// length-prefixed [`crate::wire::CrabkaSubmitChangeRequest`] codec. Kept
+/// byte-for-byte identical to the inlined path so the wire stays exact.
+fn encode_submit_change_body(
+    records: &[crabka_metadata::MetadataRecord],
+) -> Result<Vec<u8>, RaftError> {
+    let body_bytes = <serde_wincode::SerdeCompat<Vec<crabka_metadata::MetadataRecord>> as wincode::Serialize>::serialize(
+        &records.to_vec(),
+    )
+    .map_err(RaftError::from)?;
+    let payload = crate::wire::CrabkaSubmitChangeRequest {
+        records: bytes::Bytes::from(body_bytes),
+    };
+    let mut body = Vec::with_capacity(payload.records.len() + 4);
+    payload.encode_v0(&mut body)?;
+    Ok(body)
+}
+
+/// Decode a `CrabkaSubmitChangeResponse` from the leader's `resp_body` and map
+/// its transport `error_code` into the caller's `Result`:
+/// - `0` → applied (`Ok`).
+/// - `2` → the leader rejected at apply-time (topic already exists). The wire
+///   carries only a code; the topic name is what the caller had in hand.
+/// - anything else → collapse to `NotLeader` (`CreateTopics` maps that to the
+///   retryable `NOT_CONTROLLER`), preferring the response's `leader_hint` when
+///   non-negative and falling back to the dialed `leader`.
+fn translate_submit_change_response(resp_body: &[u8], leader: NodeId) -> Result<(), RaftError> {
+    let mut cur: &[u8] = resp_body;
+    let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
+    match resp.error_code {
+        0 => Ok(()),
+        2 => Err(RaftError::Metadata(
+            crabka_metadata::MetadataError::TopicExists(String::new()),
+        )),
+        _ => Err(RaftError::NotLeader {
+            current_leader: (resp.leader_hint >= 0)
+                .then(|| u64::try_from(resp.leader_hint).unwrap_or(leader)),
+        }),
+    }
 }
 
 #[async_trait::async_trait]
@@ -729,6 +807,160 @@ mod bootstrap_mode_tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
         assert!(controller_endpoint_addr(&voters, 7) == Some("controller-host:9093".to_string()));
+    }
+
+    fn topic_record(name: &str) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: name.into(),
+            topic_id: Uuid::nil(),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    fn submit_change_response_bytes(error_code: i16, leader_hint: i64) -> bytes::Bytes {
+        let mut out = Vec::new();
+        crate::wire::CrabkaSubmitChangeResponse {
+            error_code,
+            leader_hint,
+        }
+        .encode_v0(&mut out);
+        bytes::Bytes::from(out)
+    }
+
+    #[test]
+    fn encode_submit_change_body_frames_wincode_records_with_i32_length_prefix() {
+        // The forward path must produce the exact `CrabkaSubmitChangeRequest` v0
+        // wire bytes: a 4-byte big-endian length prefix followed by the
+        // wincode-encoded `Vec<MetadataRecord>`. Decoding the framed body back
+        // and re-deserializing must round-trip to the original records, proving
+        // the prefix length matches the payload length (a mutated length or a
+        // dropped wincode step fails to decode or yields different records).
+        let records = vec![topic_record("alpha"), topic_record("beta")];
+        let body = encode_submit_change_body(&records).expect("encode");
+
+        let expected_wincode = <serde_wincode::SerdeCompat<
+            Vec<crabka_metadata::MetadataRecord>,
+        > as wincode::Serialize>::serialize(&records)
+        .expect("wincode");
+        assert!(body.len() == expected_wincode.len() + 4);
+
+        let mut cur: &[u8] = &body;
+        let req =
+            crate::wire::CrabkaSubmitChangeRequest::decode_v0(&mut cur).expect("decode frame");
+        assert!(req.records.as_ref() == expected_wincode.as_slice());
+        // The framed payload IS the wincode encoding of the original records, so
+        // it deserializes back to them — proving no double-framing / corruption.
+        let decoded = <serde_wincode::SerdeCompat<
+            Vec<crabka_metadata::MetadataRecord>,
+        > as wincode::Deserialize>::deserialize(&req.records)
+        .expect("wincode decode");
+        assert!(decoded == records);
+    }
+
+    #[test]
+    fn translate_submit_change_response_maps_each_error_code() {
+        // 0 => applied.
+        assert!(translate_submit_change_response(&submit_change_response_bytes(0, -1), 5).is_ok());
+
+        // 2 => leader rejected at apply-time: a TopicExists metadata error.
+        let err = translate_submit_change_response(&submit_change_response_bytes(2, -1), 5)
+            .expect_err("code 2 is an error");
+        assert!(matches!(
+            err,
+            RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))
+        ));
+
+        // Any other code collapses to NotLeader, taking the response's
+        // leader_hint when non-negative.
+        let err = translate_submit_change_response(&submit_change_response_bytes(1, 9), 5)
+            .expect_err("code 1 is an error");
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: Some(9)
+            }
+        ));
+
+        // A negative leader_hint falls back to None (unknown), NOT to the dialed
+        // leader id — distinguishing the `>= 0` guard.
+        let err = translate_submit_change_response(&submit_change_response_bytes(3, -1), 5)
+            .expect_err("code 3 is an error");
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: None
+            }
+        ));
+    }
+
+    #[test]
+    fn translate_submit_change_response_propagates_decode_error() {
+        // A truncated body (fewer than the fixed 10 response bytes) must surface
+        // as a protocol error rather than being silently treated as success.
+        let err =
+            translate_submit_change_response(&[0u8; 3], 5).expect_err("truncated decodes err");
+        assert!(matches!(err, RaftError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn forward_submit_via_sends_encoded_body_and_returns_ok_on_applied() {
+        // End-to-end of the testable core: the transport must receive the exact
+        // framed body for `records` (the wincode + length-prefix encoding) at the
+        // dialed leader/addr, and an `error_code = 0` response yields Ok.
+        let records = vec![topic_record("gamma")];
+        let expected_body = encode_submit_change_body(&records).expect("encode");
+
+        let mut transport = MockSubmitChangeTransport::new();
+        transport
+            .expect_send_submit_change()
+            .withf(move |leader, addr, body| {
+                *leader == 7 && addr == "leader-host:9093" && body == &expected_body
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(submit_change_response_bytes(0, -1)));
+
+        forward_submit_via(&transport, 7, "leader-host:9093", &records)
+            .await
+            .expect("applied");
+    }
+
+    #[tokio::test]
+    async fn forward_submit_via_translates_not_leader_hint() {
+        // The transport's response leader_hint must flow through translation to
+        // the caller's NotLeader error.
+        let mut transport = MockSubmitChangeTransport::new();
+        transport
+            .expect_send_submit_change()
+            .returning(|_, _, _| Ok(submit_change_response_bytes(1, 4)));
+
+        let err = forward_submit_via(&transport, 7, "leader-host:9093", &[topic_record("z")])
+            .await
+            .expect_err("not leader");
+        assert!(matches!(
+            err,
+            RaftError::NotLeader {
+                current_leader: Some(4)
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_submit_via_maps_transport_error_to_network() {
+        // A dial/send failure surfaces as RaftError::Network (so CreateTopics
+        // retries), not a panic or a swallowed success.
+        let mut transport = MockSubmitChangeTransport::new();
+        transport.expect_send_submit_change().returning(|_, _, _| {
+            Err(crabka_client_core::ClientError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "refused",
+            )))
+        });
+
+        let err = forward_submit_via(&transport, 7, "leader-host:9093", &[topic_record("z")])
+            .await
+            .expect_err("network error");
+        assert!(matches!(err, RaftError::Network(_)));
     }
 
     #[tokio::test]

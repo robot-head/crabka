@@ -10,7 +10,31 @@ use bytes::Bytes;
 use crate::connection::Connection;
 use crate::error::ClientError;
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+use crabka_protocol::owned::fetch_response::FetchResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+
+/// The single live-IO dependency [`fetch_partition_with_isolation`] needs: send
+/// a typed [`FetchRequest`] and get the decoded [`FetchResponse`] back.
+///
+/// Abstracting it behind a trait (mirroring `connect-postgres`'s `PgCatalog`
+/// seam) keeps the request-construction (`build_fetch_request`) and
+/// response-decode (`decode_fetch_response`) logic mockable without a socket:
+/// the trait method returns the already-decoded response, so a `mockall` mock
+/// drives every decode/offset/error-code decision under the crate's default
+/// feature set. The only un-mockable part — the actual frame write / read on
+/// the wire — stays in the [`Connection`] adapter.
+#[cfg_attr(test, mockall::automock)]
+#[async_trait::async_trait]
+pub(crate) trait FetchTransport: Send + Sync {
+    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, ClientError>;
+}
+
+#[async_trait::async_trait]
+impl FetchTransport for Connection {
+    async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, ClientError> {
+        self.send(req).await
+    }
+}
 
 /// One record decoded from a single-partition fetch.
 #[derive(Debug, Clone)]
@@ -49,8 +73,32 @@ pub async fn fetch_partition(
     max_wait_ms: i32,
     partition_max_bytes: i32,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
+    fetch_partition_on(
+        conn,
+        topic,
+        topic_id,
+        partition,
+        fetch_offset,
+        max_wait_ms,
+        partition_max_bytes,
+    )
+    .await
+}
+
+/// `FetchTransport`-generic body of [`fetch_partition`]; the public entry point
+/// is a thin `Connection` adapter so the build/decode logic is unit-testable
+/// against a `mockall` `FetchTransport`.
+async fn fetch_partition_on<T: FetchTransport + ?Sized>(
+    conn: &T,
+    topic: &str,
+    topic_id: WireUuid,
+    partition: i32,
+    fetch_offset: i64,
+    max_wait_ms: i32,
+    partition_max_bytes: i32,
+) -> Result<Vec<FetchedRecord>, ClientError> {
     // Default to READ_UNCOMMITTED (isolation_level = 0): every record visible.
-    fetch_partition_with_isolation(
+    fetch_partition_with_isolation_on(
         conn,
         topic,
         topic_id,
@@ -84,8 +132,35 @@ pub async fn fetch_partition_with_isolation(
     partition_max_bytes: i32,
     isolation_level: i8,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
+    fetch_partition_with_isolation_on(
+        conn,
+        topic,
+        topic_id,
+        partition,
+        fetch_offset,
+        max_wait_ms,
+        partition_max_bytes,
+        isolation_level,
+    )
+    .await
+}
+
+/// `FetchTransport`-generic body of [`fetch_partition_with_isolation`]. Holds the
+/// build-request → send → decode-response logic so it is killable against a
+/// `mockall` `FetchTransport` without a live broker socket.
+#[allow(clippy::too_many_arguments)]
+async fn fetch_partition_with_isolation_on<T: FetchTransport + ?Sized>(
+    conn: &T,
+    topic: &str,
+    topic_id: WireUuid,
+    partition: i32,
+    fetch_offset: i64,
+    max_wait_ms: i32,
+    partition_max_bytes: i32,
+    isolation_level: i8,
+) -> Result<Vec<FetchedRecord>, ClientError> {
     let resp = conn
-        .send(build_fetch_request(
+        .fetch(build_fetch_request(
             topic,
             topic_id,
             partition,
@@ -279,6 +354,117 @@ mod tests {
             ..Default::default()
         };
         let err = decode_fetch_response(&resp, 0).unwrap_err();
+        assert!(matches!(err, ClientError::Server { error_code: 1 }));
+    }
+
+    // ── socket-free end-to-end drive via MockFetchTransport ──────────────────
+    //
+    // These exercise `fetch_partition_with_isolation_on` (and the public
+    // `fetch_partition` adapter) end-to-end without a broker: the mock captures
+    // the `FetchRequest` the wrapper builds and returns a hand-built
+    // `FetchResponse`, so build-request + decode-response decisions are killable
+    // under the crate's default feature set.
+
+    /// The default `fetch_partition` path requests `isolation_level` 0 and decodes
+    /// the returned batch into absolute, offset-ordered records.
+    #[tokio::test]
+    async fn fetch_partition_on_builds_request_and_decodes_response() {
+        let topic_id = WireUuid([3; 16]);
+        let mut transport = MockFetchTransport::new();
+        transport
+            .expect_fetch()
+            .withf(move |req: &FetchRequest| {
+                // build_fetch_request wiring must be preserved on the wire.
+                req.isolation_level == 0
+                    && req.min_bytes == 1
+                    && req.max_bytes == 50 * 1024 * 1024
+                    && req.topics.len() == 1
+                    && req.topics[0].topic == "t"
+                    && req.topics[0].topic_id == topic_id
+                    && req.topics[0].partitions.len() == 1
+                    && req.topics[0].partitions[0].partition == 2
+                    && req.topics[0].partitions[0].fetch_offset == 5
+                    && req.topics[0].partitions[0].partition_max_bytes == 4096
+            })
+            .returning(|_req| {
+                Ok(FetchResponse {
+                    responses: vec![FetchableTopicResponse {
+                        topic: "t".into(),
+                        partitions: vec![PartitionData {
+                            partition_index: 2,
+                            high_watermark: 7,
+                            records: Some(RecordsPayload::from(vec![batch_with(5, &[b"a", b"b"])])),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            });
+
+        let got = super::fetch_partition_on(&transport, "t", topic_id, 2, 5, 250, 4096)
+            .await
+            .unwrap();
+        assert!(got.len() == 2);
+        assert!(got[0].offset == 5);
+        assert!(got[0].value.as_deref() == Some(b"a".as_ref()));
+        assert!(got[1].offset == 6);
+    }
+
+    /// A caller-set isolation level (`READ_COMMITTED` = 1) must reach the wire.
+    #[tokio::test]
+    async fn fetch_partition_with_isolation_on_forwards_isolation_level() {
+        let topic_id = WireUuid([9; 16]);
+        let mut transport = MockFetchTransport::new();
+        transport
+            .expect_fetch()
+            .withf(|req: &FetchRequest| req.isolation_level == 1)
+            .returning(|_req| Ok(FetchResponse::default()));
+
+        let got =
+            super::fetch_partition_with_isolation_on(&transport, "t", topic_id, 0, 0, 100, 1024, 1)
+                .await
+                .unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// A transport error from the seam propagates unchanged.
+    #[tokio::test]
+    async fn fetch_partition_on_propagates_transport_error() {
+        let mut transport = MockFetchTransport::new();
+        transport
+            .expect_fetch()
+            .returning(|_req| Err(ClientError::Disconnected));
+
+        let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Disconnected));
+    }
+
+    /// A partition-level error code surfaces as `ClientError::Server` through the
+    /// full send→decode path (not just the isolated decode helper).
+    #[tokio::test]
+    async fn fetch_partition_on_surfaces_partition_error_code() {
+        let mut transport = MockFetchTransport::new();
+        transport.expect_fetch().returning(|_req| {
+            Ok(FetchResponse {
+                responses: vec![FetchableTopicResponse {
+                    topic: "t".into(),
+                    partitions: vec![PartitionData {
+                        partition_index: 0,
+                        error_code: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        });
+
+        let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
+            .await
+            .unwrap_err();
         assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 }

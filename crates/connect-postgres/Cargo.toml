@@ -34,4 +34,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+mockall = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
