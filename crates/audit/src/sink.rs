@@ -16,6 +16,17 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    /// Stamp the hash-chain headers (`seq` decimal, `prev_hash` lowercase hex)
+    /// onto this record. Called by the writer, which owns the chain.
+    pub fn push_chain_headers(&mut self, seq: u64, prev_head: &[u8; 32]) {
+        self.headers
+            .push(("seq".to_string(), seq.to_string().into_bytes()));
+        self.headers.push((
+            "prev_hash".to_string(),
+            crate::chain::to_hex(prev_head).into_bytes(),
+        ));
+    }
+
     /// Serialize an event to OCSF JSON and attach SIEM-filterable headers.
     #[must_use]
     pub fn from_event(event: &AuditEvent, product: &ProductInfo) -> Self {

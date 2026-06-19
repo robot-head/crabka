@@ -46,6 +46,8 @@ pub enum AuditEventClass {
     Authorization,
     ApiActivity,
     ApplicationLifecycle,
+    /// Internal meta-record (signed chain checkpoint); not an OCSF event.
+    Checkpoint,
 }
 
 impl AuditEventClass {
@@ -57,6 +59,7 @@ impl AuditEventClass {
             AuditEventClass::Authorization => "authorization",
             AuditEventClass::ApiActivity => "api_activity",
             AuditEventClass::ApplicationLifecycle => "application_lifecycle",
+            AuditEventClass::Checkpoint => "checkpoint",
         }
     }
 }

@@ -3,6 +3,7 @@
 //! See `docs/superpowers/specs/2026-06-18-crabka-fedramp-mla-audit-design.md`.
 
 pub mod chain;
+pub mod checkpoint;
 pub mod event;
 pub mod log;
 pub mod ocsf;
@@ -10,6 +11,7 @@ pub mod signing;
 pub mod sink;
 
 pub use chain::{ChainState, GENESIS_HEAD, chain_hash};
+pub use checkpoint::{Checkpoint, EVENT_CLASS_CHECKPOINT};
 pub use event::{
     AuditEndpoint, AuditEvent, AuditEventClass, AuditOutcome, AuditPrincipal, AuditResource,
     LifecycleKind,
