@@ -142,9 +142,6 @@ exclude_re = [
     "metadata/src/feature\\.rs.*replace <impl Feature for (GroupVersionFeature|ShareVersionFeature|StreamsVersionFeature)>::supported_range -> \\(i16, i16\\) with \\(0, 1\\)",
     "metadata/src/feature\\.rs.*replace <impl Feature for (ShareVersionFeature|StreamsVersionFeature)>::default_level -> i16 with 0",
     "metadata/src/feature\\.rs.*replace validate_feature_dependencies -> Result<\\(\\), String> with Ok\\(\\(\\)\\)",
-    # to_kafka_record explicitly sets key=None, which is the same value as
-    # Record::default().key; deleting the field is behaviourally equivalent.
-    "crates/metadata/src/kafka_record\\.rs:.*delete field key from struct Record expression in to_kafka_record",
     # Metadata image dir-assignment: resizing an already-full directories vec to
     # the same length is a Vec no-op, so `<` -> `<=` is equivalent.
     "(crates/)?metadata/src/image\\.rs.*replace < with <= in MetadataImage::apply",
@@ -216,7 +213,8 @@ exclude_re = [
     # drop at end of scope, so `close_all -> ()` is an equivalent mutant. The
     # pool's eviction/bootstrap/registry decisions ARE mutation-tested
     # (`BrokerPool::evict` and `bootstrap_connection` are unit-tested in pool.rs).
-    "(crates/)?client-core/src/pool\\.rs.*replace BrokerPool::close_all with \\(\\)",
+    # `(<C>)?` tolerates the generic-parameter form (`BrokerPool<C>::close_all`).
+    "(crates/)?client-core/src/pool\\.rs.*replace BrokerPool(<C>)?::close_all with \\(\\)",
     # The public Client facade and Connection wire helpers are exercised by
     # `crates/client-core/tests/unit.rs`, which requires the crate's `mock`
     # feature so the in-process MockBroker is exported. The default package
