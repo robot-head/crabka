@@ -1,7 +1,13 @@
-//! Durable local spool for the AU-5 degraded path.
+//! Durable-across-process-crash local spool for the AU-5 degraded path.
 //!
 //! Holds exactly the chained audit records not yet written to the topic, in
-//! order. Frame: `[u32 len][record]`; record: `[u8 class_tag][u32 value_len]
+//! order. Appends are flushed to the OS page cache (not `fsync`'d), and a torn
+//! tail frame from a crash mid-append is healed on `open`; so this survives a
+//! process crash, but an OS/power loss between append and replay can still lose
+//! not-yet-replayed records. (Real `fsync` durability is a prerequisite for the
+//! future fail-closed mode — tracked separately.)
+//!
+//! Frame: `[u32 len][record]`; record: `[u8 class_tag][u32 value_len]
 //! [value][u32 header_count]([u32 klen][k][u32 vlen][v])*`. Synchronous
 //! `std::fs` (degraded, low-frequency path); a truncated tail frame is treated
 //! as end-of-data.
