@@ -207,7 +207,11 @@ jobs:
       - name: Check links
         uses: lycheeverse/lychee-action@v2
         with:
-          lycheeVersion: v0.24.2
+          # No explicit `lycheeVersion`: pinning it drives the action's
+          # download-specific-version path, which fails to install lychee
+          # releases whose tarball ships the binary in a top-level directory
+          # (`install: cannot stat '.../lychee-download/lychee'`). Letting the
+          # action pick its own default uses the install path it ships tested.
           args: >-
             --no-progress
             --format detailed
