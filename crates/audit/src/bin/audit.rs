@@ -1,0 +1,75 @@
+//! `crabka-audit` — offline audit-log tools.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Parser, Subcommand};
+use crabka_audit::{TrustedKeys, verify_partition_dir};
+
+#[derive(Parser)]
+#[command(name = "crabka-audit", about = "Crabka audit-log tools (FedRAMP MLA)")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Verify a partition's hash-chain and signed checkpoints offline.
+    Verify {
+        /// Path to the audit partition directory, e.g. `<log_dir>/__crabka_audit-0`
+        #[arg(long)]
+        partition_dir: PathBuf,
+        /// `key_id` the trusted public key corresponds to.
+        #[arg(long)]
+        key_id: String,
+        /// Path to the trusted Ed25519 public key (raw 32 bytes).
+        #[arg(long)]
+        public_key: PathBuf,
+    },
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Verify {
+            partition_dir,
+            key_id,
+            public_key,
+        } => {
+            let pubkey = match std::fs::read(&public_key) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("error: read public key {}: {e}", public_key.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let trusted = TrustedKeys::single(key_id, pubkey);
+            match verify_partition_dir(&partition_dir, &trusted) {
+                Ok(report) if report.ok => {
+                    println!(
+                        "OK: {} records, {} checkpoints, chain continuous, all signatures valid",
+                        report.records, report.checkpoints
+                    );
+                    ExitCode::SUCCESS
+                }
+                Ok(report) => {
+                    let b = report.first_break.expect("not ok implies a break");
+                    eprintln!(
+                        "TAMPER DETECTED at offset {} (seq {:?}): {}",
+                        b.offset, b.seq, b.reason
+                    );
+                    eprintln!(
+                        "verified {} records, {} checkpoints before the break",
+                        report.records, report.checkpoints
+                    );
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
