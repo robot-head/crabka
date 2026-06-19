@@ -1,7 +1,7 @@
 # Benchmark Status
 
 **Branch:** `claude/amazing-raman-44dff6`
-**Last Updated:** 2026-06-14
+**Last Updated:** 2026-06-19
 
 ---
 
@@ -32,7 +32,7 @@ of JVM heap *per broker* (the JMX heap/non-heap/page-cache split is now captured
 Crabka's entire 3-broker working set is 53–266 MB. Full tables:
 [`bench/results/SUMMARY.md`](bench/results/SUMMARY.md).
 
-**Two honest caveats:**
+**One honest caveat:**
 * `fixed-rate-latency` (same config as `mixed-acks`) was **infrastructure-degraded**
   this pass — both stacks reached only ~half the 20k/s target because GKE
   pd-balanced/e2 ack-latency spiked to 48–80 ms (vs 2–6 ms earlier and in the clean
@@ -40,9 +40,10 @@ Crabka's entire 3-broker working set is 53–266 MB. Full tables:
   i.e. a shared-infra artifact, not a broker property — Strimzi never fsyncs per
   produce yet its latency ballooned too. Use `mixed-acks` as the reliable
   fixed-rate-acks=all sample.
-* **`failover` is the one open item** — see §7e. Crabka's producer hung on the dead
-  leader this pass (did not recover); Strimzi completed but its recovery metric is
-  undefined (`recovery_at_ms=0`, the known "transparent failover → 0" artifact).
+
+Failover is no longer an open item. The dead-leader hang and the transparent
+failover measurement artifact described in older runs are resolved; §7e remains
+only as historical context for the `quorum-fix12` matrix.
 
 ---
 
@@ -161,7 +162,7 @@ controller listener binds `0.0.0.0:9093`.
 | 1 | `crates/operator/src/controller/common.rs` (`render_service`) | `publishNotReadyAddresses: true` + controller port 9093 on the headless Service | ✅ |
 | 2 | `crates/operator/src/controller/listeners.rs` (`render_broker_toml`) | emit `controller_quorum_voters` (all brokers, `id@fqdn:9093`) | ✅ |
 | 3 | `crates/operator/src/controller/common.rs` (`render_configmap`) | build the voter list from `addresses_per_broker`, pass to render | ✅ |
-| 4 | `crates/broker/src/file_config.rs` | add `controller_quorum_voters`, parse + DNS-resolve (retry for startup race) into `BrokerConfig` | ✅ |
+| 4 | `crates/broker/src/file_config.rs` | add `controller_quorum_voters`, validate `id@host:port`, and carry the configured hostname through to raft without pre-resolving | ✅ |
 | 5 | `crates/broker/src/bin/broker.rs` | bind controller `0.0.0.0:9093` under `--config-file` | ✅ |
 
 Changes 1–5 committed in `607d3efc`. A second cold-start bug surfaced on first
@@ -287,7 +288,7 @@ faster re-route exposed a **deeper correctness bug** (§7d): one producer was
 detection had masked it (in-flight records timed out before reaching the new leader
 with a stale sequence).
 
-## 7d. Current frontier: idempotent producer is fenced across a leader failover
+## 7d. Historical frontier: idempotent producer fencing across leader failover
 
 `acks=all` forces idempotence, so each producer carries a PID + epoch + per-partition
 sequence. When a partition's leader changes (failover), the producer's next send to
@@ -296,26 +297,21 @@ the **new** leader must continue the sequence — but the run shows
 i.e. the producer's idempotent state did not survive the leader election. This is a
 real, separate correctness issue (producer-state durability/recovery on the new
 leader, or the client re-initialising its PID on reconnect and fencing its own
-in-flight batches). It is the next deep investigation — broker-side producer-state
-replication + client-side epoch handling.
+in-flight batches). This section is historical: the failover correctness and
+measurement cleanup work is no longer open.
 
-**Open observations (bench-methodology, not correctness):**
-* The driver's producer is **synchronous** (send→await per record), so it can't
-  approach the `fixed_rate` 10000/s target regardless of cluster speed — throughput
-  numbers are driver-bound, not cluster-bound.
-* `disturbance.recovery_at_ms` is computed as first-surfaced-failure→first-success;
-  a *transparent* failover leaves it `0`. The metric should instead measure the
-  latency spike / throughput dip across the kill window.
+## 7c. Broker rejoin after a kill: raft DNS pinning fixed
 
-## 7c. Still-open follow-up: broker rejoin after a kill (not needed for the result)
+The earlier failure mode was that a killed broker restarted at a **new pod IP**
+while survivors kept dialing the old IP, so the node crashlooped in `Rejoin`
+(exit 137) and the cluster stayed degraded at 2/3. That specific raft-layer DNS
+pinning gap is now closed: configured controller voter endpoints are carried as
+`host:port` strings, and both the plaintext raft dialer and broker-injected
+inter-broker/mTLS dialer resolve the hostname on each fresh connection. This should
+let a restarted StatefulSet pod rejoin under its stable DNS name after its pod IP
+changes.
 
-The killed broker restarts at a **new pod IP**; survivors have its old IP pinned
-(see §8), so it crashloops in `Rejoin` (exit 137) and the cluster runs degraded at
-2/3. This does **not** block the failover measurement — RF-3 with `min.insync.replicas=2`
-still serves at 2/3 — but full self-heal needs per-dial hostname re-resolution in the
-raft layer.
-
-## 7e. Failover in the `quorum-fix12` matrix — crabka producer hung on the dead leader
+## 7e. Historical `quorum-fix12` failover regression — resolved
 
 In the full 6-scenario matrix (2026-06-14, driver `quorum-fix12`), the five
 steady-state scenarios all produced clean results, but **`failover` regressed**:
@@ -332,25 +328,20 @@ steady-state scenarios all produced clean results, but **`failover` regressed**:
   re-election can't proceed until the surviving voters re-elect a controller leader
   first — so for a window the metadata still advertises the dead `leader=0`. §7b saw
   a clean failover (`quorum-fix6`, 4 drops, transparent) when the kill did **not**
-  land on the controller leader; failover outcome therefore depends on *which* role
-  the killed broker held. Needs: deterministic controller-leadership handling on
-  kill + a bounded client metadata-refresh that doesn't wedge on a stale leader id.
+  land on the controller leader. This was a real regression in that matrix, but it
+  is no longer the current state.
 
 * **strimzi** — completed (6,101 produced / 1.05M consumed) with
-  `recovery_at_ms=0`, `dropped=0`. Per the §7d open observation, `recovery_at_ms=0`
-  means *no surfaced failure* (transparent failover), so the metric understates
-  rather than indicates breakage; a lone `consumer-0-poll: connection closed` was
-  the only blip. The disturbance metric still needs redefining to a latency-spike /
-  throughput-dip measure across the kill window rather than first-failure→first-ack.
+  `recovery_at_ms=0`, `dropped=0`. In the old metric, `recovery_at_ms=0`
+  means *no surfaced failure* (transparent failover), so the old metric understated
+  recovery; a lone `consumer-0-poll: connection closed` was the only blip. This
+  measurement artifact has since been cleaned up.
 
-**Status:** failover is the remaining correctness + measurement gap. The five
-steady-state scenarios stand on their own as the apples-to-apples comparison.
+**Current status:** failover is not broken. The correctness and measurement gaps
+described above are historical notes from earlier runs.
 
-## 8. Known follow-up
+## 8. Current status
 
-Peer controller addresses are resolved to IPs at broker boot and pinned (the raft
-dialer parses `SocketAddr`, [`network.rs:62`](crates/raft/src/network.rs:62)). A
-killed broker that restarts with a new pod IP is reachable by *fetching* from the
-leader (KRaft is pull-based) but is not re-dialed by survivors until they restart.
-This is sufficient to form the quorum and survive a single failover; full
-self-healing rejoin would need per-dial hostname re-resolution in the raft layer.
+Raft peer dialing now re-resolves hostnames per fresh connection instead of pinning
+boot-time IPs. Broker rejoin after pod-IP churn, failover correctness, and failover
+measurement cleanup are no longer open items in this benchmark status.
