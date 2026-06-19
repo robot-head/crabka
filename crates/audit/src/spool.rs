@@ -331,11 +331,31 @@ mod tests {
         s.append(&r1).unwrap();
         s.append(&r2).unwrap();
         s.rewrite(&[r1.clone(), r2.clone()]).unwrap(); // drop r0 (replayed)
+        check!(s.bytes() > 0); // `*=` mutant would leave bytes at 0
         check!(s.count() == 2);
         check!(s.read_all().unwrap() == vec![r1.clone(), r2.clone()]);
         s.truncate().unwrap();
         check!(s.is_empty());
         check!(s.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn append_accepts_record_that_exactly_fills_to_max() {
+        let probe = tempfile::tempdir().unwrap();
+        let r = chained_record(0, &GENESIS_HEAD, b"payload");
+        let one = {
+            let mut s = Spool::open(probe.path(), 1 << 20).unwrap();
+            s.append(&r).unwrap();
+            s.bytes()
+        };
+        // Cap at exactly two records: the 2nd append fills to max and MUST be
+        // accepted (bytes + frame == max, not >). The `+ -> *` mutant computes
+        // bytes * frame, which exceeds max and would wrongly reject.
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Spool::open(dir.path(), one * 2).unwrap();
+        check!(s.append(&r).unwrap());
+        check!(s.append(&r).unwrap());
+        check!(s.count() == 2);
     }
 
     #[test]

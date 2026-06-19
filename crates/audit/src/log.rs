@@ -684,6 +684,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spool_overflow_drops_and_updates_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        // size of one chained record, to cap the spool at ~1 record
+        let one = {
+            let d2 = tempfile::tempdir().unwrap();
+            let mut s = Spool::open(d2.path(), 1 << 20).unwrap();
+            let mut rec = AuditRecord::from_event(&life(0), &product());
+            rec.push_chain_headers(0, &crate::chain::GENESIS_HEAD);
+            s.append(&rec).unwrap();
+            s.bytes()
+        };
+        let sink = Arc::new(FailableSink::default());
+        sink.set_fail(true); // stay in spool mode (no replay), so drops accumulate
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(64);
+        let spool = Spool::open(dir.path(), one).unwrap();
+        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let h = tokio::spawn(writer.run());
+        for i in 0..6 {
+            log.emit(life(i));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(log);
+        h.await.unwrap();
+        // Strict bounds chosen to also kill the "return constant 1" mutants.
+        assert2::check!(stats.dropped() >= 2); // many overflowed (kills inc_dropped/() , dropped->0/1)
+        assert2::check!(stats.spool_bytes() > 1); // ~one record is buffered (kills spool_bytes->0/1)
+    }
+
+    #[tokio::test]
     async fn partial_replay_keeps_remainder_then_drains() {
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(FailableSink::default());

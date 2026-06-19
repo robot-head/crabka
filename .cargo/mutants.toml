@@ -42,6 +42,10 @@ exclude_globs = [
     # used rather than an `exclude_re` on the mutant name because name-regex
     # exclusions do not reliably match struct-field-deletion mutants here.
     "crates/broker/src/bin/**",
+    # crabka-audit's `verify` CLI: clap arg-parse + VerifyReport→ExitCode glue.
+    # The verification logic lives in verify.rs and IS mutation-tested. Same
+    # rationale as the grpc-gateway / schema-registry / broker `src/bin/**` globs.
+    "crates/audit/src/bin/**",
     "crates/operator/src/run.rs",
     # KIP-939 idle-transaction reaper background task: a `tokio::interval` run
     # loop + `current_image`/leader-refresh orchestration. Pure serve-loop glue
@@ -258,4 +262,31 @@ exclude_re = [
     # makes a successful StreamsMembership join retry forever, so cargo-mutants
     # can only classify it as a timeout rather than an assertion gap.
     "(crates/)?client-streams/src/membership/client\\.rs.*replace == with != in StreamsMembership::start",
+    # Manual Debug impls carry no behavioural signal: FileEd25519Signer's exists
+    # only to keep private key material out of logs; KafkaTopicAuditSink's only
+    # because BrokerMetrics is not Debug.
+    "audit/src/signing\\.rs.*<impl std::fmt::Debug for FileEd25519Signer>::fmt",
+    "broker/src/audit_sink\\.rs.*<impl std::fmt::Debug for KafkaTopicAuditSink>::fmt",
+    # now_ms is a wall-clock helper; checkpoint timestamps are informational (the
+    # signed chain head + seq are what gets verified), so a constant clock is
+    # behaviourally indistinguishable to any non-flaky test.
+    "audit/src/log\\.rs.*replace now_ms -> i64",
+    # interval_at start instant: shifting it only moves the first replay/checkpoint
+    # tick by one period — no signal a deterministic test can assert.
+    "audit/src/log\\.rs.*replace \\+ with - in AuditWriter::run",
+    # Equivalent: when valid_bytes == physical (no torn tail) the `<` guard skips
+    # set_len; `<=` would set_len to the same length — a no-op truncation.
+    "audit/src/spool\\.rs.*replace < with <= in Spool::open",
+    # Defensive bounds on truncated/adversarial spool input; the "stop on a
+    # truncated/corrupt frame without panicking" contract is verified by
+    # open_heals_torn_tail_frame and the read_all length guard.
+    "audit/src/spool\\.rs.*replace take_u32 ->",
+    "audit/src/spool\\.rs.*in take_u32",
+    # Recovery tail-window floor: identical result for any partition whose tail
+    # fits the 4096-offset window (leo-4096 and leo+4096 both clamp to 0 for the
+    # realistic small audit partition); only differs for >4096-record tails.
+    "broker/src/audit_recovery\\.rs.*replace - with \\+ in recover_from_partition_tail",
+    # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
+    # base_offset + offset_delta), not the tamper verdict.
+    "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",
 ]

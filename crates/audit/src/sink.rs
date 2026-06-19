@@ -129,4 +129,83 @@ mod tests {
         let e = AuditError::Io("disk full".to_string());
         check!(format!("{e}").contains("disk full"));
     }
+
+    fn hdr(r: &AuditRecord, k: &str) -> Option<String> {
+        r.headers
+            .iter()
+            .find(|(hk, _)| hk == k)
+            .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+    }
+
+    #[test]
+    fn from_event_sets_principal_and_status_headers() {
+        use crate::event::{
+            AuditEndpoint, AuditEvent, AuditOutcome, AuditPrincipal, LifecycleKind,
+        };
+        use crate::ocsf::ProductInfo;
+        let product = ProductInfo {
+            vendor_name: "v".into(),
+            name: "n".into(),
+            version: "0".into(),
+        };
+        let authn = AuditEvent::Authentication {
+            outcome: AuditOutcome::Failure,
+            mechanism: "SASL/PLAIN".into(),
+            principal: AuditPrincipal {
+                name: "alice".into(),
+                auth_method: "SaslPlain".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.1".into(),
+                port: 1,
+            },
+            reason: None,
+            time_ms: 0,
+        };
+        let r = AuditRecord::from_event(&authn, &product);
+        check!(hdr(&r, "principal").as_deref() == Some("alice"));
+        check!(hdr(&r, "status").as_deref() == Some("failure"));
+        let admin = AuditEvent::AdminOperation {
+            outcome: AuditOutcome::Success,
+            principal: AuditPrincipal {
+                name: "bob".into(),
+                auth_method: "MTls".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.2".into(),
+                port: 2,
+            },
+            operation: "CreateTopics".into(),
+            resources: vec![],
+            time_ms: 0,
+        };
+        let r = AuditRecord::from_event(&admin, &product);
+        check!(hdr(&r, "principal").as_deref() == Some("bob"));
+        check!(hdr(&r, "status").as_deref() == Some("success"));
+        let deny = AuditEvent::AuthorizationDenied {
+            principal: AuditPrincipal {
+                name: "carol".into(),
+                auth_method: "MTls".into(),
+            },
+            source: AuditEndpoint {
+                ip: "10.0.0.3".into(),
+                port: 3,
+            },
+            resource_type: "Topic".into(),
+            resource_name: "t".into(),
+            operation: "Write".into(),
+            time_ms: 0,
+        };
+        let r = AuditRecord::from_event(&deny, &product);
+        check!(hdr(&r, "principal").as_deref() == Some("carol"));
+        check!(hdr(&r, "status").as_deref() == Some("denied"));
+        let life = AuditEvent::Lifecycle {
+            kind: LifecycleKind::BrokerStarted,
+            node_id: 1,
+            time_ms: 0,
+        };
+        let r = AuditRecord::from_event(&life, &product);
+        check!(hdr(&r, "principal") == None);
+        check!(hdr(&r, "status") == None);
+    }
 }
