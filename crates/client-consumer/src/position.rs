@@ -78,10 +78,25 @@ mod tests {
     }
 
     #[test]
+    fn leader_end_at_position_is_still_valid() {
+        assert!(classify(100, 2, 2, 100) == ValidationOutcome::Valid { leader_epoch: 2 });
+    }
+
+    #[test]
+    fn leader_end_zero_is_known_and_valid_for_negative_position() {
+        assert!(classify(-1, 2, 2, 0) == ValidationOutcome::Valid { leader_epoch: 2 });
+    }
+
+    #[test]
     fn leader_end_below_position_is_truncation() {
         // Leader's epoch-2 end offset (80) is below our position (100): the
         // tail we hold was truncated away.
         assert!(classify(100, 2, 2, 80) == ValidationOutcome::Truncated { safe_offset: 80 });
+    }
+
+    #[test]
+    fn negative_leader_end_alone_truncates_to_zero() {
+        assert!(classify(-3, 2, 2, -2) == ValidationOutcome::Truncated { safe_offset: 0 });
     }
 
     #[test]
@@ -92,7 +107,17 @@ mod tests {
     }
 
     #[test]
+    fn older_leader_epoch_alone_is_truncation() {
+        assert!(classify(10, 2, 1, 20) == ValidationOutcome::Truncated { safe_offset: 20 });
+    }
+
+    #[test]
     fn undefined_leader_offset_truncates_to_zero() {
         assert!(classify(100, 2, -1, -1) == ValidationOutcome::Truncated { safe_offset: 0 });
+    }
+
+    #[test]
+    fn undefined_leader_offset_truncates_even_when_epoch_matches() {
+        assert!(classify(100, 2, 2, -1) == ValidationOutcome::Truncated { safe_offset: 0 });
     }
 }

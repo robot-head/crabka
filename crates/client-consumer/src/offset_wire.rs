@@ -166,10 +166,12 @@ mod tests {
         // Legacy single-group fields (v0-7).
         let legacy = req.topics.as_ref().expect("legacy topics");
         assert!(legacy.len() == 1 && legacy[0].name == "t");
+        assert!(legacy[0].partition_indexes == vec![0, 1]);
         // v8+ groups[] with topic_id (v10).
         assert!(req.groups.len() == 1 && req.groups[0].group_id == "g");
         let gtops = req.groups[0].topics.as_ref().expect("group topics");
         assert!(gtops[0].name == "t" && gtops[0].topic_id == id(7));
+        assert!(gtops[0].partition_indexes == vec![0, 1]);
     }
 
     #[test]
@@ -252,14 +254,16 @@ mod tests {
     #[test]
     fn build_commit_topics_tags_topic_id() {
         let mut offsets = HashMap::new();
-        offsets.insert(("t".to_string(), 0), (100, 5));
+        offsets.insert(("t".to_string(), 3), (100, 5));
         let mut ids = HashMap::new();
         ids.insert("t".to_string(), id(7));
         let topics = build_commit_topics(offsets, &ids);
         assert!(topics.len() == 1);
         assert!(topics[0].name == "t" && topics[0].topic_id == id(7));
+        assert!(topics[0].partitions[0].partition_index == 3);
         assert!(topics[0].partitions[0].committed_offset == 100);
         assert!(topics[0].partitions[0].committed_leader_epoch == 5);
+        assert!(topics[0].partitions[0].committed_metadata == Some(String::new()));
 
         // Missing id → ZERO default.
         let mut o2 = HashMap::new();

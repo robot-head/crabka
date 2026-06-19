@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
+use crabka_protocol::owned::share_group_heartbeat_response::Assignment;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 /// `FENCED_MEMBER_EPOCH` — our epoch is behind the broker's; rejoin.
@@ -57,6 +58,50 @@ enum HeartbeatOutcome {
     Transient,
 }
 
+fn build_leave_heartbeat_request(
+    group_id: String,
+    member_id: String,
+) -> ShareGroupHeartbeatRequest {
+    ShareGroupHeartbeatRequest {
+        group_id,
+        member_id,
+        member_epoch: -1,
+        ..Default::default()
+    }
+}
+
+fn build_heartbeat_request(
+    group_id: String,
+    member_id: String,
+    member_epoch: i32,
+    subscribe: Option<Vec<String>>,
+) -> ShareGroupHeartbeatRequest {
+    ShareGroupHeartbeatRequest {
+        group_id,
+        member_id,
+        member_epoch,
+        subscribed_topic_names: subscribe,
+        ..Default::default()
+    }
+}
+
+fn heartbeat_result(error_code: i16) -> HeartbeatOutcome {
+    if error_code == 0 {
+        HeartbeatOutcome::Ok
+    } else if is_rejoin_error(error_code) {
+        HeartbeatOutcome::RejoinFromScratch
+    } else {
+        HeartbeatOutcome::Transient
+    }
+}
+
+fn is_rejoin_error(error_code: i16) -> bool {
+    matches!(
+        error_code,
+        FENCED_MEMBER_EPOCH | UNKNOWN_MEMBER_ID | STALE_MEMBER_EPOCH
+    )
+}
+
 /// Drive the heartbeat loop until `shutdown` fires.
 pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToken) {
     let mut ticker = tokio::time::interval(state.heartbeat_interval);
@@ -91,12 +136,10 @@ pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToke
     // Graceful departure: a leave heartbeat (`member_epoch = -1`) tells the
     // broker to evict us now rather than waiting out the session timeout.
     // Best-effort and bounded so a hung broker can't block `close()`.
-    let leave = state.client.send(ShareGroupHeartbeatRequest {
-        group_id: state.group_id.clone(),
-        member_id: state.member_id.clone(),
-        member_epoch: -1,
-        ..Default::default()
-    });
+    let leave = state.client.send(build_leave_heartbeat_request(
+        state.group_id.clone(),
+        state.member_id.clone(),
+    ));
     let _ = tokio::time::timeout(Duration::from_secs(5), leave).await;
 }
 
@@ -114,40 +157,37 @@ async fn heartbeat_once(state: &ShareCoordinatorState, rejoining: bool) -> Heart
     };
     let result = state
         .client
-        .send(ShareGroupHeartbeatRequest {
-            group_id: state.group_id.clone(),
-            member_id: state.member_id.clone(),
-            member_epoch: epoch,
-            subscribed_topic_names: subscribed,
-            ..Default::default()
-        })
+        .send(build_heartbeat_request(
+            state.group_id.clone(),
+            state.member_id.clone(),
+            epoch,
+            subscribed,
+        ))
         .await;
     match result {
-        Ok(r) if r.error_code == 0 => {
-            *state.member_epoch.lock().await = r.member_epoch;
-            if let Some(assignment) = r.assignment {
-                update_assignment(state, assignment).await;
+        Ok(r) => match heartbeat_result(r.error_code) {
+            HeartbeatOutcome::Ok => {
+                *state.member_epoch.lock().await = r.member_epoch;
+                if let Some(assignment) = r.assignment {
+                    update_assignment(state, assignment).await;
+                }
+                HeartbeatOutcome::Ok
             }
-            HeartbeatOutcome::Ok
-        }
-        Ok(r)
-            if r.error_code == FENCED_MEMBER_EPOCH
-                || r.error_code == UNKNOWN_MEMBER_ID
-                || r.error_code == STALE_MEMBER_EPOCH =>
-        {
-            tracing::warn!(
-                error_code = r.error_code,
-                "share heartbeat fenced; rejoining from epoch 0"
-            );
-            HeartbeatOutcome::RejoinFromScratch
-        }
-        Ok(r) => {
-            tracing::warn!(
-                error_code = r.error_code,
-                "unexpected share heartbeat error"
-            );
-            HeartbeatOutcome::Transient
-        }
+            HeartbeatOutcome::RejoinFromScratch => {
+                tracing::warn!(
+                    error_code = r.error_code,
+                    "share heartbeat fenced; rejoining from epoch 0"
+                );
+                HeartbeatOutcome::RejoinFromScratch
+            }
+            HeartbeatOutcome::Transient => {
+                tracing::warn!(
+                    error_code = r.error_code,
+                    "unexpected share heartbeat error"
+                );
+                HeartbeatOutcome::Transient
+            }
+        },
         Err(e) => {
             tracing::warn!(error = %e, "share heartbeat send failed");
             HeartbeatOutcome::Transient
@@ -159,10 +199,7 @@ async fn heartbeat_once(state: &ShareCoordinatorState, rejoining: bool) -> Heart
 /// resolving topic names from the cached `topic_names` map (topic ids the map
 /// doesn't know yet fall back to the id's hex form so `poll()` still has a
 /// stable display name; a later Metadata refresh fixes it).
-async fn update_assignment(
-    state: &ShareCoordinatorState,
-    assignment: crabka_protocol::owned::share_group_heartbeat_response::Assignment,
-) {
+async fn update_assignment(state: &ShareCoordinatorState, assignment: Assignment) {
     let names = state.topic_names.lock().await;
     let mut next: Vec<(WireUuid, String, i32)> = Vec::new();
     for tp in &assignment.topic_partitions {
@@ -187,4 +224,112 @@ fn hex_topic_id(id: WireUuid) -> String {
         let _ = write!(s, "{b:02x}");
         s
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_protocol::owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions;
+
+    fn id(n: u8) -> WireUuid {
+        let mut b = [0u8; 16];
+        b[15] = n;
+        WireUuid(b)
+    }
+
+    async fn state() -> ShareCoordinatorState {
+        let mut names = HashMap::new();
+        names.insert(id(7), "topic-a".to_string());
+        ShareCoordinatorState {
+            client: Client::builder()
+                .bootstrap("127.0.0.1:1")
+                .client_id("share-coordinator-test")
+                .build()
+                .await
+                .unwrap(),
+            group_id: "group-a".into(),
+            member_id: "member-a".into(),
+            member_epoch: Arc::new(Mutex::new(3)),
+            assignment: Arc::new(Mutex::new(Vec::new())),
+            topic_names: Arc::new(Mutex::new(names)),
+            subscribe: vec!["topic-a".into()],
+            heartbeat_interval: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn heartbeat_requests_preserve_group_member_epoch_and_subscription() {
+        let leave = build_leave_heartbeat_request("group-a".into(), "member-a".into());
+        assert!(leave.group_id == "group-a");
+        assert!(leave.member_id == "member-a");
+        assert!(leave.member_epoch == -1);
+
+        let heartbeat = build_heartbeat_request(
+            "group-a".into(),
+            "member-a".into(),
+            4,
+            Some(vec!["topic-a".into()]),
+        );
+        assert!(heartbeat.group_id == "group-a");
+        assert!(heartbeat.member_id == "member-a");
+        assert!(heartbeat.member_epoch == 4);
+        assert!(heartbeat.subscribed_topic_names == Some(vec!["topic-a".into()]));
+    }
+
+    #[test]
+    fn heartbeat_result_classifies_success_rejoin_and_transient_errors() {
+        assert!(matches!(heartbeat_result(0), HeartbeatOutcome::Ok));
+        assert!(matches!(
+            heartbeat_result(FENCED_MEMBER_EPOCH),
+            HeartbeatOutcome::RejoinFromScratch
+        ));
+        assert!(matches!(
+            heartbeat_result(UNKNOWN_MEMBER_ID),
+            HeartbeatOutcome::RejoinFromScratch
+        ));
+        assert!(matches!(
+            heartbeat_result(STALE_MEMBER_EPOCH),
+            HeartbeatOutcome::RejoinFromScratch
+        ));
+        assert!(matches!(heartbeat_result(17), HeartbeatOutcome::Transient));
+    }
+
+    #[tokio::test]
+    async fn update_assignment_resolves_names_and_hex_fallbacks() {
+        let state = state().await;
+        update_assignment(
+            &state,
+            Assignment {
+                topic_partitions: vec![
+                    TopicPartitions {
+                        topic_id: id(7),
+                        partitions: vec![1],
+                        ..Default::default()
+                    },
+                    TopicPartitions {
+                        topic_id: id(9),
+                        partitions: vec![2],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let assignment = state.assignment.lock().await.clone();
+        assert!(
+            assignment
+                == vec![
+                    (id(7), "topic-a".into(), 1),
+                    (id(9), hex_topic_id(id(9)), 2)
+                ]
+        );
+    }
+
+    #[test]
+    fn hex_topic_id_formats_all_uuid_bytes() {
+        assert!(hex_topic_id(id(9)) == "00000000000000000000000000000009");
+    }
 }

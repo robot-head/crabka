@@ -42,11 +42,99 @@ use crate::error::ConsumerError;
 
 /// `partition_max_bytes` / `max_bytes` budget for a `ShareFetch` (mirrors the
 /// classic consumer's 50 MiB fetch budget).
-const MAX_BYTES: i32 = 50 * 1024 * 1024;
+const MAX_BYTES: i32 = 52_428_800;
 /// Per-partition byte budget.
-const PARTITION_MAX_BYTES: i32 = 1 << 20;
+const PARTITION_MAX_BYTES: i32 = 1_048_576;
 /// Cap on records returned per fetch.
 const MAX_RECORDS: i32 = 500;
+
+fn build_share_fetch_topics(
+    assignment: &[(WireUuid, String, i32)],
+    acks: &HashMap<(WireUuid, i32), Vec<FetchAckBatch>>,
+) -> Vec<FetchTopic> {
+    let mut by_topic: HashMap<WireUuid, Vec<(i32, Vec<FetchAckBatch>)>> = HashMap::new();
+    for (tid, _name, partition) in assignment {
+        let packs = acks.get(&(*tid, *partition)).cloned().unwrap_or_default();
+        by_topic.entry(*tid).or_default().push((*partition, packs));
+    }
+
+    by_topic
+        .into_iter()
+        .map(|(topic_id, parts)| FetchTopic {
+            topic_id,
+            partitions: parts
+                .into_iter()
+                .map(
+                    |(partition_index, acknowledgement_batches)| FetchPartition {
+                        partition_index,
+                        partition_max_bytes: PARTITION_MAX_BYTES,
+                        acknowledgement_batches,
+                        ..Default::default()
+                    },
+                )
+                .collect(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn build_share_fetch_request(
+    group_id: String,
+    member_id: String,
+    share_session_epoch: i32,
+    timeout: Duration,
+    topics: Vec<FetchTopic>,
+) -> ShareFetchRequest {
+    ShareFetchRequest {
+        group_id: Some(group_id),
+        member_id: Some(member_id),
+        share_session_epoch,
+        max_wait_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
+        min_bytes: 1,
+        max_bytes: MAX_BYTES,
+        max_records: MAX_RECORDS,
+        batch_size: MAX_RECORDS,
+        topics,
+        ..Default::default()
+    }
+}
+
+fn build_share_ack_request(
+    group_id: String,
+    member_id: String,
+    share_session_epoch: i32,
+    is_renew_ack: bool,
+    topics: Vec<AcknowledgeTopic>,
+) -> ShareAcknowledgeRequest {
+    ShareAcknowledgeRequest {
+        group_id: Some(group_id),
+        member_id: Some(member_id),
+        share_session_epoch,
+        is_renew_ack,
+        topics,
+        ..Default::default()
+    }
+}
+
+fn response_has_error(error_code: i16) -> bool {
+    error_code != 0
+}
+
+fn range_len(first: i64, last: i64) -> usize {
+    usize::try_from(last - first + 1).unwrap_or(0)
+}
+
+fn offset_in_range(first: i64, offset: i64, last: i64) -> bool {
+    first <= offset && offset <= last
+}
+
+fn record_offset(base_offset: i64, offset_delta: i32) -> i64 {
+    base_offset + i64::from(offset_delta)
+}
+
+fn record_timestamp(base_timestamp: i64, timestamp_delta: i64) -> i64 {
+    base_timestamp + timestamp_delta
+}
 
 impl ShareConsumer {
     /// Acquire and return the next batch of records.
@@ -77,52 +165,20 @@ impl ShareConsumer {
 
         // Group assigned partitions by topic id, attaching the (topic_id,
         // partition) acks to the matching partition entry.
-        let mut by_topic: HashMap<WireUuid, Vec<(i32, Vec<FetchAckBatch>)>> = HashMap::new();
-        for (tid, _name, partition) in &assignment {
-            let packs = acks.get(&(*tid, *partition)).cloned().unwrap_or_default();
-            by_topic.entry(*tid).or_default().push((*partition, packs));
-        }
+        let topics = build_share_fetch_topics(&assignment, &acks);
 
-        let topics: Vec<FetchTopic> = by_topic
-            .into_iter()
-            .map(|(topic_id, parts)| FetchTopic {
-                topic_id,
-                partitions: parts
-                    .into_iter()
-                    .map(
-                        |(partition_index, acknowledgement_batches)| FetchPartition {
-                            partition_index,
-                            partition_max_bytes: PARTITION_MAX_BYTES,
-                            acknowledgement_batches,
-                            ..Default::default()
-                        },
-                    )
-                    .collect(),
-                ..Default::default()
-            })
-            .collect();
-
-        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
         let resp = self
             .client
-            .send(ShareFetchRequest {
-                group_id: Some(self.group_id.clone()),
-                member_id: Some(self.member_id.clone()),
-                share_session_epoch: self.share_session_epoch,
-                max_wait_ms: timeout_ms,
-                min_bytes: 1,
-                max_bytes: MAX_BYTES,
-                max_records: MAX_RECORDS,
-                batch_size: MAX_RECORDS,
-                share_acquire_mode: 0,
-                is_renew_ack: false,
+            .send(build_share_fetch_request(
+                self.group_id.clone(),
+                self.member_id.clone(),
+                self.share_session_epoch,
+                timeout,
                 topics,
-                forgotten_topics_data: vec![],
-                ..Default::default()
-            })
+            ))
             .await?;
 
-        if resp.error_code != 0 {
+        if response_has_error(resp.error_code) {
             return Err(ConsumerError::Server(resp.error_code));
         }
         // A successful ShareFetch consumes one session epoch; advance to the
@@ -141,7 +197,7 @@ impl ShareConsumer {
         for topic in &resp.responses {
             let topic_name = name_for.get(&topic.topic_id).cloned().unwrap_or_default();
             for part in &topic.partitions {
-                if part.acknowledge_error_code != 0 {
+                if response_has_error(part.acknowledge_error_code) {
                     tracing::warn!(
                         topic = %topic_name,
                         partition = part.partition_index,
@@ -149,7 +205,7 @@ impl ShareConsumer {
                         "share fetch piggyback acknowledge error"
                     );
                 }
-                if part.error_code != 0 {
+                if response_has_error(part.error_code) {
                     tracing::warn!(
                         topic = %topic_name,
                         partition = part.partition_index,
@@ -180,19 +236,19 @@ impl ShareConsumer {
                         continue;
                     }
                     for r in &batch.records {
-                        let offset = batch.base_offset + i64::from(r.offset_delta);
+                        let offset = record_offset(batch.base_offset, r.offset_delta);
                         // Pair the record with the acquired range that contains
                         // it to read the broker's delivery_count for this offset.
                         let delivery_count = part
                             .acquired_records
                             .iter()
-                            .find(|ar| ar.first_offset <= offset && offset <= ar.last_offset)
+                            .find(|ar| offset_in_range(ar.first_offset, offset, ar.last_offset))
                             .map_or(0, |ar| ar.delivery_count);
                         out.push(ShareConsumerRecord {
                             topic: topic_name.clone(),
                             partition: part.partition_index,
                             offset,
-                            timestamp: batch.base_timestamp + r.timestamp_delta,
+                            timestamp: record_timestamp(batch.base_timestamp, r.timestamp_delta),
                             key: r.key.clone(),
                             value: r.value.clone(),
                             delivery_count,
@@ -267,33 +323,25 @@ impl ShareConsumer {
             ));
         }
         let topic_id = self.topic_id_for(&record.topic);
-        let topics = vec![AcknowledgeTopic {
+        let topics = build_ack_topics(vec![(
             topic_id,
-            partitions: vec![AcknowledgePartition {
-                partition_index: record.partition,
-                acknowledgement_batches: vec![AckAckBatch {
-                    first_offset: record.offset,
-                    last_offset: record.offset,
-                    acknowledge_types: vec![],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }];
+            record.partition,
+            record.offset,
+            record.offset,
+            0,
+        )]);
 
         let resp = self
             .client
-            .send(ShareAcknowledgeRequest {
-                group_id: Some(self.group_id.clone()),
-                member_id: Some(self.member_id.clone()),
-                share_session_epoch: self.share_session_epoch,
-                is_renew_ack: true,
+            .send(build_share_ack_request(
+                self.group_id.clone(),
+                self.member_id.clone(),
+                self.share_session_epoch,
+                true,
                 topics,
-                ..Default::default()
-            })
+            ))
             .await?;
-        if resp.error_code != 0 {
+        if response_has_error(resp.error_code) {
             return Err(ConsumerError::Server(resp.error_code));
         }
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
@@ -318,16 +366,15 @@ impl ShareConsumer {
 
         let resp = self
             .client
-            .send(ShareAcknowledgeRequest {
-                group_id: Some(self.group_id.clone()),
-                member_id: Some(self.member_id.clone()),
-                share_session_epoch: self.share_session_epoch,
-                is_renew_ack: false,
+            .send(build_share_ack_request(
+                self.group_id.clone(),
+                self.member_id.clone(),
+                self.share_session_epoch,
+                false,
                 topics,
-                ..Default::default()
-            })
+            ))
             .await?;
-        if resp.error_code != 0 {
+        if response_has_error(resp.error_code) {
             return Err(ConsumerError::Server(resp.error_code));
         }
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
@@ -344,7 +391,7 @@ impl ShareConsumer {
         match self.ack_mode {
             ShareAckMode::Implicit => {
                 for (tid, partition, first, last) in std::mem::take(&mut self.prev_delivered) {
-                    let count = usize::try_from(last - first + 1).unwrap_or(0);
+                    let count = range_len(first, last);
                     out.entry((tid, partition))
                         .or_default()
                         .push(FetchAckBatch {
@@ -357,7 +404,7 @@ impl ShareConsumer {
             }
             ShareAckMode::Explicit => {
                 for (tid, partition, first, last, ack) in std::mem::take(&mut self.pending_acks) {
-                    let count = usize::try_from(last - first + 1).unwrap_or(0);
+                    let count = range_len(first, last);
                     out.entry((tid, partition))
                         .or_default()
                         .push(FetchAckBatch {
@@ -401,7 +448,7 @@ impl ShareConsumer {
 fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<AcknowledgeTopic> {
     let mut by_topic: HashMap<WireUuid, HashMap<i32, Vec<AckAckBatch>>> = HashMap::new();
     for (tid, partition, first, last, ack) in acks {
-        let count = usize::try_from(last - first + 1).unwrap_or(0);
+        let count = if ack == 0 { 0 } else { range_len(first, last) };
         by_topic
             .entry(tid)
             .or_default()
@@ -431,4 +478,280 @@ fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<Acknowledge
             ..Default::default()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_client_core::Client;
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    fn id(n: u8) -> WireUuid {
+        let mut b = [0u8; 16];
+        b[15] = n;
+        WireUuid(b)
+    }
+
+    async fn test_consumer(ack_mode: ShareAckMode) -> ShareConsumer {
+        ShareConsumer {
+            client: Client::builder()
+                .bootstrap("127.0.0.1:1")
+                .client_id("share-poll-test")
+                .build()
+                .await
+                .unwrap(),
+            group_id: "group-a".into(),
+            member_id: "member-a".into(),
+            member_epoch: Arc::new(Mutex::new(3)),
+            assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
+            topic_names: Arc::new(Mutex::new(HashMap::new())),
+            share_session_epoch: 4,
+            ack_mode,
+            pending_acks: Vec::new(),
+            prev_delivered: Vec::new(),
+            shutdown: CancellationToken::new(),
+            hb_handle: None,
+        }
+    }
+
+    fn only<T>(items: &[T]) -> &T {
+        assert!(items.len() == 1);
+        &items[0]
+    }
+
+    #[test]
+    fn share_fetch_request_preserves_wire_fields_and_timeout_bounds() {
+        let topic = FetchTopic {
+            topic_id: id(7),
+            partitions: vec![FetchPartition {
+                partition_index: 2,
+                partition_max_bytes: 123,
+                acknowledgement_batches: Vec::new(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let req = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            4,
+            Duration::from_millis(250),
+            vec![topic.clone()],
+        );
+
+        assert!(req.group_id == Some("group-a".into()));
+        assert!(req.member_id == Some("member-a".into()));
+        assert!(req.share_session_epoch == 4);
+        assert!(req.max_wait_ms == 250);
+        assert!(req.min_bytes == 1);
+        assert!(req.max_bytes == MAX_BYTES);
+        assert!(req.max_records == MAX_RECORDS);
+        assert!(req.batch_size == MAX_RECORDS);
+        assert!(req.share_acquire_mode == 0);
+        assert!(!req.is_renew_ack);
+        assert!(req.topics == vec![topic]);
+        assert!(req.forgotten_topics_data.is_empty());
+
+        let saturated = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            4,
+            Duration::from_millis(u64::from(u32::MAX)),
+            Vec::new(),
+        );
+        assert!(saturated.max_wait_ms == i32::MAX);
+    }
+
+    #[test]
+    fn share_fetch_topics_group_assignment_and_attach_partition_acks() {
+        let ack = FetchAckBatch {
+            first_offset: 10,
+            last_offset: 11,
+            acknowledge_types: vec![ShareAckType::Accept.wire(); 2],
+            ..Default::default()
+        };
+        let mut acks = HashMap::new();
+        acks.insert((id(7), 2), vec![ack.clone()]);
+
+        let topics = build_share_fetch_topics(
+            &[
+                (id(7), "topic-a".into(), 2),
+                (id(7), "topic-a".into(), 3),
+                (id(8), "topic-b".into(), 1),
+            ],
+            &acks,
+        );
+
+        let topic = topics.iter().find(|topic| topic.topic_id == id(7)).unwrap();
+        assert!(topic.partitions.len() == 2);
+        let part = topic
+            .partitions
+            .iter()
+            .find(|part| part.partition_index == 2)
+            .unwrap();
+        assert!(part.partition_max_bytes == PARTITION_MAX_BYTES);
+        assert!(part.acknowledgement_batches == vec![ack]);
+        let empty = topic
+            .partitions
+            .iter()
+            .find(|part| part.partition_index == 3)
+            .unwrap();
+        assert!(empty.acknowledgement_batches.is_empty());
+    }
+
+    #[test]
+    fn share_ack_request_preserves_identity_epoch_renew_flag_and_topics() {
+        let topics = build_ack_topics(vec![(id(7), 2, 10, 12, ShareAckType::Reject.wire())]);
+
+        let req =
+            build_share_ack_request("group-a".into(), "member-a".into(), 5, true, topics.clone());
+
+        assert!(req.group_id == Some("group-a".into()));
+        assert!(req.member_id == Some("member-a".into()));
+        assert!(req.share_session_epoch == 5);
+        assert!(req.is_renew_ack);
+        assert!(req.topics == topics);
+    }
+
+    #[test]
+    fn response_and_record_helpers_preserve_boundaries() {
+        assert!(!response_has_error(0));
+        assert!(response_has_error(17));
+        assert!(range_len(10, 12) == 3);
+        assert!(range_len(12, 10) == 0);
+        assert!(offset_in_range(10, 10, 12));
+        assert!(offset_in_range(10, 12, 12));
+        assert!(!offset_in_range(10, 9, 12));
+        assert!(!offset_in_range(10, 13, 12));
+        assert!(record_offset(100, 7) == 107);
+        assert!(record_timestamp(1000, 33) == 1033);
+    }
+
+    #[tokio::test]
+    async fn acknowledge_rejects_implicit_mode_and_stages_explicit_record() {
+        let record = ShareConsumerRecord {
+            topic: "topic-a".into(),
+            partition: 2,
+            offset: 10,
+            timestamp: 0,
+            key: None,
+            value: None,
+            delivery_count: 1,
+        };
+
+        let mut implicit = test_consumer(ShareAckMode::Implicit).await;
+        assert!(
+            implicit
+                .acknowledge(&record, ShareAckType::Accept)
+                .unwrap_err()
+                .to_string()
+                .contains("implicit ack mode")
+        );
+
+        let mut explicit = test_consumer(ShareAckMode::Explicit).await;
+        explicit
+            .acknowledge(&record, ShareAckType::Release)
+            .unwrap();
+        assert!(explicit.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Release.wire())]);
+    }
+
+    #[tokio::test]
+    async fn renew_rejects_implicit_mode_before_sending() {
+        let record = ShareConsumerRecord {
+            topic: "topic-a".into(),
+            partition: 2,
+            offset: 10,
+            timestamp: 0,
+            key: None,
+            value: None,
+            delivery_count: 1,
+        };
+        let mut consumer = test_consumer(ShareAckMode::Implicit).await;
+
+        assert!(
+            consumer
+                .renew(&record)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("implicit ack mode")
+        );
+    }
+
+    #[tokio::test]
+    async fn take_piggyback_acks_drains_implicit_deliveries_as_accept_ranges() {
+        let mut consumer = test_consumer(ShareAckMode::Implicit).await;
+        consumer.prev_delivered = vec![(id(7), 2, 10, 12)];
+
+        let acks = consumer.take_piggyback_acks();
+
+        assert!(consumer.prev_delivered.is_empty());
+        let batch = only(acks.get(&(id(7), 2)).unwrap());
+        assert!(batch.first_offset == 10);
+        assert!(batch.last_offset == 12);
+        assert!(batch.acknowledge_types == vec![ShareAckType::Accept.wire(); 3]);
+    }
+
+    #[tokio::test]
+    async fn take_piggyback_acks_drains_explicit_pending_and_clears_stale_deliveries() {
+        let mut consumer = test_consumer(ShareAckMode::Explicit).await;
+        consumer.prev_delivered = vec![(id(7), 2, 1, 1)];
+        consumer.pending_acks = vec![(id(7), 2, 10, 11, ShareAckType::Reject.wire())];
+
+        let acks = consumer.take_piggyback_acks();
+
+        assert!(consumer.prev_delivered.is_empty());
+        assert!(consumer.pending_acks.is_empty());
+        let batch = only(acks.get(&(id(7), 2)).unwrap());
+        assert!(batch.first_offset == 10);
+        assert!(batch.last_offset == 11);
+        assert!(batch.acknowledge_types == vec![ShareAckType::Reject.wire(); 2]);
+    }
+
+    #[tokio::test]
+    async fn topic_id_for_prefers_assignment_then_names_and_defaults_unknown() {
+        let consumer = test_consumer(ShareAckMode::Explicit).await;
+        consumer
+            .topic_names
+            .lock()
+            .await
+            .insert(id(8), "topic-b".into());
+
+        assert!(consumer.topic_id_for("topic-a") == id(7));
+        assert!(consumer.topic_id_for("topic-b") == id(8));
+        assert!(consumer.topic_id_for("missing") == WireUuid::default());
+    }
+
+    #[test]
+    fn build_ack_topics_groups_offsets_by_topic_and_partition() {
+        let topics = build_ack_topics(vec![
+            (id(7), 2, 10, 12, ShareAckType::Accept.wire()),
+            (id(7), 3, 20, 20, ShareAckType::Release.wire()),
+            (id(8), 1, 30, 31, ShareAckType::Reject.wire()),
+        ]);
+
+        let topic = topics.iter().find(|topic| topic.topic_id == id(7)).unwrap();
+        assert!(topic.partitions.len() == 2);
+        let part = topic
+            .partitions
+            .iter()
+            .find(|part| part.partition_index == 2)
+            .unwrap();
+        let batch = only(&part.acknowledgement_batches);
+        assert!(batch.first_offset == 10);
+        assert!(batch.last_offset == 12);
+        assert!(batch.acknowledge_types == vec![ShareAckType::Accept.wire(); 3]);
+
+        let renew = build_ack_topics(vec![(id(7), 2, 10, 10, 0)]);
+        let renew_batch = only(&only(&only(&renew).partitions).acknowledgement_batches);
+        assert!(renew_batch.first_offset == 10);
+        assert!(renew_batch.last_offset == 10);
+        assert!(renew_batch.acknowledge_types.is_empty());
+    }
 }

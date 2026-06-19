@@ -84,6 +84,15 @@ fn peek_version(bytes: &[u8]) -> i16 {
     i16::from_be_bytes([bytes[0], bytes[1]])
 }
 
+fn empty_subscription() -> DecodedSubscription {
+    DecodedSubscription {
+        topics: Vec::new(),
+        owned: Vec::new(),
+        generation_id: -1,
+        rack_id: None,
+    }
+}
+
 pub(crate) fn encode_subscription(
     topics: &[String],
     owned: &[(String, i32)],
@@ -115,23 +124,13 @@ pub(crate) fn encode_subscription(
 }
 
 pub(crate) fn decode_subscription(bytes: &[u8]) -> DecodedSubscription {
-    if bytes.len() < 2 {
-        return DecodedSubscription {
-            topics: Vec::new(),
-            owned: Vec::new(),
-            generation_id: -1,
-            rack_id: None,
-        };
-    }
+    let Some(payload) = bytes.get(2..) else {
+        return empty_subscription();
+    };
     let version = peek_version(bytes).clamp(0, SUBSCRIPTION_WIRE_VERSION);
-    let mut cur = &bytes[2..];
+    let mut cur = payload;
     let Ok(msg) = ConsumerProtocolSubscription::decode(&mut cur, version) else {
-        return DecodedSubscription {
-            topics: Vec::new(),
-            owned: Vec::new(),
-            generation_id: -1,
-            rack_id: None,
-        };
+        return empty_subscription();
     };
     let mut owned = Vec::new();
     for tp in msg.owned_partitions {
@@ -170,11 +169,11 @@ pub(crate) fn encode_assignment(partitions: &[(String, i32)]) -> Bytes {
 }
 
 pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
-    if bytes.len() < 2 {
+    let Some(payload) = bytes.get(2..) else {
         return Vec::new();
-    }
+    };
     let version = peek_version(bytes).clamp(0, ASSIGNMENT_WIRE_VERSION);
-    let mut cur = &bytes[2..];
+    let mut cur = payload;
     let Ok(msg) = ConsumerProtocolAssignment::decode(&mut cur, version) else {
         return Vec::new();
     };
@@ -191,6 +190,37 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
 mod tests {
     use super::*;
     use assert2::assert;
+
+    #[test]
+    fn isolation_level_wire_values_match_fetch_request_encoding() {
+        assert!(IsolationLevel::ReadUncommitted.wire() == 0);
+        assert!(IsolationLevel::ReadCommitted.wire() == 1);
+    }
+
+    #[test]
+    fn peek_version_requires_two_bytes() {
+        assert!(peek_version(&[]) == 0);
+        assert!(peek_version(&[0x7f]) == 0);
+        assert!(peek_version(&[0, 3]) == 3);
+    }
+
+    #[test]
+    fn decode_subscription_short_or_malformed_payload_uses_empty_fallback() {
+        for payload in [&[][..], &[0x7f][..], &[0, 3][..]] {
+            let decoded = decode_subscription(payload);
+            assert!(decoded.topics.is_empty());
+            assert!(decoded.owned.is_empty());
+            assert!(decoded.generation_id == -1);
+            assert!(decoded.rack_id == None);
+        }
+    }
+
+    #[test]
+    fn decode_assignment_short_or_malformed_payload_uses_empty_fallback() {
+        for payload in [&[][..], &[0x7f][..], &[0, 3][..]] {
+            assert!(decode_assignment(payload).is_empty());
+        }
+    }
 
     #[test]
     fn subscription_round_trip() {
