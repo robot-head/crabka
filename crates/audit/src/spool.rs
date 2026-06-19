@@ -49,9 +49,18 @@ impl Spool {
             bytes: 0,
             count: 0,
         };
-        let records = s.read_all()?;
+        let (records, valid_bytes) = s.scan()?;
+        let physical = s.file.metadata().map_err(io)?.len();
+        if valid_bytes < physical {
+            s.file.set_len(valid_bytes).map_err(io)?;
+            tracing::warn!(
+                physical,
+                valid_bytes,
+                "audit spool: truncated torn tail frame on open"
+            );
+        }
         s.count = u64::try_from(records.len()).unwrap_or(u64::MAX);
-        s.bytes = s.file.metadata().map_err(io)?.len();
+        s.bytes = valid_bytes;
         Ok(s)
     }
 
@@ -85,8 +94,11 @@ impl Spool {
         Ok(true)
     }
 
-    /// Read every record from the start of the spool, in order.
-    pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
+    /// Scan the spool file, returning decoded records and the byte offset
+    /// immediately after the last complete, successfully-decoded frame (the
+    /// "logical length"). A truncated or corrupt tail frame is treated as
+    /// end-of-data; `valid_bytes` points to just before that torn frame.
+    fn scan(&self) -> Result<(Vec<AuditRecord>, u64), AuditError> {
         let mut buf = Vec::new();
         {
             let mut f = File::open(&self.path).map_err(io)?;
@@ -94,6 +106,7 @@ impl Spool {
         }
         let mut out = Vec::new();
         let mut cur: &[u8] = &buf;
+        let mut valid_bytes: u64 = 0;
         while cur.len() >= 4 {
             let len =
                 usize::try_from(u32::from_be_bytes([cur[0], cur[1], cur[2], cur[3]])).unwrap_or(0);
@@ -101,12 +114,20 @@ impl Spool {
                 break; // truncated tail frame
             }
             match decode_record(&cur[4..4 + len]) {
-                Some(rec) => out.push(rec),
+                Some(rec) => {
+                    out.push(rec);
+                    valid_bytes += u64::try_from(4 + len).unwrap_or(0);
+                }
                 None => break, // corrupt frame: stop (visible)
             }
             cur = &cur[4 + len..];
         }
-        Ok(out)
+        Ok((out, valid_bytes))
+    }
+
+    /// Read every record from the start of the spool, in order.
+    pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
+        Ok(self.scan()?.0)
     }
 
     /// Replace the spool contents with exactly `remaining`, atomically.
@@ -141,6 +162,7 @@ impl Spool {
     /// Clear the spool.
     pub fn truncate(&mut self) -> Result<(), AuditError> {
         self.file.set_len(0).map_err(io)?;
+        self.file.seek(SeekFrom::Start(0)).map_err(io)?;
         self.file.flush().map_err(io)?;
         self.bytes = 0;
         self.count = 0;
@@ -334,6 +356,33 @@ mod tests {
         // sanity: hex of head1 matches r1's chain math
         check!(to_hex(&head) == to_hex(&head1));
         let _ = (HEADER_SEQ, HEADER_PREV_HASH); // used by impl
+    }
+
+    #[test]
+    fn open_heals_torn_tail_frame() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let r0 = chained_record(0, &GENESIS_HEAD, b"good");
+        {
+            let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+            s.append(&r0).unwrap();
+        }
+        // Simulate a crash mid-append: a length prefix claiming 100 bytes, only 3 follow.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join("audit.spool"))
+                .unwrap();
+            f.write_all(&100u32.to_be_bytes()).unwrap();
+            f.write_all(b"abc").unwrap();
+        }
+        // Reopen heals the torn tail; the good record survives and appends continue contiguously.
+        let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
+        assert2::check!(s.count() == 1);
+        assert2::check!(s.read_all().unwrap() == vec![r0.clone()]);
+        let r1 = chained_record(1, &GENESIS_HEAD, b"more");
+        assert2::check!(s.append(&r1).unwrap());
+        assert2::check!(s.read_all().unwrap() == vec![r0, r1]);
     }
 
     #[test]
