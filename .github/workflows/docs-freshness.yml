@@ -37,7 +37,7 @@ jobs:
       # Re-derive the whole reference tree from current code. A failure here
       # means doc generation itself broke against the live APIs.
       - name: Regenerate reference markdown
-        run: cargo run -p crabka-docgen -- all --out website/content/reference
+        run: cargo run -p crabka-docgen -- all --out website/content/docs/reference
 
       # The doc generators carry assertions about their own output (sectioned
       # config table, protocol spec links, etc.).
@@ -81,7 +81,7 @@ jobs:
               'breaks a generated failure-scenario invariant). Re-run locally with:',
               '',
               '```sh',
-              'cargo run -p crabka-docgen -- all --out website/content/reference',
+              'cargo run -p crabka-docgen -- all --out website/content/docs/reference',
               'cargo test -p crabka-docgen',
               'cargo test -p crabka-raft --features scenarios',
               '(cd website && zola build)',

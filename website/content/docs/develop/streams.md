@@ -1,12 +1,18 @@
 +++
-title = "Streams & Data Formats"
-weight = 35
+title = "Streams and Data Formats"
+weight = 10
 template = "docs/page.html"
 +++
 
-`crabka-client-streams` is the KIP-1071 Streams client: it joins a Streams
-rebalance group, runs a processing topology, and reads/writes Kafka topics
-through pluggable **serdes**. It offers two processing models:
+`crabka-client-streams` is Crabka's Rust Streams client. It joins a KIP-1071
+Streams rebalance group, runs a processing topology, and reads/writes Kafka
+topics through pluggable serdes.
+
+Use this page when you are building stream-processing applications in Rust. Use
+[Schema Registry Deployment](/docs/deploy/schema-registry/) when you need the
+registry service those schema-aware serdes talk to.
+
+The client offers two processing models:
 
 - **Row model** — the Processor API and the high-level DSL (`StreamsApp` /
   `streams_builder`), one record at a time, with `TopologyTestDriver` for
@@ -36,7 +42,7 @@ Add the client and pick the columnar features you need:
 
 ```toml
 [dependencies]
-crabka-client-streams = { version = "0.3.6", features = ["polars", "arrow"] }
+crabka-client-streams = { version = "0.3.7", features = ["polars", "arrow"] }
 ```
 
 Define a type, then round-trip it through a schema serde. Any `serde` type that

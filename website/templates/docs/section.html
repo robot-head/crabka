@@ -5,8 +5,8 @@
 {% endblock body %}
 
 {% block header %}
-  {# Derive the top-level section from the section path (e.g. "guide" or "reference").
-     section.path is "/reference/", so strip the leading slash before splitting. #}
+  {# Derive the top-level section from the section path (e.g. "docs" or "benchmarks").
+     section.path is "/docs/", so strip the leading slash before splitting. #}
   {% set path_parts = section.path | trim_start_matches(pat="/") | split(pat="/") %}
   {% set current_section = path_parts | first %}
   {{ macros_header::header(current_section=current_section)}}

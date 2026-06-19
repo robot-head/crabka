@@ -39,7 +39,7 @@ logo = "android-chrome-512x512.png"
 twitter = ""
 linked_in = ""
 github = "https://github.com/robot-head/crabka"
-section = "guide"
+section = "docs"
 site_links_search_box = false
 
 [[extra.menu.social]]

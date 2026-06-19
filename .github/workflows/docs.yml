@@ -52,7 +52,7 @@ jobs:
         with:
           target: wasm32-unknown-unknown
       - name: Generate reference markdown
-        run: cargo run -p crabka-docgen -- all --out website/content/reference
+        run: cargo run -p crabka-docgen -- all --out website/content/docs/reference
       - name: Build rustdoc
         run: cargo doc --no-deps --workspace
       - name: Install wasm-bindgen-cli (version-matched to Cargo.lock)

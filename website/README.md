@@ -7,7 +7,7 @@ Built with [Zola](https://www.getzola.org/) and deployed to GitHub Pages by
 
     # 1. Generate the reference tree from source (operator CRDs, broker config,
     #    topic configs, protocol API table).
-    cargo run -p crabka-docgen -- all --out website/content/reference
+    cargo run -p crabka-docgen -- all --out website/content/docs/reference
 
     # 2. (Optional) build rustdoc and stage it under /api/rust/.
     cargo doc --no-deps --workspace
@@ -16,6 +16,6 @@ Built with [Zola](https://www.getzola.org/) and deployed to GitHub Pages by
     # 3. Serve with live reload (requires Zola >= 0.22).
     cd website && zola serve
 
-Generated content under `content/reference/` (except `broker/rust-api.md`)
-and everything under `static/api/` and `static/images/` is git-ignored — it
-is regenerated at build time and never committed.
+Generated content under `content/docs/reference/` and everything under
+`static/api/` and `static/images/` is git-ignored — it is regenerated at build
+time and never committed.
