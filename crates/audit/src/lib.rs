@@ -9,6 +9,7 @@ pub mod log;
 pub mod ocsf;
 pub mod signing;
 pub mod sink;
+pub mod spool;
 pub mod verify;
 
 pub use chain::{ChainState, GENESIS_HEAD, chain_hash};
@@ -23,4 +24,5 @@ pub use signing::{
     FileEd25519Signer, SigningKeyProvider, checkpoint_signing_bytes, verify_signature,
 };
 pub use sink::{AuditError, AuditRecord, AuditSink, HEADER_PREV_HASH, HEADER_SEQ, MemorySink};
+pub use spool::Spool;
 pub use verify::{TrustedKeys, VerifyBreak, VerifyReport, verify_partition_dir};
