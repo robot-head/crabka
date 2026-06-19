@@ -110,6 +110,7 @@ mod tests {
         let a = p.pick("t", Some(b"my-key"), 12);
         let b = p.pick("t", Some(b"my-key"), 12);
         assert!(a == b);
+        assert!(a == 9);
         assert!((0..12).contains(&a));
     }
 
@@ -134,11 +135,37 @@ mod tests {
     }
 
     #[test]
+    fn rotate_wraps_at_partition_count() {
+        let p = UniformStickyPartitioner::new();
+
+        assert!(p.pick("t", None, 3) == 0);
+        p.rotate("t", 3);
+        assert!(p.pick("t", None, 3) == 1);
+        p.rotate("t", 3);
+        assert!(p.pick("t", None, 3) == 2);
+        p.rotate("t", 3);
+        assert!(p.pick("t", None, 3) == 0);
+        assert!(*p.sticky.lock().unwrap().get("t").unwrap() == 0);
+    }
+
+    #[test]
     fn distinct_topics_have_distinct_sticky_state() {
         let p = UniformStickyPartitioner::new();
         let _ = p.pick("a", None, 4);
         p.rotate("a", 4);
         // Topic "b"'s sticky is still 0.
         assert!(p.pick("b", None, 4) == 0);
+    }
+
+    #[test]
+    fn murmur2_matches_kafka_golden_vectors() {
+        assert!(murmur2(b"") == 275_646_681);
+        assert!(murmur2(b"a") == -1_563_381_124);
+        assert!(murmur2(b"ab") == 316_155_434);
+        assert!(murmur2(b"abc") == 479_470_107);
+        assert!(murmur2(b"abcd") == -1_323_649_548);
+        assert!(murmur2(b"abcde") == 461_995_741);
+        assert!(murmur2(b"kafka") == -798_503_068);
+        assert!(murmur2(b"my-key") == 1_748_425_209);
     }
 }

@@ -156,17 +156,38 @@ mod tests {
         let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0);
         assert!(a.current.is_some());
         assert!(a.current.as_ref().unwrap().records.len() == 1);
+        assert!(!a.current.as_ref().unwrap().is_empty());
+        assert!(
+            a.current.as_ref().unwrap().size_bytes == approx_record_size(None, Some(b"hi"), &[])
+        );
     }
 
     #[test]
     fn record_past_batch_size_rolls_over() {
-        let mut a = Accumulator::new(40);
-        // Each record is ~20+ bytes; two records exceed 40.
+        let record_size = approx_record_size(None, Some(&[0u8; 32]), &[]);
+        let mut a = Accumulator::new(record_size * 2 - 1);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         assert!(a.ready.len() == 1);
         assert!(a.current.is_some());
         assert!(a.current.as_ref().unwrap().records.len() == 1);
+        assert!(a.current.as_ref().unwrap().records[0].offset_delta == 0);
+    }
+
+    #[test]
+    fn exact_batch_size_boundary_does_not_roll_over() {
+        let record_size = approx_record_size(None, Some(&[0u8; 32]), &[]);
+        let mut a = Accumulator::new(record_size * 2);
+
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
+
+        assert!(a.ready.is_empty());
+        let current = a.current.as_ref().unwrap();
+        assert!(current.records.len() == 2);
+        assert!(current.records[0].offset_delta == 0);
+        assert!(current.records[1].offset_delta == 1);
+        assert!(current.size_bytes == record_size * 2);
     }
 
     #[test]
@@ -176,5 +197,35 @@ mod tests {
         a.seal_current();
         assert!(a.current.is_none());
         assert!(a.ready.len() == 1);
+    }
+
+    #[test]
+    fn seal_drops_empty_current_batch() {
+        let mut a = Accumulator::new(1024);
+        a.current = Some(InProgressBatch::new());
+
+        assert!(a.current.as_ref().unwrap().is_empty());
+        a.seal_current();
+
+        assert!(a.current.is_none());
+        assert!(a.ready.is_empty());
+    }
+
+    #[test]
+    fn approx_record_size_counts_overhead_key_value_and_headers() {
+        let headers = vec![
+            Header {
+                key: "h1".into(),
+                value: Some(Bytes::from_static(b"abc")),
+            },
+            Header {
+                key: "empty".into(),
+                value: None,
+            },
+        ];
+
+        let expected_size: usize = [8, 3, 4, 5, 4, 2, 3, 8, 5, 0, 8].into_iter().sum();
+        assert!(approx_record_size(Some(b"key"), Some(b"value"), &headers) == expected_size);
+        assert!(approx_record_size(None, None, &[]) == 8 + 4 + 4);
     }
 }

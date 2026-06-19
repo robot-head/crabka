@@ -122,6 +122,16 @@ exclude_re = [
     # endless stream of zero-length records, so cargo-mutants can only classify
     # it as a timeout rather than a useful assertion gap.
     "security/src/gssapi/keytab\\.rs.*replace Reader<'a>::i32 -> Result<i32, KeytabError> with Ok\\(0\\)",
+    # client-producer builder:
+    # - build_init_producer_id_request is intentionally the protocol default
+    #   InitProducerId shape for idempotent-only producers (transactional_id=None,
+    #   transaction_timeout_ms=0), so returning Default is equivalent.
+    # - init_producer_id is the live Client RPC retry loop; its request shape,
+    #   retry classifier, deadline, and backoff boundaries are tested in pure
+    #   helpers, while observing the match guard requires a broker/client.
+    "(crates/)?client-producer/src/builder\\.rs.*replace build_init_producer_id_request -> InitProducerIdRequest with Default::default\\(\\)",
+    "(crates/)?client-producer/src/builder\\.rs.*replace match guard !is_retriable_coordinator_code\\(resp.error_code\\) with (true|false) in init_producer_id",
+    "(crates/)?client-producer/src/builder\\.rs.*delete ! in init_producer_id",
     # crabka-metadata feature-registry equivalent mutants: today, the default
     # min floor for non-metadata.version features is genuinely 0, plain features
     # declare no dependencies, share/streams default to 0 and support (0, 1),
