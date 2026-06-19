@@ -10,7 +10,7 @@
 2. **`CrabkaMetricStore`** (`store.rs`): implements the `MetricStore` trait by, per `scan()`, registering the cold blockstore tables (`BlockStore::scan_context`) *and* the hot head tables into one `SessionContext`, then building a **UNION view** split at the **compaction frontier** (the compactor's committed offset, surfaced as a per-tenant `min_ts` cut) so a sample counted in a sealed block is not also counted from the head. `label_names`/`label_values`/`series` union the blockstore `Index` with the head's live series.
 3. **HTTP API** (`http/`): an axum `Router` mounted under both bare `/api/v1/` and `/prometheus/api/v1/`, tenant via `X-Scope-OrgID`. `/query` + `/query_range` call `PromqlEngine` and map `QueryResult` → Prometheus JSON with exact shapes; `/series`, `/labels`, `/label/{name}/values`, `/metadata`, `/query_exemplars`, `/status/buildinfo` round out Grafana's discovery calls. Errors use the Prometheus `{"status":"error",...}` envelope. **Response-shape fidelity is the byte-equality analog** and is tested with exact-JSON assertions for vector, matrix, scalar, and error.
 
-**Tech Stack:** Rust 2024 · `datafusion` (git pin below) · `arrow` 59 · `tokio` · `axum` 0.8 (`http1`,`tokio`) · `serde`/`serde_json` · `async-trait` · `thiserror` · `tracing` · `crabka-promql` (Slices 2–3) · `crabka-blockstore` · `crabka-client-consumer`. Tests: `assert2`, `tower::ServiceExt::oneshot` (in-process router), `crabka-broker` in-process test-support / testcontainers (`#[ignore]`).
+**Tech Stack:** Rust 2024 · `datafusion` (git pin below) · `arrow` 59 · `tokio` · `axum` 0.8 (workspace base `http1`,`tokio`; querier adds `json`,`query`) · `serde`/`serde_json` · `async-trait` · `thiserror` · `tracing` · `crabka-promql` (Slices 2–3) · `crabka-blockstore` · `crabka-client-consumer`. Tests: `assert2`, `tower::ServiceExt::oneshot` (in-process router), `crabka-broker` in-process test-support / testcontainers (`#[ignore]`).
 
 ## Global Constraints
 
@@ -21,7 +21,7 @@
 - **Assertions:** `assert2::assert!` / `assert2::check!` in tests.
 - **Async tests:** `#[tokio::test]`. Dev-dep `tokio` features `["macros","rt-multi-thread"]`.
 - **Dependency pin (locked):** `datafusion = { git = "https://github.com/apache/datafusion", rev = "0838a4ddb902535b0e95a1c5a254be7e9c7fe9bf" }`, `arrow` 59. Same instance as blockstore/promql — types cross the DataFusion boundary without conversion.
-- **Prometheus JSON fidelity is the contract.** Response bodies must match Prometheus exactly: top-level `{"status":"success","data":{...}}`; `data.resultType ∈ {"vector","matrix","scalar","string"}`; a vector sample is `{"metric":{…},"value":[<ts_secs_float>,"<val_str>"]}`; a matrix series is `{"metric":{…},"values":[[<ts>,"<val>"],…]}`; native-histogram results use the `"histogram"`/`"histograms"` shape; errors are `{"status":"error","errorType":"…","error":"…"}`. Floats are formatted with Go's `strconv.FormatFloat(v,'g',-1,64)` semantics (special-cased: `+Inf`/`-Inf`/`NaN` → those literal strings) — value strings are produced by one shared `format_sample_value` helper, behavior-pinned by tests.
+- **Prometheus JSON fidelity is the contract.** Response bodies must match Prometheus exactly: top-level `{"status":"success","data":{...}}`; `data.resultType ∈ {"vector","matrix","scalar","string"}`; a vector sample is `{"metric":{…},"value":[<ts_secs_float>,"<val_str>"]}`; a matrix series is `{"metric":{…},"values":[[<ts>,"<val>"],…]}`; native-histogram results use the `"histogram"`/`"histograms"` shape; errors are `{"status":"error","errorType":"…","error":"…"}`. Floats are formatted with Prometheus `jsonutil.MarshalFloat` semantics — `strconv.AppendFloat(f, fmt, -1, 64)` with `fmt='f'` by default, switching to `'e'` only when `abs(v) < 1e-6` or `abs(v) >= 1e21` (special-cased: `+Inf`/`-Inf`/`NaN` → those literal strings) — value strings are produced by one shared `format_sample_value` helper, behavior-pinned by tests.
 
 ---
 
@@ -30,7 +30,7 @@
 **Depends on:**
 - **`crabka-promql` (Slices 2–3)** — provides the `MetricStore` trait, `ScanResult`, `PromqlEngine<S>`, `QueryResult`, `InstantSample`, `RangeSeries`, `SampleValue`, `NativeHistogram`, `EngineOpts`, `PromqlError`. This slice *consumes* that contract verbatim (see "Shared contract" below) and implements `MetricStore` against it.
 - **`crabka-blockstore`** — `BlockStore::scan_context`, `Index`, `Labels`, `LabelMatcher`/`MatchOp`.
-- **`crabka-metrics` Slice 4 (ingest)** — `WalRecord` (encode/decode) + the metrics WAL topic name + the per-tenant **compaction frontier** the compactor commits (consumer-group committed offset / sealed-block `max_ts`). Slice 1 — `float_sample_schema()`/`native_histogram_schema()`, `NativeHistogram`, `encode_float_samples`/`decode_*`.
+- **`crabka-metrics` Slice 4 (ingest)** — `WalRecord` (encode/decode) + the metrics WAL topic name + the per-tenant **compaction frontier** the compactor commits (consumer-group committed offset / sealed-block `max_ts`). The real `WalRecord` has **public fields** `tenant: String`, `labels: Vec<(String,String)>`, `payload: SamplePayload`, `exemplars` (no accessor methods); `SamplePayload` is `Float { timestamp_ms, value }` / `Hist { timestamp_ms, hist }` (no `WalSample` enum). Slice 1 — `float_sample_schema()`/`native_histogram_schema()`, `NativeHistogram`, `encode_float_samples`/`decode_*`.
 - **`crabka-client-consumer`** — `Consumer::builder()…subscribe(vec).auto_offset_reset(Earliest).build().await`, `poll(Duration) -> Result<Vec<ConsumerRecord>, ConsumerError>`, `ConsumerRecord{topic,partition,offset,timestamp,key,value,headers}`, `IsolationLevel`, `AutoOffsetReset`.
 
 **The 8 metrics slices** (this plan = Slice 5; each gets its own plan):
@@ -60,14 +60,25 @@ pub trait MetricStore: Send + Sync {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ScanResult, PromqlError>;
-    async fn label_names(&self, tenant: &str, start_ms: i64, end_ms: i64)
-        -> Result<Vec<String>, PromqlError>;
-    async fn label_values(&self, tenant: &str, name: &str, start_ms: i64, end_ms: i64)
-        -> Result<Vec<String>, PromqlError>;
+    async fn label_names(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<String>, PromqlError>;
+    async fn label_values(
+        &self,
+        tenant: &str,
+        name: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<String>, PromqlError>;
     async fn series(
         &self,
         tenant: &str,
-        matcher_sets: &[Vec<LabelMatcher>],
+        matchers: &[LabelMatcher],
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Labels>, PromqlError>;
@@ -89,17 +100,17 @@ impl<S: MetricStore> PromqlEngine<S> {
 }
 
 pub enum QueryResult {
-    Scalar(i64 /*ts_ms*/, f64),
+    Scalar { ts_ms: i64, value: f64 },
     InstantVector(Vec<InstantSample>),
     RangeMatrix(Vec<RangeSeries>),
-    Str(i64 /*ts_ms*/, String),
+    Str { ts_ms: i64, value: String },
 }
 pub struct InstantSample { pub labels: Labels, pub ts_ms: i64, pub value: SampleValue }
 pub struct RangeSeries  { pub labels: Labels, pub samples: Vec<(i64, SampleValue)> }
 pub enum SampleValue { Float(f64), Histogram(NativeHistogram) }
 ```
 
-> **Verify-before-use (do not fabricate):** the exact field names / enum discriminants of `QueryResult`, `InstantSample`, `RangeSeries`, `SampleValue`, and the `MetricStore` method shapes are owned by Slices 2–3. Before Task 4, run `cargo doc -p crabka-promql --no-deps` (or read `crates/promql/src/lib.rs` re-exports) and reconcile. If a name differs (e.g. `ts_ms` vs `timestamp_ms`, `Scalar` carrying the ts or not), adapt the **mapping code and tests together** — keep the asserted *JSON* exact (that is the contract this slice owns); the Rust field names bend to promql.
+> **Verify-before-use (do not fabricate):** the exact field names / enum discriminants of `QueryResult`, `InstantSample`, `RangeSeries`, `SampleValue`, and the `MetricStore` method shapes are owned by Slices 2–3. Before Task 4, run `cargo doc -p crabka-promql --no-deps` (or read `crates/promql/src/lib.rs` re-exports) and reconcile. If a name differs (e.g. `ts_ms` vs `timestamp_ms`, the `Scalar`/`Str` struct-field names), adapt the **mapping code and tests together** — keep the asserted *JSON* exact (that is the contract this slice owns); the Rust field names bend to promql.
 
 ---
 
@@ -142,7 +153,7 @@ crabka-promql = { path = "../promql" }
 crabka-blockstore = { path = "../blockstore" }
 crabka-client-consumer = { path = "../client-consumer" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
-axum = { workspace = true }
+axum = { workspace = true, features = ["json", "query"] }  # workspace base lacks these; Json/Query handlers need them
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -197,7 +208,8 @@ impl Default for QuerierConfig {
     fn default() -> Self {
         Self {
             bootstrap: "localhost:9092".to_string(),
-            wal_topic: "__crabka_metrics_wal".to_string(),
+            // Slice 4 defines this constant in the same crate (`crabka-metrics`).
+            wal_topic: crate::WAL_TOPIC.to_string(),
             group_id: "crabka-querier-head".to_string(),
             head_retention: Duration::from_secs(3 * 60 * 60),
             listen_addr: ([0, 0, 0, 0], 9009).into(),
@@ -206,7 +218,7 @@ impl Default for QuerierConfig {
 }
 ```
 
-> `wal_topic` default here is a placeholder; in Task 6 the binary reads the real constant from Slice 4 (`crabka_metrics::WAL_TOPIC` or equivalent). Reconcile the name when wiring the binary; the head/tailer take the topic as a parameter so they are agnostic.
+> `wal_topic` defaults to Slice 4's `crate::WAL_TOPIC` (`"__crabka_metrics_wal"`), defined in the same `crabka-metrics` crate. The head/tailer take the topic as a parameter so they stay agnostic; the binary (Task 6) can override it from a flag.
 
 - [ ] **Step 3: Wire `lib.rs`**
 
@@ -358,6 +370,23 @@ mod tests {
     }
 
     #[test]
+    fn prune_removes_emptied_series_from_index() {
+        let mut h = seed();
+        // Before: both jobs visible.
+        let mut jobs = h.label_values("t", "job");
+        jobs.sort();
+        assert!(jobs == vec!["api".to_string(), "web".to_string()]);
+        // Full prune past retention: all seed samples age out, so EVERY series
+        // is emptied and its index entries must be torn down.
+        h.prune(3_602_000);
+        assert!(h.label_values("t", "job").is_empty());
+        assert!(h.label_names("t").is_empty());
+        // And the series no longer resolves.
+        let got = h.resolve("t", &[LabelMatcher::new("job", MatchOp::Eq, "api")]);
+        assert!(got.is_empty());
+    }
+
+    #[test]
     fn offsets_track_low_and_high_water() {
         let h = seed();
         // partition 0 implied (single-partition ingest in seed uses offset only;
@@ -486,15 +515,47 @@ impl WalHead {
         e.1 = e.1.max(offset);
     }
 
-    /// Drop samples older than `now_ms - retention`.
+    /// Drop samples older than `now_ms - retention`. A series whose samples all
+    /// age out is removed entirely — along with its postings and label-value
+    /// index entries — so it stops surfacing in `resolve`/`label_names`/
+    /// `label_values`/`series_labels` (matching Prometheus head semantics: a
+    /// series with no samples in the window is not visible) and stops leaking
+    /// memory.
     pub fn prune(&mut self, now_ms: i64) {
         let cutoff = now_ms.saturating_sub(
             i64::try_from(self.retention.as_millis()).unwrap_or(i64::MAX),
         );
         for t in self.tenants.values_mut() {
-            for s in t.series.values_mut() {
+            // 1. Drain aged-out samples; collect series that became empty.
+            let mut emptied: Vec<SeriesFingerprint> = Vec::new();
+            for (fp, s) in &mut t.series {
                 let keep_from = s.points.partition_point(|(ts, _)| *ts < cutoff);
                 s.points.drain(0..keep_from);
+                if s.points.is_empty() {
+                    emptied.push(*fp);
+                }
+            }
+            // 2. Tear down the index for each emptied series.
+            for fp in emptied {
+                let Some(s) = t.series.remove(&fp) else { continue };
+                for (name, value) in s.labels.iter() {
+                    let key = (name.clone(), value.clone());
+                    if let Some(set) = t.postings.get_mut(&key) {
+                        set.remove(&fp);
+                        if set.is_empty() {
+                            t.postings.remove(&key);
+                            // The (name,value) pair has no series left; drop the
+                            // value from t.values, and the name too if it now has
+                            // no values.
+                            if let Some(vals) = t.values.get_mut(name) {
+                                vals.remove(value);
+                                if vals.is_empty() {
+                                    t.values.remove(name);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -670,7 +731,7 @@ impl TenantHead {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-metrics --lib querier::head`
-Expected: PASS (5 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -699,7 +760,7 @@ This task has **two churn-prone seams**: the consumer client API and Slice 4's `
 
 - [ ] **Step 1: Write the pure-mapping failing test**
 
-Create `crates/metrics/src/querier/tailer.rs` with tests first. The test builds a `WalRecord` via Slice 4's constructor and asserts it lands in the head. **Verify `WalRecord`'s real constructor/fields against Slice 4 before running** — the test below assumes `WalRecord { tenant, labels, ts_ms, sample }` with a float sample; adapt field names to the real type, keep the asserted head behavior.
+Create `crates/metrics/src/querier/tailer.rs` with tests first. The test builds a `WalRecord` via Slice 4's constructor and asserts it lands in the head. **Verify `WalRecord`'s real constructor/fields against Slice 4 before running** — the real type has public fields `WalRecord { tenant: String, labels: Vec<(String,String)>, payload: SamplePayload, exemplars }` with `SamplePayload::Float { timestamp_ms, value }`; adapt field construction to the real type, keep the asserted head behavior.
 
 ```rust
 #[cfg(test)]
@@ -771,7 +832,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::WalRecord; // Slice 4
+use crate::{SamplePayload, WalRecord}; // Slice 4
 use crate::querier::QuerierConfig;
 use crate::querier::head::{HeadSample, WalHead};
 
@@ -797,22 +858,26 @@ impl SharedHead {
 }
 
 /// Pure mapping: decode a `WalRecord` into a head ingest. Unit-tested without a
-/// broker. ADAPT the field access to Slice 4's real `WalRecord`.
+/// broker. Maps against Slice 4's real `WalRecord` (public fields, no methods).
 pub fn apply_wal_record(head: &mut WalHead, rec: &WalRecord, partition: i32, offset: i64) {
-    // The exact accessors below depend on Slice 4. Expected shape:
-    //   rec.tenant() -> &str
-    //   rec.labels() -> &Labels   (or rebuild Labels from rec)
-    //   rec.timestamp_ms() -> i64
-    //   rec.sample() -> Float(f64) | Histogram(NativeHistogram)
-    let tenant = rec.tenant();
-    let labels: &Labels = rec.labels();
-    let fp = labels.fingerprint();
-    let ts_ms = rec.timestamp_ms();
-    let sample = match rec.sample() {
-        crate::WalSample::Float(f) => HeadSample::Float(f),
-        crate::WalSample::Histogram(h) => HeadSample::Histogram(h.clone()),
+    // Slice 4 `WalRecord` is field-access, not methods:
+    //   rec.tenant: String
+    //   rec.labels: Vec<(String, String)>      (NOT a blockstore `Labels`)
+    //   rec.payload: SamplePayload             (Float{timestamp_ms,value} | Hist{timestamp_ms,hist})
+    // Rebuild a `Labels` from the `(name, value)` pairs to fingerprint + index.
+    let tenant = &rec.tenant;
+    let mut labels = Labels::new();
+    for (name, value) in &rec.labels {
+        labels.insert(name.as_str(), value.as_str());
+    }
+    let fp = labels.fingerprint(); // or rec.series_fingerprint() if it matches blockstore's
+    let (ts_ms, sample) = match &rec.payload {
+        SamplePayload::Float { timestamp_ms, value } => (*timestamp_ms, HeadSample::Float(*value)),
+        SamplePayload::Hist { timestamp_ms, hist } => {
+            (*timestamp_ms, HeadSample::Histogram(hist.clone()))
+        }
     };
-    head.ingest_at(tenant, fp, labels, ts_ms, sample, partition, offset);
+    head.ingest_at(tenant, fp, &labels, ts_ms, sample, partition, offset);
 }
 
 /// The tailer.
@@ -890,7 +955,7 @@ fn now_ms() -> i64 {
 ```
 
 > **Verify-notes (do before this compiles):**
-> - `WalRecord` accessors / `WalSample` enum — confirm names against Slice 4. If Slice 4 exposes raw fields rather than methods, switch to field access. If there is no `WalSample` split (e.g. a single `value` + an `is_histogram` flag), branch on that instead.
+> - `WalRecord` fields / `SamplePayload` enum — Slice 4 exposes **public fields** `tenant: String`, `labels: Vec<(String,String)>`, `payload: SamplePayload` (NOT methods, NOT a blockstore `Labels`, NOT a `WalSample` enum). `SamplePayload` is `Float { timestamp_ms, value }` / `Hist { timestamp_ms, hist }`. The mapping rebuilds a `Labels` from the `(name,value)` pairs (or calls `rec.series_fingerprint()`) and matches on `payload`. Confirm these names against Slice 4 before compiling.
 > - `WalRecord::decode(&[u8]) -> Result<…>` — confirm the decode entry point and error type; map it to a `tracing::debug!` (a poison-pill record must not kill the tailer).
 > - `tokio-util` for `CancellationToken` — add `tokio-util = { workspace = true }` if not already a metrics dep.
 > - The consumer builder uses a **unique group id per querier** (so every querier sees every partition). The default `group_id` in `QuerierConfig` should be suffixed with a per-process nonce in the binary (Task 6).
@@ -918,6 +983,7 @@ git commit -m "feat(metrics): HeadTailer — WAL-tail consumer loop + pure recor
 
 **Interfaces:**
 - Consumes: `crabka-promql::{MetricStore, ScanResult, PromqlError}`, `crabka-blockstore::{BlockStore, Labels, LabelMatcher}`, `SharedHead`, Slice 1 schemas.
+- **Prerequisite (land first):** `crabka-blockstore::Index::series_labels(tenant, fp) -> Option<Labels>` — the `Index` already stores `series: HashMap<fp, Labels>` but exposes no accessor for it; `series` (cold side) needs it to reconstruct cold series labels. Add it to blockstore (trivial lookup) before this task; do not reconstruct from postings.
 - Produces:
   - `struct CrabkaMetricStore { blockstore: Arc<BlockStore>, head: SharedHead, frontier: Arc<dyn Fn(&str) -> i64 + Send + Sync> }` (the `frontier` closure returns the per-tenant compaction-frontier timestamp in ms — samples with `ts < frontier` are read from cold blocks; `ts >= frontier` from the head — preventing double-count).
   - `CrabkaMetricStore::new(blockstore, head, frontier) -> Self`
@@ -1016,7 +1082,7 @@ mod tests {
             h.ingest_at("t", extra.fingerprint(), &extra, 2_000, HeadSample::Float(1.0), 0, 1);
         }
         let store = CrabkaMetricStore::new(blockstore, head, Arc::new(|_| 1_500));
-        let mut names = store.label_names("t", 0, 10_000).await.unwrap();
+        let mut names = store.label_names("t", &[], 0, 10_000).await.unwrap();
         names.sort();
         assert!(names.contains(&"job".to_string())); // from cold
         assert!(names.contains(&"region".to_string())); // from hot
@@ -1070,8 +1136,8 @@ impl CrabkaMetricStore {
     }
 
     fn err(e: impl std::fmt::Display) -> PromqlError {
-        // ADAPT to PromqlError's real constructor (e.g. PromqlError::Storage(String)).
-        PromqlError::storage(e.to_string())
+        // Slice 2 defines the store-error variant as `PromqlError::Store(String)`.
+        PromqlError::Store(e.to_string())
     }
 }
 
@@ -1138,12 +1204,19 @@ impl MetricStore for CrabkaMetricStore {
     async fn label_names(
         &self,
         tenant: &str,
+        matchers: &[LabelMatcher],
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<String>, PromqlError> {
+        // Slice 2's `Index`/head label APIs union the unfiltered name sets; the
+        // `matchers` arg is accepted for trait conformance and (matching Slice
+        // 2's own mock) does not narrow the result here. If/when the blockstore
+        // `Index` grows a matcher-filtered `label_names`, thread it through both
+        // sides identically.
         let mut set: BTreeSet<String> =
             self.blockstore.index().label_names(tenant).into_iter().collect();
         set.extend(self.head.read().await.label_names(tenant));
+        let _ = matchers;
         Ok(set.into_iter().collect())
     }
 
@@ -1151,6 +1224,7 @@ impl MetricStore for CrabkaMetricStore {
         &self,
         tenant: &str,
         name: &str,
+        matchers: &[LabelMatcher],
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<String>, PromqlError> {
@@ -1161,36 +1235,35 @@ impl MetricStore for CrabkaMetricStore {
             .into_iter()
             .collect();
         set.extend(self.head.read().await.label_values(tenant, name));
+        let _ = matchers; // accepted for trait conformance (see `label_names`)
         Ok(set.into_iter().collect())
     }
 
     async fn series(
         &self,
         tenant: &str,
-        matcher_sets: &[Vec<LabelMatcher>],
+        matchers: &[LabelMatcher],
         _start_ms: i64,
         _end_ms: i64,
     ) -> Result<Vec<Labels>, PromqlError> {
         let head = self.head.read().await;
         let mut out: Vec<Labels> = Vec::new();
         let mut seen: BTreeSet<u64> = BTreeSet::new();
-        for matchers in matcher_sets {
-            // cold
-            let cold_fps = self.blockstore.index().resolve(tenant, matchers).map_err(Self::err)?;
-            for fp in &cold_fps {
-                if seen.insert(*fp) {
-                    if let Some(l) = self.blockstore.index().series_labels(tenant, *fp) {
-                        out.push(l);
-                    }
-                }
-            }
-            // hot
-            let hot_fps = head.resolve(tenant, matchers);
-            for l in head.series_labels(tenant, &hot_fps) {
-                let fp = l.fingerprint();
-                if seen.insert(fp) {
+        // cold
+        let cold_fps = self.blockstore.index().resolve(tenant, matchers).map_err(Self::err)?;
+        for fp in &cold_fps {
+            if seen.insert(*fp) {
+                if let Some(l) = self.blockstore.index().series_labels(tenant, *fp) {
                     out.push(l);
                 }
+            }
+        }
+        // hot
+        let hot_fps = head.resolve(tenant, matchers);
+        for l in head.series_labels(tenant, &hot_fps) {
+            let fp = l.fingerprint();
+            if seen.insert(fp) {
+                out.push(l);
             }
         }
         Ok(out)
@@ -1256,8 +1329,8 @@ async fn register_union(
 > - `SessionContext::table_provider(&self, &str) -> Result<Arc<dyn TableProvider>>` — name may be `table` / `table_provider`; adapt. Used to lift the histogram blocks into the float ctx.
 > - `MemTable::try_new(SchemaRef, Vec<Vec<RecordBatch>>)` at `datafusion::catalog::MemTable` (older path `datafusion::datasource::MemTable`).
 > - `CREATE VIEW … UNION ALL …` then `register_table`/query by name — if `CREATE VIEW` over registered tables is unsupported at the pin, build the union via `ctx.table(cold).union(ctx.table(hot))?.into_view()` and `register_table(view_name, view)` instead. The **behavior** (UNION ALL, no dedup, frontier split prevents double-count) is what the test pins.
-> - `PromqlError` constructor (`::storage` here is a guess) — match Slice 2's real variant.
-> - `BlockStore::index()` returning `&Index` and `Index::series_labels` — the blockstore plan exposes `index()`; `series_labels(tenant, fp) -> Option<Labels>` may need adding to the `Index` in blockstore (small, additive). If absent, resolve labels from the postings or add the accessor in a blockstore follow-up; flag it.
+> - `PromqlError` store-error variant is `PromqlError::Store(String)` (Slice 2's frozen variant set: `Parse`/`Plan`/`Exec`/`Store`/`Unsupported`).
+> - `BlockStore::index()` returning `&Index` — the blockstore plan exposes `index()` with `new/add_series/resolve/candidate_blocks/label_names/label_values`, but **no `series_labels` accessor**. `Index::series_labels(tenant, fp) -> Option<Labels>` is a **REQUIRED prerequisite of this slice** (the `Index` already stores `series: HashMap<fp, Labels>`, so the accessor is a trivial lookup): land it in blockstore first, or vendor the small accessor, **before** Task 4. Do NOT fall back to reconstructing labels from postings — that is lossy and expensive.
 > - `super::store_native_histogram_schema()` is a typo guard — use `crate::native_histogram_schema()`.
 
 - [ ] **Step 4: Make the test pass**
@@ -1285,7 +1358,7 @@ git commit -m "feat(metrics): CrabkaMetricStore — cold+hot UNION MetricStore w
 **Interfaces:**
 - Consumes: `crabka-promql::{QueryResult, InstantSample, RangeSeries, SampleValue, Labels}`.
 - Produces:
-  - `fn format_sample_value(v: f64) -> String` — Go `strconv.FormatFloat(v,'g',-1,64)` semantics; `+Inf`/`-Inf`/`NaN` literals.
+  - `fn format_sample_value(v: f64) -> String` — Prometheus `MarshalFloat` semantics (`'f'` default, `'e'` for `abs<1e-6`/`abs>=1e21`); `+Inf`/`-Inf`/`NaN` literals.
   - `fn query_result_to_json(r: &QueryResult) -> serde_json::Value` — the full Prometheus `data` object (`resultType` + `result`).
   - `fn success(data: serde_json::Value) -> serde_json::Value` / `fn error_envelope(error_type: &str, msg: &str) -> serde_json::Value`.
   - `fn labels_to_json(l: &Labels) -> serde_json::Value` (object of name→value, including `__name__`).
@@ -1348,7 +1421,7 @@ mod tests {
                 "resultType": "matrix",
                 "result": [{
                     "metric": {"__name__": "up", "job": "api"},
-                    "values": [[1435781430.0, "1"], [1435781445.0, "0"]]
+                    "values": [[1435781430, "1"], [1435781445, "0"]]
                 }]
             }
         });
@@ -1356,8 +1429,40 @@ mod tests {
     }
 
     #[test]
+    fn matrix_integral_second_ts_is_bare_integer() {
+        // Pins MarshalTimestamp: a whole-second ts serializes WITHOUT a trailing
+        // `.0` (bare integer), and a sub-second ts keeps zero-padded fraction.
+        let r = QueryResult::RangeMatrix(vec![RangeSeries {
+            labels: up_api(),
+            samples: vec![
+                (1_435_781_430_000, SampleValue::Float(1.0)), // → 1435781430
+                (1_435_781_430_005, SampleValue::Float(2.0)), // → 1435781430.005
+                (1_435_781_430_050, SampleValue::Float(3.0)), // → 1435781430.050
+            ],
+        }]);
+        let got = success(query_result_to_json(&r));
+        let want = json!({
+            "status": "success",
+            "data": {
+                "resultType": "matrix",
+                "result": [{
+                    "metric": {"__name__": "up", "job": "api"},
+                    "values": [
+                        [1435781430, "1"],
+                        [1435781430.005, "2"],
+                        [1435781430.050, "3"]
+                    ]
+                }]
+            }
+        });
+        // serde_json::Number comparison: 1435781430 (integer) != 1435781430.0
+        // (float) — that distinction is exactly what this test guards.
+        assert!(got == want, "got={got}");
+    }
+
+    #[test]
     fn scalar_json_is_exact() {
-        let r = QueryResult::Scalar(1_435_781_451_781, 2.0);
+        let r = QueryResult::Scalar { ts_ms: 1_435_781_451_781, value: 2.0 };
         let got = success(query_result_to_json(&r));
         let want = json!({
             "status": "success",
@@ -1386,8 +1491,14 @@ mod tests {
         assert!(format_sample_value(f64::INFINITY) == "+Inf");
         assert!(format_sample_value(f64::NEG_INFINITY) == "-Inf");
         assert!(format_sample_value(f64::NAN) == "NaN");
-        // 'g' format: large/small magnitudes use exponent form.
+        // MarshalFloat: exponent form only when abs >= 1e21 or abs < 1e-6.
         assert!(format_sample_value(1e21) == "1e+21");
+        // The [1e-6, 1e-4) band stays in 'f' (plain decimal) form — this is the
+        // MarshalFloat-vs-Go-'g' boundary (Go 'g' would switch at 1e-4).
+        assert!(format_sample_value(1e-5) == "0.00001");
+        assert!(format_sample_value(0.0001) == "0.0001");
+        // Below 1e-6 switches to exponent form.
+        assert!(format_sample_value(1e-7) == "1e-07");
     }
 }
 ```
@@ -1402,8 +1513,9 @@ Expected: FAIL — `cannot find function query_result_to_json`.
 ```rust
 //! Prometheus query-API JSON. The response *shape* is the contract (the
 //! byte-equality analog for this signal), so all serialization funnels through
-//! here. Timestamps are emitted as `<seconds>.<millis>` floats; sample values as
-//! Go-`strconv.FormatFloat('g',-1,64)` strings.
+//! here. Timestamps port `jsonutil.MarshalTimestamp` (bare integer seconds, with
+//! a 3-digit fraction only when the ms remainder is non-zero); sample values
+//! port `jsonutil.MarshalFloat` (`'f'` default, `'e'` for `abs<1e-6`/`>=1e21`).
 
 use crabka_blockstore::Labels;
 use crabka_promql::{InstantSample, QueryResult, RangeSeries, SampleValue};
@@ -1431,16 +1543,32 @@ pub fn labels_to_json(l: &Labels) -> Value {
     Value::Object(map)
 }
 
-/// ms → Prometheus float seconds (`<secs>.<frac>`), as a JSON number.
+/// ms → Prometheus JSON timestamp number, byte-exact with Prometheus's
+/// `util/jsonutil.MarshalTimestamp`: a bare integer of whole seconds, with
+/// `.<fraction>` (the millisecond remainder, zero-padded to exactly 3 digits, no
+/// trailing-zero trimming) appended ONLY when that remainder is non-zero. So
+/// `1435781430000` → `1435781430` (no trailing `.0`), `1435781430005` →
+/// `1435781430.005`, `1435781430050` → `1435781430.050`, `1435781451781` →
+/// `1435781451.781`. Negatives carry the sign on the whole number (Go form).
 fn ts_to_json(ts_ms: i64) -> Value {
-    // Prometheus serializes the timestamp as a float of seconds. Use the same
-    // decimal as Go's json: integral millis divided by 1000.
-    let secs = ts_ms as f64 / 1000.0;
-    json!(secs)
+    let sign = if ts_ms < 0 { "-" } else { "" };
+    let abs = ts_ms.unsigned_abs();
+    let secs = abs / 1000;
+    let fraction = abs % 1000;
+    let s = if fraction == 0 {
+        format!("{sign}{secs}")
+    } else {
+        // Go pads to 3 digits (e.g. fraction 5 → "005", 50 → "050") and does NOT
+        // trim trailing zeros.
+        format!("{sign}{secs}.{fraction:03}")
+    };
+    // Build a JSON number from the decimal string so no f64 rounding sneaks in.
+    Value::Number(s.parse::<serde_json::Number>().expect("valid decimal"))
 }
 
-/// Go `strconv.FormatFloat(v,'g',-1,64)` for sample values, with the Prometheus
-/// special-cases for non-finite values.
+/// Prometheus `jsonutil.MarshalFloat` for sample values: `strconv.AppendFloat`
+/// with `fmt='f'` by default, switching to `fmt='e'` only when the magnitude is
+/// `< 1e-6` or `>= 1e21`, plus the special-cases for non-finite values.
 #[must_use]
 pub fn format_sample_value(v: f64) -> String {
     if v.is_nan() {
@@ -1449,26 +1577,30 @@ pub fn format_sample_value(v: f64) -> String {
     if v.is_infinite() {
         return if v > 0.0 { "+Inf" } else { "-Inf" }.to_string();
     }
-    format_go_g(v)
+    format_prom_float(v)
 }
 
-/// Float → string matching Go's `'g'` shortest-round-trip format. Rust's
-/// `{}` already produces the shortest round-trip decimal; we then reshape the
-/// exponent (`e21` → `e+21`) and drop a `+` only where Go would. Behavior is
-/// pinned by `float_formatting_matches_go`.
-fn format_go_g(v: f64) -> String {
-    // Rust's default Display for f64 is shortest round-trip but never uses
-    // exponent form. Match Go 'g': exponent when exp < -4 or exp >= 21.
+/// Float → string matching Prometheus `MarshalFloat`: shortest round-trip in
+/// `'f'` (plain decimal) form by default, switching to `'e'` (exponent) form
+/// only when `abs(v) < 1e-6` or `abs(v) >= 1e21` — NOT Go `'g'` (whose exponent
+/// boundary is `1e-4`). Rust's `{}` already gives the shortest round-trip plain
+/// decimal; `{:e}` gives the shortest exponent form, which we reshape (`e21` →
+/// `e+21`) to match. Behavior is pinned by `float_formatting_matches_go`.
+fn format_prom_float(v: f64) -> String {
+    // Match MarshalFloat: exponent form only when abs < 1e-6 or abs >= 1e21.
+    // In the [1e-6, 1e-4) band Prometheus still emits 'f' form (e.g. 1e-5 →
+    // "0.00001"), so the lower threshold is 1e-6, not 1e-4.
     let abs = v.abs();
-    if v != 0.0 && (abs >= 1e21 || abs < 1e-4) {
-        // Use exponent form; Rust's {:e} gives e.g. "1e21" / "1.5e-5".
+    if v != 0.0 && (abs >= 1e21 || abs < 1e-6) {
+        // Use exponent form; Rust's {:e} gives e.g. "1e21" / "1e-7".
         let s = format!("{v:e}");
         return normalize_exponent(&s);
     }
     format!("{v}")
 }
 
-/// Normalize Rust `{:e}` ("1e21", "1.234e-5") to Go 'g' ("1e+21", "1.234e-05").
+/// Normalize Rust `{:e}` ("1e21", "1.234e-5") to Go's `'e'` exponent form
+/// ("1e+21", "1.234e-05"): explicit sign + at-least-two-digit zero-padded exp.
 fn normalize_exponent(s: &str) -> String {
     let Some((mantissa, exp)) = s.split_once('e') else {
         return s.to_string();
@@ -1554,22 +1686,22 @@ pub fn query_result_to_json(r: &QueryResult) -> Value {
                 .collect();
             json!({ "resultType": "matrix", "result": result })
         }
-        QueryResult::Scalar(ts_ms, v) => json!({
+        QueryResult::Scalar { ts_ms, value } => json!({
             "resultType": "scalar",
-            "result": [ts_to_json(*ts_ms), format_sample_value(*v)]
+            "result": [ts_to_json(*ts_ms), format_sample_value(*value)]
         }),
-        QueryResult::Str(ts_ms, s) => json!({
+        QueryResult::Str { ts_ms, value } => json!({
             "resultType": "string",
-            "result": [ts_to_json(*ts_ms), s]
+            "result": [ts_to_json(*ts_ms), value]
         }),
     }
 }
 ```
 
 > **Verify-notes:**
-> - **`ts_to_json` precision:** `serde_json` serializes `f64` with shortest round-trip — `1435781451.781` stays exact and `1435781430.0` renders as `1435781430.0`. Confirm against the test; if the trailing `.0`/precision differs from Prometheus, switch to a `serde_json::Number` built from a formatted string. The matrix test's `1435781430.0` is the canary.
+> - **`ts_to_json` byte-exactness:** `ts_to_json` ports Prometheus's `util/jsonutil.MarshalTimestamp` directly — a bare integer of whole seconds, plus a 3-digit zero-padded fraction only when the millisecond remainder is non-zero — and builds a `serde_json::Number` from that decimal **string** so no f64 reformatting reintroduces a trailing `.0`. A whole-second ts (`1435781430000`) must serialize as the JSON integer `1435781430`, NOT `1435781430.0`. The `matrix_integral_second_ts_is_bare_integer` test is the canary (an integer `Number` is `!=` an f64 `Number` under `serde_json`, which is what makes the bare-integer requirement testable).
 > - **Native-histogram JSON is a PLACEHOLDER** (`histogram_to_json`). The real Prometheus bucket shape (boundary-inclusion rule integer + `["<lower>","<upper>","<count>"]` triples expanded from spans) is non-trivial; implement it with a dedicated `native_histogram_json_is_exact` test seeded from a known `NativeHistogram`, cross-checked against a real Prometheus `/query` response for the same histogram. Flagged, not faked — float vector/matrix/scalar/error are the in-scope byte-equality assertions for this task.
-> - **`QueryResult::Scalar` shape:** the shared contract gives `Scalar(i64, f64)`; if promql's `Scalar` carries no timestamp, drop `ts_ms` and source the eval ts from the request (instant `time`) in the handler — keep the JSON `[<ts>, "<val>"]`.
+> - **`QueryResult::Scalar` shape:** the shared contract gives the struct variant `Scalar { ts_ms: i64, value: f64 }` (and `Str { ts_ms, value }`); if promql's `Scalar` carries no timestamp, drop `ts_ms` and source the eval ts from the request (instant `time`) in the handler — keep the JSON `[<ts>, "<val>"]`.
 
 - [ ] **Step 4: Create `http/mod.rs` (module wiring + tenant extractor)**
 
@@ -1588,10 +1720,15 @@ use crabka_promql::PromqlEngine;
 
 use crate::querier::store::CrabkaMetricStore;
 
-/// Shared handler state: the PromQL engine over `CrabkaMetricStore`.
+/// Shared handler state: the PromQL engine over `CrabkaMetricStore`, plus a
+/// direct handle to the same store for the metadata endpoints. Slice 2's frozen
+/// `PromqlEngine` exposes no `store()` accessor (its `store` field is private),
+/// so the `/series`/`/labels`/`/label/{name}/values` handlers reach the store
+/// through this field rather than through the engine.
 #[derive(Clone)]
 pub struct AppState {
     pub engine: Arc<PromqlEngine<CrabkaMetricStore>>,
+    pub store: Arc<CrabkaMetricStore>,
 }
 
 /// Tenant from `X-Scope-OrgID` (Mimir/Cortex convention); falls back to
@@ -1637,7 +1774,7 @@ fn api_v1_router(state: AppState) -> Router<AppState> {
 - [ ] **Step 5: Run to verify json tests pass**
 
 Run: `cargo test -p crabka-metrics --lib querier::http::json`
-Expected: PASS (5 tests). (`http/mod.rs` won't fully compile until Task 6 adds the handlers; if you split commits, stub `query`/`meta` with `todo!()`-free empty handlers first — see Task 6.)
+Expected: PASS (6 tests). (`http/mod.rs` won't fully compile until Task 6 adds the handlers; if you split commits, stub `query`/`meta` with `todo!()`-free empty handlers first — see Task 6.)
 
 - [ ] **Step 6: Commit**
 
@@ -1699,9 +1836,9 @@ mod tests {
             h.ingest_at("anonymous", l.fingerprint(), &l, ts_ms, HeadSample::Float(1.0), 0, 0);
         }
         // Frontier 0 → everything is hot.
-        let store = CrabkaMetricStore::new(blockstore, head, Arc::new(|_| 0));
-        let engine = Arc::new(PromqlEngine::new(Arc::new(store), EngineOpts::default()));
-        AppState { engine }
+        let store = Arc::new(CrabkaMetricStore::new(blockstore, head, Arc::new(|_| 0)));
+        let engine = Arc::new(PromqlEngine::new(store.clone(), EngineOpts::default()));
+        AppState { engine, store }
     }
 
     #[tokio::test]
@@ -1788,12 +1925,14 @@ use crate::querier::http::json::{error_envelope, query_result_to_json, success};
 use crate::querier::http::{AppState, tenant_of};
 
 /// Map a `PromqlError` to `(HTTP status, errorType)` per Prometheus conventions.
+/// Slice 2's frozen variant set is `Parse`/`Plan`/`Exec`/`Store`/`Unsupported`
+/// (see `crabka_promql::PromqlError`).
 fn classify(e: &PromqlError) -> (StatusCode, &'static str) {
-    // ADAPT to PromqlError's variants. Parse/type errors → 400/bad_data;
-    // execution/storage → 422/execution or 503/timeout. Default 422.
     match e {
-        // e.g. PromqlError::Parse(_) | PromqlError::Type(_) => (BAD_REQUEST, "bad_data"),
-        _ => (StatusCode::UNPROCESSABLE_ENTITY, "execution"),
+        PromqlError::Parse(_) | PromqlError::Plan(_) => (StatusCode::BAD_REQUEST, "bad_data"),
+        PromqlError::Unsupported(_) => (StatusCode::BAD_REQUEST, "bad_data"),
+        PromqlError::Store(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        PromqlError::Exec(_) => (StatusCode::UNPROCESSABLE_ENTITY, "execution"),
     }
 }
 
@@ -1914,9 +2053,13 @@ use serde_json::json;
 use crate::querier::http::json::{error_envelope, success};
 use crate::querier::http::{AppState, tenant_of};
 
-// Parsing matchers from repeated `match[]=` params is a promql concern; this
-// uses a thin local parser or promql's exposed selector parser. VERIFY.
-fn parse_matchers(_params: &HashMap<String, String>) -> Vec<Vec<crabka_blockstore::LabelMatcher>> {
+// Parse a single `match[]=` selector set into a flat matcher list — the shape
+// `MetricStore::series` takes (Slice 2: `&[LabelMatcher]`). Parsing the PromQL
+// selector is a promql concern; this uses a thin local parser or promql's
+// exposed selector parser. VERIFY. (Prometheus accepts repeated `match[]`; this
+// slice handles the single-selector case Grafana sends — extend to union
+// multiple selector sets at the handler if needed.)
+fn parse_matchers(_params: &HashMap<String, String>) -> Vec<crabka_blockstore::LabelMatcher> {
     Vec::new() // wire to promql's selector parser for `match[]`
 }
 
@@ -1935,8 +2078,8 @@ pub async fn series(
 ) -> impl IntoResponse {
     let tenant = tenant_of(&headers);
     let (start, end) = time_window(&params);
-    let matcher_sets = parse_matchers(&params);
-    match state.engine.store().series(&tenant, &matcher_sets, start, end).await {
+    let matchers = parse_matchers(&params);
+    match state.store.series(&tenant, &matchers, start, end).await {
         Ok(series) => {
             let result: Vec<_> = series.iter().map(crate::querier::http::json::labels_to_json).collect();
             Json(success(json!(result))).into_response()
@@ -1953,7 +2096,8 @@ pub async fn labels(
 ) -> impl IntoResponse {
     let tenant = tenant_of(&headers);
     let (start, end) = time_window(&params);
-    match state.engine.store().label_names(&tenant, start, end).await {
+    let matchers = parse_matchers(&params);
+    match state.store.label_names(&tenant, &matchers, start, end).await {
         Ok(mut names) => {
             names.sort();
             Json(success(json!(names))).into_response()
@@ -1971,7 +2115,8 @@ pub async fn label_values(
 ) -> impl IntoResponse {
     let tenant = tenant_of(&headers);
     let (start, end) = time_window(&params);
-    match state.engine.store().label_values(&tenant, &name, start, end).await {
+    let matchers = parse_matchers(&params);
+    match state.store.label_values(&tenant, &name, &matchers, start, end).await {
         Ok(mut values) => {
             values.sort();
             Json(success(json!(values))).into_response()
@@ -2005,12 +2150,12 @@ pub async fn buildinfo() -> impl IntoResponse {
 }
 ```
 
-> **`PromqlEngine::store()` accessor:** the handlers need the underlying `MetricStore` for `/series`/`/labels`/`/label values`. If Slice 2's `PromqlEngine` does not expose `store()`, add a `pub fn store(&self) -> &S` to it (additive, small) — flag it as a promql follow-up — or hold `Arc<CrabkaMetricStore>` alongside the engine in `AppState`. The latter avoids touching promql; prefer it if you want zero cross-crate edits: add `pub store: Arc<CrabkaMetricStore>` to `AppState` and call it directly.
+> **Store handle for the metadata handlers:** the `/series`/`/labels`/`/label values` handlers need the underlying `MetricStore`. Slice 2's frozen `PromqlEngine` exposes **no** `store()` accessor (its `store` field is private), so — to keep zero cross-crate edits to promql — `AppState` carries `pub store: Arc<CrabkaMetricStore>` directly (the same `Arc` cloned into `PromqlEngine::new`), and the handlers call `state.store.{series,label_names,label_values}` directly. (This is the decision wired throughout Tasks 5/6: do not reach through the engine.)
 
 - [ ] **Step 5: Run to verify handler tests pass**
 
 Run: `cargo test -p crabka-metrics --lib querier::http`
-Expected: PASS (json + query handler tests). Adjust `AppState` (engine vs. engine+store) per the accessor decision above.
+Expected: PASS (json + query handler tests). `AppState` carries both `engine` and `store` (see the store-handle note above).
 
 - [ ] **Step 6: Commit**
 
@@ -2086,8 +2231,8 @@ async fn run_querier(config: QuerierConfig) -> Result<(), Box<dyn std::error::Er
     let frontier = make_frontier(blockstore.clone());
 
     let store = Arc::new(CrabkaMetricStore::new(blockstore, head, frontier));
-    let engine = Arc::new(PromqlEngine::new(store, EngineOpts::default()));
-    let app = http::router(http::AppState { engine });
+    let engine = Arc::new(PromqlEngine::new(store.clone(), EngineOpts::default()));
+    let app = http::router(http::AppState { engine, store });
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     tracing::info!(addr = %config.listen_addr, "querier Prometheus API listening");
@@ -2220,8 +2365,8 @@ async fn range_query_returns_matrix_shape() {
         head,
         Arc::new(|_| 0),
     ));
-    let engine = Arc::new(PromqlEngine::new(store, EngineOpts::default()));
-    let app = router(AppState { engine });
+    let engine = Arc::new(PromqlEngine::new(store.clone(), EngineOpts::default()));
+    let app = router(AppState { engine, store });
 
     // step=15s over [0,60]s.
     let resp = app
@@ -2290,8 +2435,8 @@ git commit -m "test(metrics): range query over head returns exact matrix shape"
 **Churn-prone surfaces — structured + behavior-pinned, not fabricated (per CLAUDE.md):**
 - **DataFusion UNION of hot+cold** (Task 4 `register_union`/`register_memtable`/`table_provider`) — pinned by the `c == 2` no-double-count test; `CREATE VIEW … UNION ALL` vs `DataFrame::union(...).into_view()` fallback both flagged with a verify-checklist.
 - **Consumer client API** (Task 3) — built from the real `Consumer::builder()…subscribe(vec).auto_offset_reset(Earliest).build()` + `poll(Duration) -> Result<Vec<ConsumerRecord>>` shape read from the crate; the `WalRecord` decode is isolated in `apply_wal_record` with a pure unit test and verify-notes.
-- **`crabka-promql` contract** (`MetricStore`/`ScanResult`/`PromqlEngine`/`QueryResult`/`SampleValue`) — consumed verbatim from the shared contract; every spot where a field name might differ (`ts_ms`, `Scalar` ts, `PromqlError` variants, `EngineOpts::default`, `PromqlEngine::store()`) carries an explicit "adapt the Rust, keep the JSON" verify-note.
+- **`crabka-promql` contract** (`MetricStore`/`ScanResult`/`PromqlEngine`/`QueryResult`/`SampleValue`) — consumed verbatim from the shared contract; every spot where a field name might differ (`ts_ms`, `Scalar` ts, `PromqlError` variants, `EngineOpts::default`) carries an explicit "adapt the Rust, keep the JSON" verify-note. (Slice 2's `PromqlEngine` has no `store()` accessor — its `store` field is private — so `AppState` carries an `Arc<CrabkaMetricStore>` directly for the metadata handlers.)
 
 **Type consistency:** `WalHead`/`SharedHead`/`HeadSample` consistent across Tasks 2/3/4/6/8. `CrabkaMetricStore::new(blockstore, head, frontier)` signature stable Tasks 4/6/7/8. `AppState`/`router`/`tenant_of` stable Tasks 5/6/7/8. `format_sample_value`/`query_result_to_json`/`success`/`error_envelope` defined once (Task 5), used by handlers (Task 6) and pinned by the JSON tests. `QuerierConfig` fields stable Tasks 1/3/7.
 
-**Known risk (flagged, not hidden):** the two genuine cross-slice unknowns are (a) Slice 4's exact `WalRecord`/`WalSample` API + WAL topic constant + compaction-frontier surface, and (b) Slice 2/3's exact `QueryResult`/`PromqlError`/`PromqlEngine::store()` shapes. Both are contained to clearly-marked seams (`apply_wal_record`, `classify`, the store accessor decision) with verify-notes and behavior-pinning tests, so any drift surfaces as a localized compile error against green tests — never silent wrong results.
+**Known risk (flagged, not hidden):** the two genuine cross-slice unknowns are (a) Slice 4's exact `WalRecord`/`SamplePayload` field names + WAL topic constant + compaction-frontier surface, and (b) Slice 2/3's exact `QueryResult`/`PromqlError`/`PromqlEngine::store()` shapes. Both are contained to clearly-marked seams (`apply_wal_record`, `classify`, the store accessor decision) with verify-notes and behavior-pinning tests, so any drift surfaces as a localized compile error against green tests — never silent wrong results.

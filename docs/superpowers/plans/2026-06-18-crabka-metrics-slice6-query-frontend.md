@@ -31,7 +31,7 @@
 
 **The querier's `__query_shard__` support is assumed (Slice 5 contract):** the querier honors a `__query_shard__="<i>_of_<n>"` matcher on a vector selector by restricting its series scan to the shard whose `fingerprint % n == i`. The frontend's job is to *inject* that matcher and *merge* the partials; the querier's job is to *honor* it. This slice does not implement querier-side shard filtering.
 
-**Slice 5 absent at authoring time** — the `QueryResult`/Prometheus-JSON shapes are (re)defined here in `frontend/result.rs` as the slice's own canonical model (greenfield: no shared type to import yet; when Slice 5 lands its querier serializes to the same shape). If Slice 5 already defines `QueryResult`, import it instead and delete `frontend/result.rs`.
+**Slice 6 talks to the querier over HTTP, not via the engine API.** The frontend's `frontend::result::QueryResult` is a **serde JSON DTO** (Prometheus `{"status","data":{"resultType","result"}}`), deliberately distinct from Slice 2's Rust engine enum `crabka_promql::QueryResult` (which is `Scalar`/`InstantVector`/`RangeMatrix`/`Str`). They share a friendly name but are different layers: the engine value model vs. the wire DTO this slice parses out of the querier's response body. Do **not** import Slice 2/5's engine `QueryResult` here — Slice 5 serializes via `query_result_to_json(&QueryResult) -> serde_json::Value` and exposes no typed JSON DTO, so this slice owns `frontend/result.rs` and must keep its byte-shape identical to what Slice 5's `query_result_to_json` emits (pinned by the serde test in Task 1).
 
 **The 8 metrics slices** (this plan = Slice 6):
 
@@ -87,7 +87,7 @@
 Add to `[dependencies]` (workspace pins where they exist; `reqwest`/`promql-parser` are explicit-version like grpc-gateway's reqwest):
 
 ```toml
-axum = { workspace = true }
+axum = { workspace = true, features = ["json", "form", "query"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "time", "sync"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
@@ -108,6 +108,8 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 ```
 
 > **Workspace-dep verify-note:** `futures`, `async-trait`, `clap`, `tracing`, `object_store`, `serde_json` are workspace members (see root `Cargo.toml`). If `futures` is named `futures-util` only, use `futures-util` with `join_all` from `futures_util::future`. If a `workspace = true` line errors with "not a workspace dependency", add the pin to the root `[workspace.dependencies]` first (it is a manifest fix, not a design change).
+
+> **axum feature verify-note (required, not optional):** the workspace `axum` pin is `default-features = false, features = ["http1", "tokio"]` — it does **not** enable the `json`, `form`, or `query` extractors. This slice needs all three: `axum::Json` (server responses + the `http_backend` stub test), `Form<RangeForm>` (the `http_backend` stub test), and `Query<RangeParams>`/`Query<InstantParams>` (the `server.rs` handlers). The `features = ["json", "form", "query"]` above is merged additively onto the workspace pin by Cargo, so these three are added on top of `http1`/`tokio`. Without them the crate will not compile (the extractors won't exist).
 
 - [ ] **Step 2: Write the failing test**
 
@@ -629,19 +631,32 @@ Expected: FAIL — `cannot find function split_range`.
 
 - [ ] **Step 3: Implement `split.rs`**
 
-The alignment rule (Mimir's): sub-range boundaries must fall on the step grid so the union of per-sub-range eval points equals the original's. Each sub-range spans `interval_secs` rounded *down* to a whole number of steps; consecutive sub-ranges share no eval point (the next starts one step after the previous ended).
+The alignment rule (Mimir's): sub-range boundaries are snapped to an **absolute**
+interval grid (multiples of `interval`, e.g. `00:00 UTC` day boundaries), *not*
+to a grid relative to `start`. This is what lets a moving time window reuse
+cached older sub-ranges: a sub-range that falls entirely inside one absolute
+interval bucket has the *same* `(start, end)` — and therefore the same cache key
+— regardless of which outer window asked for it. Each sub-range collects the
+step-grid eval points (`start + j*step`) that land in one absolute bucket
+`[k*interval, (k+1)*interval)`; consecutive sub-ranges share no eval point.
 
 ```rust
-//! Time-splitting for `query_range`: chop a long range into step-aligned
-//! per-interval sub-ranges, fan each to a querier, then stitch the matrices.
+//! Time-splitting for `query_range`: chop a long range into per-interval
+//! sub-ranges snapped to an absolute interval grid (so moving windows share
+//! sub-range boundaries and can reuse cache), fan each to a querier, then
+//! stitch the matrices.
 
 use std::collections::BTreeMap;
 
 use crate::frontend::result::{QueryResult, ResultData, SampleStream, series_key};
 
-/// Split `[start, end]` (step `step`) into contiguous sub-ranges each spanning
-/// at most `interval` seconds, with every boundary on the step grid so the
-/// union of sub-range eval points equals the original's exactly.
+/// Split `[start, end]` (step `step`) into sub-ranges each lying within one
+/// absolute interval bucket `[k*interval, (k+1)*interval)`. Boundaries snap to
+/// the absolute grid (multiples of `interval`), so two overlapping outer windows
+/// produce *identical* `(sub_start, sub_end)` pairs for any shared interior
+/// bucket — that identity is what makes the result cache reusable across a
+/// moving window. The union of sub-range eval points equals the original's
+/// exactly (no gap, no overlap).
 ///
 /// Returns at least one sub-range. If `step <= 0` or `interval < step`, returns
 /// the whole range unsplit (defensive — the caller validates inputs upstream).
@@ -650,20 +665,26 @@ pub fn split_range(start: f64, end: f64, step: f64, interval: f64) -> Vec<(f64, 
     if step <= 0.0 || interval < step || end <= start {
         return vec![(start, end)];
     }
-    // Steps per sub-range (at least 1), then the time span those steps cover.
-    let steps_per = (interval / step).floor().max(1.0);
-    let span = steps_per * step;
 
     let mut out = Vec::new();
     let mut sub_start = start;
     while sub_start <= end + f64::EPSILON {
-        // The last eval point at or before sub_start + span, clamped to end.
-        let sub_end = (sub_start + span).min(end);
+        // The absolute interval boundary strictly after `sub_start`. Snapping to
+        // `floor(t/interval)*interval` is what aligns this window's tiles with
+        // every other window's tiles.
+        let next_boundary = ((sub_start / interval).floor() + 1.0) * interval;
+        // Last eval point strictly before that boundary: step back one step from
+        // the boundary onto the global `start + j*step` grid, clamped to `end`.
+        let last_point_before = {
+            let steps_to_boundary = ((next_boundary - start) / step).ceil();
+            start + (steps_to_boundary - 1.0) * step
+        };
+        let sub_end = last_point_before.min(end);
         out.push((sub_start, sub_end));
         if sub_end >= end - f64::EPSILON {
             break;
         }
-        // Next sub-range starts one step AFTER this one ended (no shared point).
+        // Next sub-range starts at the first eval point in the next bucket.
         sub_start = sub_end + step;
     }
     out
@@ -712,7 +733,7 @@ pub fn stitch_matrices(parts: Vec<QueryResult>) -> QueryResult {
 }
 ```
 
-> **Boundary verify-note:** Mimir aligns split boundaries to the step so a 24h split of a 7d range yields exactly 7 sub-queries whose eval points tile the original grid with no overlap or gap. The `step_aligned_and_covers_exactly` test pins this; if a reviewer prefers Mimir's *absolute* day-boundary alignment (split at `00:00 UTC` rather than at `start + k*span`), change `split_range` to snap `sub_end` to `floor((sub_start+span)/interval)*interval` on the step grid — keep the test's "union equals original eval points" invariant.
+> **Boundary verify-note:** `split_range` uses Mimir's **absolute** interval-grid alignment (boundaries snapped to multiples of `interval`, e.g. `00:00 UTC` day boundaries — *not* `start + k*span`). A 24h split of a 7d range yields sub-queries whose eval points tile the original grid with no overlap or gap, and — critically — a *shifted* window reuses the interior tiles unchanged: `split_range(0,100,10,40) = [(0,30),(40,70),(80,100)]` and `split_range(40,140,10,40) = [(40,70),(80,110),(120,140)]` share the identical `(40,70)` tile, so its `(tenant, query, start, end, step)` cache key is byte-identical across the two windows and hits on the second query. The `split_is_step_aligned_and_covers_exactly` test pins the "union equals original eval points" invariant; the Task 8 `moving_window_reuses_cached_subranges` test pins the cross-window cache reuse this alignment enables.
 
 - [ ] **Step 4: Re-export from `mod.rs`**
 
@@ -840,12 +861,14 @@ pub enum ShardError {
 
 /// The additively-decomposable aggregation set. `sum`/`count`/`min`/`max` map
 /// to partial-then-combine directly; `avg` decomposes into `sum/count` (the
-/// frontend recombines — see `merge_shards`). Anything else (`quantile`,
-/// `topk`, `stddev`, `count_values`, …) is not shardable here.
-fn is_decomposable_aggr(op: &parser::token::TokenType) -> bool {
+/// frontend recombines — see `merge_shards` and the orchestrator's avg path).
+/// Anything else (`quantile`, `topk`, `stddev`, `count_values`, …) is not
+/// shardable here. `op_id` is the `u16` token id from `agg.op.id()`; we match it
+/// directly, exactly as `aggr_op_of` does, so the two stay consistent.
+fn is_decomposable_aggr(op_id: parser::token::TokenId) -> bool {
     use promql_parser::parser::token;
     matches!(
-        *op,
+        op_id,
         token::T_SUM | token::T_COUNT | token::T_MIN | token::T_MAX | token::T_AVG
     )
 }
@@ -860,7 +883,7 @@ pub fn analyze(query: &str, shards: usize) -> ShardPlan {
         return ShardPlan::NoShard;
     };
     match ast {
-        Expr::Aggregate(agg) if is_decomposable_aggr(&agg.op.id()) => {
+        Expr::Aggregate(agg) if is_decomposable_aggr(agg.op.id()) => {
             ShardPlan::Shardable { shards }
         }
         _ => ShardPlan::NoShard,
@@ -884,17 +907,19 @@ pub fn rewrite_shard(
 fn inject_into_selectors(expr: &mut Expr, shard_value: &str) {
     match expr {
         Expr::VectorSelector(vs) => {
-            vs.matchers.append(Matcher::new(
+            // `Matchers::append` is a builder that consumes `self` and returns
+            // `Self`, so rebind through it rather than discarding the result.
+            vs.matchers = std::mem::take(&mut vs.matchers).append(Matcher::new(
                 MatchOp::Equal,
-                QUERY_SHARD_LABEL.to_string(),
-                shard_value.to_string(),
+                QUERY_SHARD_LABEL,
+                shard_value,
             ));
         }
         Expr::MatrixSelector(ms) => {
-            ms.vs.matchers.append(Matcher::new(
+            ms.vs.matchers = std::mem::take(&mut ms.vs.matchers).append(Matcher::new(
                 MatchOp::Equal,
-                QUERY_SHARD_LABEL.to_string(),
-                shard_value.to_string(),
+                QUERY_SHARD_LABEL,
+                shard_value,
             ));
         }
         Expr::Aggregate(agg) => inject_into_selectors(&mut agg.expr, shard_value),
@@ -910,13 +935,14 @@ fn inject_into_selectors(expr: &mut Expr, shard_value: &str) {
         Expr::Paren(p) => inject_into_selectors(&mut p.expr, shard_value),
         Expr::Subquery(sq) => inject_into_selectors(&mut sq.expr, shard_value),
         Expr::Unary(u) => inject_into_selectors(&mut u.expr, shard_value),
-        Expr::StepInvariant(si) => inject_into_selectors(&mut si.expr, shard_value),
+        // The 11 `Expr` variants are exhaustive; there is no `StepInvariant`
+        // wrapper (@-modifier step-invariance is carried on `VectorSelector.at`).
         Expr::NumberLiteral(_) | Expr::StringLiteral(_) | Expr::Extension(_) => {}
     }
 }
 ```
 
-> **promql-parser 0.10 API verify-note (the churn surface):** the variant names (`Expr::VectorSelector`/`MatrixSelector`/`Aggregate`/`Call`/`Binary`/`Paren`/`Subquery`/`Unary`/`StepInvariant`/`NumberLiteral`/`StringLiteral`/`Extension`), the matcher constructor (`Matcher::new(MatchOp::Equal, name, value)` and `Matchers::append`), the aggregate-op token accessor (`agg.op.id()` → `TokenType`, and the `T_SUM`…`T_AVG` token constants), and `Expr: Display` (`to_string()` re-renders the query) are all **promql-parser 0.10** surface. If any name differs, fix it against the 0.10 docs — the tests pin the *behavior* (shardable decision + `i_of_n` matcher text in the rendered string), not the type names. If `Matchers::append` consumes/returns rather than mutating in place, rebind: `vs.matchers = vs.matchers.clone().append(...)`. If `op.id()` is instead `agg.op` being a `TokenType` directly, drop the `.id()`.
+> **promql-parser 0.10 API verify-note (the churn surface):** the 11 `Expr` variants (`VectorSelector`/`MatrixSelector`/`Aggregate`/`Call`/`Binary`/`Paren`/`Subquery`/`Unary`/`NumberLiteral`/`StringLiteral`/`Extension` — there is **no** `StepInvariant` variant; @-modifier step-invariance is carried on `VectorSelector.at`), the matcher constructor (`Matcher::new(MatchOp::Equal, name: &str, value: &str)` — both args are `&str`, so pass `QUERY_SHARD_LABEL` / `shard_value` directly, not `.to_string()`), the builder `Matchers::append(self, Matcher) -> Self` (it **consumes and returns** `self`, so the implementation rebinds via `vs.matchers = std::mem::take(&mut vs.matchers).append(...)` — mutating-in-place would silently drop the matcher and over-count every shard), the aggregate-op token accessor (`agg.op.id()` → `TokenId` = `u16`, and the `T_SUM`…`T_AVG` token constants are `u16`), and `Expr: Display` (`to_string()` re-renders the query) are all **promql-parser 0.10** surface. If any name differs, fix it against the 0.10 docs — the tests pin the *behavior* (shardable decision + `i_of_n` matcher text in the rendered string), not the type names. If `op.id()` is instead `agg.op` being a token id directly, drop the `.id()`.
 
 - [ ] **Step 4: Re-export from `mod.rs`**
 
@@ -950,8 +976,10 @@ git commit -m "feat(metrics): shardability analysis + __query_shard__ AST rewrit
 **Interfaces:**
 - Consumes: `QueryResult`, `ResultData`, `SampleStream`, `InstantSample`, `series_key`, the parsed top-level aggregation op.
 - Produces:
-  - `fn merge_shards(op: AggrOp, parts: Vec<QueryResult>) -> QueryResult` — combine N shard partials into the single result the unsharded query would have produced. `Sum`/`Count` → add partial values per `(series_key, timestamp)`; `Min`/`Max` → min/max per `(series_key, timestamp)`; `Avg` → handled by the orchestrator as `sum(...) / count(...)` (this fn rejects `Avg`, documented). Works for both matrix (`query_range`) and vector (`query`) partials.
+  - `fn merge_shards(op: AggrOp, parts: Vec<QueryResult>) -> QueryResult` — combine N shard partials into the single result the unsharded query would have produced. `Sum`/`Count` → add partial values per `(series_key, timestamp)`; `Min`/`Max` → min/max per `(series_key, timestamp)`; `Avg` is **not** an `AggrOp` — the orchestrator decomposes `avg(x)` into `sum(x)`/`count(x)` and recombines via `divide_results` (this fn never sees `Avg`). Works for both matrix (`query_range`) and vector (`query`) partials.
   - `enum AggrOp { Sum, Count, Min, Max }` + `fn aggr_op_of(query: &str) -> Option<AggrOp>` (parse, read top-level op).
+  - `fn decompose_avg(query: &str) -> Option<(String, String)>` — if `query`'s top-level op is `avg`, return the `(sum(<inner>), count(<inner>))` query-string pair (built from the AST by swapping the aggregate op, then `to_string()`); else `None`.
+  - `fn divide_results(sum_res: QueryResult, count_res: QueryResult) -> QueryResult` — recombine an `avg` from its merged sum and merged count: per `(series_key, timestamp)`, emit `sum / count`. Handles matrix and vector; errors/short-circuit propagate.
 
 - [ ] **Step 1: Write the failing test — sharded sum equals unsharded**
 
@@ -1167,9 +1195,119 @@ fn fmt_value(v: f64) -> String {
         format!("{v}")
     }
 }
+
+/// If `query`'s top-level aggregation is `avg`, return the `(sum, count)` query
+/// pair that decomposes it: `avg(inner)` ⇒ (`sum(inner)`, `count(inner)`),
+/// preserving any `by`/`without` grouping. Built from the AST by swapping the
+/// aggregate op token and re-rendering, so it never string-munges the inner
+/// expression. Returns `None` for any non-`avg` top-level query.
+#[must_use]
+pub fn decompose_avg(query: &str) -> Option<(String, String)> {
+    use promql_parser::parser::token;
+    let ast = parser::parse(query).ok()?;
+    let Expr::Aggregate(agg) = ast else {
+        return None;
+    };
+    if agg.op.id() != token::T_AVG {
+        return None;
+    }
+    // Rebuild the aggregate with a different op, keeping modifier/grouping/expr.
+    let with_op = |op_id| {
+        let mut a = agg.clone();
+        a.op = parser::token::TokenType::new(op_id);
+        Expr::Aggregate(a).to_string()
+    };
+    Some((with_op(token::T_SUM), with_op(token::T_COUNT)))
+}
+
+/// Recombine `avg` from its merged `sum` and merged `count` results: per
+/// `(series_key, timestamp)`, emit `sum / count`. A point present in only one of
+/// the two inputs is dropped (a count of 0 has no average). Errors short-circuit.
+#[must_use]
+pub fn divide_results(sum_res: QueryResult, count_res: QueryResult) -> QueryResult {
+    if sum_res.status == "error" {
+        return sum_res;
+    }
+    if count_res.status == "error" {
+        return count_res;
+    }
+
+    // Flatten both sides to (series_key, timestamp_bits) -> (metric, value).
+    fn flatten(
+        qr: &QueryResult,
+    ) -> Option<(bool, BTreeMap<(String, u64), (BTreeMap<String, String>, f64)>)> {
+        let mut out = BTreeMap::new();
+        let is_vector = match &qr.data {
+            Some(ResultData::Matrix(series)) => {
+                for s in series {
+                    for (t, v) in &s.values {
+                        out.insert(
+                            (series_key(&s.metric), t.to_bits()),
+                            (s.metric.clone(), v.parse().unwrap_or(f64::NAN)),
+                        );
+                    }
+                }
+                false
+            }
+            Some(ResultData::Vector(elems)) => {
+                for e in elems {
+                    out.insert(
+                        (series_key(&e.metric), e.value.0.to_bits()),
+                        (e.metric.clone(), e.value.1.parse().unwrap_or(f64::NAN)),
+                    );
+                }
+                true
+            }
+            _ => return None,
+        };
+        Some((is_vector, out))
+    }
+
+    let (Some((sum_vec, sums)), Some((_, counts))) = (flatten(&sum_res), flatten(&count_res)) else {
+        return QueryResult::error("internal", "non-matrix/vector while dividing for avg");
+    };
+
+    let mut by_series: BTreeMap<String, SampleStream> = BTreeMap::new();
+    for (key, (metric, sum_v)) in sums {
+        let Some((_, count_v)) = counts.get(&key) else {
+            continue; // no matching count ⇒ no average for this point
+        };
+        if *count_v == 0.0 {
+            continue;
+        }
+        let (skey, tbits) = key;
+        by_series
+            .entry(skey)
+            .or_insert_with(|| SampleStream {
+                metric,
+                values: Vec::new(),
+            })
+            .values
+            .push((f64::from_bits(tbits), fmt_value(sum_v / count_v)));
+    }
+    for s in by_series.values_mut() {
+        s.values
+            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    if sum_vec {
+        let vector = by_series
+            .into_values()
+            .map(|s| InstantSample {
+                metric: s.metric,
+                value: s.values.into_iter().next().unwrap_or((0.0, "NaN".to_string())),
+            })
+            .collect();
+        QueryResult::success(ResultData::Vector(vector))
+    } else {
+        QueryResult::success(ResultData::Matrix(by_series.into_values().collect()))
+    }
+}
 ```
 
-> **Avg decomposition note:** `avg` is intentionally not an `AggrOp`. The orchestrator (Task 6) detects a top-level `avg` and runs it as two sharded sub-queries — `sum(<inner>)` and `count(<inner>)` — then divides the merged sum by the merged count per `(series, timestamp)`. This keeps `merge_shards` total over the four exact-combine ops and avoids a wrong "average of per-shard averages". The equivalence test for `avg` lives in Task 8's integration test.
+> **Avg decomposition note:** `avg` is intentionally not an `AggrOp`. The orchestrator (Task 6) detects a top-level `avg` via `decompose_avg`, runs the resulting `sum(<inner>)` and `count(<inner>)` each as its own fully-sharded sub-query (rewrite per shard → fan out → `merge_shards`), then recombines with `divide_results` (merged-sum / merged-count per `(series, timestamp)`). This keeps `merge_shards` total over the four exact-combine ops and avoids a wrong "average of per-shard averages". The end-to-end equivalence test for `avg` (sharded `avg(...)` == unsharded) is the `sharded_avg_equals_unsharded` test added in Task 8.
+
+> **`decompose_avg` AST verify-note:** rebuilding the aggregate with a new op assumes `AggregateExpr` is `Clone` and its `op: TokenType` field is reassignable via `TokenType::new(token_id)` (promql-parser 0.10). If `TokenType` is not directly constructible from a `TokenId`, build the two strings instead by parsing once and substituting only the leading function name on the rendered AST (`avg` → `sum`/`count`) — but prefer the AST rebuild so grouping/modifiers are preserved structurally. The Task 8 `sharded_avg_equals_unsharded` test pins the behavior regardless of which path compiles.
 
 > **Value-format verify-note:** Prometheus renders `10` not `10.0`. `fmt_value` reproduces the integer case; for non-integers it relies on Rust's shortest-`f64` formatting, which matches Prometheus's Go `strconv.FormatFloat(v, 'f', -1, 64)` for the values these tests exercise. If a differential test against real Prometheus later shows a divergence (e.g. very large/small magnitudes), this is the single function to adjust.
 
@@ -1180,7 +1318,7 @@ Expected: PASS (all shard tests).
 
 - [ ] **Step 5: Re-export the merge API from `mod.rs`**
 
-Extend the shard re-export: `pub use shard::{AggrOp, QUERY_SHARD_LABEL, ShardError, ShardPlan, aggr_op_of, analyze, merge_shards, rewrite_shard};`.
+Extend the shard re-export: `pub use shard::{AggrOp, QUERY_SHARD_LABEL, ShardError, ShardPlan, aggr_op_of, analyze, decompose_avg, divide_results, merge_shards, rewrite_shard};`.
 
 - [ ] **Step 6: Commit**
 
@@ -1451,23 +1589,50 @@ impl<B: QuerierBackend, C: ResultCache> QueryFrontend<B, C> {
     ) -> QueryResult {
         match shard::analyze(query, self.cfg.shard_count) {
             ShardPlan::Shardable { shards } => {
+                // `avg` is shardable but not directly combinable: decompose into
+                // sum/count, shard each, then divide the merged sum by the merged
+                // count per (series, timestamp).
+                if let Some((sum_q, count_q)) = shard::decompose_avg(query) {
+                    let sum_res = self
+                        .shard_range(tenant, &sum_q, start, end, step, shards, AggrOp::Sum)
+                        .await;
+                    let count_res = self
+                        .shard_range(tenant, &count_q, start, end, step, shards, AggrOp::Count)
+                        .await;
+                    return shard::divide_results(sum_res, count_res);
+                }
                 let Some(op) = shard::aggr_op_of(query) else {
                     return self.dispatch_range(tenant, query, start, end, step).await;
                 };
-                let futs = (0..shards).map(|i| {
-                    let rewritten = shard::rewrite_shard(query, i, shards);
-                    async move {
-                        match rewritten {
-                            Ok(q) => self.dispatch_range(tenant, &q, start, end, step).await,
-                            Err(e) => QueryResult::error("bad_data", &e.to_string()),
-                        }
-                    }
-                });
-                let partials = join_all(futs).await;
-                shard::merge_shards(op, partials)
+                self.shard_range(tenant, query, start, end, step, shards, op)
+                    .await
             }
             ShardPlan::NoShard => self.dispatch_range(tenant, query, start, end, step).await,
         }
+    }
+
+    /// Rewrite `query` per shard, fan out the N range sub-queries in parallel,
+    /// and merge the partials with `op`.
+    async fn shard_range(
+        &self,
+        tenant: &str,
+        query: &str,
+        start: f64,
+        end: f64,
+        step: f64,
+        shards: usize,
+        op: AggrOp,
+    ) -> QueryResult {
+        let futs = (0..shards).map(|i| {
+            let rewritten = shard::rewrite_shard(query, i, shards);
+            async move {
+                match rewritten {
+                    Ok(q) => self.dispatch_range(tenant, &q, start, end, step).await,
+                    Err(e) => QueryResult::error("bad_data", &e.to_string()),
+                }
+            }
+        });
+        shard::merge_shards(op, join_all(futs).await)
     }
 
     async fn dispatch_range(
@@ -1496,7 +1661,7 @@ impl<B: QuerierBackend, C: ResultCache> QueryFrontend<B, C> {
 use crate::frontend::{shard, split};
 ```
 
-> **`avg` handling note (flagged, implement now):** `analyze` returns `Shardable` for `avg`, but `aggr_op_of` returns `None` for `avg` (it's not in `AggrOp`). With the code above, an `avg` query therefore falls through to a single un-sharded dispatch (correct but un-sharded). Implementing the full `sum/count` decomposition for `avg` is an *optional enhancement* — to keep this task bounded, restrict `analyze` to the four `AggrOp` ops by having it consult `aggr_op_of(query).is_some()` instead of `is_decomposable_aggr`. Update Task 4's `analyze` accordingly so `analyze` and `aggr_op_of` agree, and drop `avg` from `is_decomposable_aggr`'s doc set. (The `quantile_aggregation_is_not_shardable` test still passes; add no new behavior for `avg` in this slice.)
+> **`avg` decomposition note (implemented):** `analyze` returns `Shardable` for `avg` (it is in `is_decomposable_aggr`), and `aggr_op_of` returns `None` for `avg` (it is not an `AggrOp`). Rather than fall through to an un-sharded dispatch, `run_sub_range` calls `shard::decompose_avg(query)` *first*: when the top-level op is `avg`, it derives `sum(<inner>)` and `count(<inner>)`, shards and merges each via `shard_range`, then recombines with `shard::divide_results` (merged-sum / merged-count per `(series, timestamp)`). This delivers the FOCUS-required `avg → sum/count` decomposition fully sharded, while keeping `merge_shards` total over the four exact-combine ops. The end-to-end equivalence is pinned by Task 8's `sharded_avg_equals_unsharded` test. (`instant_query` in Task 10 applies the same `decompose_avg` path for `/api/v1/query`.)
 
 - [ ] **Step 6: Run to verify it passes**
 
@@ -1741,7 +1906,7 @@ git commit -m "feat(metrics): ResultCache — in-memory + object-store, TTL, spl
 
 - [ ] **Step 1: Split-and-cache reuse test (`frontend_split_stitch.rs`)**
 
-The headline cache behavior: a moving window reuses cached older sub-ranges. Query `[0, 100]` then `[40, 140]` with a 40s split; the overlapping middle sub-range must be served from cache (one fewer backend call the second time).
+The headline cache behavior: a moving window reuses cached older sub-ranges. Query `[0, 100]` then the *moved* window `[40, 140]` with a 40s split. Because boundaries snap to the absolute interval grid, the two windows share the interior tile `(40, 70)`; on the second query that tile is served from cache, so the moved window issues backend calls only for its *new* tiles `(80, 110)` and `(120, 140)` — exactly two, not three.
 
 ```rust
 use std::collections::BTreeMap;
@@ -1791,16 +1956,23 @@ async fn moving_window_reuses_cached_subranges() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(InMemoryCache::new(Duration::from_secs(60))), cfg);
 
+    // Window [0,100] (40s split) ⇒ tiles (0,30),(40,70),(80,100) ⇒ 3 calls.
     let _ = qf.range_query("t1", "up", 0.0, 100.0, 10.0, CacheControl::Use).await;
     let after_first = qf.backend_ref().calls().len();
+    assert!(after_first == 3);
 
-    // Re-issue the SAME query: every sub-range is now cached ⇒ zero new calls.
-    let _ = qf.range_query("t1", "up", 0.0, 100.0, 10.0, CacheControl::Use).await;
-    assert!(qf.backend_ref().calls().len() == after_first);
+    // MOVE the window to [40,140] ⇒ tiles (40,70),(80,110),(120,140). The
+    // absolute-grid-aligned interior tile (40,70) is identical to the first
+    // window's and is served from cache ⇒ only the two NEW tiles hit the
+    // backend (+2, not +3). This is the cross-window reuse the split enables.
+    let _ = qf.range_query("t1", "up", 40.0, 140.0, 10.0, CacheControl::Use).await;
+    assert!(qf.backend_ref().calls().len() == after_first + 2);
 
-    // no-store bypasses the cache ⇒ fresh backend calls.
-    let _ = qf.range_query("t1", "up", 0.0, 100.0, 10.0, CacheControl::NoStore).await;
-    assert!(qf.backend_ref().calls().len() > after_first);
+    // Re-issue the moved window with no-store ⇒ cache bypassed ⇒ all 3 of its
+    // tiles re-fetched.
+    let before_no_store = qf.backend_ref().calls().len();
+    let _ = qf.range_query("t1", "up", 40.0, 140.0, 10.0, CacheControl::NoStore).await;
+    assert!(qf.backend_ref().calls().len() == before_no_store + 3);
 }
 ```
 
@@ -1858,6 +2030,51 @@ async fn sharded_sum_rate_equals_unsharded() {
     // Exactly 4 shard sub-requests were dispatched.
     assert!(qf.backend_ref().calls().len() == 4);
 }
+
+#[tokio::test]
+async fn sharded_avg_equals_unsharded() {
+    // avg(inner) decomposes into sum(inner)/count(inner), each sharded over 4
+    // shards. The orchestrator dispatches the 4 sum shards first, then the 4
+    // count shards (8 calls total, FIFO into the mock).
+    //
+    // Ground truth: true sum @0 = 12, @10 = 20; true count @0 = 4, @10 = 4 ⇒
+    // avg = 3 @0 and 5 @10. Spread the sum across shards (3,4,2,3)@0 /
+    // (5,5,5,5)@10 and the count as 1 per shard per point.
+    let sum_at_0 = [3.0, 4.0, 2.0, 3.0]; // Σ = 12
+    let sum_at_10 = [5.0, 5.0, 5.0, 5.0]; // Σ = 20
+
+    let backend = MockQuerier::new();
+    // 4 sum-shard partials, in shard order.
+    for i in 0..4 {
+        backend.stub_range(matrix_empty_labels(&[(0.0, sum_at_0[i]), (10.0, sum_at_10[i])]));
+    }
+    // 4 count-shard partials (1 series per shard per point ⇒ count 1 each).
+    for _ in 0..4 {
+        backend.stub_range(matrix_empty_labels(&[(0.0, 1.0), (10.0, 1.0)]));
+    }
+    let cfg = FrontendConfig {
+        split_interval_secs: 10_000.0, // no split
+        shard_count: 4,
+        ..FrontendConfig::default()
+    };
+    let qf = QueryFrontend::new(Arc::new(backend), Arc::new(NoCache), cfg);
+
+    let sharded = qf
+        .range_query("t1", "avg(rate(http_requests_total[5m]))", 0.0, 10.0, 10.0, CacheControl::Use)
+        .await;
+
+    let m = sharded.as_matrix().unwrap();
+    assert!(m.len() == 1);
+    // 12/4 = 3 @ t=0 ; 20/4 = 5 @ t=10.
+    assert!(m[0].values == vec![(0.0, "3".to_string()), (10.0, "5".to_string())]);
+    // 4 sum-shard + 4 count-shard sub-requests = 8.
+    assert!(qf.backend_ref().calls().len() == 8);
+    // Every sub-request is sharded; the sum/count split is visible in the query.
+    let queries: Vec<String> = qf.backend_ref().calls().into_iter().map(|c| c.query).collect();
+    assert!(queries.iter().all(|q| q.contains("__query_shard__")));
+    assert!(queries.iter().filter(|q| q.starts_with("sum")).count() == 4);
+    assert!(queries.iter().filter(|q| q.starts_with("count")).count() == 4);
+}
 ```
 
 - [ ] **Step 3: Run to verify they pass**
@@ -1865,7 +2082,7 @@ async fn sharded_sum_rate_equals_unsharded() {
 Run: `cargo test -p crabka-metrics --test frontend_split_stitch --test frontend_shard_equivalence`
 Expected: PASS.
 
-> **Mock-stub ordering caveat:** `MockQuerier` pops stubs FIFO and repeats the last. The shard test programs 4 distinct stubs (one per shard) in shard-index order. This works because `join_all` preserves index order in the returned `Vec`, but the *dispatch* order into the mock is the `(0..shards)` map order — deterministic. If a future change makes dispatch concurrent-nondeterministic w.r.t. stub consumption, switch `MockQuerier` to match on `RangeRequest.query`'s `__query_shard__` value instead of FIFO (a small fixture upgrade; flagged here, not needed yet).
+> **Mock-stub ordering caveat:** `MockQuerier` pops stubs FIFO and repeats the last. The `sum`-shard test programs 4 distinct stubs (one per shard) in shard-index order; the `avg` test programs 8 (4 `sum`-shard stubs, then 4 `count`-shard stubs) because the orchestrator fully awaits the sharded `sum(...)` sub-query before the sharded `count(...)` one. This works because `join_all` preserves index order in the returned `Vec` and the *dispatch* order into the mock is the deterministic `(0..shards)` map order (and, for `avg`, sum-then-count). If a future change makes dispatch concurrent-nondeterministic w.r.t. stub consumption, switch `MockQuerier` to match on `RangeRequest.query` (its `__query_shard__` value and `sum`/`count` prefix) instead of FIFO (a small fixture upgrade; flagged here, not needed yet).
 
 - [ ] **Step 4: Commit**
 
@@ -2294,25 +2511,47 @@ In `mod.rs`'s `QueryFrontend` impl, add the instant path (shard-or-not, fan-out,
         time: f64,
         _cc: CacheControl,
     ) -> QueryResult {
-        use crate::frontend::backend::InstantRequest;
         match shard::analyze(query, self.cfg.shard_count) {
             ShardPlan::Shardable { shards } => {
+                // Same `avg` decomposition as the range path (sum/count → divide).
+                if let Some((sum_q, count_q)) = shard::decompose_avg(query) {
+                    let sum_res = self
+                        .shard_instant(tenant, &sum_q, time, shards, AggrOp::Sum)
+                        .await;
+                    let count_res = self
+                        .shard_instant(tenant, &count_q, time, shards, AggrOp::Count)
+                        .await;
+                    return shard::divide_results(sum_res, count_res);
+                }
                 let Some(op) = shard::aggr_op_of(query) else {
                     return self.dispatch_instant(tenant, query, time).await;
                 };
-                let futs = (0..shards).map(|i| {
-                    let rewritten = shard::rewrite_shard(query, i, shards);
-                    async move {
-                        match rewritten {
-                            Ok(q) => self.dispatch_instant(tenant, &q, time).await,
-                            Err(e) => QueryResult::error("bad_data", &e.to_string()),
-                        }
-                    }
-                });
-                shard::merge_shards(op, join_all(futs).await)
+                self.shard_instant(tenant, query, time, shards, op).await
             }
             ShardPlan::NoShard => self.dispatch_instant(tenant, query, time).await,
         }
+    }
+
+    /// Rewrite `query` per shard, fan out the N instant sub-queries in parallel,
+    /// and merge the partials with `op`.
+    async fn shard_instant(
+        &self,
+        tenant: &str,
+        query: &str,
+        time: f64,
+        shards: usize,
+        op: AggrOp,
+    ) -> QueryResult {
+        let futs = (0..shards).map(|i| {
+            let rewritten = shard::rewrite_shard(query, i, shards);
+            async move {
+                match rewritten {
+                    Ok(q) => self.dispatch_instant(tenant, &q, time).await,
+                    Err(e) => QueryResult::error("bad_data", &e.to_string()),
+                }
+            }
+        });
+        shard::merge_shards(op, join_all(futs).await)
     }
 
     async fn dispatch_instant(&self, tenant: &str, query: &str, time: f64) -> QueryResult {
@@ -2465,7 +2704,7 @@ git commit -m "feat(metrics): query-frontend axum server + --target query-fronte
 - `reqwest` 0.13 + querier HTTP contract (`http_backend.rs`) — pinned by a loopback axum-stub test asserting request shape + response parse; verify-note for method drift.
 - `object_store` 0.13 (`cache.rs`) — `GetResult.meta.last_modified` / `bytes()` / `put` signatures verify-noted; round-trip test pins behavior; FNV-key collision analysis included.
 
-**`avg` decomposition — flagged and bounded:** `avg` is deliberately not an `AggrOp`; the bounded resolution (Task 6 note) makes `analyze`/`aggr_op_of` agree on the four exact-combine ops so an `avg` query runs un-sharded rather than producing a wrong "average of averages". Full `sum/count` decomposition is explicitly deferred (no behavior added this slice).
+**`avg` decomposition — implemented (FOCUS deliverable):** `avg` is deliberately not an `AggrOp`, but it *is* sharded: the orchestrator detects a top-level `avg` via `shard::decompose_avg`, dispatches `sum(<inner>)` and `count(<inner>)` each fully sharded (rewrite-per-shard → fan-out → `merge_shards`), then recombines with `shard::divide_results` (merged-sum / merged-count per `(series, timestamp)`). This avoids a wrong "average of per-shard averages" while keeping `merge_shards` total over the four exact-combine ops. The `range_query` and `instant_query` paths share the decomposition, and the `sharded_avg_equals_unsharded` integration test (Task 8) pins sharded-`avg` == unsharded.
 
 **Placeholder scan:** no "TBD"/"similar to Task N"/"add error handling". Every step has runnable code or an exact command. The hand-waves (3rd-party API method names at arrow/reqwest/object_store/promql-parser versions) are each bounded with a verify-against-docs note and pinned by a behavior test, never left vague.
 

@@ -212,7 +212,7 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 
 /// Mandatory blockstore column: series fingerprint (`UInt64`).
 pub const COL_FINGERPRINT: &str = "series_fingerprint";
-/// Mandatory blockstore column: sample timestamp in nanoseconds (`Int64`).
+/// Mandatory blockstore column: sample timestamp in epoch milliseconds (`Int64`).
 pub const COL_TIMESTAMP: &str = "timestamp";
 
 // Native-histogram payload columns.
@@ -522,21 +522,34 @@ Append to the `tests` module in `histogram.rs`:
 ```rust
     #[test]
     fn encode_decode_round_trips() {
-        let h1 = sample_histogram();
+        let h1 = sample_histogram(); // custom_values: None (absent)
         let mut h2 = sample_histogram();
         h2.is_float = true;
         h2.negative_spans = vec![BucketSpan { offset: -1, length: 1 }];
         h2.negative_counts = vec![2.0];
-        h2.custom_values = Some(vec![0.5, 1.0, 2.0]);
+        h2.custom_values = Some(vec![0.5, 1.0, 2.0]); // present, non-empty
         h2.schema = -53;
         h2.start_timestamp_ms = Some(123);
+        // Empty-but-present custom_values: NHCB validity hinges on distinguishing
+        // absent (None) from empty (`Some(vec![])`), so pin that equivalence class.
+        let mut h3 = sample_histogram();
+        h3.custom_values = Some(vec![]); // present, empty
+        h3.schema = -53;
 
-        let rows = vec![(10_u64, 1000_i64, h1.clone()), (20_u64, 2000_i64, h2.clone())];
+        let rows = vec![
+            (10_u64, 1000_i64, h1.clone()),
+            (20_u64, 2000_i64, h2.clone()),
+            (30_u64, 3000_i64, h3.clone()),
+        ];
         let batch = encode_native_histograms(&rows).unwrap();
-        assert!(batch.num_rows() == 2);
+        assert!(batch.num_rows() == 3);
 
         let back = decode_native_histograms(&batch).unwrap();
         assert!(back == rows);
+        // Explicit absent-vs-empty assertions: None, Some(non-empty), Some(empty).
+        assert!(back[0].2.custom_values == None);
+        assert!(back[1].2.custom_values == Some(vec![0.5, 1.0, 2.0]));
+        assert!(back[2].2.custom_values == Some(vec![]));
     }
 
     #[test]
