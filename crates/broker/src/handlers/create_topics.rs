@@ -320,6 +320,25 @@ pub(crate) async fn handle(
             results.push(result);
         }
 
+        // Audit: emit one AdminOperation record for the successfully-created topics.
+        let created: Vec<crabka_audit::AuditResource> = results
+            .iter()
+            .filter(|t| t.error_code == 0)
+            .map(|t| crabka_audit::AuditResource {
+                resource_type: "Topic".to_string(),
+                name: t.name.clone(),
+            })
+            .collect();
+        if !created.is_empty() {
+            crate::handlers::audit_admin(
+                broker,
+                ctx,
+                "CreateTopics",
+                crabka_audit::AuditOutcome::Success,
+                created,
+            );
+        }
+
         // KIP-599: consume controller_mutation_rate quota.
         let delay = crate::quota::consume_controller_mutation_quota(
             &image,

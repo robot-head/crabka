@@ -1803,6 +1803,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-audit"
+version = "0.3.7"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "bytes",
+ "clap",
+ "crabka-log",
+ "crabka-protocol",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crabka-authz"
 version = "0.3.7"
 dependencies = [
@@ -1854,6 +1874,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crabka-audit",
  "crabka-authz",
  "crabka-broker-test-helpers",
  "crabka-client-consumer",
@@ -2235,9 +2256,11 @@ dependencies = [
  "crabka-client-producer",
  "crabka-log",
  "crabka-protocol",
+ "crabka-raft",
  "crabka-security",
  "futures-util",
  "proptest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

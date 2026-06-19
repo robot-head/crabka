@@ -154,12 +154,26 @@ pub struct Broker {
     /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) offset_for_leader_epoch_requests: Arc<std::sync::atomic::AtomicU64>,
+    /// `FedRAMP` MLA (Slice 1): cloneable handle to the audit pipeline.
+    /// Handlers and lifecycle code call `emit` to record events; the
+    /// `AuditWriter` background task drains them into the
+    /// `KafkaTopicAuditSink`. Disabled (`AuditLog::disabled()`) when
+    /// `BrokerConfig::audit_enabled` is `false`.
+    pub(crate) audit_log: std::sync::Arc<crabka_audit::AuditLog>,
     handlers: HandlerTable,
 }
 
 impl Broker {
     pub(crate) fn handlers(&self) -> &HandlerTable {
         &self.handlers
+    }
+
+    pub(crate) fn audit_product() -> crabka_audit::ProductInfo {
+        crabka_audit::ProductInfo {
+            vendor_name: "Crabka".to_string(),
+            name: "crabka-broker".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
     }
 
     /// Test-only: clone the controller handle so the `auto_join` unit test can
@@ -1398,6 +1412,18 @@ impl BrokerHandle {
     /// returned future blocks until the listener task exits.
     #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
     pub async fn shutdown(mut self) {
+        // Emit the BrokerStopping lifecycle event before tearing down
+        // partitions. This record may be dropped if the audit partition is
+        // already gone — acceptable for Slice 1; durable shutdown auditing
+        // is Slice 3.
+        self._broker
+            .audit_log
+            .emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStopping,
+                node_id: i64::from(self._broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
+
         // Cancel the replicator supervisor BEFORE the controller drops:
         // in-flight replication tasks must observe a clean cancellation
         // rather than a torn-down metadata-watch channel.
@@ -2122,6 +2148,7 @@ impl Broker {
             &producer_state,
         )
         .await?;
+        crate::coordinator::bootstrap::bootstrap_audit_topic(&config, &controller).await?;
 
         // 4a. Construct the transaction coordinator. All dependencies
         //     (controller, partitions, producer_ids) are ready at this point.
@@ -2215,6 +2242,169 @@ impl Broker {
         // `/metrics` HTTP listener and any other later consumers
         // still reuse the same `metrics` value.
         let metrics = crate::metrics::BrokerMetrics::new();
+
+        // ── Audit pipeline (FedRAMP MLA, Slice 1) ──────────────────────────
+        // Wired after `bootstrap_audit_topic` (which submits the audit topic
+        // metadata record into raft) and after `partitions` + `metrics` are
+        // live. The `KafkaTopicAuditSink` resolves the local audit partition
+        // lazily at write time, so it is safe to construct here even though
+        // the replicator supervisor (spawned below) has not yet materialized
+        // the local partition replica.
+        // Resolve the audit partition this broker leads (broker-affinity).
+        // Hoisted out of the audit_enabled block so block 2 (BrokerStarted
+        // wait) can key on the actual led partition index rather than
+        // hardcoding partition 0.
+        let audit_led_partition: Option<i32> = if config.audit_enabled {
+            let image = controller.current_image();
+            let mut led: Option<i32> = None;
+            let mut idx = 0i32;
+            while let Some(part) = image.partition(&config.audit_topic, idx) {
+                if part.leader == config.node_id {
+                    led = Some(idx);
+                    break;
+                }
+                idx += 1;
+            }
+            led
+        } else {
+            None
+        };
+
+        let audit_log = if config.audit_enabled {
+            let (log, rx) = crabka_audit::AuditLog::new(8192);
+            if let Some(pidx) = audit_led_partition {
+                let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
+                    partitions.clone(),
+                    config.audit_topic.clone(),
+                    pidx,
+                    metrics.clone(),
+                ));
+                let audit_signer: Option<std::sync::Arc<dyn crabka_audit::SigningKeyProvider>> =
+                    if let (Some(path), Some(key_id)) =
+                        (&config.audit_signing_key_path, &config.audit_signing_key_id)
+                    {
+                        match crabka_audit::FileEd25519Signer::from_pkcs8_file(path, key_id.clone())
+                        {
+                            Ok(s) => Some(std::sync::Arc::new(s)),
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "failed to load audit signing key; checkpoints disabled"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        tracing::info!(
+                            "no audit signing key configured; audit checkpoints disabled"
+                        );
+                        None
+                    };
+
+                // Open the durable spool (resolve relative dir under the log dir).
+                let spool_dir = if config.audit_spool_dir.is_absolute() {
+                    config.audit_spool_dir.clone()
+                } else {
+                    config.log_dir.join(&config.audit_spool_dir)
+                };
+                let spool = match crabka_audit::Spool::open(
+                    &spool_dir,
+                    config.audit_spool_max_bytes,
+                ) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to open audit spool; spooling disabled");
+                        None
+                    }
+                };
+
+                // Recover the chain: prefer the spool's last record, else the topic tail.
+                let resume = spool
+                    .as_ref()
+                    .and_then(|s| s.resume_point().ok().flatten())
+                    .or_else(|| {
+                        partitions
+                            .get(&config.audit_topic, pidx)
+                            .and_then(|p| crate::audit_recovery::recover_from_partition_tail(&p))
+                    });
+                let chain = match resume {
+                    Some((next_seq, head)) => {
+                        tracing::info!(next_seq, "audit chain resumed");
+                        crabka_audit::ChainState::resume(next_seq, head)
+                    }
+                    None => crabka_audit::ChainState::new(),
+                };
+
+                let stats = std::sync::Arc::new(crabka_audit::AuditStats::new());
+                let writer = crabka_audit::AuditWriter::new(
+                    rx,
+                    crabka_audit::AuditWriterParams {
+                        sink,
+                        product: Self::audit_product(),
+                        signer: audit_signer,
+                        checkpoint_every_n: config.audit_checkpoint_every_n,
+                        checkpoint_every: std::time::Duration::from_secs(
+                            config.audit_checkpoint_every_secs,
+                        ),
+                        chain,
+                        spool,
+                        stats: stats.clone(),
+                        replay_every: std::time::Duration::from_secs(2),
+                    },
+                );
+                tokio::spawn(writer.run());
+
+                // Poll spool stats into Prometheus once a second.
+                let poll_metrics = metrics.clone();
+                let poll_log = log.clone();
+                tokio::spawn(async move {
+                    let mut last_spooled = 0u64;
+                    let mut last_replayed = 0u64;
+                    let mut last_dropped = 0u64;
+                    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        tick.tick().await;
+                        let spooled = stats.spooled();
+                        let replayed = stats.replayed();
+                        // dropped = spool-full/io drops (stats) + channel-full drops (AuditLog)
+                        let dropped = stats.dropped() + poll_log.dropped();
+                        poll_metrics
+                            .audit_records_spooled_total
+                            .inc_by(spooled - last_spooled);
+                        poll_metrics
+                            .audit_records_replayed_total
+                            .inc_by(replayed - last_replayed);
+                        poll_metrics
+                            .audit_records_dropped_total
+                            .inc_by(dropped - last_dropped);
+                        last_spooled = spooled;
+                        last_replayed = replayed;
+                        last_dropped = dropped;
+                        poll_metrics
+                            .audit_spool_depth
+                            .set(i64::try_from(stats.depth()).unwrap_or(i64::MAX));
+                        poll_metrics
+                            .audit_spool_bytes
+                            .set(i64::try_from(stats.spool_bytes()).unwrap_or(i64::MAX));
+                    }
+                });
+            } else {
+                tracing::warn!("no audit partition led by this broker; audit records will drop");
+            }
+            log
+        } else {
+            crabka_audit::AuditLog::disabled()
+        };
+        // Wrap the cluster authorizer with the deny-auditing decorator so every
+        // Deny decision is recorded as an AuthorizationDenied audit event.
+        if config.audit_enabled {
+            config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
+                config.authorizer.clone(),
+                audit_log.clone(),
+            ));
+        }
+        // ───────────────────────────────────────────────────────────────────
+
         // KIP-113 offline-dir handling: feed the supervisor the online
         // subset so newly materialized partitions never land on a dir
         // the startup probe flagged unwritable.
@@ -3094,6 +3284,7 @@ impl Broker {
             client_metrics,
             #[cfg(any(test, feature = "test-helpers"))]
             offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            audit_log,
             handlers,
         });
 
@@ -3107,6 +3298,34 @@ impl Broker {
                 shutdown.clone(),
             ));
             listener_tasks.push(task);
+        }
+
+        // Emit the BrokerStarted lifecycle event now that the broker Arc is
+        // live and listeners are bound. A broker that leads no audit partition
+        // (e.g. a controller-only node, or one that bootstrapped before brokers
+        // registered) has nowhere to durably write its own BrokerStarted record
+        // in Slice 1, so we deliberately skip both the partition-wait and the
+        // emit rather than emit a guaranteed-dropped record. Multi-broker / RF>1
+        // durability is Slice 3. When audit_led_partition is Some, we wait for
+        // the partition to materialize in the local registry before emitting.
+        if let Some(led_pidx) = audit_led_partition {
+            let audit_topic = broker.config.audit_topic.clone();
+            let partitions_for_wait = broker.partitions.clone();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    // Wait for this broker's led audit partition to materialise.
+                    if partitions_for_wait.contains(&audit_topic, led_pidx) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
+                kind: crabka_audit::LifecycleKind::BrokerStarted,
+                node_id: i64::from(broker.config.broker_id),
+                time_ms: crate::time_util::now_ms(),
+            });
         }
 
         // Now that the listener accept loops are spawned, launch the

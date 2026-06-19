@@ -214,6 +214,27 @@ pub(crate) async fn handle(
         });
     }
 
+    // Audit: emit one AdminOperation record for the successfully-deleted topics.
+    let deleted: Vec<crabka_audit::AuditResource> = results
+        .iter()
+        .filter(|t| t.error_code == 0)
+        .filter_map(|t| {
+            t.name.as_deref().map(|n| crabka_audit::AuditResource {
+                resource_type: "Topic".to_string(),
+                name: n.to_string(),
+            })
+        })
+        .collect();
+    if !deleted.is_empty() {
+        crate::handlers::audit_admin(
+            broker,
+            ctx,
+            "DeleteTopics",
+            crabka_audit::AuditOutcome::Success,
+            deleted,
+        );
+    }
+
     // KIP-599: apply controller_mutation_rate throttle after response assembly.
     let delay = crate::quota::consume_controller_mutation_quota(
         &image,

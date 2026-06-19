@@ -490,6 +490,23 @@ pub struct BrokerConfig {
     /// Defaults to [`RlmmKind::TopicBacked`] in production; [`RlmmKind::InMemory`]
     /// for in-process tests. Ignored when `remote_storage_backend` is `None`.
     pub remote_log_metadata: RlmmKind,
+
+    /// Whether the audit subsystem is active (`FedRAMP` MLA).
+    pub audit_enabled: bool,
+    /// Internal topic name for audit records.
+    pub audit_topic: String,
+    /// Path to the PKCS#8 Ed25519 audit checkpoint signing key (None = no checkpoints).
+    pub audit_signing_key_path: Option<std::path::PathBuf>,
+    /// Key id recorded on checkpoints (for rotation).
+    pub audit_signing_key_id: Option<String>,
+    /// Emit a checkpoint after this many audit records.
+    pub audit_checkpoint_every_n: u64,
+    /// Emit a checkpoint at least this often (seconds).
+    pub audit_checkpoint_every_secs: u64,
+    /// Directory for the durable audit spool (relative paths resolve under the broker's log dir).
+    pub audit_spool_dir: std::path::PathBuf,
+    /// Cap on the audit spool size in bytes.
+    pub audit_spool_max_bytes: u64,
 }
 
 /// Parameters for the topic-backed
@@ -715,6 +732,15 @@ impl BrokerConfig {
             remote_log_manager_interval: std::time::Duration::from_secs(2),
             // Tests use the in-memory RLMM fixture.
             remote_log_metadata: RlmmKind::InMemory,
+            // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
+            audit_enabled: true,
+            audit_topic: "__crabka_audit".to_string(),
+            audit_signing_key_path: None,
+            audit_signing_key_id: None,
+            audit_checkpoint_every_n: 1000,
+            audit_checkpoint_every_secs: 60,
+            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
+            audit_spool_max_bytes: 1_073_741_824,
         }
     }
 
@@ -983,6 +1009,15 @@ impl Default for BrokerConfig {
             // Production default: topic-backed RLMM. `bootstrap` and
             // `snapshot_dir` are empty; the broker derives them at startup.
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
+            // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
+            audit_enabled: true,
+            audit_topic: "__crabka_audit".to_string(),
+            audit_signing_key_path: None,
+            audit_signing_key_id: None,
+            audit_checkpoint_every_n: 1000,
+            audit_checkpoint_every_secs: 60,
+            audit_spool_dir: std::path::PathBuf::from("audit-spool"),
+            audit_spool_max_bytes: 1_073_741_824,
         }
     }
 }

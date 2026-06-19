@@ -202,10 +202,13 @@ pub(crate) async fn failover_offline_dirs(
 
 /// Scan partitions where `shutting_down` is currently leader, submit a
 /// replacement-leader record for each one where a live ISR alternative
-/// exists, and return `true` iff every partition has been re-led (i.e.
-/// the broker is safe to shut down). Returns `false` while leadership
-/// is still being transferred; the client retries on the next
-/// heartbeat tick.
+/// exists, and return `true` once every *transferable* partition has been
+/// re-led (i.e. the broker is safe to shut down). Partitions with no other
+/// live replica — single-replica internal topics like `__consumer_offsets`
+/// or `__crabka_audit` — cannot transfer leadership anywhere and are not
+/// counted; counting them would block controlled shutdown forever. Returns
+/// `false` while transferable leadership is still moving; the client retries
+/// on the next heartbeat tick.
 ///
 /// Pure-by-construction: `MetadataImage` is read-only, the controller
 /// is the only side-effect channel. On submit failure we log and
@@ -225,7 +228,6 @@ async fn drain_leaderships_for_shutdown(
             if pr.leader != shutting_down_node {
                 continue;
             }
-            leader_count += 1;
             if let Ok(new_pr) = select_replacement_leader_for_shutdown(
                 &image,
                 liveness,
@@ -235,11 +237,18 @@ async fn drain_leaderships_for_shutdown(
             )
             .await
             {
+                // A live replica can take over: transfer leadership and keep
+                // the broker waiting until the new leadership is visible.
+                leader_count += 1;
                 changes.push(MetadataRecord::V1Partition(new_pr));
             }
-            // Else: no live alternative ISR member; leadership stays
-            // here for now. The broker has to wait — possibly forever
-            // if the cluster has no other replica.
+            // Else: no live alternative ISR member to transfer to — e.g. the
+            // single-replica internal topics (__consumer_offsets,
+            // __transaction_state, __crabka_audit), of which every broker
+            // leads its own copy. Leadership cannot move anywhere, so counting
+            // it would block controlled shutdown forever; and the broker is
+            // stopping regardless (the partition has no other replica to serve
+            // it either way). Do NOT count it toward the drain gate.
         }
     }
 
@@ -250,11 +259,11 @@ async fn drain_leaderships_for_shutdown(
         return Ok(false);
     }
 
-    // `leader_count` was computed against the pre-submit image. The
-    // submit above (if any) only takes effect on a subsequent
-    // heartbeat once the new image is visible — so we report
-    // `should_shut_down=true` only when this broker was already not
-    // leading anything.
+    // `leader_count` was computed against the pre-submit image and counts
+    // only transferable partitions. The submit above (if any) only takes
+    // effect on a subsequent heartbeat once the new image is visible — so we
+    // report `should_shut_down=true` only when this broker was already not
+    // leading any transferable partition.
     Ok(leader_count == 0)
 }
 
@@ -426,6 +435,49 @@ mod tests {
         let changes = captured.lock().unwrap();
         assert!(changes.is_empty());
         assert!(recoveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_replica_partition_does_not_block_controlled_shutdown() {
+        // Broker 1 leads an RF=1 partition (replicas=[1], isr=[1]) — exactly
+        // the shape of the broker-affinity internal topics __consumer_offsets
+        // / __crabka_audit. There is nowhere to transfer leadership, so the
+        // drain gate must still report "safe to shut down" (regression: this
+        // used to count the partition forever and time out controlled
+        // shutdown at 30s).
+        let img = image_with_dir_partition(1, &[1], &[1], &[Uuid::nil()]);
+        let (source, captured) = MockSource::new(img);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
+        let liveness = liveness_with(&[1]).await;
+
+        let drained = drain_leaderships_for_shutdown(&controller, &liveness, 1)
+            .await
+            .unwrap();
+
+        assert!(drained); // untransferable partition is not counted
+        assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
+    }
+
+    #[tokio::test]
+    async fn transferable_partition_blocks_until_leadership_moves() {
+        // Broker 1 leads an RF=2 partition with broker 2 alive in ISR: it can
+        // and must transfer, so the broker is not yet safe to shut down.
+        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[Uuid::nil(), Uuid::nil()]);
+        let (source, captured) = MockSource::new(img);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
+        let liveness = liveness_with(&[1, 2]).await;
+
+        let drained = drain_leaderships_for_shutdown(&controller, &liveness, 1)
+            .await
+            .unwrap();
+
+        assert!(!drained); // still leading a transferable partition pre-submit
+        let changes = captured.lock().unwrap();
+        assert!(changes.len() == 1);
+        let MetadataRecord::V1Partition(pr) = &changes[0] else {
+            panic!("expected V1Partition change")
+        };
+        assert!(pr.leader == 2); // leadership handed to the live ISR replica
     }
 
     /// Empty ACLs + no super-users → every principal is denied

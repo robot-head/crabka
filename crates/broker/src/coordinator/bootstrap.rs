@@ -37,6 +37,91 @@ pub const OFFSETS_PARTITION: i32 = 0;
 /// storage path (which today hardcodes `OFFSETS_PARTITION = 0`).
 pub const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
+/// Internal topic carrying tamper-evident OCSF audit records (`FedRAMP` MLA).
+pub const AUDIT_TOPIC: &str = "__crabka_audit";
+
+/// Create `__crabka_audit` with one partition per registered broker (RF=1).
+///
+/// Broker-affinity: partition `i` is led by the i-th broker (ascending node
+/// id), so each broker leads exactly one audit partition and writes to it
+/// locally. Idempotent: a `TopicExists` error from the controller is treated
+/// as success (another broker or a restart already created the topic).
+///
+/// Only the quorum leader submits the metadata records, mirroring the
+/// `__consumer_offsets` bootstrap path to avoid TOCTOU duplicate-id races.
+/// Followers skip submission entirely; the leader's records replicate into
+/// their image through the normal raft log.
+///
+/// Returns `Ok(())` immediately when `config.audit_enabled` is `false`.
+pub async fn bootstrap_audit_topic(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+) -> Result<(), BrokerError> {
+    if !config.audit_enabled {
+        return Ok(());
+    }
+
+    // Only the quorum leader submits; copy out the leader id before any `.await`
+    // so we don't hold the `Ref` across an await point.
+    let am_leader = *controller.watch_leader().borrow() == Some(config.node_id);
+    if !am_leader {
+        return Ok(());
+    }
+
+    // Already created (idempotent restart or another leader beat us).
+    if controller
+        .current_image()
+        .topic(&config.audit_topic)
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let image = controller.current_image();
+    let mut brokers: Vec<crabka_raft::NodeId> = image.brokers().map(|b| b.node_id).collect();
+    drop(image);
+    if brokers.is_empty() {
+        brokers.push(config.node_id);
+    }
+    brokers.sort_unstable();
+
+    let num_partitions = i32::try_from(brokers.len()).unwrap_or(1);
+    // RF=1: partition i → brokers[i % len] as sole replica/leader.
+    // Use the crate-internal round_robin helper; falls back to explicit
+    // per-broker assignment when brokers.len() == num_partitions (the common
+    // single-broker test case also satisfies this).
+    let assignments =
+        crate::handlers::create_topics::round_robin_replicas(&brokers, num_partitions, 1);
+
+    let mut records = Vec::with_capacity(1 + usize::try_from(num_partitions).unwrap_or(0));
+    records.push(MetadataRecord::V1Topic(TopicRecord {
+        name: config.audit_topic.clone(),
+        topic_id: uuid::Uuid::new_v4(),
+        partitions: num_partitions,
+        replication_factor: 1,
+    }));
+    for (p, replicas) in assignments.iter().enumerate() {
+        records.push(MetadataRecord::V1Partition(PartitionRecord {
+            topic: config.audit_topic.clone(),
+            partition: i32::try_from(p).expect("audit partition index overflows i32"),
+            leader: replicas[0],
+            replicas: replicas.clone(),
+            isr: replicas.clone(),
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 0,
+        }));
+    }
+
+    match controller.submit_change(records).await {
+        // Idempotent: another broker / a restart already created it.
+        Ok(()) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => Ok(()),
+        Err(e) => Err(BrokerError::Startup(e.to_string())),
+    }
+}
+
 /// Bootstrap-time accumulator. Committed offsets are protocol-agnostic, so we
 /// collect them per group and attach them once the group's kind is known;
 /// classic `GroupMetadata` builds a `ClassicState` in place. Next-gen records

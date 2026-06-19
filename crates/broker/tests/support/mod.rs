@@ -51,6 +51,222 @@ pub async fn start() -> InProcess {
     }
 }
 
+/// Start a broker rooted at `dir` (caller owns the directory).
+///
+/// Used by restart tests: pass the same path across two boots to verify
+/// that persistent state (audit chain, spool) is recovered correctly.
+/// Automatically detects if a raft log already exists and uses `Rejoin`.
+pub async fn start_with_dir(dir: &std::path::Path) -> (BrokerHandle, crabka_client_core::Client) {
+    let mut config = BrokerConfig::for_tests(dir.to_path_buf());
+    // Mirror the production heuristic from `detect_bootstrap_mode` in
+    // broker.rs: key Rejoin on `metadata_log_nonempty` (committed
+    // quorum-state), NOT bare directory presence.  The segment dir is created
+    // before the first raft commit, so dir-existence would re-bootstrap a node
+    // killed mid-election instead of letting it rejoin correctly.
+    let metadata_dir = dir.join("__cluster_metadata");
+    if crabka_raft::metadata_log_nonempty(&metadata_dir) {
+        config.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
+    }
+    let broker = Broker::start(config).await.expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("crabka-broker-test")
+        .build()
+        .await
+        .expect("client build");
+    (broker, client)
+}
+
+/// Fetch the audit topic and return the `seq` header value (parsed as `u64`)
+/// from each non-checkpoint record, in order.
+pub async fn audit_record_seqs(client: &crabka_client_core::Client) -> Vec<u64> {
+    use crabka_broker::coordinator::AUDIT_TOPIC;
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+
+    let topic_id = topic_id_for(client, AUDIT_TOPIC).await;
+    let fr = client
+        .send(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            topics: vec![FetchTopic {
+                topic: AUDIT_TOPIC.into(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    partition_max_bytes: 1 << 20,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("FetchRequest for audit topic");
+
+    let mut seqs = Vec::new();
+    if let Some(part) = fr.responses.first().and_then(|r| r.partitions.first())
+        && let Some(batches) = part.records.as_ref().and_then(|r| r.as_v2())
+    {
+        for batch in batches {
+            for rec in &batch.records {
+                // Skip checkpoint records — they have no `seq` header.
+                let is_checkpoint = rec
+                    .headers
+                    .iter()
+                    .any(|h| h.key == "event_class" && h.value.as_deref() == Some(b"checkpoint"));
+                if is_checkpoint {
+                    continue;
+                }
+                if let Some(seq_val) = rec
+                    .headers
+                    .iter()
+                    .find(|h| h.key == "seq")
+                    .and_then(|h| h.value.as_ref())
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    seqs.push(seq_val);
+                }
+            }
+        }
+    }
+    seqs
+}
+
+/// Start a broker configured with an audit signing key and a given checkpoint cadence.
+///
+/// Uses `every_secs = 3600` so only the count-based trigger fires in tests.
+pub async fn start_with_audit_key(
+    key_path: &std::path::Path,
+    key_id: &str,
+    every_n: u64,
+) -> InProcess {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
+    config.audit_signing_key_path = Some(key_path.to_path_buf());
+    config.audit_signing_key_id = Some(key_id.to_string());
+    config.audit_checkpoint_every_n = every_n;
+    config.audit_checkpoint_every_secs = 3600; // only count trigger fires
+    let broker = Broker::start(config).await.expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    let client = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("crabka-broker-test-audit-key")
+        .build()
+        .await
+        .expect("client build");
+    InProcess {
+        broker,
+        client,
+        _tempdir: tempdir,
+    }
+}
+
+/// Start a broker whose authorizer is `SimpleAclAuthorizer` with no ACLs and no
+/// super-users (deny-all for the anonymous test client). Audit is enabled via
+/// `for_tests` defaults. The anonymous client will be denied every admin
+/// operation, triggering `AuthorizationDenied` audit events.
+pub async fn start_with_deny_all_authz() -> InProcess {
+    use crabka_broker::authorizer::SimpleAclAuthorizer;
+    use std::collections::HashSet;
+
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
+    // Replace the default AllowAllAuthorizer with a deny-all SimpleAclAuthorizer
+    // (empty ACL store, no super-users). The anonymous test client connects
+    // with no credentials so it has no super-user bypass — every operation is
+    // denied and the auditing decorator emits AuthorizationDenied events.
+    config.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(HashSet::new()));
+    let broker = Broker::start(config).await.expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    let client = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("crabka-broker-test-deny")
+        .build()
+        .await
+        .expect("client build");
+    InProcess {
+        broker,
+        client,
+        _tempdir: tempdir,
+    }
+}
+
+/// Fetch all records from `AUDIT_TOPIC` partition 0 and JSON-decode each
+/// record value, returning the decoded objects. Mirrors the
+/// `broker_started_event_is_written_to_audit_topic` fetch pattern.
+pub async fn consume_audit_records(client: &crabka_client_core::Client) -> Vec<serde_json::Value> {
+    use crabka_broker::coordinator::AUDIT_TOPIC;
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
+
+    let topic_id = topic_id_for(client, AUDIT_TOPIC).await;
+    let fr = client
+        .send(FetchRequest {
+            max_wait_ms: 500,
+            min_bytes: 1,
+            max_bytes: 1 << 20,
+            topics: vec![FetchTopic {
+                topic: AUDIT_TOPIC.into(),
+                topic_id,
+                partitions: vec![FetchPartition {
+                    partition: 0,
+                    fetch_offset: 0,
+                    partition_max_bytes: 1 << 20,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("FetchRequest for audit topic");
+
+    let mut records = Vec::new();
+    if let Some(part) = fr.responses.first().and_then(|r| r.partitions.first())
+        && let Some(batches) = part.records.as_ref().and_then(|r| r.as_v2())
+    {
+        for batch in batches {
+            for rec in &batch.records {
+                if let Some(value) = &rec.value
+                    && let Ok(j) = serde_json::from_slice::<serde_json::Value>(value)
+                {
+                    records.push(j);
+                }
+            }
+        }
+    }
+    records
+}
+
+/// Round-trip a Metadata request to learn the topic's assigned UUID.
+/// Produce / Fetch at v ≥ 13 carry only `topic_id` on the wire, so the
+/// caller must plumb the real UUID through.
+pub async fn topic_id_for(
+    client: &crabka_client_core::Client,
+    name: &str,
+) -> crabka_protocol::primitives::uuid::Uuid {
+    use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+
+    let resp = client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata for topic_id");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
+
 // ── Multi-broker helpers ──────────────────────────────────────────────────────
 //
 // The functions below are only meaningful on non-Windows targets because
