@@ -275,7 +275,8 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering::SeqCst;
+    use std::sync::atomic::{AtomicBool, AtomicI64};
     use std::time::Duration;
 
     use assert2::check;
@@ -322,21 +323,52 @@ mod tests {
         (std::sync::Arc::new(s), pubkey)
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct FailableSink {
         fail: AtomicBool,
+        /// -1 = unlimited; >= 0 = writes remaining before budget error.
+        allow: AtomicI64,
         inner: MemorySink,
     }
-    impl FailableSink {
-        fn set_fail(&self, v: bool) {
-            self.fail.store(v, Ordering::SeqCst);
+
+    impl Default for FailableSink {
+        fn default() -> Self {
+            Self {
+                fail: AtomicBool::new(false),
+                allow: AtomicI64::new(-1),
+                inner: MemorySink::default(),
+            }
         }
     }
+
+    impl FailableSink {
+        fn set_fail(&self, v: bool) {
+            self.fail.store(v, SeqCst);
+        }
+
+        fn allow_n(&self, n: i64) {
+            self.fail.store(false, SeqCst);
+            self.allow.store(n, SeqCst);
+        }
+
+        fn allow_unlimited(&self) {
+            self.allow.store(-1, SeqCst);
+            self.fail.store(false, SeqCst);
+        }
+    }
+
     #[async_trait::async_trait]
     impl AuditSink for FailableSink {
         async fn write(&self, record: AuditRecord) -> Result<(), crate::sink::AuditError> {
-            if self.fail.load(Ordering::SeqCst) {
+            if self.fail.load(SeqCst) {
                 return Err(crate::sink::AuditError::Sink("forced".into()));
+            }
+            let allow = self.allow.load(SeqCst);
+            if allow >= 0 {
+                if allow == 0 {
+                    return Err(crate::sink::AuditError::Sink("budget exhausted".into()));
+                }
+                self.allow.fetch_sub(1, SeqCst);
             }
             self.inner.write(record).await
         }
@@ -607,5 +639,87 @@ mod tests {
         check!(sink.inner.records().len() == 2);
         check!(stats.spooled() == 0);
         check!(stats.depth() == 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_is_spooled_in_spool_mode_and_replayed_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signer, _pubkey) = test_signer();
+        let sink = Arc::new(FailableSink::default());
+        sink.set_fail(true); // topic down → everything spools
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(64);
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
+        let mut p = params(sink.clone(), spool, stats.clone());
+        p.signer = Some(signer);
+        p.checkpoint_every_n = 2; // emit a checkpoint after every 2 records
+        let writer = AuditWriter::new(rx, p);
+        let h = tokio::spawn(writer.run());
+        log.emit(life(0));
+        log.emit(life(1)); // 2 records → triggers a checkpoint, all spooled
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        check!(sink.inner.records().is_empty()); // nothing on topic yet
+        sink.set_fail(false); // recover → replay drains spool in order
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        drop(log);
+        h.await.unwrap();
+        let recs = sink.inner.records();
+        // exactly 2 chained records, and at least one checkpoint, and the checkpoint
+        // appears AFTER both chained records (it was spooled + replayed in order).
+        check!(
+            recs.iter()
+                .filter(|r| r.class != AuditEventClass::Checkpoint)
+                .count()
+                == 2
+        );
+        let cp_idx = recs
+            .iter()
+            .position(|r| r.class == AuditEventClass::Checkpoint)
+            .expect("checkpoint present");
+        let chained_before = recs[..cp_idx]
+            .iter()
+            .filter(|r| r.class != AuditEventClass::Checkpoint)
+            .count();
+        check!(chained_before == 2); // checkpoint comes after the 2 records it covers
+    }
+
+    #[tokio::test]
+    async fn partial_replay_keeps_remainder_then_drains() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FailableSink::default());
+        sink.set_fail(true);
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(64);
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
+        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let h = tokio::spawn(writer.run());
+        log.emit(life(0));
+        log.emit(life(1));
+        log.emit(life(2));
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        check!(stats.depth() == 3);
+
+        // allow exactly 2 replay writes, then fail → partial replay
+        sink.allow_n(2);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        check!(stats.replayed() == 2);
+        check!(stats.depth() == 1); // remainder retained, still spooling
+
+        // allow the rest
+        sink.allow_unlimited();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        check!(stats.depth() == 0);
+
+        drop(log);
+        h.await.unwrap();
+        // all 3 chained records reached the sink exactly once, in seq order
+        let seqs: Vec<String> = sink
+            .inner
+            .records()
+            .iter()
+            .filter(|r| r.class != AuditEventClass::Checkpoint)
+            .map(|r| header(r, "seq").unwrap())
+            .collect();
+        check!(seqs == vec!["0".to_string(), "1".to_string(), "2".to_string()]);
     }
 }
