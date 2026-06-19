@@ -18,28 +18,85 @@ pub struct BrokerInfo {
     pub rack: Option<String>,
 }
 
+/// The single live-IO dependency [`BrokerPool`] needs: dial an address and
+/// return an opened connection. Abstracting it behind a trait (mirroring
+/// `connect-postgres`'s `PgCatalog` seam) makes the pool's caching, fallback
+/// iteration, and eviction *logic* killable without a socket: a `mockall` mock
+/// connector hands back a stand-in connection type, so [`BrokerPool::get`],
+/// [`BrokerPool::bootstrap_connection`], [`BrokerPool::evict`],
+/// [`BrokerPool::evict_bootstrap`], and [`BrokerPool::close_all`] are all
+/// exercised under the crate's default feature set. The only un-mockable part —
+/// the actual TCP dial + API-versions handshake — stays in [`TcpConnector`].
+///
+/// The trait has an associated `Conn` type rather than returning a fixed handle
+/// so tests can substitute a cheap stand-in; `mockall` does not cleanly mock a
+/// generic-associated-type trait, so the test connector is hand-written
+/// (`CountingConnector`) instead of `automock`-generated.
+#[async_trait::async_trait]
+pub trait BrokerConnector: Send + Sync {
+    /// Connection handle this connector produces. `Connection` in production; a
+    /// cheap stand-in in tests so caching/fallback decisions are observable
+    /// without opening a real socket.
+    type Conn: Send + Sync;
+
+    /// Dial `addr` and return a ready connection, or a transport error.
+    async fn dial(&self, addr: SocketAddr) -> Result<Self::Conn, ClientError>;
+}
+
+/// Production [`BrokerConnector`]: opens a real [`Connection`] honouring the
+/// pool's TLS/SASL policy. This thin adapter is the only un-mockable part of the
+/// pool (the live TCP dial + API-versions handshake).
+#[derive(Debug)]
+pub struct TcpConnector {
+    options: ConnectionOptions,
+}
+
+#[async_trait::async_trait]
+impl BrokerConnector for TcpConnector {
+    type Conn = Connection;
+
+    async fn dial(&self, addr: SocketAddr) -> Result<Connection, ClientError> {
+        Connection::connect_with_options(addr, self.options.clone()).await
+    }
+}
+
 /// Pool of `Arc<Connection>` keyed by broker id. Connections are opened lazily
 /// on first use and cached thereafter.
-pub struct BrokerPool {
-    by_id: DashMap<i32, Arc<Connection>>,
+///
+/// Generic over the [`BrokerConnector`] seam so the caching/fallback/eviction
+/// logic is unit-testable against a mock connector; the default `C` is the live
+/// [`TcpConnector`], so the public type and every downstream use stay
+/// `BrokerPool` (no type argument needed).
+pub struct BrokerPool<C: BrokerConnector = TcpConnector> {
+    by_id: DashMap<i32, Arc<C::Conn>>,
     by_addr: DashMap<i32, SocketAddr>,
     bootstrap: Vec<SocketAddr>,
-    options: ConnectionOptions,
+    connector: C,
 }
 
 /// Synthetic broker id under which the shared bootstrap connection is cached.
 /// Never a real Kafka node id (those are `>= 0`).
 const BOOTSTRAP_ID: i32 = -1;
 
-impl BrokerPool {
+impl BrokerPool<TcpConnector> {
     /// Create a new pool with the given bootstrap addresses and connection options.
     #[must_use]
     pub fn new(bootstrap: Vec<SocketAddr>, options: ConnectionOptions) -> Self {
+        BrokerPool::with_connector(bootstrap, TcpConnector { options })
+    }
+}
+
+impl<C: BrokerConnector> BrokerPool<C> {
+    /// Build a pool over an explicit [`BrokerConnector`]. Used by [`new`] for the
+    /// live connector and by tests for a mock connector.
+    ///
+    /// [`new`]: BrokerPool::new
+    fn with_connector(bootstrap: Vec<SocketAddr>, connector: C) -> Self {
         Self {
             by_id: DashMap::new(),
             by_addr: DashMap::new(),
             bootstrap,
-            options,
+            connector,
         }
     }
 
@@ -47,7 +104,7 @@ impl BrokerPool {
     /// learned the (id, address) mapping via [`refresh_brokers`].
     ///
     /// [`refresh_brokers`]: BrokerPool::refresh_brokers
-    pub async fn get(&self, broker_id: i32) -> Result<Arc<Connection>, ClientError> {
+    pub async fn get(&self, broker_id: i32) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&broker_id) {
             return Ok(entry.clone());
         }
@@ -56,7 +113,7 @@ impl BrokerPool {
             .get(&broker_id)
             .map(|e| *e)
             .ok_or(ClientError::Disconnected)?;
-        let conn = Arc::new(Connection::connect_with_options(addr, self.options.clone()).await?);
+        let conn = Arc::new(self.connector.dial(addr).await?);
         self.by_id.insert(broker_id, conn.clone());
         Ok(conn)
     }
@@ -84,13 +141,13 @@ impl BrokerPool {
 
     /// Get-or-connect to the first reachable bootstrap address. The bootstrap
     /// connection is cached under the synthetic broker id `-1`.
-    pub async fn bootstrap_connection(&self) -> Result<Arc<Connection>, ClientError> {
+    pub async fn bootstrap_connection(&self) -> Result<Arc<C::Conn>, ClientError> {
         if let Some(entry) = self.by_id.get(&BOOTSTRAP_ID) {
             return Ok(entry.clone());
         }
         let mut last_err: Option<ClientError> = None;
         for addr in &self.bootstrap {
-            match Connection::connect_with_options(*addr, self.options.clone()).await {
+            match self.connector.dial(*addr).await {
                 Ok(c) => {
                     let arc = Arc::new(c);
                     self.by_id.insert(BOOTSTRAP_ID, arc.clone());
@@ -160,6 +217,7 @@ impl BrokerPool {
 mod tests {
     use super::*;
     use assert2::assert;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn refresh_inserts_addresses() {
@@ -221,5 +279,187 @@ mod tests {
 
         assert!(!pool.knows_broker(1));
         assert!(!pool.knows_broker(2));
+    }
+
+    // ── socket-free caching / fallback / eviction via a counting connector ────
+    //
+    // These drive the pool's connection-lifecycle logic without a broker. A
+    // `CountingConnector` hands back a cheap stand-in `Conn` and records how
+    // many dials it performed and against which addresses, so caching, the
+    // bootstrap fallback iteration, and the two eviction paths are all killable
+    // under the crate's default feature set.
+
+    /// Stand-in connection: an opaque marker carrying the address it was dialed
+    /// against so tests can prove which bootstrap address won.
+    #[derive(Debug)]
+    struct StubConn {
+        addr: SocketAddr,
+    }
+
+    struct CountingConnector {
+        dials: Arc<AtomicUsize>,
+        /// Addresses that should fail to dial (simulating a dead broker).
+        fail: Vec<SocketAddr>,
+    }
+
+    #[async_trait::async_trait]
+    impl BrokerConnector for CountingConnector {
+        type Conn = StubConn;
+
+        async fn dial(&self, addr: SocketAddr) -> Result<StubConn, ClientError> {
+            self.dials.fetch_add(1, Ordering::Relaxed);
+            if self.fail.contains(&addr) {
+                return Err(ClientError::Disconnected);
+            }
+            Ok(StubConn { addr })
+        }
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{port}").parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_dials_once_then_serves_from_cache() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+        // Unknown id: no address learned → Disconnected, no dial attempted.
+        assert!(matches!(pool.get(5).await, Err(ClientError::Disconnected)));
+        assert!(dials.load(Ordering::Relaxed) == 0);
+
+        pool.by_addr.insert(5, addr(9092));
+        let first = pool.get(5).await.unwrap();
+        assert!(first.addr == addr(9092));
+        // Second get is served from cache: still a single dial.
+        let second = pool.get(5).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(dials.load(Ordering::Relaxed) == 1);
+    }
+
+    #[tokio::test]
+    async fn evict_forces_reconnect_only_for_that_id() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+        pool.by_addr.insert(1, addr(9092));
+        pool.by_addr.insert(2, addr(9093));
+        let _ = pool.get(1).await.unwrap();
+        let _ = pool.get(2).await.unwrap();
+        assert!(dials.load(Ordering::Relaxed) == 2);
+
+        // Evicting id 1 drops only its cached connection.
+        pool.evict(1);
+        assert!(!pool.by_id.contains_key(&1));
+        assert!(pool.by_id.contains_key(&2));
+
+        // id 1 re-dials; id 2 is still cached.
+        let _ = pool.get(1).await.unwrap();
+        let _ = pool.get(2).await.unwrap();
+        assert!(dials.load(Ordering::Relaxed) == 3);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_connection_caches_and_skips_dead_addresses() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        // First bootstrap address is dead; the second must win.
+        let pool = BrokerPool::with_connector(
+            vec![addr(1111), addr(2222)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![addr(1111)],
+            },
+        );
+        let boot = pool.bootstrap_connection().await.unwrap();
+        assert!(boot.addr == addr(2222));
+        // Two dials: the dead first address, then the live second.
+        assert!(dials.load(Ordering::Relaxed) == 2);
+
+        // Cached under the synthetic bootstrap id; a second call does not redial.
+        let again = pool.bootstrap_connection().await.unwrap();
+        assert!(Arc::ptr_eq(&boot, &again));
+        assert!(dials.load(Ordering::Relaxed) == 2);
+        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_id_does_not_collide_with_real_broker_ids() {
+        // The bootstrap connection is keyed under a synthetic id that no real
+        // broker id (>= 0) can equal, so `evict(0)` must not disturb it.
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![addr(2222)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+        let _ = pool.bootstrap_connection().await.unwrap();
+        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+        // BOOTSTRAP_ID must be negative; a real broker id is never negative.
+        assert!(BOOTSTRAP_ID < 0);
+
+        // Evicting any real id leaves the bootstrap connection intact.
+        pool.evict(0);
+        pool.evict(1);
+        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+    }
+
+    #[tokio::test]
+    async fn evict_bootstrap_drops_only_the_bootstrap_connection() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![addr(2222)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+        pool.by_addr.insert(3, addr(9092));
+        let _ = pool.get(3).await.unwrap();
+        let _ = pool.bootstrap_connection().await.unwrap();
+        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+        assert!(pool.by_id.contains_key(&3));
+
+        pool.evict_bootstrap();
+        // Only the bootstrap entry is gone; the real broker stays cached.
+        assert!(!pool.by_id.contains_key(&BOOTSTRAP_ID));
+        assert!(pool.by_id.contains_key(&3));
+
+        // The next bootstrap_connection redials.
+        let before = dials.load(Ordering::Relaxed);
+        let _ = pool.bootstrap_connection().await.unwrap();
+        assert!(dials.load(Ordering::Relaxed) == before + 1);
+    }
+
+    #[tokio::test]
+    async fn close_all_releases_every_cached_connection() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let pool = BrokerPool::with_connector(
+            vec![addr(2222)],
+            CountingConnector {
+                dials: dials.clone(),
+                fail: vec![],
+            },
+        );
+        pool.by_addr.insert(1, addr(9092));
+        let held = pool.get(1).await.unwrap();
+        let _ = pool.bootstrap_connection().await.unwrap();
+        // Two strong refs to broker 1's conn: the pool's and `held`.
+        assert!(Arc::strong_count(&held) == 2);
+
+        pool.close_all();
+        // The pool dropped its references; only `held` remains.
+        assert!(Arc::strong_count(&held) == 1);
     }
 }

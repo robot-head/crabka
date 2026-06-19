@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
@@ -38,6 +39,129 @@ pub(crate) type OffsetKey = (String, i32);
 /// the buffer keys by group inside one producer's pending set.
 pub(crate) type PendingTxnOffsets =
     std::collections::HashMap<String, Vec<(OffsetKey, OffsetEntry)>>;
+
+/// Live-dependency seam for the KIP-939 idle-transaction reaper.
+///
+/// `sweep_expired`'s orchestration (the per-tid three-phase abort dance) is
+/// pure decision logic wrapped around four irreducible side effects: a
+/// coordinator-ownership check, two compare-and-swap-style persisted
+/// transitions (`Ongoing → PrepareAbort`, then `PrepareAbort → CompleteAbort`),
+/// the abort-marker fan-out, and producer-identity allocation. Each of those
+/// touches a live `__transaction_state` partition, partition leaders, or the
+/// producer-id allocator. Pulling them behind this trait lets the orchestration
+/// be unit-tested against a [`mockall`] mock — every method returns
+/// already-extracted plain data (snapshots), so the decisions consuming them
+/// are killable by a mock. The live adapter is [`TxnCoordinator`] itself.
+///
+/// The two `*_transition` methods perform the entry mutation **atomically under
+/// the per-tid lock** (so a concurrent `EndTxn`/`InitProducerId` is not
+/// clobbered) and return the resulting persisted snapshot, or `None` when the
+/// guard failed (lost race / no longer present). The pure helpers
+/// [`apply_prepare_abort`] / [`apply_complete_abort`] / [`complete_abort_guard_ok`]
+/// compute the transitions; the backend only owns the CAS + persistence, which
+/// is the irreducible part.
+#[cfg_attr(test, mockall::automock)]
+#[async_trait]
+pub(crate) trait ReaperBackend: Send + Sync {
+    /// Is this broker the transaction coordinator for `tid` right now?
+    async fn is_coordinator_for(&self, tid: &str) -> bool;
+
+    /// Atomically, under `tid`'s entry lock: if the entry should be aborted as
+    /// an idle transaction at `now_ms`, transition `Ongoing → PrepareAbort`,
+    /// persist it, and return the persisted snapshot. Returns `None` when the
+    /// entry is absent, must not be reaped, or persistence failed.
+    async fn prepare_abort(&self, tid: &str, now_ms: i64, txnv: TxnVersion) -> Option<TxnEntry>;
+
+    /// Fan out abort markers for `entry` to the partition leaders this broker
+    /// hosts (remote leaders are logged + skipped).
+    async fn dispatch_abort_markers(&self, entry: &TxnEntry);
+
+    /// Atomically, under `tid`'s entry lock: re-validate that the current entry
+    /// still matches the `prepared` snapshot this reaper wrote (same identity +
+    /// still `PrepareAbort`), and if so transition to `CompleteAbort` — bumping
+    /// producer identity per KIP-890 at `now_ms` — persist it, and return the
+    /// persisted snapshot. Returns `None` when the entry advanced underneath us
+    /// or persistence failed.
+    async fn complete_abort(
+        &self,
+        prepared: &TxnEntry,
+        now_ms: i64,
+        txnv: TxnVersion,
+    ) -> Option<TxnEntry>;
+}
+
+/// The `Ongoing → PrepareAbort` mutation for an idle-reaped entry: flip the
+/// state and stamp `last_update_ms`. Pure so the transition is unit-killable
+/// independently of persistence.
+fn apply_prepare_abort(entry: &mut TxnEntry, now_ms: i64) {
+    entry.state = TxnState::PrepareAbort;
+    entry.last_update_ms = now_ms;
+}
+
+/// The `PrepareAbort → CompleteAbort` mutation, given the freshly-allocated
+/// `(producer_id, producer_epoch)` from the KIP-890 identity bump. Records the
+/// prior id as `prev_producer_id` only when a roll actually happened (a fresh
+/// pid was allocated). Pure so the transition is unit-killable.
+fn apply_complete_abort(entry: &mut TxnEntry, new_pid: i64, new_epoch: i16, now_ms: i64) {
+    if new_pid != entry.producer_id {
+        entry.prev_producer_id = entry.producer_id;
+    }
+    entry.state = TxnState::CompleteAbort;
+    entry.producer_id = new_pid;
+    entry.producer_epoch = new_epoch;
+    entry.last_update_ms = now_ms;
+}
+
+/// Does the current re-acquired `entry` still match the `prepared` snapshot this
+/// reaper wrote in Phase 1, so it is safe to finalise to `CompleteAbort`? Guards
+/// against a concurrent `EndTxn`/`InitProducerId` having advanced the entry.
+/// Pure so the guard is unit-killable.
+fn complete_abort_guard_ok(entry: &TxnEntry, prepared: &TxnEntry) -> bool {
+    entry.producer_id == prepared.producer_id
+        && entry.producer_epoch == prepared.producer_epoch
+        && entry.state == TxnState::PrepareAbort
+}
+
+/// The reaper orchestration loop, generic over the [`ReaperBackend`] seam so it
+/// is unit-testable against a mock. For each candidate tid it runs the
+/// three-phase abort: ownership check → `prepare_abort` (CAS) → marker fan-out →
+/// `complete_abort` (CAS). Returns the tids it finalised, in iteration order.
+async fn sweep_with_backend<B: ReaperBackend + ?Sized>(
+    backend: &B,
+    candidates: Vec<String>,
+    now_ms: i64,
+    txnv: TxnVersion,
+) -> Vec<String> {
+    let mut aborted = Vec::new();
+    for tid in candidates {
+        // Only reap transactions this broker currently coordinates: a
+        // partition we used to lead may have moved, leaving stale state.
+        if !backend.is_coordinator_for(&tid).await {
+            continue;
+        }
+
+        // Phase 1: decide + Ongoing → PrepareAbort, persisted under the lock.
+        let Some(prepared) = backend.prepare_abort(&tid, now_ms, txnv).await else {
+            continue;
+        };
+
+        // Phase 2: fan out abort markers to local partition leaders.
+        backend.dispatch_abort_markers(&prepared).await;
+
+        // Phase 3: PrepareAbort → CompleteAbort, re-validating identity + state
+        // under the lock so a concurrent EndTxn / InitProducerId is not
+        // clobbered.
+        if backend
+            .complete_abort(&prepared, now_ms, txnv)
+            .await
+            .is_some()
+        {
+            info!(tid, "txn reaper: aborted timed-out transaction");
+            aborted.push(tid);
+        }
+    }
+    aborted
+}
 
 /// Per-broker transaction coordinator. Constructed in `Broker::start`
 /// and shared via `Arc` with the transaction wire handlers.
@@ -253,112 +377,12 @@ impl TxnCoordinator {
     /// out from under us aborts this reap of that tid (re-validated before the
     /// Complete write). Returns the tids it finalized.
     pub(crate) async fn sweep_expired(&self, now_ms: i64, txnv: TxnVersion) -> Vec<String> {
-        // Snapshot (tid, handle) pairs first so we don't hold DashMap shard
-        // locks across the async abort work.
-        let handles: Vec<(String, Arc<Mutex<TxnEntry>>)> = self
-            .state
-            .iter()
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect();
-
-        let mut aborted = Vec::new();
-        for (tid, handle) in handles {
-            // Only reap transactions this broker currently coordinates: a
-            // partition we used to lead may have moved, leaving stale state.
-            if !self.is_coordinator_for(&tid).await {
-                continue;
-            }
-
-            // Phase 1: decide + Ongoing → PrepareAbort under the lock.
-            let prepare_snap = {
-                let mut entry = handle.lock().await;
-                if !should_abort_idle_txn(entry.state, entry.txn_timeout_ms, entry.start_ms, now_ms)
-                {
-                    continue;
-                }
-                entry.state = TxnState::PrepareAbort;
-                entry.last_update_ms = now_ms;
-                entry.clone()
-            };
-            if let Err(e) = self.put(prepare_snap.clone(), txnv).await {
-                warn!(tid, error = %e, "txn reaper: failed to persist PrepareAbort; skipping");
-                continue;
-            }
-
-            // Phase 2: fan out abort markers to local partition leaders.
-            self.dispatch_local_abort_markers(&prepare_snap).await;
-
-            // Phase 3: PrepareAbort → CompleteAbort, re-validating identity +
-            // state so a concurrent EndTxn / InitProducerId is not clobbered.
-            let Some(current) = self.get(&tid) else {
-                continue;
-            };
-            let complete_snap = {
-                let mut entry = current.lock().await;
-                if entry.producer_id != prepare_snap.producer_id
-                    || entry.producer_epoch != prepare_snap.producer_epoch
-                    || entry.state != TxnState::PrepareAbort
-                {
-                    // Someone advanced the entry underneath us; don't finalize.
-                    continue;
-                }
-                let (new_pid, new_epoch) = next_producer_identity(
-                    txnv,
-                    entry.producer_id,
-                    entry.producer_epoch,
-                    &self.producer_ids,
-                );
-                if new_pid != entry.producer_id {
-                    entry.prev_producer_id = entry.producer_id;
-                }
-                entry.state = TxnState::CompleteAbort;
-                entry.producer_id = new_pid;
-                entry.producer_epoch = new_epoch;
-                entry.last_update_ms = now_ms;
-                entry.clone()
-            };
-            if let Err(e) = self.put(complete_snap, txnv).await {
-                warn!(tid, error = %e, "txn reaper: failed to persist CompleteAbort; skipping");
-                continue;
-            }
-            info!(tid, "txn reaper: aborted timed-out transaction");
-            aborted.push(tid);
-        }
-        aborted
-    }
-
-    /// Local-only abort-marker fan-out for the idle-transaction reaper. Writes
-    /// an abort marker to every involved partition this broker leads; partitions
-    /// led by a remote broker are logged and skipped (inter-broker
-    /// `WriteTxnMarkers` from the reaper is not yet wired — same limitation as
-    /// the `InitProducerId` abort-on-stale-Ongoing path).
-    async fn dispatch_local_abort_markers(&self, entry: &TxnEntry) {
-        use crate::txn::marker::{MarkerType, build_marker_batch};
-        for tp in &entry.partitions {
-            let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
-                warn!(
-                    topic = %tp.topic,
-                    partition = tp.partition,
-                    "txn reaper: partition not locally led; abort marker needs inter-broker \
-                     WriteTxnMarkers (not yet wired), skipping"
-                );
-                continue;
-            };
-            let marker = build_marker_batch(
-                entry.producer_id,
-                entry.producer_epoch,
-                part.log_end_offset(),
-                MarkerType::Abort,
-            );
-            if let Err(e) = part.produce_batch(marker).await {
-                warn!(
-                    topic = %tp.topic,
-                    partition = tp.partition,
-                    error = %e,
-                    "txn reaper: failed to write abort marker"
-                );
-            }
-        }
+        // Snapshot the candidate tids first so we don't hold DashMap shard locks
+        // across the async abort work; the orchestration then drives the live
+        // `ReaperBackend` (this coordinator), which re-acquires each entry's lock
+        // per phase.
+        let candidates: Vec<String> = self.state.iter().map(|e| e.key().clone()).collect();
+        sweep_with_backend(self, candidates, now_ms, txnv).await
     }
 
     /// Replay every locally-led `__transaction_state` partition into the
@@ -462,6 +486,94 @@ impl TxnCoordinator {
     }
 }
 
+/// Live adapter: the real reaper side effects against the in-memory state map,
+/// the `__transaction_state` partition log, partition leaders, and the
+/// producer-id allocator. Only the irreducible IO lives here; every decision is
+/// the pure helper / orchestration logic above.
+#[async_trait]
+impl ReaperBackend for TxnCoordinator {
+    async fn is_coordinator_for(&self, tid: &str) -> bool {
+        let p = self.partition_for(tid);
+        self.leader_partitions.read().await.contains(&p)
+    }
+
+    async fn prepare_abort(&self, tid: &str, now_ms: i64, txnv: TxnVersion) -> Option<TxnEntry> {
+        let handle = self.get(tid)?;
+        let prepared = {
+            let mut entry = handle.lock().await;
+            if !should_abort_idle_txn(entry.state, entry.txn_timeout_ms, entry.start_ms, now_ms) {
+                return None;
+            }
+            apply_prepare_abort(&mut entry, now_ms);
+            entry.clone()
+        };
+        if let Err(e) = self.put(prepared.clone(), txnv).await {
+            warn!(tid, error = %e, "txn reaper: failed to persist PrepareAbort; skipping");
+            return None;
+        }
+        Some(prepared)
+    }
+
+    async fn dispatch_abort_markers(&self, entry: &TxnEntry) {
+        use crate::txn::marker::{MarkerType, build_marker_batch};
+        for tp in &entry.partitions {
+            let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
+                warn!(
+                    topic = %tp.topic,
+                    partition = tp.partition,
+                    "txn reaper: partition not locally led; abort marker needs inter-broker \
+                     WriteTxnMarkers (not yet wired), skipping"
+                );
+                continue;
+            };
+            let marker = build_marker_batch(
+                entry.producer_id,
+                entry.producer_epoch,
+                part.log_end_offset(),
+                MarkerType::Abort,
+            );
+            if let Err(e) = part.produce_batch(marker).await {
+                warn!(
+                    topic = %tp.topic,
+                    partition = tp.partition,
+                    error = %e,
+                    "txn reaper: failed to write abort marker"
+                );
+            }
+        }
+    }
+
+    async fn complete_abort(
+        &self,
+        prepared: &TxnEntry,
+        now_ms: i64,
+        txnv: TxnVersion,
+    ) -> Option<TxnEntry> {
+        let tid = prepared.transactional_id.as_str();
+        let handle = self.get(tid)?;
+        let complete = {
+            let mut entry = handle.lock().await;
+            if !complete_abort_guard_ok(&entry, prepared) {
+                // Someone advanced the entry underneath us; don't finalize.
+                return None;
+            }
+            let (new_pid, new_epoch) = next_producer_identity(
+                txnv,
+                entry.producer_id,
+                entry.producer_epoch,
+                &self.producer_ids,
+            );
+            apply_complete_abort(&mut entry, new_pid, new_epoch, now_ms);
+            entry.clone()
+        };
+        if let Err(e) = self.put(complete, txnv).await {
+            warn!(tid, error = %e, "txn reaper: failed to persist CompleteAbort; skipping");
+            return None;
+        }
+        Some(prepared.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +622,203 @@ mod tests {
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
         assert!(map.get(&1000).is_none());
         assert!(map.get(&2000).is_some());
+    }
+
+    // ── Pure transition / guard helpers ───────────────────────────────────
+
+    #[test]
+    fn apply_prepare_abort_flips_state_and_stamps_time() {
+        let mut e = entry(1000, -1);
+        e.state = TxnState::Ongoing;
+        e.last_update_ms = 1;
+        apply_prepare_abort(&mut e, 999);
+        assert!(e.state == TxnState::PrepareAbort);
+        assert!(e.last_update_ms == 999);
+    }
+
+    #[test]
+    fn apply_complete_abort_records_prev_only_on_a_pid_roll() {
+        // No roll: same pid, epoch bumped → prev untouched.
+        let mut e = entry(1000, -1);
+        e.state = TxnState::PrepareAbort;
+        e.producer_epoch = 4;
+        apply_complete_abort(&mut e, 1000, 5, 42);
+        assert!(e.state == TxnState::CompleteAbort);
+        assert!(e.producer_id == 1000);
+        assert!(e.producer_epoch == 5);
+        assert!(e.prev_producer_id == -1, "no roll must not set prev");
+        assert!(e.last_update_ms == 42);
+
+        // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
+        let mut rolled = entry(1000, -1);
+        rolled.state = TxnState::PrepareAbort;
+        apply_complete_abort(&mut rolled, 2000, 0, 43);
+        assert!(rolled.producer_id == 2000);
+        assert!(rolled.producer_epoch == 0);
+        assert!(
+            rolled.prev_producer_id == 1000,
+            "roll must record prior pid"
+        );
+    }
+
+    #[test]
+    fn complete_abort_guard_rejects_identity_or_state_drift() {
+        let mut prepared = entry(1000, -1);
+        prepared.producer_epoch = 7;
+        prepared.state = TxnState::PrepareAbort;
+
+        // Exact match → ok.
+        let mut current = prepared.clone();
+        assert!(complete_abort_guard_ok(&current, &prepared));
+
+        // pid changed → reject.
+        current = prepared.clone();
+        current.producer_id = 9999;
+        assert!(!complete_abort_guard_ok(&current, &prepared));
+
+        // epoch changed → reject.
+        current = prepared.clone();
+        current.producer_epoch = 8;
+        assert!(!complete_abort_guard_ok(&current, &prepared));
+
+        // state advanced past PrepareAbort → reject.
+        current = prepared.clone();
+        current.state = TxnState::CompleteAbort;
+        assert!(!complete_abort_guard_ok(&current, &prepared));
+    }
+
+    // ── Orchestration loop, driven against a mock backend ─────────────────
+
+    fn prepared_entry(tid: &str, pid: i64, epoch: i16) -> TxnEntry {
+        let mut e = TxnEntry::new_empty(tid.to_owned(), pid, epoch, 60_000, 0);
+        e.state = TxnState::PrepareAbort;
+        e
+    }
+
+    #[tokio::test]
+    async fn sweep_runs_full_three_phase_abort_for_an_expired_tid() {
+        let mut backend = MockReaperBackend::new();
+        backend
+            .expect_is_coordinator_for()
+            .withf(|t| t == "tid-a")
+            .returning(|_| true);
+        backend
+            .expect_prepare_abort()
+            .times(1)
+            .returning(|t, _, _| Some(prepared_entry(t, 1000, 3)));
+        backend
+            .expect_dispatch_abort_markers()
+            .times(1)
+            .withf(|e| e.transactional_id == "tid-a" && e.state == TxnState::PrepareAbort)
+            .returning(|_| ());
+        backend
+            .expect_complete_abort()
+            .times(1)
+            .withf(|e, _, _| e.transactional_id == "tid-a")
+            .returning(|e, _, _| Some(e.clone()));
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+        assert!(out == vec!["tid-a".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_tids_this_broker_does_not_coordinate() {
+        let mut backend = MockReaperBackend::new();
+        backend.expect_is_coordinator_for().returning(|_| false);
+        // No prepare / dispatch / complete must be reached.
+        backend.expect_prepare_abort().never();
+        backend.expect_dispatch_abort_markers().never();
+        backend.expect_complete_abort().never();
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_skips_tid_when_prepare_declines_and_does_not_dispatch() {
+        let mut backend = MockReaperBackend::new();
+        backend.expect_is_coordinator_for().returning(|_| true);
+        // Not idle / persistence failed → None.
+        backend
+            .expect_prepare_abort()
+            .times(1)
+            .returning(|_, _, _| None);
+        backend.expect_dispatch_abort_markers().never();
+        backend.expect_complete_abort().never();
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_does_not_report_tid_when_complete_loses_the_race() {
+        let mut backend = MockReaperBackend::new();
+        backend.expect_is_coordinator_for().returning(|_| true);
+        backend
+            .expect_prepare_abort()
+            .returning(|t, _, _| Some(prepared_entry(t, 1000, 3)));
+        // Markers still fan out (Phase 2 ran)...
+        backend
+            .expect_dispatch_abort_markers()
+            .times(1)
+            .returning(|_| ());
+        // ...but Phase 3 lost the race → not finalized, not reported.
+        backend
+            .expect_complete_abort()
+            .times(1)
+            .returning(|_, _, _| None);
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sweep_aborts_each_expired_tid_independently() {
+        let mut backend = MockReaperBackend::new();
+        // tid-a coordinated + expired; tid-b not coordinated.
+        backend
+            .expect_is_coordinator_for()
+            .returning(|t| t == "tid-a");
+        backend
+            .expect_prepare_abort()
+            .withf(|t, _, _| t == "tid-a")
+            .returning(|t, _, _| Some(prepared_entry(t, 1000, 3)));
+        backend.expect_dispatch_abort_markers().returning(|_| ());
+        backend
+            .expect_complete_abort()
+            .returning(|e, _, _| Some(e.clone()));
+
+        let out = sweep_with_backend(
+            &backend,
+            vec!["tid-a".to_owned(), "tid-b".to_owned()],
+            1_000,
+            TxnVersion::Verified,
+        )
+        .await;
+        assert!(out == vec!["tid-a".to_owned()]);
     }
 }
