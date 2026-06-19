@@ -52,7 +52,20 @@ fn relays_and_records() {
     c.read_exact(&mut resp).unwrap();
     assert_eq!(resp, vec![0, 0, 0, 42, 0x99]);
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let frames = recorder.lock().unwrap().clone();
+        let req = frames
+            .iter()
+            .any(|f| f.is_request && f.api_key == 3 && f.version == 12);
+        let resp = frames
+            .iter()
+            .any(|f| !f.is_request && f.api_key == 3 && f.version == 12);
+        if (req && resp) || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     let frames = recorder.lock().unwrap().clone();
     assert!(
         frames
