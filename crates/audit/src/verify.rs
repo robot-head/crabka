@@ -42,12 +42,21 @@ pub struct VerifyBreak {
 }
 
 /// Result of verifying a partition.
+///
+/// `unanchored_records` is only meaningful when `ok` is `true`. It counts
+/// records whose seq is greater than the highest seq covered by the last valid
+/// signed checkpoint. When `ok` is `false` this field is 0 (the walk stopped
+/// at the break before a reliable count could be established).
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub records: u64,
     pub checkpoints: u64,
     pub ok: bool,
     pub first_break: Option<VerifyBreak>,
+    /// Number of records that are NOT covered by a signed checkpoint (i.e. the
+    /// unsigned tail). Zero means the chain is fully attested. Only meaningful
+    /// when `ok` is `true`.
+    pub unanchored_records: u64,
 }
 
 fn header<'a>(record: &'a Record, key: &str) -> Option<&'a [u8]> {
@@ -74,6 +83,9 @@ fn broke(
             seq,
             reason: reason.to_string(),
         }),
+        // unanchored_records is 0 when ok=false; the count is not meaningful
+        // after a break since the walk stopped early.
+        unanchored_records: 0,
     }
 }
 
@@ -83,6 +95,8 @@ struct WalkState {
     expected_seq: u64,
     records: u64,
     checkpoints: u64,
+    /// The `seq_high` of the most-recently validated checkpoint, if any.
+    last_checkpoint_seq_high: Option<u64>,
 }
 
 impl WalkState {
@@ -92,6 +106,7 @@ impl WalkState {
             expected_seq: 0,
             records: 0,
             checkpoints: 0,
+            last_checkpoint_seq_high: None,
         }
     }
 }
@@ -160,6 +175,7 @@ fn check_checkpoint(
             "checkpoint seq_high does not match record count",
         ));
     }
+    state.last_checkpoint_seq_high = Some(cp.seq_high);
     Ok(())
 }
 
@@ -246,11 +262,17 @@ pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyR
         }
     }
 
+    let unanchored_records = match state.last_checkpoint_seq_high {
+        Some(seq_high) => state.records.saturating_sub(seq_high + 1),
+        None => state.records,
+    };
+
     Ok(VerifyReport {
         records: state.records,
         checkpoints: state.checkpoints,
         ok: true,
         first_break: None,
+        unanchored_records,
     })
 }
 
@@ -339,6 +361,9 @@ mod tests {
         check!(report.records == 3);
         check!(report.checkpoints == 1);
         check!(report.first_break.is_none());
+        // build_partition writes 3 records (seq 0..2) + 1 checkpoint (seq_high=2)
+        // → all records are covered → 0 unanchored
+        check!(report.unanchored_records == 0);
     }
 
     #[test]
@@ -351,5 +376,233 @@ mod tests {
         check!(!report.ok);
         let b = report.first_break.unwrap();
         check!(b.reason.contains("signature"));
+    }
+
+    // ── Fix 1 tests: unanchored_records field ─────────────────────────────────
+
+    /// Partition with a trailing tail of 2 records beyond the last checkpoint.
+    #[test]
+    fn unanchored_tail_records_are_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (s, pubkey) = signer();
+        let mut log = Log::open(tmp.path(), LogConfig::default()).unwrap();
+        let mut chain = ChainState::new();
+        let mut offset = 0i64;
+
+        // 3 records + checkpoint (seq_high=2)
+        for i in 0..3u8 {
+            let mut rec = crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{i}}}").into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            };
+            let (seq, prev) = chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+            let mut b = audit_record_to_batch(&rec, offset);
+            log.append(&mut b).unwrap();
+            offset += 1;
+        }
+        let cp = Checkpoint::signed(s.as_ref(), chain.next_seq() - 1, &chain.head(), 100);
+        let mut b = audit_record_to_batch(&cp.to_record(), offset);
+        log.append(&mut b).unwrap();
+        offset += 1;
+
+        // 2 more records WITHOUT a trailing checkpoint
+        for i in 3..5u8 {
+            let mut rec = crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{i}}}").into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            };
+            let (seq, prev) = chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+            let mut b = audit_record_to_batch(&rec, offset);
+            log.append(&mut b).unwrap();
+            offset += 1;
+        }
+
+        let trusted = TrustedKeys::single("k1".into(), pubkey);
+        let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
+        check!(report.ok);
+        check!(report.checkpoints == 1);
+        check!(report.records == 5);
+        check!(report.unanchored_records == 2);
+    }
+
+    /// Chain-only partition (no signing key, no checkpoints) — all records are unanchored.
+    #[test]
+    fn chain_only_partition_all_records_unanchored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut log = Log::open(tmp.path(), LogConfig::default()).unwrap();
+        let mut chain = ChainState::new();
+
+        for (offset, i) in (0..3u8).enumerate() {
+            let mut rec = crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{i}}}").into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            };
+            let (seq, prev) = chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+            let mut b = audit_record_to_batch(&rec, i64::try_from(offset).unwrap());
+            log.append(&mut b).unwrap();
+        }
+
+        // No trusted key needed — no checkpoints present
+        let trusted = TrustedKeys::default();
+        let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
+        check!(report.ok);
+        check!(report.checkpoints == 0);
+        check!(report.records == 3);
+        check!(report.unanchored_records == 3);
+    }
+
+    // ── Fix 2 tests: direct tamper-detection (chain-inconsistent fixtures) ────
+
+    /// Dropped record creates a seq gap that the verifier detects as a break.
+    #[test]
+    fn dropped_record_detected_as_seq_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut log = Log::open(tmp.path(), LogConfig::default()).unwrap();
+        let mut chain = ChainState::new();
+
+        // Build 3 records into memory first, then write only [0] and [2] (skip [1]).
+        let mut records: Vec<crate::sink::AuditRecord> = (0..3u8)
+            .map(|i| crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{i}}}").into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            })
+            .collect();
+
+        for rec in &mut records {
+            let (seq, prev) = chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+        }
+
+        // Write records[0] (seq=0) then records[2] (seq=2) — skip records[1]
+        let mut b = audit_record_to_batch(&records[0], 0);
+        log.append(&mut b).unwrap();
+        let mut b = audit_record_to_batch(&records[2], 1);
+        log.append(&mut b).unwrap();
+
+        let trusted = TrustedKeys::default();
+        let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
+        check!(!report.ok, "dropped record must be detected as tamper");
+        let reason = &report.first_break.unwrap().reason;
+        check!(
+            reason.contains("seq"),
+            "reason should mention seq gap, got: {reason}"
+        );
+    }
+
+    /// A record stamped with the wrong `prev_hash` is detected as a chain break.
+    #[test]
+    fn wrong_prev_hash_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut log = Log::open(tmp.path(), LogConfig::default()).unwrap();
+        let mut chain = ChainState::new();
+
+        // Record 0: correct chain
+        let mut rec0 = crate::sink::AuditRecord {
+            class: crate::event::AuditEventClass::ApplicationLifecycle,
+            value: b"{\"i\":0}".to_vec(),
+            headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+        };
+        let (seq0, prev0) = chain.extend(&rec0.value);
+        rec0.push_chain_headers(seq0, &prev0);
+        let mut b = audit_record_to_batch(&rec0, 0);
+        log.append(&mut b).unwrap();
+
+        // Record 1: stamped with GENESIS_HEAD as prev (wrong — should be head after rec0)
+        let mut rec1 = crate::sink::AuditRecord {
+            class: crate::event::AuditEventClass::ApplicationLifecycle,
+            value: b"{\"i\":1}".to_vec(),
+            headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+        };
+        // Advance chain to get the correct seq, but use GENESIS_HEAD as wrong prev
+        let (seq1, _correct_prev) = chain.extend(&rec1.value);
+        rec1.push_chain_headers(seq1, &GENESIS_HEAD); // wrong prev
+        let mut b = audit_record_to_batch(&rec1, 1);
+        log.append(&mut b).unwrap();
+
+        let trusted = TrustedKeys::default();
+        let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
+        check!(!report.ok, "wrong prev_hash must be detected as tamper");
+        let reason = &report.first_break.unwrap().reason;
+        check!(
+            reason.contains("prev_hash"),
+            "reason should mention prev_hash, got: {reason}"
+        );
+    }
+
+    /// A checkpoint signed over the original chain head does not match after
+    /// records are replaced with different values (re-stamped chain head differs).
+    #[test]
+    fn stale_checkpoint_chain_head_mismatch_detected() {
+        let tmp_orig = tempfile::tempdir().unwrap();
+        let tmp_tampered = tempfile::tempdir().unwrap();
+
+        let (s, pubkey) = signer();
+
+        // Build original partition: 2 records + checkpoint
+        let mut orig_chain = ChainState::new();
+        let mut orig_records: Vec<crate::sink::AuditRecord> = (0..2u8)
+            .map(|i| crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{i}}}").into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            })
+            .collect();
+        for rec in &mut orig_records {
+            let (seq, prev) = orig_chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+        }
+        let orig_cp = Checkpoint::signed(
+            s.as_ref(),
+            orig_chain.next_seq() - 1,
+            &orig_chain.head(),
+            42,
+        );
+
+        // Build tampered partition: same structure but different values → different chain head
+        // but reuse the OLD checkpoint (signed over the original head)
+        let mut tampered_chain = ChainState::new();
+        let mut tampered_records: Vec<crate::sink::AuditRecord> = (0..2u8)
+            .map(|i| crate::sink::AuditRecord {
+                class: crate::event::AuditEventClass::ApplicationLifecycle,
+                value: format!("{{\"i\":{},\"tampered\":true}}", i + 10).into_bytes(),
+                headers: vec![("event_class".into(), b"application_lifecycle".to_vec())],
+            })
+            .collect();
+        for rec in &mut tampered_records {
+            let (seq, prev) = tampered_chain.extend(&rec.value);
+            rec.push_chain_headers(seq, &prev);
+        }
+
+        let mut log = Log::open(tmp_tampered.path(), LogConfig::default()).unwrap();
+        let mut offset = 0i64;
+        for rec in &tampered_records {
+            let mut b = audit_record_to_batch(rec, offset);
+            log.append(&mut b).unwrap();
+            offset += 1;
+        }
+        // Reuse the OLD checkpoint (signed over original chain head — won't match tampered head)
+        let mut b = audit_record_to_batch(&orig_cp.to_record(), offset);
+        log.append(&mut b).unwrap();
+
+        let _ = tmp_orig; // keep alive
+
+        let trusted = TrustedKeys::single("k1".into(), pubkey);
+        let report = verify_partition_dir(tmp_tampered.path(), &trusted).unwrap();
+        check!(
+            !report.ok,
+            "stale checkpoint over wrong chain_head must be detected"
+        );
+        let reason = &report.first_break.unwrap().reason;
+        check!(
+            reason.contains("chain_head"),
+            "reason should mention chain_head, got: {reason}"
+        );
     }
 }

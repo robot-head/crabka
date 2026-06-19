@@ -2295,7 +2295,7 @@ impl Broker {
                             }
                         }
                     } else {
-                        tracing::warn!(
+                        tracing::info!(
                             "no audit signing key configured; audit checkpoints disabled"
                         );
                         None

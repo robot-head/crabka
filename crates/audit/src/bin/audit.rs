@@ -46,14 +46,7 @@ fn main() -> ExitCode {
             };
             let trusted = TrustedKeys::single(key_id, pubkey);
             match verify_partition_dir(&partition_dir, &trusted) {
-                Ok(report) if report.ok => {
-                    println!(
-                        "OK: {} records, {} checkpoints, chain continuous, all signatures valid",
-                        report.records, report.checkpoints
-                    );
-                    ExitCode::SUCCESS
-                }
-                Ok(report) => {
+                Ok(report) if !report.ok => {
                     let b = report.first_break.expect("not ok implies a break");
                     eprintln!(
                         "TAMPER DETECTED at offset {} (seq {:?}): {}",
@@ -64,6 +57,28 @@ fn main() -> ExitCode {
                         report.records, report.checkpoints
                     );
                     ExitCode::FAILURE
+                }
+                Ok(report) if report.records == 0 => {
+                    println!("OK: empty partition");
+                    ExitCode::SUCCESS
+                }
+                Ok(report) if report.checkpoints == 0 || report.unanchored_records > 0 => {
+                    eprintln!(
+                        "INCOMPLETE ATTESTATION: chain continuous over {} records, but {} \
+                        record(s) are not covered by a signed checkpoint ({} checkpoint(s) \
+                        present). Integrity is not cryptographically attested for the unsigned \
+                        portion.",
+                        report.records, report.unanchored_records, report.checkpoints
+                    );
+                    ExitCode::FAILURE
+                }
+                Ok(report) => {
+                    println!(
+                        "OK: {} records, {} checkpoints, chain continuous, all signatures valid, \
+                        fully attested",
+                        report.records, report.checkpoints
+                    );
+                    ExitCode::SUCCESS
                 }
                 Err(e) => {
                     eprintln!("error: {e}");

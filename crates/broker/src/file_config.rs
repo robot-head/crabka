@@ -3021,6 +3021,7 @@ in_memory = true
         let mut cfg = crate::config::BrokerConfig::for_tests(std::path::PathBuf::from("/tmp/x"));
         fc.apply_to(&mut cfg).expect("apply");
         assert2::check!(cfg.audit_signing_key_path == None);
+        assert2::check!(cfg.audit_signing_key_id == None);
         assert2::check!(cfg.audit_checkpoint_every_n == 1000);
         assert2::check!(cfg.audit_checkpoint_every_secs == 60);
     }

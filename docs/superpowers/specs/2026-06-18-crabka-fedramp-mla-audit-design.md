@@ -128,7 +128,7 @@ For **fail-closed event classes**, if the record cannot be durably persisted to 
 
 ## 5. Tamper-evidence (KSI-MLA-OSM)
 
-- **Per-record chaining.** Each record carries `seq` (monotonic per broker) and `prev_hash` (hash of the prior record in this broker's chain) in its Kafka record headers. Any insertion, deletion, or reorder breaks the chain and is detectable — even against on-disk segment rewrites.
+- **Per-record chaining.** Each record carries `seq` (monotonic per broker) and `prev_hash` (hash of the prior record in this broker's chain) in its Kafka record headers. Any insertion, deletion, or reorder breaks the chain and is detectable — even against on-disk segment rewrites — up to the most recent signed checkpoint. Records written after the last checkpoint (the unsigned window) are chain-continuous but not signature-attested; a cleanly-stopped broker emits a final checkpoint covering the tail. Chain-only mode (no signing key configured) provides continuity detection only, with no signature attestation over any records.
 - **Signed checkpoints.** Every *N* records or *T* seconds the broker emits a checkpoint record: a signature over `{broker_id, seq_range, chain_head_hash, timestamp, key_id}` using the broker's audit signing key.
 - **Algorithm.** FIPS-approved — **Ed25519 (FIPS 186-5)** or **ECDSA P-256** (final selection in the plan).
 - **Key management.** Keys sourced from config / file / KMS. **Rotation** via `key_id` carried on each checkpoint, so a chain spans key epochs verifiably.
