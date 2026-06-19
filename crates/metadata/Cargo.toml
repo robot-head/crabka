@@ -29,6 +29,7 @@ crabka-security = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+mutants = { workspace = true }
 proptest = { workspace = true }
 criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
 

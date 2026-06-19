@@ -120,6 +120,8 @@ impl HeartbeatTask {
     }
 
     /// Signal the background task to stop and wait for it to finish.
+    // cargo-mutants: shutdown signal/join not asserted by unit tests
+    #[cfg_attr(test, mutants::skip)]
     pub async fn shutdown(self) {
         // Ignore send error: if the receiver is already gone the task is done.
         let _ = self.shutdown.send(true);

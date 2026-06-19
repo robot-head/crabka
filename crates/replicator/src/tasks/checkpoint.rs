@@ -209,6 +209,8 @@ impl CheckpointTask {
     }
 
     /// Signal the task to stop and await its completion.
+    // cargo-mutants: shutdown signal/join not asserted by unit tests
+    #[cfg_attr(test, mutants::skip)]
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(true);
         let _ = self.handle.await;

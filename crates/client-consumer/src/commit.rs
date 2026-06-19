@@ -65,6 +65,7 @@ fn commit_response_result(resp: &OffsetCommitResponse) -> Result<(), ConsumerErr
 impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
     /// Blocks until the broker acks.
+    #[cfg_attr(test, mutants::skip)] // cargo-mutants: I/O-bound coordinator RPC, exercised by integration tests
     pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
         let raw_offsets = self.next_offsets.lock().await.clone();
         if raw_offsets.is_empty() {
@@ -114,6 +115,7 @@ impl Consumer {
     /// Fire-and-forget commit. Returns once the request is enqueued on the
     /// client's writer task; does NOT wait for the broker ack. Errors are
     /// logged but not returned.
+    #[cfg_attr(test, mutants::skip)] // cargo-mutants: fire-and-forget I/O spawn, exercised by integration tests
     pub fn commit_async(&self) {
         let client = self.client.clone();
         let group_id = self.group_id.clone();

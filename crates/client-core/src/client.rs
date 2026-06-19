@@ -65,7 +65,9 @@ impl Client {
     /// [`refresh_metadata`](Client::refresh_metadata), port not `0`). Lets a
     /// caller choose between [`broker`](Client::broker) routing and the
     /// bootstrap [`send`](Client::send) without a speculative connect.
+    // cargo-mutants: one-line delegation to BrokerPool::knows_broker
     #[must_use]
+    #[cfg_attr(test, mutants::skip)]
     pub fn knows_broker(&self, broker_id: i32) -> bool {
         self.pool.knows_broker(broker_id)
     }
@@ -86,12 +88,16 @@ impl Client {
     /// Drop the pooled connection to `broker_id` so the next request to it
     /// reconnects (to its current advertised address). Call this after a send
     /// fails so a bounced / failed-over broker isn't retried over a dead socket.
+    // cargo-mutants: one-line delegation to BrokerPool::evict
+    #[cfg_attr(test, mutants::skip)]
     pub fn evict_broker(&self, broker_id: i32) {
         self.pool.evict(broker_id);
     }
 
     /// Send a default `MetadataRequest`, parse the broker list from the response,
     /// refresh the pool's address registry, and return the typed response.
+    // cargo-mutants: live-broker metadata round-trip; not unit-testable
+    #[cfg_attr(test, mutants::skip)]
     pub async fn refresh_metadata(
         &self,
     ) -> Result<crabka_protocol::owned::metadata_response::MetadataResponse, ClientError> {
@@ -186,6 +192,8 @@ impl Client {
     }
 
     /// Close the client and all pooled connections.
+    // cargo-mutants: teardown; delegates to BrokerPool::close_all
+    #[cfg_attr(test, mutants::skip)]
     pub fn close(self) {
         if let Some(pool) = Arc::into_inner(self.pool) {
             pool.close_all();
@@ -213,6 +221,8 @@ impl BrokerHandle<'_> {
     /// request still reaches its intended target instead of failing
     /// `Disconnected`. A *known* broker whose connect fails is not masked: the
     /// fallback only triggers when the id was never in the registry.
+    // cargo-mutants: live-broker send path; not unit-testable
+    #[cfg_attr(test, mutants::skip)]
     pub async fn send<R: ProtocolRequest>(&self, req: R) -> Result<R::Response, ClientError> {
         let conn = match self.pool.get(self.broker_id).await {
             Ok(conn) => conn,

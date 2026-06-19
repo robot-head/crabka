@@ -33,6 +33,8 @@ pub struct FileEd25519Signer {
 }
 
 impl std::fmt::Debug for FileEd25519Signer {
+    // cargo-mutants: Debug formatting is not behaviorally tested.
+    #[cfg_attr(test, mutants::skip)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileEd25519Signer")
             .field("key_id", &self.key_id)

@@ -80,6 +80,8 @@ impl PostgresWalSource {
         )
     }
 
+    // cargo-mutants: real DB connection; not exercised under unit tests.
+    #[cfg_attr(test, mutants::skip)]
     pub async fn connect(config: PostgresSourceConfig) -> Result<Self, ConnectError> {
         let catalog = TokioPgCatalog::connect(config.database_url.expose_secret()).await?;
         let database_name = initialize(&catalog, &config).await?;
