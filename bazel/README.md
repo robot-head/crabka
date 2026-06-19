@@ -3,7 +3,7 @@
 Bazel is a **secondary** build path for Crabka, scoped to the lean Kafka
 **client** libraries. Cargo remains the source of truth for the full workspace;
 Bazel reads the same `Cargo.toml` / `Cargo.lock` through
-[`crate_universe`](https://bazelbuild.github.io/rules_rust/crate_universe.html),
+[`crate_universe`](https://bazelbuild.github.io/rules_rust/crate_universe_bzlmod.html),
 so there is no second dependency set to keep in sync.
 
 ## Layout

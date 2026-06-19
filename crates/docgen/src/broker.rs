@@ -55,7 +55,7 @@ fn api_spec(api_key: i16) -> (&'static str, &'static str) {
     // KIP (the original Kafka 0.x core RPCs and a handful of admin RPCs).
     const PROTOCOL_GUIDE: (&str, &str) = (
         "Protocol guide",
-        "https://kafka.apache.org/protocol#protocol_api_keys",
+        "https://kafka.apache.org/43/design/protocol/",
     );
     const KIP_848: (&str, &str) = (
         "KIP-848",

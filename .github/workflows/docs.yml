@@ -14,6 +14,9 @@ on:
       - "crates/voters/**"
       - "crates/playground/**"
       - "charts/**"
+      - "README.md"
+      - "**/README.md"
+      - "lychee.toml"
       - ".github/workflows/docs.yml"
     tags:
       # Same anchor as publish-images: one Helm repo update per workspace release.
@@ -27,6 +30,9 @@ on:
       - "crates/voters/**"
       - "crates/playground/**"
       - "charts/**"
+      - "README.md"
+      - "**/README.md"
+      - "lychee.toml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -186,6 +192,34 @@ jobs:
       - name: Build site
         run: zola build
         working-directory: website
+      - name: Build link-check input list
+        run: |
+          set -euo pipefail
+          {
+            find website/public -type f \( -name '*.html' -o -name '*.htm' \) \
+              -not -path 'website/public/api/rust/*'
+            find . -name README.md \
+              -not -path './target/*' \
+              -not -path './.git/*' \
+              -not -path './website/public/*' \
+              -not -path './website/themes/*'
+          } | sort -u > .lychee-inputs.txt
+      - name: Check links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          lycheeVersion: v0.24.2
+          args: >-
+            --no-progress
+            --format detailed
+            --timeout 20
+            --max-retries 1
+            --include-fragments
+            --fallback-extensions html
+            --root-dir website/public
+            --files-from .lychee-inputs.txt
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Upload Pages artifact
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/crabka-broker-v')
         uses: actions/upload-pages-artifact@v5
