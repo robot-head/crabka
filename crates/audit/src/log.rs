@@ -14,6 +14,8 @@ use crate::event::AuditEvent;
 use crate::ocsf::ProductInfo;
 use crate::signing::SigningKeyProvider;
 use crate::sink::{AuditRecord, AuditSink};
+use crate::spool::Spool;
+use crate::stats::AuditStats;
 
 /// Cloneable, cheap handle that broker code calls to record events.
 ///
@@ -65,8 +67,24 @@ impl AuditLog {
     }
 }
 
-/// Background task that chains, serializes, and writes audit events to a sink,
-/// emitting signed checkpoints on a count/time cadence and at shutdown.
+/// Construction parameters for [`AuditWriter`].
+pub struct AuditWriterParams {
+    pub sink: Arc<dyn AuditSink>,
+    pub product: ProductInfo,
+    pub signer: Option<Arc<dyn SigningKeyProvider>>,
+    pub checkpoint_every_n: u64,
+    pub checkpoint_every: Duration,
+    /// Chain state, possibly resumed from a recovered position.
+    pub chain: ChainState,
+    /// Durable spool for the AU-5 degraded path (None disables spooling).
+    pub spool: Option<Spool>,
+    pub stats: Arc<AuditStats>,
+    /// How often to attempt draining the spool while in spool mode.
+    pub replay_every: Duration,
+}
+
+/// Background task: chains + writes audit events, spooling on sink failure and
+/// replaying on recovery, emitting signed checkpoints on a cadence.
 pub struct AuditWriter {
     rx: mpsc::Receiver<AuditEvent>,
     sink: Arc<dyn AuditSink>,
@@ -76,38 +94,46 @@ pub struct AuditWriter {
     checkpoint_every_n: u64,
     checkpoint_every: Duration,
     since_checkpoint: u64,
+    spool: Option<Spool>,
+    spooling: bool,
+    stats: Arc<AuditStats>,
+    replay_every: Duration,
 }
 
 impl AuditWriter {
     #[must_use]
-    pub fn new(
-        rx: mpsc::Receiver<AuditEvent>,
-        sink: Arc<dyn AuditSink>,
-        product: ProductInfo,
-        signer: Option<Arc<dyn SigningKeyProvider>>,
-        checkpoint_every_n: u64,
-        checkpoint_every: Duration,
-    ) -> Self {
+    pub fn new(rx: mpsc::Receiver<AuditEvent>, params: AuditWriterParams) -> Self {
+        let spooling = params.spool.as_ref().is_some_and(|s| !s.is_empty());
+        if let Some(spool) = &params.spool {
+            params.stats.set_depth(spool.count(), spool.bytes());
+        }
         Self {
             rx,
-            sink,
-            product,
-            chain: ChainState::new(),
-            signer,
-            checkpoint_every_n,
-            checkpoint_every,
+            sink: params.sink,
+            product: params.product,
+            chain: params.chain,
+            signer: params.signer,
+            checkpoint_every_n: params.checkpoint_every_n,
+            checkpoint_every: params.checkpoint_every,
             since_checkpoint: 0,
+            spool: params.spool,
+            spooling,
+            stats: params.stats,
+            replay_every: params.replay_every,
         }
     }
 
-    /// Drain the channel until all senders drop; emit a final checkpoint for any
-    /// pending tail.
+    /// Drain the channel until all senders drop; emit a final checkpoint for
+    /// any pending tail.
     pub async fn run(mut self) {
-        let mut ticker = tokio::time::interval_at(
+        let mut ckpt = tokio::time::interval_at(
             Instant::now() + self.checkpoint_every,
             self.checkpoint_every,
         );
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        ckpt.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut replay =
+            tokio::time::interval_at(Instant::now() + self.replay_every, self.replay_every);
+        replay.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -121,17 +147,21 @@ impl AuditWriter {
                                 self.emit_checkpoint().await;
                             }
                         }
-                        None => break, // all senders dropped
+                        None => break,
                     }
                 }
-                _ = ticker.tick() => {
+                _ = ckpt.tick() => {
                     if self.since_checkpoint > 0 {
                         self.emit_checkpoint().await;
                     }
                 }
+                _ = replay.tick() => {
+                    if self.spooling {
+                        self.try_replay().await;
+                    }
+                }
             }
         }
-        // Final checkpoint covers any records since the last one.
         if self.since_checkpoint > 0 {
             self.emit_checkpoint().await;
         }
@@ -141,27 +171,96 @@ impl AuditWriter {
         let mut record = AuditRecord::from_event(event, &self.product);
         let (seq, prev) = self.chain.extend(&record.value);
         record.push_chain_headers(seq, &prev);
-        if let Err(e) = self.sink.write(record).await {
-            tracing::warn!(error = %e, "audit sink write failed");
-        }
+        self.write_or_spool(record).await;
         self.since_checkpoint += 1;
     }
 
     async fn emit_checkpoint(&mut self) {
-        let Some(signer) = &self.signer else {
-            // No key configured: chaining only, no checkpoints.
+        let Some(signer) = self.signer.clone() else {
             self.since_checkpoint = 0;
             return;
         };
-        // chain.next_seq() is the seq the NEXT record would get, so the last
-        // chained record's seq is next_seq() - 1.
         let seq_high = self.chain.next_seq().saturating_sub(1);
         let head = self.chain.head();
         let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, now_ms());
-        if let Err(e) = self.sink.write(cp.to_record()).await {
-            tracing::warn!(error = %e, "audit checkpoint write failed");
-        }
+        self.write_or_spool(cp.to_record()).await;
         self.since_checkpoint = 0;
+    }
+
+    /// Write to the sink, or to the spool if we're in (sticky) spool mode or
+    /// the sink write fails.
+    async fn write_or_spool(&mut self, record: AuditRecord) {
+        if self.spooling {
+            self.spool_record(&record);
+            return;
+        }
+        if let Err(e) = self.sink.write(record.clone()).await {
+            tracing::warn!(error = %e, "audit sink write failed; entering spool mode");
+            self.spooling = true;
+            self.spool_record(&record);
+        }
+    }
+
+    fn spool_record(&mut self, record: &AuditRecord) {
+        let Some(spool) = &mut self.spool else {
+            self.stats.inc_dropped();
+            return;
+        };
+        match spool.append(record) {
+            Ok(true) => {
+                self.stats.inc_spooled();
+                self.stats.set_depth(spool.count(), spool.bytes());
+            }
+            Ok(false) => {
+                self.stats.inc_dropped();
+                tracing::warn!("audit spool full; record dropped");
+            }
+            Err(e) => {
+                self.stats.inc_dropped();
+                tracing::error!(error = %e, "audit spool write failed; record dropped");
+            }
+        }
+    }
+
+    /// Drain the spool to the sink in order; exit spool mode when fully
+    /// drained.
+    async fn try_replay(&mut self) {
+        let Some(spool) = &mut self.spool else {
+            self.spooling = false;
+            return;
+        };
+        if spool.is_empty() {
+            self.spooling = false;
+            return;
+        }
+        let records = match spool.read_all() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = %e, "audit spool read failed during replay");
+                return;
+            }
+        };
+        let mut replayed = 0usize;
+        for rec in &records {
+            if self.sink.write(rec.clone()).await.is_err() {
+                break; // topic still unhealthy
+            }
+            replayed += 1;
+        }
+        if replayed == records.len() {
+            if let Err(e) = spool.truncate() {
+                tracing::error!(error = %e, "audit spool truncate failed");
+                return;
+            }
+            self.spooling = false;
+            tracing::info!(replayed, "audit spool drained; resumed direct topic writes");
+        } else if let Err(e) = spool.rewrite(&records[replayed..]) {
+            tracing::error!(error = %e, "audit spool rewrite failed during replay");
+            return;
+        }
+        self.stats
+            .inc_replayed_by(u64::try_from(replayed).unwrap_or(u64::MAX));
+        self.stats.set_depth(spool.count(), spool.bytes());
     }
 }
 
@@ -176,6 +275,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use assert2::check;
@@ -185,7 +285,9 @@ mod tests {
     use crate::event::*;
     use crate::ocsf::ProductInfo;
     use crate::signing::FileEd25519Signer;
-    use crate::sink::{AuditRecord, MemorySink};
+    use crate::sink::{AuditRecord, AuditSink, MemorySink};
+    use crate::spool::Spool;
+    use crate::stats::AuditStats;
 
     fn product() -> ProductInfo {
         ProductInfo {
@@ -220,17 +322,60 @@ mod tests {
         (std::sync::Arc::new(s), pubkey)
     }
 
+    #[derive(Debug, Default)]
+    struct FailableSink {
+        fail: AtomicBool,
+        inner: MemorySink,
+    }
+    impl FailableSink {
+        fn set_fail(&self, v: bool) {
+            self.fail.store(v, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl AuditSink for FailableSink {
+        async fn write(&self, record: AuditRecord) -> Result<(), crate::sink::AuditError> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(crate::sink::AuditError::Sink("forced".into()));
+            }
+            self.inner.write(record).await
+        }
+    }
+
+    fn params(sink: Arc<dyn AuditSink>, spool: Spool, stats: Arc<AuditStats>) -> AuditWriterParams {
+        AuditWriterParams {
+            sink,
+            product: product(),
+            signer: None,
+            checkpoint_every_n: 0,
+            checkpoint_every: Duration::from_hours(1),
+            chain: crate::chain::ChainState::new(),
+            spool: Some(spool),
+            stats,
+            replay_every: Duration::from_millis(20),
+        }
+    }
+
     #[tokio::test]
     async fn emitted_events_reach_the_sink_in_order() {
-        let (log, rx) = AuditLog::new(16);
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
         let sink = Arc::new(MemorySink::default());
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(16);
         let writer = AuditWriter::new(
             rx,
-            sink.clone(),
-            product(),
-            None,
-            1_000_000,
-            Duration::from_hours(1),
+            AuditWriterParams {
+                sink: sink.clone(),
+                product: product(),
+                signer: None,
+                checkpoint_every_n: 1_000_000,
+                checkpoint_every: Duration::from_hours(1),
+                chain: ChainState::new(),
+                spool: Some(spool),
+                stats,
+                replay_every: Duration::from_hours(1),
+            },
         );
         let handle = tokio::spawn(writer.run());
 
@@ -269,16 +414,24 @@ mod tests {
 
     #[tokio::test]
     async fn chained_records_carry_seq_and_prev_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
         let (log, rx) = AuditLog::new(16);
         let sink = Arc::new(MemorySink::default());
         // no signer, huge interval => no checkpoints, just chaining
         let writer = AuditWriter::new(
             rx,
-            sink.clone(),
-            product(),
-            None,
-            1_000_000,
-            Duration::from_hours(1),
+            AuditWriterParams {
+                sink: sink.clone(),
+                product: product(),
+                signer: None,
+                checkpoint_every_n: 1_000_000,
+                checkpoint_every: Duration::from_hours(1),
+                chain: ChainState::new(),
+                spool: Some(spool),
+                stats: Arc::new(AuditStats::new()),
+                replay_every: Duration::from_hours(1),
+            },
         );
         let h = tokio::spawn(writer.run());
         log.emit(life(1));
@@ -307,16 +460,24 @@ mod tests {
     #[tokio::test]
     async fn checkpoints_emitted_by_count_and_verify_against_recomputed_head() {
         let (signer, pubkey) = test_signer();
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
         let (log, rx) = AuditLog::new(64);
         let sink = Arc::new(MemorySink::default());
         // checkpoint every 2 records; long interval so only count triggers
         let writer = AuditWriter::new(
             rx,
-            sink.clone(),
-            product(),
-            Some(signer),
-            2,
-            Duration::from_hours(1),
+            AuditWriterParams {
+                sink: sink.clone(),
+                product: product(),
+                signer: Some(signer),
+                checkpoint_every_n: 2,
+                checkpoint_every: Duration::from_hours(1),
+                chain: ChainState::new(),
+                spool: Some(spool),
+                stats: Arc::new(AuditStats::new()),
+                replay_every: Duration::from_hours(1),
+            },
         );
         let h = tokio::spawn(writer.run());
         for i in 0..4 {
@@ -353,16 +514,24 @@ mod tests {
     #[tokio::test]
     async fn shutdown_emits_final_checkpoint_for_pending_tail() {
         let (signer, pubkey) = test_signer();
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
         let (log, rx) = AuditLog::new(16);
         let sink = Arc::new(MemorySink::default());
         // every_n large so only the shutdown path emits
         let writer = AuditWriter::new(
             rx,
-            sink.clone(),
-            product(),
-            Some(signer),
-            1_000_000,
-            Duration::from_hours(1),
+            AuditWriterParams {
+                sink: sink.clone(),
+                product: product(),
+                signer: Some(signer),
+                checkpoint_every_n: 1_000_000,
+                checkpoint_every: Duration::from_hours(1),
+                chain: ChainState::new(),
+                spool: Some(spool),
+                stats: Arc::new(AuditStats::new()),
+                replay_every: Duration::from_hours(1),
+            },
         );
         let h = tokio::spawn(writer.run());
         log.emit(life(1));
@@ -381,5 +550,62 @@ mod tests {
         let cp = Checkpoint::from_value(&v).unwrap();
         check!(cp.verify(&pubkey));
         check!(cp.seq_high == 2); // last chained seq (records 0,1,2)
+    }
+
+    #[tokio::test]
+    async fn records_spool_on_sink_failure_then_replay_to_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FailableSink::default());
+        sink.set_fail(true); // topic "down"
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(64);
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
+        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let h = tokio::spawn(writer.run());
+
+        log.emit(life(1));
+        log.emit(life(2));
+        log.emit(life(3));
+        // give the writer time to process + spool
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        check!(stats.spooled() >= 3);
+        check!(stats.depth() >= 3);
+        check!(sink.inner.records().is_empty()); // nothing reached the topic yet
+
+        // topic recovers; replay ticker should drain
+        sink.set_fail(false);
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        drop(log);
+        h.await.unwrap();
+
+        // all three chained records reached the sink, in order, with monotonic seq
+        let recs = sink.inner.records();
+        let seqs: Vec<String> = recs
+            .iter()
+            .filter(|r| r.class != AuditEventClass::Checkpoint)
+            .map(|r| header(r, "seq").unwrap())
+            .collect();
+        check!(seqs == vec!["0".to_string(), "1".to_string(), "2".to_string()]);
+        check!(stats.replayed() >= 3);
+        check!(stats.depth() == 0);
+    }
+
+    #[tokio::test]
+    async fn direct_writes_when_sink_healthy_do_not_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FailableSink::default()); // healthy
+        let stats = Arc::new(AuditStats::new());
+        let (log, rx) = AuditLog::new(16);
+        let spool = Spool::open(dir.path(), 1 << 20).unwrap();
+        let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
+        let h = tokio::spawn(writer.run());
+        log.emit(life(1));
+        log.emit(life(2));
+        drop(log);
+        h.await.unwrap();
+        check!(sink.inner.records().len() == 2);
+        check!(stats.spooled() == 0);
+        check!(stats.depth() == 0);
     }
 }
