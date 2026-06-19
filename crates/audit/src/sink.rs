@@ -82,6 +82,8 @@ pub enum AuditError {
     Sink(String),
     #[error("audit key: {0}")]
     Key(String),
+    #[error("audit spool I/O: {0}")]
+    Io(String),
 }
 
 /// Destination for serialized audit records.
@@ -114,5 +116,17 @@ impl AuditSink for MemorySink {
             .expect("audit memory sink poisoned")
             .push(record);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::check;
+
+    #[test]
+    fn io_error_displays() {
+        let e = AuditError::Io("disk full".to_string());
+        check!(format!("{e}").contains("disk full"));
     }
 }

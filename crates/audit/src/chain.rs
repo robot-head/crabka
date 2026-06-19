@@ -44,6 +44,12 @@ impl ChainState {
         Self::default()
     }
 
+    /// Resume a chain from a recovered position (after restart / spool replay).
+    #[must_use]
+    pub fn resume(next_seq: u64, head: [u8; 32]) -> Self {
+        Self { next_seq, head }
+    }
+
     /// Advance the chain for a record carrying `value`. Returns the `(seq,
     /// prev_head)` to stamp on that record (the head as it was *before* this
     /// record), then folds the record into the head.
@@ -131,6 +137,18 @@ mod tests {
         check!(s1 == 1);
         check!(p1 == chain_hash(&GENESIS_HEAD, 0, b"r0")); // prev == head after r0
         check!(c.head() == chain_hash(&p1, 1, b"r1"));
+    }
+
+    #[test]
+    fn resume_sets_next_seq_and_head_and_continues() {
+        let head = chain_hash(&GENESIS_HEAD, 4, b"r4");
+        let mut c = ChainState::resume(5, head);
+        check!(c.next_seq() == 5);
+        check!(c.head() == head);
+        let (seq, prev) = c.extend(b"r5");
+        check!(seq == 5);
+        check!(prev == head);
+        check!(c.head() == chain_hash(&head, 5, b"r5"));
     }
 
     #[test]

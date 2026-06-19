@@ -62,6 +62,44 @@ impl AuditEventClass {
             AuditEventClass::Checkpoint => "checkpoint",
         }
     }
+
+    /// Compact tag for spool framing.
+    #[must_use]
+    pub fn tag(self) -> u8 {
+        match self {
+            AuditEventClass::Authentication => 0,
+            AuditEventClass::Authorization => 1,
+            AuditEventClass::ApiActivity => 2,
+            AuditEventClass::ApplicationLifecycle => 3,
+            AuditEventClass::Checkpoint => 4,
+        }
+    }
+
+    /// Inverse of [`Self::tag`].
+    #[must_use]
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(AuditEventClass::Authentication),
+            1 => Some(AuditEventClass::Authorization),
+            2 => Some(AuditEventClass::ApiActivity),
+            3 => Some(AuditEventClass::ApplicationLifecycle),
+            4 => Some(AuditEventClass::Checkpoint),
+            _ => None,
+        }
+    }
+
+    /// Inverse of [`Self::as_header`].
+    #[must_use]
+    pub fn from_header(s: &str) -> Option<Self> {
+        match s {
+            "authentication" => Some(AuditEventClass::Authentication),
+            "authorization" => Some(AuditEventClass::Authorization),
+            "api_activity" => Some(AuditEventClass::ApiActivity),
+            "application_lifecycle" => Some(AuditEventClass::ApplicationLifecycle),
+            "checkpoint" => Some(AuditEventClass::Checkpoint),
+            _ => None,
+        }
+    }
 }
 
 /// A single auditable security event. Times are caller-supplied epoch-millis so
@@ -116,6 +154,22 @@ impl AuditEvent {
 mod tests {
     use super::*;
     use assert2::check;
+
+    #[test]
+    fn class_tag_round_trips_and_header_maps() {
+        for c in [
+            AuditEventClass::Authentication,
+            AuditEventClass::Authorization,
+            AuditEventClass::ApiActivity,
+            AuditEventClass::ApplicationLifecycle,
+            AuditEventClass::Checkpoint,
+        ] {
+            check!(AuditEventClass::from_tag(c.tag()) == Some(c));
+            check!(AuditEventClass::from_header(c.as_header()) == Some(c));
+        }
+        check!(AuditEventClass::from_tag(99) == None);
+        check!(AuditEventClass::from_header("nope") == None);
+    }
 
     #[test]
     fn event_class_maps_each_variant() {
