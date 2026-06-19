@@ -7,6 +7,11 @@ use async_trait::async_trait;
 use crate::event::{AuditEvent, AuditEventClass, AuditOutcome};
 use crate::ocsf::{ProductInfo, to_ocsf};
 
+/// Record-header key carrying the per-broker chain sequence number (decimal ASCII).
+pub const HEADER_SEQ: &str = "seq";
+/// Record-header key carrying the previous chain head (lowercase hex of 32 bytes).
+pub const HEADER_PREV_HASH: &str = "prev_hash";
+
 /// A serialized, sink-ready audit record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRecord {
@@ -20,9 +25,9 @@ impl AuditRecord {
     /// onto this record. Called by the writer, which owns the chain.
     pub fn push_chain_headers(&mut self, seq: u64, prev_head: &[u8; 32]) {
         self.headers
-            .push(("seq".to_string(), seq.to_string().into_bytes()));
+            .push((HEADER_SEQ.to_string(), seq.to_string().into_bytes()));
         self.headers.push((
-            "prev_hash".to_string(),
+            HEADER_PREV_HASH.to_string(),
             crate::chain::to_hex(prev_head).into_bytes(),
         ));
     }
