@@ -64,6 +64,8 @@ fn status_str(outcome: AuditOutcome) -> &'static str {
 pub enum AuditError {
     #[error("audit sink: {0}")]
     Sink(String),
+    #[error("audit key: {0}")]
+    Key(String),
 }
 
 /// Destination for serialized audit records.

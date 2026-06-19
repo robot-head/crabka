@@ -6,6 +6,7 @@ pub mod chain;
 pub mod event;
 pub mod log;
 pub mod ocsf;
+pub mod signing;
 pub mod sink;
 
 pub use chain::{ChainState, GENESIS_HEAD, chain_hash};
@@ -15,4 +16,7 @@ pub use event::{
 };
 pub use log::{AuditLog, AuditWriter};
 pub use ocsf::{ProductInfo, to_ocsf};
+pub use signing::{
+    FileEd25519Signer, SigningKeyProvider, checkpoint_signing_bytes, verify_signature,
+};
 pub use sink::{AuditError, AuditRecord, AuditSink, MemorySink};
