@@ -66,9 +66,10 @@ impl AuditSink for KafkaTopicAuditSink {
             })
             .collect();
         let mut batch = RecordBatch::default();
+        // `offset_delta`/`key` are left at their `Record::default()` values (0 /
+        // None) — a single audit record with no key. Spelling them out would only
+        // create equivalent "delete field" mutants.
         batch.records.push(Record {
-            offset_delta: 0,
-            key: None,
             value: Some(Bytes::from(record.value)),
             headers,
             ..Default::default()
