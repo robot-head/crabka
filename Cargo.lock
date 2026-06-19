@@ -2255,6 +2255,7 @@ dependencies = [
  "crabka-security",
  "futures-util",
  "proptest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",
