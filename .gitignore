@@ -27,9 +27,6 @@ crabka-operator.tar
 # OMB harness — upstream checkout fetched at run time
 .omb/
 
-# Superpowers plans — local working notes, not tracked (specs/ stays tracked)
-docs/superpowers/plans/
-
 # Generated docs-site content (produced by crabka-docgen / cargo doc at build time)
 /website/content/docs/reference/
 /website/static/api/
