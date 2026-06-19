@@ -346,6 +346,7 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 /// begin in steady-state heartbeating. `needs_rejoin` becomes `true`
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
 pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken) {
     // The coordinator task runs on its own `Client` (separate pool from the
     // build/data-path client), so its pool's (id → addr) registry starts empty.
@@ -421,6 +422,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
 /// leaves the group on close for dynamic members. Skips a cleared id (a
 /// from-scratch rejoin that never re-completed), which the broker wouldn't
 /// recognize anyway.
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort shutdown I/O, exercised by integration tests
 async fn leave_group(state: &CoordinatorState) {
     if state.member_id.is_empty() {
         return;
@@ -491,6 +493,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
 /// can't surface an error). Publishes the new id into the shared
 /// `coordinator_id` cell on success; logs and keeps the last-known id on
 /// failure (the next tick retries).
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort discovery I/O, exercised by integration tests
 async fn refind_after(state: &CoordinatorState, ctx: &str) {
     match find_coordinator(&state.client, &state.group_id).await {
         Ok(id) => state.coordinator_id.store(id, Ordering::Relaxed),
@@ -625,6 +628,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
 /// generation bump can return `ILLEGAL_GENERATION`, and surfacing that
 /// into `poll()` would break the KIP-429 transparency guarantee. Worst
 /// case the new owner re-delivers a few records (at-least-once).
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort revoke-time commit I/O, exercised by integration tests
 async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let revoked_set: HashSet<&(String, i32)> = revoked.iter().collect();
     let offsets: HashMap<(String, i32), (i64, i32)> = {

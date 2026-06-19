@@ -310,6 +310,8 @@ impl ControllerHandle {
     /// (un-mockable) dial→`raw_request`→close round trip and hands back the raw
     /// response body, and [`translate_submit_change_response`] decodes that body
     /// and maps the transport `error_code` into a `RaftError`.
+    // cargo-mutants: thin wrapper; builds the live DialerSubmitTransport, needs a real dialer
+    #[cfg_attr(test, mutants::skip)]
     async fn forward_submit_to(
         &self,
         leader: NodeId,

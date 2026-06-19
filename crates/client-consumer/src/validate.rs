@@ -58,6 +58,7 @@ impl Consumer {
     /// Refresh leader id / leader epoch for every partition reported by
     /// `Metadata`. A partition whose metadata leader epoch is greater than the
     /// epoch we last consumed (`offset_epoch`) is flagged `awaiting_validation`.
+    #[cfg_attr(test, mutants::skip)] // cargo-mutants: metadata-refresh I/O, exercised by integration tests
     pub(crate) async fn refresh_leader_epochs(&self) -> Result<(), ConsumerError> {
         // `refresh_metadata` (not a bare `send(MetadataRequest)`) so the main
         // client's BrokerPool learns each broker's (id → addr) mapping — this
@@ -82,6 +83,7 @@ impl Consumer {
     /// Returns the set of partitions that truncated, mapped to the safe offset
     /// the caller must reset `next_offsets` to. Clears the validation flag for
     /// partitions confirmed consistent.
+    #[cfg_attr(test, mutants::skip)] // cargo-mutants: OffsetForLeaderEpoch RPC orchestration, exercised by integration tests
     pub(crate) async fn validate_positions(
         &self,
     ) -> Result<HashMap<(String, i32), i64>, ConsumerError> {

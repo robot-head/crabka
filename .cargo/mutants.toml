@@ -76,26 +76,6 @@ exclude_re = [
     # The public `compress`/`decompress` dispatchers have no codec prefix, so
     # they are not matched and stay under test.
     "compression/src/lib\\.rs.* replace (gzip|snappy|lz4|zstd)_(compress|decompress) ->",
-    # KIP-939 idle-transaction reaper IO seam. The three-phase abort
-    # *orchestration* is now extracted into `sweep_with_backend`, unit-tested
-    # against a `mockall` `ReaperBackend` mock and mutation-caught. What stays
-    # excluded is the irreducible live IO with no offline signal:
-    #  - `TxnCoordinator::sweep_expired`: a thin wrapper that snapshots the live
-    #    `state` DashMap and delegates to `sweep_with_backend`.
-    #  - the `impl ReaperBackend for TxnCoordinator` adapter methods, which need a
-    #    live `__transaction_state` partition, the producer-id allocator, and
-    #    marker fan-out to partition leaders.
-    # The reaper's *decision* (`should_abort_idle_txn`, which skips 2PC) is also
-    # fully mutation-tested in `txn/two_pc.rs` and model-checked in
-    # `txn::two_pc_model`.
-    "broker/src/txn/coordinator\\.rs.*TxnCoordinator::sweep_expired",
-    "broker/src/txn/coordinator\\.rs.*<impl ReaperBackend for TxnCoordinator>::(is_coordinator_for|prepare_abort|dispatch_abort_markers|complete_abort)",
-    # `Broker::start_with_listeners` is the broker startup serve-loop: ~1.5k
-    # lines of task-spawn / listener-bind / supervision wiring with no
-    # unit-testable signal (exercised end-to-end by every in-process broker
-    # test). The KIP-939 reaper spawn-guard lives here; like the other
-    # serve-loop entrypoints above, mutate the spawned code, not the wiring.
-    "broker/src/broker\\.rs.*start_with_listeners",
     # crabka-kraft-core's `sim` module is `#[cfg(feature = "sim")]` and that
     # feature is OFF in the crate's default build. cargo-mutants tests a mutant
     # in crabka-kraft-core against the crate's own default features, so the whole
@@ -113,35 +93,32 @@ exclude_re = [
     # test requires a live MIT KDC fixture and is intentionally ignored unless
     # that fixture is running.
     "security/src/gssapi/provider\\.rs",
-    # Equivalent mutants: Jwks::empty is intentionally identical to
-    # Default::default(), and Reader::at_end returning false at exact EOF still
-    # falls into the next size-read's Truncated => break EOF path.
-    "security/src/jwks\\.rs.*replace Jwks::empty -> Self with Default::default\\(\\)",
+    # Equivalent mutant: Reader::at_end returning false at exact EOF still falls
+    # into the next size-read's Truncated => break EOF path. (Jwks::empty ==
+    # Default::default() is now skipped in-source via `#[mutants::skip]`.)
     "security/src/gssapi/keytab\\.rs.*replace Reader<'a>::at_end -> bool with false",
     # Mutating keytab entry-size reads to zero makes the parser loop on an
     # endless stream of zero-length records, so cargo-mutants can only classify
     # it as a timeout rather than a useful assertion gap.
     "security/src/gssapi/keytab\\.rs.*replace Reader<'a>::i32 -> Result<i32, KeytabError> with Ok\\(0\\)",
-    # client-producer builder:
-    # - build_init_producer_id_request is intentionally the protocol default
-    #   InitProducerId shape for idempotent-only producers (transactional_id=None,
-    #   transaction_timeout_ms=0), so returning Default is equivalent.
-    # - init_producer_id is the live Client RPC retry loop; its request shape,
-    #   retry classifier, deadline, and backoff boundaries are tested in pure
-    #   helpers, while observing the match guard requires a broker/client.
-    "(crates/)?client-producer/src/builder\\.rs.*replace build_init_producer_id_request -> InitProducerIdRequest with Default::default\\(\\)",
+    # client-producer builder: `init_producer_id` is the live Client RPC retry
+    # loop; its request shape, retry classifier, deadline, and backoff boundaries
+    # are tested in pure helpers, while observing the match guard requires a
+    # broker/client. (`build_init_producer_id_request` — the protocol-default
+    # InitProducerId shape for idempotent-only producers, so `-> Default` is
+    # equivalent — is now skipped in-source via `#[cfg_attr(test, mutants::skip)]`.)
     "(crates/)?client-producer/src/builder\\.rs.*replace match guard !is_retriable_coordinator_code\\(resp.error_code\\) with (true|false) in init_producer_id",
     "(crates/)?client-producer/src/builder\\.rs.*delete ! in init_producer_id",
     # crabka-metadata feature-registry equivalent mutants: today, the default
     # min floor for non-metadata.version features is genuinely 0, plain features
-    # declare no dependencies, share/streams default to 0 and support (0, 1),
-    # and validate_feature_dependencies is a no-op for the real dependency-free
-    # registry. Synthetic dependency behavior is unit-tested via check_deps.
+    # declare no dependencies, and share/streams default to 0 and support (0, 1).
+    # (`validate_feature_dependencies` — a no-op for the real dependency-free
+    # registry — is now skipped in-source via `#[mutants::skip]`; synthetic
+    # dependency behavior is unit-tested via check_deps.)
     "metadata/src/feature\\.rs.*replace Feature::min_required_floor -> i16 with 0",
     "metadata/src/feature\\.rs.*replace Feature::dependencies -> &'static\\[\\(&'static str, i16\\)\\] with Vec::leak\\(Vec::new\\(\\)\\)",
     "metadata/src/feature\\.rs.*replace <impl Feature for (GroupVersionFeature|ShareVersionFeature|StreamsVersionFeature)>::supported_range -> \\(i16, i16\\) with \\(0, 1\\)",
     "metadata/src/feature\\.rs.*replace <impl Feature for (ShareVersionFeature|StreamsVersionFeature)>::default_level -> i16 with 0",
-    "metadata/src/feature\\.rs.*replace validate_feature_dependencies -> Result<\\(\\), String> with Ok\\(\\(\\)\\)",
     # Metadata image dir-assignment: resizing an already-full directories vec to
     # the same length is a Vec no-op, so `<` -> `<=` is equivalent.
     "(crates/)?metadata/src/image\\.rs.*replace < with <= in MetadataImage::apply",
@@ -159,36 +136,10 @@ exclude_re = [
     # modules themselves.
     "schema-serde/src/format/(avro|json|protobuf)\\.rs",
     "schema-serde/src/format/mod\\.rs.*Binding::register",
-    # `AddPartitionsToTxn`'s start-timestamp stamp (`txnStartTimestamp` on the
-    # edge into Ongoing) is reaper-supporting bookkeeping: its only observable
-    # effect is *when* the (excluded) idle-transaction reaper measures the
-    # timeout from, so no unit test can kill a mutation of it. The function's
-    # actual add-partition logic is covered by the broker txn integration suite.
-    "add_partitions_to_txn\\.rs.*process_one_txn",
     # NB: `crates/broker/src/bin/**` (the broker entrypoint, incl. its
     # `BrokerConfig` field wiring and `wait_for_termination_signal`) is excluded
     # via `exclude_globs` above — name-regex exclusions don't reliably match the
     # struct-field-deletion mutants the entrypoint generates.
-    # raft leader-forwarding IO seam (no offline signal). The serialize/translate
-    # decisions are extracted into `encode_submit_change_body` /
-    # `translate_submit_change_response` / `forward_submit_via`, unit-tested
-    # against a `mockall` `SubmitChangeTransport` mock and mutation-caught.
-    # `ControllerHandle::forward_submit_to` is now a thin wrapper that constructs
-    # the live `DialerSubmitTransport` (from `self.dialer`) and delegates — only
-    # reachable with a real dialer. (The socket adapter itself,
-    # `DialerSubmitTransport::send_submit_change`, carries `#[cfg_attr(test,
-    # mutants::skip)]` in-source: its `ConnectionOptions { .. }` literal generates
-    # a struct-field-deletion mutant that name-regex exclusions can't filter.)
-    "raft/src/controller\\.rs.*ControllerHandle::forward_submit_to",
-    # `PostgresWalSource::connect` is the only connect-postgres function with no
-    # offline signal: it dials a live PostgreSQL via `TokioPgCatalog::connect`.
-    # The connection-setup *logic* it used to inline (publication/slot
-    # validation + slot orchestration) is now extracted into `initialize` /
-    # `validate_publication_tables` / `validate_publication_settings` /
-    # `ensure_slot`, which are unit-tested against a `mockall` `PgCatalog` mock
-    # (`source::catalog_tests`) and carry real mutation signal. The live
-    # row-extraction adapter behind that seam (`catalog.rs`) is excluded below.
-    "connect-postgres/src/source\\.rs.*PostgresWalSource::connect",
     # The parsed LSN high half is shifted left by 32 bits and the low half is
     # bounded to 32 bits, so OR and XOR produce identical values here.
     "connect-postgres/src/offset\\.rs.*replace \\| with \\^ in <impl FromStr for PgLsn>::from_str",
@@ -196,33 +147,14 @@ exclude_re = [
     # forever (`transaction.is_some() || row.commit_lsn.is_none()`), so
     # cargo-mutants reports a timeout instead of an assertion gap.
     "connect-postgres/src/source\\.rs.*replace && with \\|\\| in <impl Source<Bytes, Bytes> for PostgresWalSource>::poll",
-    # client-core's `FetchTransport` seam. The request-construction +
-    # response-decoding + isolation/fallback decisions are extracted into
-    # `fetch_partition_on` / `fetch_partition_with_isolation_on`, unit-tested
-    # against a `mockall` mock and mutation-caught. What stays excluded is the
-    # live socket IO with no offline signal:
-    #  - `<impl FetchTransport for Connection>::fetch`: the adapter issuing one
-    #    fetch over a broker `Connection`.
-    #  - the public `fetch_partition` / `fetch_partition_with_isolation` entry
-    #    points, now thin wrappers that build the `Connection` adapter and delegate
-    #    to the `_on` cores — only reachable with a live broker socket.
-    "(crates/)?client-core/src/fetch\\.rs.*<impl FetchTransport for Connection>::fetch",
-    "(crates/)?client-core/src/fetch\\.rs.*replace fetch_partition(_with_isolation)? ->",
-    # `BrokerPool::close_all` consumes `self` and explicitly drops the pooled
-    # connections; that is behaviourally identical to letting the consumed `self`
-    # drop at end of scope, so `close_all -> ()` is an equivalent mutant. The
-    # pool's eviction/bootstrap/registry decisions ARE mutation-tested
-    # (`BrokerPool::evict` and `bootstrap_connection` are unit-tested in pool.rs).
-    # `(<C>)?` tolerates the generic-parameter form (`BrokerPool<C>::close_all`).
-    "(crates/)?client-core/src/pool\\.rs.*replace BrokerPool(<C>)?::close_all with \\(\\)",
-    # The public Client facade and Connection wire helpers are exercised by
-    # `crates/client-core/tests/unit.rs`, which requires the crate's `mock`
-    # feature so the in-process MockBroker is exported. The default package
-    # mutation run does not enable package-specific features because this
-    # workspace-wide config must also work for crates with no `mock` feature.
-    "(crates/)?client-core/src/client\\.rs.*Client::(knows_broker|evict_broker|refresh_metadata|close)",
-    "(crates/)?client-core/src/client\\.rs.*BrokerHandle<'_>::send",
-    "(crates/)?client-core/src/connection\\.rs.*Connection::(send|raw_request|versions|close)",
+    # (client-core's `FetchTransport`/pool/`Client`/`Connection` live-IO seams
+    # are skipped in-source via `#[cfg_attr(test, mutants::skip)]`: the adapter
+    # `<impl FetchTransport for Connection>::fetch`, the thin `fetch_partition`
+    # wrappers, `BrokerPool::close_all` (equivalent: consume-self drop), and the
+    # `Client`/`Connection` facade/wire helpers — all need a live broker socket
+    # and are exercised by the `mock`-feature tests in `tests/unit.rs`. Their
+    # socket-free cores (`fetch_partition_on`, pool eviction/bootstrap) stay
+    # mutation-tested.)
     # MockBroker is itself the feature-gated test harness used by the client-core
     # unit target; mutating its stop/connection loop has no signal in the
     # default-feature package run, which does not build that test target.
@@ -247,27 +179,12 @@ exclude_re = [
     # `ensure_produce_read_roundtrip` and every integration suite that reads a
     # topic back.
     "replicator/src/admin_util\\.rs.*replace >= with < in read_all",
-    # `FlowWorker::start`'s build-retry loop give-up/accumulation control
-    # (`elapsed >= MAX_BUILD_ELAPSED`, `elapsed += backoff`) is only exercised by
-    # a *persistently* unreachable cluster: a real assertion needs a cluster that
-    # stays down for the full ~30s retry budget (no non-flaky unit signal), same
-    # rationale as the serve-loop/entrypoint exclusions above. The backoff math
-    # itself is factored into the pure `next_backoff` helper, which IS
-    # unit-tested (doubling + cap), and the happy-path build is covered by
-    # `worker_replicates_one_flow`.
-    "replicator/src/worker\\.rs.*FlowWorker::start",
-    # Background-task graceful-shutdown teardown (`shutdown`): each signals a
-    # `watch` channel then awaits the spawned loop's `JoinHandle`. Dropping the
-    # handle merely detaches the task, so the *observable* difference between a
-    # real shutdown and the `-> ()` mutant (whether the loop is awaited to
-    # completion vs left running detached) is pure timing — any "did it actually
-    # stop?" assertion is flaky. Same teardown-glue rationale as the serve-loop
-    # entrypoints above; the start path and the work each task performs are
-    # tested. Covers FlowSupervisor, FlowWorker, HeartbeatTask, CheckpointTask.
-    "replicator/src/supervisor\\.rs.*FlowSupervisor::shutdown",
-    "replicator/src/worker\\.rs.*FlowWorker::shutdown",
-    "replicator/src/tasks/heartbeat\\.rs.*HeartbeatTask::shutdown",
-    "replicator/src/tasks/checkpoint\\.rs.*CheckpointTask::shutdown",
+    # (replicator's `FlowWorker::start` retry loop and the background-task
+    # graceful-shutdown teardowns — FlowSupervisor/FlowWorker/HeartbeatTask/
+    # CheckpointTask `shutdown` — are skipped in-source via `#[cfg_attr(test,
+    # mutants::skip)]`: start needs a persistently-unreachable cluster and the
+    # shutdowns differ only in task-await timing. The pure `next_backoff` helper
+    # and each task's work stay mutation-tested.)
     # Two infinite-loop mutants that HANG rather than yield a wrong result, so
     # cargo-mutants reports a TIMEOUT, not an assertion gap (same category as the
     # connect-postgres `poll` requeue exclusion above):
@@ -285,12 +202,10 @@ exclude_re = [
     "(crates/)?client-consumer/src/poll\\.rs.*replace < with (==|<=) in Consumer::poll",
     "(crates/)?client-consumer/src/poll\\.rs.*delete ! in Consumer::poll",
     "(crates/)?client-consumer/src/poll\\.rs.*replace >= with < in Consumer::poll",
-    # client-consumer commit entrypoints are live coordinator RPC wrappers. The
-    # socket-free pieces they own (request construction, offset/epoch snapshot,
-    # and response error mapping) are mutation-tested in commit.rs helpers; the
-    # public methods themselves need a broker/coordinator connection to observe.
-    "client-consumer/src/commit\\.rs.*replace Consumer::commit_sync -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
-    "client-consumer/src/commit\\.rs.*replace Consumer::commit_async with \\(\\)",
+    # (client-consumer `Consumer::commit_sync` / `commit_async` are live
+    # coordinator RPC wrappers, skipped in-source via `#[cfg_attr(test,
+    # mutants::skip)]`; their socket-free request/snapshot/error-mapping helpers
+    # in commit.rs stay mutation-tested.)
     # client-consumer coordinator edge cases:
     # - `find_coordinator` is the live Client RPC/metadata-refresh wrapper; its
     #   request construction and response projection are mutation-tested in pure
@@ -301,8 +216,6 @@ exclude_re = [
     #   than a useful assertion gap; the helpers' boundaries are unit-tested.
     "(crates/)?client-consumer/src/coordinator\\.rs.*replace find_coordinator -> Result<i32, ConsumerError> with Ok\\((-)?[0-9]+\\)",
     "(crates/)?client-consumer/src/coordinator\\.rs.*replace match guard !is_retriable_coordinator_code\\(code\\(&r\\)\\) with true in with_coordinator_refind",
-    "(crates/)?client-consumer/src/coordinator\\.rs.*replace refind_after with \\(\\)",
-    "(crates/)?client-consumer/src/coordinator\\.rs.*replace (run|leave_group|commit_revoked) with \\(\\)",
     "(crates/)?client-consumer/src/coordinator\\.rs.*replace (rejoin|prime_offsets) -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
     "(crates/)?client-consumer/src/coordinator\\.rs.*replace join_and_sync -> Result<\\(Vec<\\(String, i32\\)>, i32, String\\), ConsumerError> with Ok\\(",
     "(crates/)?client-consumer/src/coordinator\\.rs.*replace (==|!=) with (==|!=) in join_and_sync",
@@ -314,17 +227,11 @@ exclude_re = [
     # In `classify`, changing the safe-offset clamp from `< 0` to `<= 0` is
     # equivalent: for `leader_end_offset == 0`, both branches return `0`.
     "crates/client-consumer/src/position\\.rs:57:47: replace < with <= in classify",
-    # client-consumer validation entrypoints are live metadata / leader-epoch
-    # RPC wrappers. Their socket-free decisions (epoch advancement, eligibility,
-    # routing, stale response handling, and broker-error reset) are factored
-    # into helpers in validate.rs and mutation-tested there.
-    "(crates/)?client-consumer/src/validate\\.rs.*replace Consumer::refresh_leader_epochs -> Result<\\(\\), ConsumerError> with Ok\\(\\(\\)\\)",
-    "(crates/)?client-consumer/src/validate\\.rs.*replace Consumer::validate_positions -> Result<HashMap<\\(String, i32\\), i64>, ConsumerError> with Ok\\(",
-    # Share coordinator `run` is the background heartbeat serve-loop. Request
-    # construction, response classification, assignment replacement, and leave
-    # request construction are mutation-tested in pure helpers; the loop itself
-    # is task/timer/shutdown wiring.
-    "(crates/)?client-consumer/src/share/coordinator\\.rs.*replace run with \\(\\)",
+    # (client-consumer `Consumer::refresh_leader_epochs` / `validate_positions`
+    # — live metadata/leader-epoch RPC wrappers — and the share coordinator's
+    # background heartbeat `run` serve-loop are skipped in-source via
+    # `#[cfg_attr(test, mutants::skip)]`; their socket-free decision helpers in
+    # validate.rs / share helpers stay mutation-tested.)
     # Share poll/ack live entrypoints send protocol requests over a Client. The
     # request builders, error predicates, topic-id resolution, range math, and
     # ack grouping are mutation-tested in socket-free helpers in share/poll.rs;
@@ -335,22 +242,14 @@ exclude_re = [
     #   counter at 0 so the drain loop never terminates (companion to the `>=`
     #   drain-bound exclusion above).
     "replicator/src/admin_util\\.rs.*replace \\+= with \\*= in read_all",
-    # StreamsApp::streams_builder intentionally returns a fresh empty builder;
-    # `StreamsBuilder::default()` is implemented as the same `StreamsBuilder::new()`.
-    "(crates/)?client-streams/src/streams_app\\.rs.*replace StreamsApp::streams_builder -> StreamsBuilder with Default::default\\(\\)",
     # Changing the COORDINATOR_LOAD_IN_PROGRESS retry guard from `==` to `!=`
     # makes a successful StreamsMembership join retry forever, so cargo-mutants
     # can only classify it as a timeout rather than an assertion gap.
     "(crates/)?client-streams/src/membership/client\\.rs.*replace == with != in StreamsMembership::start",
-    # Manual Debug impls carry no behavioural signal: FileEd25519Signer's exists
-    # only to keep private key material out of logs; KafkaTopicAuditSink's only
-    # because BrokerMetrics is not Debug.
-    "audit/src/signing\\.rs.*<impl std::fmt::Debug for FileEd25519Signer>::fmt",
-    "broker/src/audit_sink\\.rs.*<impl std::fmt::Debug for KafkaTopicAuditSink>::fmt",
-    # now_ms is a wall-clock helper; checkpoint timestamps are informational (the
-    # signed chain head + seq are what gets verified), so a constant clock is
-    # behaviourally indistinguishable to any non-flaky test.
-    "audit/src/log\\.rs.*replace now_ms -> i64",
+    # (The manual `Debug` impls — `FileEd25519Signer` (keeps key material out of
+    # logs) and `KafkaTopicAuditSink` (only because BrokerMetrics isn't Debug) —
+    # and the `now_ms` wall-clock helper are skipped in-source via
+    # `#[cfg_attr(test, mutants::skip)]`: no behavioural signal.)
     # interval_at start instant: shifting it only moves the first replay/checkpoint
     # tick by one period — no signal a deterministic test can assert.
     "audit/src/log\\.rs.*replace \\+ with - in AuditWriter::run",

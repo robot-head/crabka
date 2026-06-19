@@ -43,5 +43,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+mutants = { workspace = true }
 tempfile = { workspace = true }
 crabka-broker = { path = "../broker", features = ["test-helpers"] }

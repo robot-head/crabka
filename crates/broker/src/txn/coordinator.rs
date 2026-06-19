@@ -376,6 +376,8 @@ impl TxnCoordinator {
     /// abort-on-stale-Ongoing path); a concurrent caller that changed the entry
     /// out from under us aborts this reap of that tid (re-validated before the
     /// Complete write). Returns the tids it finalized.
+    // cargo-mutants: I/O orchestration over live DashMap/partition state
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn sweep_expired(&self, now_ms: i64, txnv: TxnVersion) -> Vec<String> {
         // Snapshot the candidate tids first so we don't hold DashMap shard locks
         // across the async abort work; the orchestration then drives the live
@@ -492,11 +494,15 @@ impl TxnCoordinator {
 /// the pure helper / orchestration logic above.
 #[async_trait]
 impl ReaperBackend for TxnCoordinator {
+    // cargo-mutants: thin adapter over inherent method / live lock state
+    #[cfg_attr(test, mutants::skip)]
     async fn is_coordinator_for(&self, tid: &str) -> bool {
         let p = self.partition_for(tid);
         self.leader_partitions.read().await.contains(&p)
     }
 
+    // cargo-mutants: I/O over live entry locks + raft persistence
+    #[cfg_attr(test, mutants::skip)]
     async fn prepare_abort(&self, tid: &str, now_ms: i64, txnv: TxnVersion) -> Option<TxnEntry> {
         let handle = self.get(tid)?;
         let prepared = {
@@ -514,6 +520,8 @@ impl ReaperBackend for TxnCoordinator {
         Some(prepared)
     }
 
+    // cargo-mutants: writes abort markers to live partition logs
+    #[cfg_attr(test, mutants::skip)]
     async fn dispatch_abort_markers(&self, entry: &TxnEntry) {
         use crate::txn::marker::{MarkerType, build_marker_batch};
         for tp in &entry.partitions {
@@ -543,6 +551,8 @@ impl ReaperBackend for TxnCoordinator {
         }
     }
 
+    // cargo-mutants: I/O over live entry locks + raft persistence
+    #[cfg_attr(test, mutants::skip)]
     async fn complete_abort(
         &self,
         prepared: &TxnEntry,

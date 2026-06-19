@@ -256,6 +256,8 @@ pub fn bootstrap_feature_records_with_overrides(
 /// level. Returns `Err` naming the first unmet dependency. A no-op for today's
 /// registry (no feature declares dependencies) but enforces the rule at format
 /// time, mirroring the `UpdateFeatures` handler.
+// cargo-mutants: no-op for today's registry (no feature declares deps).
+#[cfg_attr(test, mutants::skip)]
 pub fn validate_feature_dependencies(resolved: &BTreeMap<String, i16>) -> Result<(), String> {
     check_deps(resolved, |name, level| {
         feature(name).map_or(&[][..], |f| f.dependencies(level))

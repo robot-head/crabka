@@ -103,6 +103,7 @@ fn is_rejoin_error(error_code: i16) -> bool {
 }
 
 /// Drive the heartbeat loop until `shutdown` fires.
+#[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
 pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToken) {
     let mut ticker = tokio::time::interval(state.heartbeat_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

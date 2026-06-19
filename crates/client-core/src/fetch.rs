@@ -31,6 +31,8 @@ pub(crate) trait FetchTransport: Send + Sync {
 
 #[async_trait::async_trait]
 impl FetchTransport for Connection {
+    // cargo-mutants: thin Connection adapter; logic lives in fetch_partition_on
+    #[cfg_attr(test, mutants::skip)]
     async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, ClientError> {
         self.send(req).await
     }
@@ -64,6 +66,8 @@ pub struct FetchedRecord {
 /// partition-level `error_code` (e.g. `OFFSET_OUT_OF_RANGE`,
 /// `NOT_LEADER_OR_FOLLOWER`, `UNKNOWN_TOPIC_ID`) so the caller can react
 /// instead of silently re-fetching the same offset forever.
+// cargo-mutants: thin wrapper over fetch_partition_on (tested core)
+#[cfg_attr(test, mutants::skip)]
 pub async fn fetch_partition(
     conn: &Connection,
     topic: &str,
@@ -121,7 +125,9 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
 /// # Errors
 ///
 /// Same as [`fetch_partition`].
+// cargo-mutants: thin wrapper over fetch_partition_with_isolation_on (tested core)
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(test, mutants::skip)]
 pub async fn fetch_partition_with_isolation(
     conn: &Connection,
     topic: &str,

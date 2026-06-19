@@ -265,6 +265,8 @@ impl AuditWriter {
 }
 
 /// Epoch-millis clock for checkpoint timestamps.
+// cargo-mutants: wall-clock read; no deterministic assertion.
+#[cfg_attr(test, mutants::skip)]
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

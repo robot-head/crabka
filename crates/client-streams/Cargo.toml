@@ -81,6 +81,7 @@ crabka-broker = { version = "0.3.7", path = "../broker", features = ["test-helpe
 crabka-schema-registry = { version = "0.3", path = "../schema-registry" }
 crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
 hex = { workspace = true }
+mutants = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
 proptest = { workspace = true }
