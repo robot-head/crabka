@@ -35,8 +35,8 @@ pub fn section_front_matter(title: &str, weight: u32, body: &str) -> String {
     )
 }
 
-/// Write the full `reference/` tree (operator + broker pages and section
-/// indexes) under `out_dir`. Overwrites existing files.
+/// Write the full reference tree (operator + broker pages and section indexes)
+/// under `out_dir`. Overwrites existing files.
 ///
 /// # Errors
 /// Returns an error if any directory cannot be created or any file cannot be
@@ -54,7 +54,7 @@ pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
         out_dir.join("_index.md"),
         section_front_matter(
             "Reference",
-            30,
+            40,
             "Auto-generated API references for the Crabka operator and broker.",
         ),
     )?;

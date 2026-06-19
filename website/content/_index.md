@@ -4,13 +4,13 @@ sort_by = "weight"
 
 [extra]
 lead = "A native-Rust Kafka-compatible broker and toolkit. Crabka speaks the Kafka wire protocol byte-for-byte, runs KRaft without a JVM, and keeps the operator, clients, schema registry, gateway, and rebalancer in one workspace."
-url = "/guide/overview/"
+url = "/docs/"
 url_button = "Get started"
 url2 = "/benchmarks/crabka-vs-strimzi/"
 url2_button = "See the benchmarks"
 repo_url = "https://github.com/robot-head/crabka"
 repo_license = "Apache 2.0"
-repo_version = "v0.3.6"
+repo_version = "v0.3.7"
 
 # --- Headline numbers (rendered as the stat band under the hero). ---
 # Sourced from /benchmarks/crabka-vs-strimzi/ — an operator-managed,
@@ -124,9 +124,9 @@ content = "Native producer, consumer, admin, and streams clients, Schema Registr
 
 # --- Top navigation. ---
 [[extra.menu.main]]
-name = "Guide"
-url = "/guide/"
-section = "guide"
+name = "Documentation"
+url = "/docs/"
+section = "docs"
 weight = 10
 
 [[extra.menu.main]]
@@ -134,12 +134,6 @@ name = "Benchmarks"
 url = "/benchmarks/"
 section = "benchmarks"
 weight = 15
-
-[[extra.menu.main]]
-name = "Reference"
-url = "/reference/"
-section = "reference"
-weight = 20
 +++
 
 Crabka is a Rust reimplementation of Apache Kafka. It speaks the Kafka wire

@@ -1,6 +1,6 @@
 +++
 title = "Playground"
-weight = 40
+weight = 30
 template = "docs/page.html"
 
 [extra]
@@ -9,11 +9,10 @@ mermaid = true
 
 ## Simulate consensus in your browser
 
-Crabka's metadata quorum is a native KRaft (Raft, KIP-595) implementation, and
-its core is **deterministic** — given the same sequence of events it always
-reaches the same state. That property makes it testable, and it also makes it
-*demonstrable*: the same engine that runs in production runs right here in your
-browser.
+Crabka's metadata quorum is a native KRaft implementation. Its core is
+deterministic: given the same sequence of events, it reaches the same state.
+That makes the consensus engine testable, and it also makes it demonstrable.
+The same engine that backs the broker can run here in your browser.
 
 The playground below compiles the deterministic consensus core to
 **WebAssembly** and drives it from JavaScript through custom in-memory
@@ -46,11 +45,11 @@ peer messages over a JS-controlled in-memory bus; every step appends to an event
 trace; the trace is rendered to SVG and fed back to the UI as an interactive
 timeline.
 
-The seam that makes this possible already existed in the engine: the consensus
+The boundary that makes this possible already existed in the engine: the consensus
 state machine is a pure, sans-IO `on_event(event, log, now) -> [Action]`
 function — it never reads the clock, opens a socket, or writes to disk. The same
 deterministic multi-node simulator the integration tests and the
-[generated failure diagrams](../../reference/concepts/failure-scenarios/) use is what
+[generated failure diagrams](/docs/reference/concepts/failure-scenarios/) use is what
 this page drives, only here *you* supply the events.
 
 To reach the browser, that core was lifted out of the async engine into a
@@ -65,4 +64,4 @@ production.
 
 For the same partition, reordering, and duplication scenarios rendered as
 curated, generated sequence diagrams, see the
-[failure-scenario reference](../../reference/concepts/failure-scenarios/).
+[failure-scenario reference](/docs/reference/concepts/failure-scenarios/).

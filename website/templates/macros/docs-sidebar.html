@@ -7,14 +7,14 @@
 
    The group containing the current page (and all its ancestor groups) is
    rendered <details open> and the current page link is marked `active`.
-   `current_section` is the first path segment (e.g. "reference"), passed in
+   `current_section` is the first path segment (e.g. "docs"), passed in
    from docs/page.html and docs/section.html.
 
    Implementation note: Tera macro-definition files may not contain `import`
    statements (top-level or inside a macro body), and `self::` resolves against
    the *calling* template rather than this file — so true self-recursion isn't
-   available here. The reference tree is only ~2 levels deep (e.g.
-   Reference -> Operator (CRDs) -> [Kafka, KafkaUser, ...]), so this uses a
+   available here. The docs tree is only ~3 levels deep (e.g.
+   Documentation -> Reference -> Operator (CRDs) -> [Kafka, KafkaUser, ...]), so this uses a
    bounded, manually-nested 3-level expansion, which covers the real tree with
    room to spare. The active-page detection (`__contains_current`) is shared by
    inlining the same `starting_with` test at each level. #}
