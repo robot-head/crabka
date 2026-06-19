@@ -6,7 +6,7 @@
 
 Apache Kafka legacy (v0/v1) `MessageSet` codec, with bridges to and from the v2 `RecordBatch` types.
 
-See the [Kafka protocol docs](https://kafka.apache.org/protocol.html#messageset) for the wire layout this crate implements. v0 carries no per-message timestamp; v1 adds an `i64` timestamp per message (KIP-32). Compression in both is signalled in the low 3 bits of the per-message `attributes` byte, with the compressed payload appearing as a single outer message whose `value` is a nested (uncompressed) MessageSet.
+See the [Kafka message format docs](https://kafka.apache.org/43/implementation/message-format/) for the wire layout this crate implements. v0 carries no per-message timestamp; v1 adds an `i64` timestamp per message (KIP-32). Compression in both is signalled in the low 3 bits of the per-message `attributes` byte, with the compressed payload appearing as a single outer message whose `value` is a nested (uncompressed) MessageSet.
 
 This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
 
