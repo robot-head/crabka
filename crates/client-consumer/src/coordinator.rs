@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -54,10 +55,7 @@ pub(crate) const NOT_COORDINATOR: i16 = 16;
 /// How long `with_coordinator_retry` keeps retrying a cold coordinator before
 /// surfacing the last error. Matches a typical client `request.timeout.ms`.
 pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// `FindCoordinator` `key_type` for a consumer group (vs. `1` = TRANSACTION,
-/// `2` = SHARE). With this key-type the request `key` is the group id.
-const KEY_TYPE_GROUP: i8 = 0;
+const UNKNOWN_EPOCH: i32 = -1;
 
 pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
@@ -86,7 +84,7 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 /// Discover the broker that currently coordinates `group_id` and return its
 /// node id.
 ///
-/// Sends `FindCoordinator(key = group_id, key_type = GROUP)` over the bootstrap
+/// Sends `FindCoordinator(key = group_id)` over the bootstrap
 /// connection (any broker can answer `FindCoordinator`), retrying cold/loading
 /// coordinator codes (14/15/16) with backoff. On success we `refresh_metadata`
 /// so the pool learns the coordinator broker's address (it appears in the
@@ -105,15 +103,7 @@ pub(crate) async fn find_coordinator(
         let group_id = group_id.to_string();
         async move {
             client
-                .send(FindCoordinatorRequest {
-                    key: group_id.clone(),
-                    key_type: KEY_TYPE_GROUP,
-                    // v4+ carries the key(s) in `coordinator_keys`; older
-                    // versions ignore it and use `key`. Populating both
-                    // keeps us version-agnostic on the negotiated wire form.
-                    coordinator_keys: vec![group_id],
-                    ..Default::default()
-                })
+                .send(build_find_coordinator_request(group_id))
                 .await
                 .map_err(ConsumerError::from)
         }
@@ -135,6 +125,50 @@ pub(crate) async fn find_coordinator(
     // the coordinator isn't a separately dialable broker.
     client.refresh_metadata().await?;
     Ok(node_id)
+}
+
+fn build_find_coordinator_request(group_id: String) -> FindCoordinatorRequest {
+    FindCoordinatorRequest {
+        key: group_id.clone(),
+        // v4+ carries the key(s) in `coordinator_keys`; older versions ignore
+        // it and use `key`. Populating both keeps us version-agnostic on the
+        // negotiated wire form.
+        coordinator_keys: vec![group_id],
+        ..Default::default()
+    }
+}
+
+fn retry_deadline_elapsed(start: tokio::time::Instant, timeout: Duration) -> bool {
+    start.elapsed() >= timeout
+}
+
+fn next_backoff(backoff: Duration, max_backoff: Duration) -> Duration {
+    (backoff * 2).min(max_backoff)
+}
+
+fn build_leave_group_request(group_id: String, member_id: String) -> LeaveGroupRequest {
+    LeaveGroupRequest {
+        group_id,
+        member_id: member_id.clone(),
+        members: vec![MemberIdentity {
+            member_id,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn build_heartbeat_request(
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+) -> HeartbeatRequest {
+    HeartbeatRequest {
+        group_id,
+        generation_id,
+        member_id,
+        ..Default::default()
+    }
 }
 
 /// Send a group-coordinator RPC to the *current* coordinator broker, and on a
@@ -168,14 +202,14 @@ where
         let needs_refind = match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Ok(r);
                 }
                 // Retriable broker code: the coordinator likely moved.
                 true
             }
             Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
                 // The socket to the coordinator is gone (bounced / failed
@@ -201,7 +235,7 @@ where
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff, MAX_BACKOFF);
     }
 }
 
@@ -228,19 +262,19 @@ where
         match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Ok(r);
                 }
             }
             Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
-                if start.elapsed() >= timeout {
+                if retry_deadline_elapsed(start, timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
             }
             Err(e) => return Err(e),
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = next_backoff(backoff, MAX_BACKOFF);
     }
 }
 
@@ -279,6 +313,7 @@ pub(crate) struct CoordinatorState {
 }
 
 /// Outcome of a single heartbeat RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatOutcome {
     /// `error_code == 0`.
     Ok,
@@ -294,6 +329,15 @@ enum HeartbeatOutcome {
     RejoinFromScratch,
     /// Transport error or unexpected non-fatal broker code; retry on next tick.
     Transient,
+}
+
+fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
+    match error_code {
+        0 => HeartbeatOutcome::Ok,
+        27 | 22 => HeartbeatOutcome::NeedRejoin,
+        25 => HeartbeatOutcome::RejoinFromScratch,
+        _ => HeartbeatOutcome::Transient,
+    }
 }
 
 /// Drive the heartbeat + rebalance loop until `shutdown` fires.
@@ -390,15 +434,10 @@ async fn leave_group(state: &CoordinatorState) {
     let coordinator = state
         .client
         .broker(state.coordinator_id.load(Ordering::Relaxed));
-    let send = coordinator.send(LeaveGroupRequest {
-        group_id: state.group_id.clone(),
-        member_id: state.member_id.clone(),
-        members: vec![MemberIdentity {
-            member_id: state.member_id.clone(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    });
+    let send = coordinator.send(build_leave_group_request(
+        state.group_id.clone(),
+        state.member_id.clone(),
+    ));
     let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
 }
 
@@ -413,24 +452,23 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
     let result = state
         .client
         .broker(state.coordinator_id.load(Ordering::Relaxed))
-        .send(HeartbeatRequest {
-            group_id: state.group_id.clone(),
-            generation_id: state.generation_id,
-            member_id: state.member_id.clone(),
-            ..Default::default()
-        })
+        .send(build_heartbeat_request(
+            state.group_id.clone(),
+            state.generation_id,
+            state.member_id.clone(),
+        ))
         .await;
     match result {
-        Ok(r) if r.error_code == 0 => HeartbeatOutcome::Ok,
-        Ok(r) if r.error_code == 27 || r.error_code == 22 => HeartbeatOutcome::NeedRejoin,
-        Ok(r) if r.error_code == 25 => HeartbeatOutcome::RejoinFromScratch,
-        Ok(r) if is_retriable_coordinator_code(r.error_code) => {
-            refind_after(state, "heartbeat").await;
-            HeartbeatOutcome::Transient
-        }
         Ok(r) => {
-            tracing::warn!(error_code = r.error_code, "unexpected heartbeat error");
-            HeartbeatOutcome::Transient
+            let outcome = heartbeat_outcome(r.error_code);
+            if matches!(outcome, HeartbeatOutcome::Transient) {
+                if is_retriable_coordinator_code(r.error_code) {
+                    refind_after(state, "heartbeat").await;
+                } else {
+                    tracing::warn!(error_code = r.error_code, "unexpected heartbeat error");
+                }
+            }
+            outcome
         }
         Err(crabka_client_core::ClientError::Disconnected) => {
             // Lost the socket to the coordinator (bounced / failed over):
@@ -598,9 +636,9 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
             // Latest) means no records were polled, so there is no progress to
             // preserve — committing it just adds a blocking round-trip that
             // widens the mid-rebalance generation-race window.
-            .filter(|(k, v)| revoked_set.contains(k) && **v > 0 && **v != i64::MAX)
+            .filter(|(k, v)| should_commit_revoked_offset(revoked_set.contains(k), **v))
             .map(|(k, v)| {
-                let epoch = pos.get(k).map_or(-1, |p| p.offset_epoch);
+                let epoch = pos.get(k).map_or(UNKNOWN_EPOCH, |p| p.offset_epoch);
                 (k.clone(), (*v, epoch))
             })
             .collect()
@@ -613,19 +651,89 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let res = state
         .client
         .broker(state.coordinator_id.load(Ordering::Relaxed))
-        .send(OffsetCommitRequest {
-            group_id: state.group_id.clone(),
-            generation_id_or_member_epoch: state.generation_id,
-            member_id: state.member_id.clone(),
+        .send(build_revoked_commit_request(
+            state.group_id.clone(),
+            state.generation_id,
+            state.member_id.clone(),
             topics,
-            ..Default::default()
-        })
+        ))
         .await;
     match res {
         Ok(_) => {}
         Err(e) => {
             tracing::warn!(error = %e, "revoke-time offset commit failed; partitions may re-deliver");
         }
+    }
+}
+
+fn should_commit_revoked_offset(is_revoked: bool, next_offset: i64) -> bool {
+    is_revoked && next_offset > 0 && next_offset != i64::MAX
+}
+
+fn build_revoked_commit_request(
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    topics: Vec<crabka_protocol::owned::offset_commit_request::OffsetCommitRequestTopic>,
+) -> OffsetCommitRequest {
+    OffsetCommitRequest {
+        group_id,
+        generation_id_or_member_epoch: generation_id,
+        member_id,
+        topics,
+        ..Default::default()
+    }
+}
+
+fn build_join_group_request(
+    group_id: String,
+    member_id: String,
+    session_timeout_ms: i32,
+    rebalance_timeout_ms: i32,
+    protocol_name: String,
+    subscription_bytes: Bytes,
+) -> JoinGroupRequest {
+    JoinGroupRequest {
+        group_id,
+        protocol_type: "consumer".into(),
+        member_id,
+        session_timeout_ms,
+        rebalance_timeout_ms,
+        protocols: vec![JoinGroupRequestProtocol {
+            name: protocol_name,
+            metadata: subscription_bytes,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn build_sync_group_assignment(
+    member_id: String,
+    partitions: &[(String, i32)],
+) -> SyncGroupRequestAssignment {
+    SyncGroupRequestAssignment {
+        member_id,
+        assignment: encode_assignment(partitions),
+        ..Default::default()
+    }
+}
+
+fn build_sync_group_request(
+    group_id: String,
+    generation_id: i32,
+    member_id: String,
+    chosen_protocol: String,
+    assignments: Vec<SyncGroupRequestAssignment>,
+) -> SyncGroupRequest {
+    SyncGroupRequest {
+        group_id,
+        generation_id,
+        member_id,
+        protocol_type: Some("consumer".into()),
+        protocol_name: Some(chosen_protocol),
+        assignments,
+        ..Default::default()
     }
 }
 
@@ -682,19 +790,14 @@ async fn join_and_sync(
             async move {
                 client
                     .broker(target)
-                    .send(JoinGroupRequest {
+                    .send(build_join_group_request(
                         group_id,
-                        protocol_type: "consumer".into(),
                         member_id,
                         session_timeout_ms,
                         rebalance_timeout_ms,
-                        protocols: vec![JoinGroupRequestProtocol {
-                            name: protocol_name,
-                            metadata: subscription_bytes,
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    })
+                        protocol_name,
+                        subscription_bytes,
+                    ))
                     .await
                     .map_err(ConsumerError::from)
             }
@@ -727,19 +830,14 @@ async fn join_and_sync(
                 async move {
                     client
                         .broker(target)
-                        .send(JoinGroupRequest {
+                        .send(build_join_group_request(
                             group_id,
-                            protocol_type: "consumer".into(),
-                            member_id: assigned_id,
+                            assigned_id,
                             session_timeout_ms,
                             rebalance_timeout_ms,
-                            protocols: vec![JoinGroupRequestProtocol {
-                                name: protocol_name,
-                                metadata: subscription_bytes,
-                                ..Default::default()
-                            }],
-                            ..Default::default()
-                        })
+                            protocol_name,
+                            subscription_bytes,
+                        ))
                         .await
                         .map_err(ConsumerError::from)
                 }
@@ -811,11 +909,7 @@ async fn join_and_sync(
         };
         assignments
             .into_iter()
-            .map(|(m, partitions)| SyncGroupRequestAssignment {
-                member_id: m,
-                assignment: encode_assignment(&partitions),
-                ..Default::default()
-            })
+            .map(|(m, partitions)| build_sync_group_assignment(m, &partitions))
             .collect()
     } else {
         Vec::new()
@@ -837,15 +931,13 @@ async fn join_and_sync(
             async move {
                 client
                     .broker(target)
-                    .send(SyncGroupRequest {
+                    .send(build_sync_group_request(
                         group_id,
                         generation_id,
                         member_id,
-                        protocol_type: Some("consumer".into()),
-                        protocol_name: Some(chosen_protocol),
-                        assignments: assignments_for_sync,
-                        ..Default::default()
-                    })
+                        chosen_protocol,
+                        assignments_for_sync,
+                    ))
                     .await
                     .map_err(ConsumerError::from)
             }
@@ -893,15 +985,7 @@ async fn prime_offsets(
     let mut seen: HashSet<(String, i32)> = HashSet::new();
     for (name, partition_index, committed, committed_epoch) in parse_offset_fetch(&of, &id_to_name)
     {
-        let starting = if committed >= 0 {
-            committed
-        } else {
-            match state.auto_offset_reset {
-                AutoOffsetReset::Earliest => 0,
-                // Resolved lazily by poll::resolve_latest_sentinels.
-                AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
-            }
-        };
+        let starting = starting_offset(committed, state.auto_offset_reset);
         let key = (name, partition_index);
         seen.insert(key.clone());
         offsets.insert(key.clone(), starting);
@@ -910,16 +994,32 @@ async fn prime_offsets(
     // The broker may omit partitions that have no commit record at all;
     // ensure every requested partition has an entry so poll() can find it.
     for tp in partitions {
-        if !seen.contains(tp) {
-            let starting = match state.auto_offset_reset {
-                AutoOffsetReset::Earliest => 0,
-                AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
-            };
+        if should_prime_missing_partition(seen.contains(tp)) {
+            let starting = reset_starting_offset(state.auto_offset_reset);
             offsets.insert(tp.clone(), starting);
             positions.entry(tp.clone()).or_default();
         }
     }
     Ok(())
+}
+
+fn starting_offset(committed: i64, reset: AutoOffsetReset) -> i64 {
+    if committed >= 0 {
+        committed
+    } else {
+        reset_starting_offset(reset)
+    }
+}
+
+fn reset_starting_offset(reset: AutoOffsetReset) -> i64 {
+    match reset {
+        AutoOffsetReset::Earliest => 0,
+        AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
+    }
+}
+
+fn should_prime_missing_partition(seen: bool) -> bool {
+    !seen
 }
 
 #[cfg(test)]
@@ -930,6 +1030,153 @@ mod retry_tests {
 
     struct Resp {
         error_code: i16,
+    }
+
+    #[test]
+    fn find_coordinator_request_populates_legacy_and_batched_group_keys() {
+        let req = build_find_coordinator_request("group-a".into());
+
+        assert!(req.key == "group-a");
+        assert!(req.key_type == 0);
+        assert!(req.coordinator_keys == vec!["group-a"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_deadline_elapsed_uses_elapsed_timeout_boundary() {
+        let start = tokio::time::Instant::now();
+
+        assert!(!retry_deadline_elapsed(start, Duration::from_millis(1)));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(retry_deadline_elapsed(start, Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn next_backoff_doubles_until_cap() {
+        assert!(
+            next_backoff(Duration::from_millis(100), Duration::from_secs(1))
+                == Duration::from_millis(200)
+        );
+        assert!(
+            next_backoff(Duration::from_millis(800), Duration::from_secs(1))
+                == Duration::from_secs(1)
+        );
+        assert!(
+            next_backoff(Duration::from_secs(1), Duration::from_secs(1)) == Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn leave_group_request_populates_legacy_and_batched_member_fields() {
+        let req = build_leave_group_request("group-a".into(), "member-a".into());
+
+        assert!(req.group_id == "group-a");
+        assert!(req.member_id == "member-a");
+        assert!(req.members.len() == 1);
+        assert!(req.members[0].member_id == "member-a");
+    }
+
+    #[test]
+    fn revoked_commit_helpers_preserve_filter_boundaries_and_request_fields() {
+        assert!(should_commit_revoked_offset(true, 1));
+        assert!(!should_commit_revoked_offset(false, 1));
+        assert!(!should_commit_revoked_offset(true, 0));
+        assert!(!should_commit_revoked_offset(true, -1));
+        assert!(!should_commit_revoked_offset(true, i64::MAX));
+
+        let topics = build_commit_topics(
+            HashMap::from([(("topic-a".to_string(), 2), (42, 7))]),
+            &HashMap::new(),
+        );
+        let req =
+            build_revoked_commit_request("group-a".into(), 3, "member-a".into(), topics.clone());
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id_or_member_epoch == 3);
+        assert!(req.member_id == "member-a");
+        assert!(req.topics == topics);
+        assert!(UNKNOWN_EPOCH == -1);
+    }
+
+    #[test]
+    fn join_group_request_preserves_group_member_timeouts_and_protocol() {
+        let req = build_join_group_request(
+            "group-a".into(),
+            "member-a".into(),
+            10_000,
+            30_000,
+            "range".into(),
+            vec![1, 2, 3].into(),
+        );
+
+        assert!(req.group_id == "group-a");
+        assert!(req.protocol_type == "consumer");
+        assert!(req.member_id == "member-a");
+        assert!(req.session_timeout_ms == 10_000);
+        assert!(req.rebalance_timeout_ms == 30_000);
+        assert!(req.protocols.len() == 1);
+        assert!(req.protocols[0].name == "range");
+        assert!(req.protocols[0].metadata == vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn sync_group_request_preserves_member_generation_protocol_and_assignments() {
+        let assignment = build_sync_group_assignment(
+            "member-a".into(),
+            &[("topic-a".to_string(), 0), ("topic-a".to_string(), 1)],
+        );
+        assert!(assignment.member_id == "member-a");
+        assert!(
+            decode_assignment(&assignment.assignment)
+                == vec![("topic-a".to_string(), 0), ("topic-a".to_string(), 1),]
+        );
+
+        let req = build_sync_group_request(
+            "group-a".into(),
+            7,
+            "member-a".into(),
+            "range".into(),
+            vec![assignment.clone()],
+        );
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id == 7);
+        assert!(req.member_id == "member-a");
+        assert!(req.protocol_type == Some("consumer".into()));
+        assert!(req.protocol_name == Some("range".into()));
+        assert!(req.assignments == vec![assignment]);
+    }
+
+    #[test]
+    fn heartbeat_request_preserves_group_generation_and_member() {
+        let req = build_heartbeat_request("group-a".into(), 42, "member-a".into());
+
+        assert!(req.group_id == "group-a");
+        assert!(req.generation_id == 42);
+        assert!(req.member_id == "member-a");
+    }
+
+    #[test]
+    fn prime_offset_helpers_preserve_committed_and_reset_boundaries() {
+        assert!(starting_offset(12, AutoOffsetReset::Earliest) == 12);
+        assert!(starting_offset(0, AutoOffsetReset::Latest) == 0);
+        assert!(starting_offset(-1, AutoOffsetReset::Earliest) == 0);
+        assert!(starting_offset(-1, AutoOffsetReset::Latest) == i64::MAX);
+        assert!(starting_offset(-1, AutoOffsetReset::None) == i64::MAX);
+        assert!(reset_starting_offset(AutoOffsetReset::Earliest) == 0);
+        assert!(reset_starting_offset(AutoOffsetReset::Latest) == i64::MAX);
+        assert!(reset_starting_offset(AutoOffsetReset::None) == i64::MAX);
+        assert!(should_prime_missing_partition(false));
+        assert!(!should_prime_missing_partition(true));
+    }
+
+    #[test]
+    fn heartbeat_outcome_classifies_success_rejoin_and_transient_errors() {
+        assert!(heartbeat_outcome(0) == HeartbeatOutcome::Ok);
+        assert!(heartbeat_outcome(27) == HeartbeatOutcome::NeedRejoin);
+        assert!(heartbeat_outcome(22) == HeartbeatOutcome::NeedRejoin);
+        assert!(heartbeat_outcome(25) == HeartbeatOutcome::RejoinFromScratch);
+        assert!(heartbeat_outcome(14) == HeartbeatOutcome::Transient);
+        assert!(heartbeat_outcome(99) == HeartbeatOutcome::Transient);
     }
 
     #[tokio::test(start_paused = true)]

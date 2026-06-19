@@ -23,6 +23,52 @@ use super::coordinator::ShareCoordinatorState;
 use super::types::ShareAckMode;
 use crate::error::ConsumerError;
 
+fn build_join_heartbeat_request(
+    group_id: String,
+    subscribe: Vec<String>,
+) -> ShareGroupHeartbeatRequest {
+    ShareGroupHeartbeatRequest {
+        group_id,
+        subscribed_topic_names: Some(subscribe),
+        ..Default::default()
+    }
+}
+
+fn response_has_error(error_code: i16) -> bool {
+    error_code != 0
+}
+
+fn heartbeat_interval_from_response(heartbeat_interval_ms: i32, configured: Duration) -> Duration {
+    if heartbeat_interval_ms > 0 {
+        Duration::from_millis(u64::try_from(heartbeat_interval_ms).unwrap_or(0))
+    } else {
+        configured
+    }
+}
+
+fn has_assignment_partitions(partitions_len: usize) -> bool {
+    partitions_len > 0
+}
+
+fn should_stage_implicit_accepts(ack_mode: ShareAckMode) -> bool {
+    ack_mode == ShareAckMode::Implicit
+}
+
+fn stage_implicit_accepts(
+    prev_delivered: &mut Vec<(WireUuid, i32, i64, i64)>,
+    pending_acks: &mut Vec<(WireUuid, i32, i64, i64, i8)>,
+) {
+    for (tid, partition, first, last) in std::mem::take(prev_delivered) {
+        pending_acks.push((
+            tid,
+            partition,
+            first,
+            last,
+            super::types::ShareAckType::Accept.wire(),
+        ));
+    }
+}
+
 /// A share-group consumer. Construct via [`ShareConsumer::builder`].
 ///
 /// It joins the group and keeps the membership alive via a background
@@ -99,15 +145,12 @@ impl ShareConsumer {
         // 1. Join: empty member id + epoch 0 + the subscription. The broker
         //    assigns a member id and bumps us to a live epoch.
         let join = client
-            .send(ShareGroupHeartbeatRequest {
-                group_id: group_id.clone(),
-                member_id: String::new(),
-                member_epoch: 0,
-                subscribed_topic_names: Some(subscribe.clone()),
-                ..Default::default()
-            })
+            .send(build_join_heartbeat_request(
+                group_id.clone(),
+                subscribe.clone(),
+            ))
             .await?;
-        if join.error_code != 0 {
+        if response_has_error(join.error_code) {
             return Err(ConsumerError::Server(join.error_code));
         }
         let member_id = join.member_id.clone().unwrap_or_default();
@@ -119,11 +162,8 @@ impl ShareConsumer {
         let member_epoch_val = join.member_epoch;
         // Honor the broker's heartbeat interval when it supplies one; else keep
         // the configured default.
-        let hb_interval = if join.heartbeat_interval_ms > 0 {
-            Duration::from_millis(u64::try_from(join.heartbeat_interval_ms).unwrap_or(0))
-        } else {
-            heartbeat_interval
-        };
+        let hb_interval =
+            heartbeat_interval_from_response(join.heartbeat_interval_ms, heartbeat_interval);
 
         // 2. Resolve assignment topic ids → names via Metadata.
         let md = client.send(MetadataRequest::default()).await?;
@@ -139,8 +179,10 @@ impl ShareConsumer {
         if let Some(assignment) = join.assignment {
             for tp in &assignment.topic_partitions {
                 let name = topic_names.get(&tp.topic_id).cloned().unwrap_or_default();
-                for &partition in &tp.partitions {
-                    assignment_vec.push((tp.topic_id, name.clone(), partition));
+                if has_assignment_partitions(tp.partitions.len()) {
+                    for &partition in &tp.partitions {
+                        assignment_vec.push((tp.topic_id, name.clone(), partition));
+                    }
                 }
             }
         }
@@ -223,16 +265,8 @@ impl ShareConsumer {
     pub async fn close(&mut self) -> Result<(), ConsumerError> {
         // Roll the previous poll's implicit Accepts into the explicit ack queue
         // so the final flush below covers both modes in one ShareAcknowledge.
-        if self.ack_mode == ShareAckMode::Implicit {
-            for (tid, partition, first, last) in std::mem::take(&mut self.prev_delivered) {
-                self.pending_acks.push((
-                    tid,
-                    partition,
-                    first,
-                    last,
-                    super::types::ShareAckType::Accept.wire(),
-                ));
-            }
+        if should_stage_implicit_accepts(self.ack_mode) {
+            stage_implicit_accepts(&mut self.prev_delivered, &mut self.pending_acks);
         }
         if let Err(e) = self.flush_pending_acks().await {
             tracing::warn!(error = %e, "share consumer close: final acknowledge failed");
@@ -243,5 +277,104 @@ impl ShareConsumer {
             let _ = h.await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    fn id(n: u8) -> WireUuid {
+        let mut b = [0u8; 16];
+        b[15] = n;
+        WireUuid(b)
+    }
+
+    async fn test_consumer() -> ShareConsumer {
+        ShareConsumer {
+            client: Client::builder()
+                .bootstrap("127.0.0.1:1")
+                .client_id("share-test")
+                .build()
+                .await
+                .unwrap(),
+            group_id: "group-a".into(),
+            member_id: "member-a".into(),
+            member_epoch: Arc::new(Mutex::new(3)),
+            assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
+            topic_names: Arc::new(Mutex::new(HashMap::new())),
+            share_session_epoch: 0,
+            ack_mode: ShareAckMode::Explicit,
+            pending_acks: Vec::new(),
+            prev_delivered: Vec::new(),
+            shutdown: CancellationToken::new(),
+            hb_handle: None,
+        }
+    }
+
+    #[test]
+    fn join_heartbeat_request_preserves_group_member_epoch_and_subscription() {
+        let req = build_join_heartbeat_request("group-a".into(), vec!["topic-a".into()]);
+
+        assert!(req.group_id == "group-a");
+        assert!(req.member_id.is_empty());
+        assert!(req.member_epoch == 0);
+        assert!(req.subscribed_topic_names == Some(vec!["topic-a".into()]));
+    }
+
+    #[test]
+    fn join_response_helpers_preserve_error_interval_and_assignment_boundaries() {
+        assert!(!response_has_error(0));
+        assert!(response_has_error(17));
+        assert!(
+            heartbeat_interval_from_response(2500, Duration::from_secs(3))
+                == Duration::from_millis(2500)
+        );
+        assert!(
+            heartbeat_interval_from_response(0, Duration::from_secs(3)) == Duration::from_secs(3)
+        );
+        assert!(!has_assignment_partitions(0));
+        assert!(has_assignment_partitions(1));
+        assert!(should_stage_implicit_accepts(ShareAckMode::Implicit));
+        assert!(!should_stage_implicit_accepts(ShareAckMode::Explicit));
+    }
+
+    #[test]
+    fn stage_implicit_accepts_moves_delivered_ranges_to_pending_acks() {
+        let mut prev = vec![(id(7), 2, 10, 12)];
+        let mut pending = Vec::new();
+
+        stage_implicit_accepts(&mut prev, &mut pending);
+
+        assert!(prev.is_empty());
+        assert!(
+            pending
+                == vec![(
+                    id(7),
+                    2,
+                    10,
+                    12,
+                    crate::share::types::ShareAckType::Accept.wire()
+                )]
+        );
+    }
+
+    #[tokio::test]
+    async fn accessors_return_share_identity_and_assignment() {
+        let consumer = test_consumer().await;
+
+        assert!(consumer.group_id() == "group-a");
+        assert!(consumer.member_id() == "member-a");
+        assert!(consumer.assignment().await == vec![("topic-a".into(), 2)]);
+    }
+
+    #[tokio::test]
+    async fn close_cancels_shutdown_token_without_spawned_handle() {
+        let mut consumer = test_consumer().await;
+
+        assert!(!consumer.shutdown.is_cancelled());
+        consumer.close().await.unwrap();
+        assert!(consumer.shutdown.is_cancelled());
     }
 }

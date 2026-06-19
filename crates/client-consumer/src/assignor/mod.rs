@@ -31,3 +31,21 @@ impl Assignor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn assignor_protocol_names_match_kafka_protocols() {
+        assert!(Assignor::Range.protocol_name() == "range");
+        assert!(Assignor::CooperativeSticky.protocol_name() == "cooperative-sticky");
+    }
+
+    #[test]
+    fn assignor_rebalance_protocols_match_assignor_strategy() {
+        assert!(Assignor::Range.rebalance_protocol() == RebalanceProtocol::Eager);
+        assert!(Assignor::CooperativeSticky.rebalance_protocol() == RebalanceProtocol::Cooperative);
+    }
+}

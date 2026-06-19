@@ -346,32 +346,7 @@ fn general_assign(
             continue;
         }
 
-        // Find least-loaded subscribed member, lex tiebreak.
-        let mut best: Option<(usize, &String)> = None;
-        for id in &subscribed {
-            let load = new_assignment.get(id).map_or(0, Vec::len);
-            match best {
-                None => best = Some((load, id)),
-                Some((bload, _)) if load < bload => best = Some((load, id)),
-                _ => {}
-            }
-        }
-        let (min_load, _) = best.expect("subscribed non-empty");
-
-        // Sticky preference: if previous owner is still subscribed and within
-        // tolerance, give it back to them.
-        let chosen: String = match prev_owner.get(tp) {
-            Some(prev) if subscribed.contains(prev) => {
-                let prev_load = new_assignment.get(prev).map_or(0, Vec::len);
-                if prev_load <= min_load {
-                    prev.clone()
-                } else {
-                    // Pick least-loaded, lex tiebreak.
-                    pick_least_loaded(&subscribed, &new_assignment)
-                }
-            }
-            _ => pick_least_loaded(&subscribed, &new_assignment),
-        };
+        let chosen = choose_assignment_owner(tp, &subscribed, &prev_owner, &new_assignment);
 
         new_assignment
             .get_mut(&chosen)
@@ -386,7 +361,81 @@ fn general_assign(
     // order for determinism.
     //
     // We bound iterations conservatively to avoid pathological loops.
-    let max_iters = sorted_partitions.len().saturating_mul(member_ids.len()) + 16;
+    balance_assignment(
+        member_ids,
+        subs,
+        &prev_owner,
+        &mut new_assignment,
+        max_balance_iters(sorted_partitions.len(), member_ids.len()),
+    );
+
+    // Convert to HashMap and sort each list for determinism.
+    let mut out: HashMap<String, Vec<(String, i32)>> = HashMap::new();
+    for (k, mut v) in new_assignment {
+        v.sort();
+        out.insert(k, v);
+    }
+    out
+}
+
+fn pick_least_loaded(
+    subscribed: &BTreeSet<String>,
+    assignment: &BTreeMap<String, Vec<(String, i32)>>,
+) -> String {
+    least_loaded(subscribed, assignment).1
+}
+
+fn least_loaded(
+    subscribed: &BTreeSet<String>,
+    assignment: &BTreeMap<String, Vec<(String, i32)>>,
+) -> (usize, String) {
+    let mut best: Option<(usize, String)> = None;
+    for id in subscribed {
+        let load = assignment.get(id).map_or(0, Vec::len);
+        match &best {
+            None => best = Some((load, id.clone())),
+            Some((bl, bid)) => {
+                debug_assert!(id >= bid, "BTreeSet iteration must be lexicographic");
+                if load < *bl {
+                    best = Some((load, id.clone()));
+                }
+            }
+        }
+    }
+    best.expect("non-empty subscription")
+}
+
+fn choose_assignment_owner(
+    tp: &(String, i32),
+    subscribed: &BTreeSet<String>,
+    prev_owner: &HashMap<(String, i32), String>,
+    assignment: &BTreeMap<String, Vec<(String, i32)>>,
+) -> String {
+    let (min_load, _) = least_loaded(subscribed, assignment);
+    match prev_owner.get(tp) {
+        Some(prev) if subscribed.contains(prev) => {
+            let prev_load = assignment.get(prev).map_or(0, Vec::len);
+            if prev_load <= min_load {
+                prev.clone()
+            } else {
+                pick_least_loaded(subscribed, assignment)
+            }
+        }
+        _ => pick_least_loaded(subscribed, assignment),
+    }
+}
+
+fn max_balance_iters(partitions: usize, members: usize) -> usize {
+    partitions.saturating_mul(members) + 16
+}
+
+fn balance_assignment(
+    member_ids: &[String],
+    subs: &BTreeMap<String, BTreeSet<String>>,
+    prev_owner: &HashMap<(String, i32), String>,
+    new_assignment: &mut BTreeMap<String, Vec<(String, i32)>>,
+    max_iters: usize,
+) {
     for _ in 0..max_iters {
         // Find heaviest and lightest among ALL members (lex tiebreak on id).
         let mut heaviest: Option<(usize, String)> = None;
@@ -404,8 +453,12 @@ fn general_assign(
                 _ => {}
             }
         }
-        let Some((hload, hid)) = heaviest else { break };
-        let Some((lload, lid)) = lightest else { break };
+        let Some((hload, hid)) = heaviest else {
+            break;
+        };
+        let Some((lload, lid)) = lightest else {
+            break;
+        };
         if hload <= lload + 1 {
             break;
         }
@@ -442,33 +495,6 @@ fn general_assign(
         }
         new_assignment.get_mut(&lid).unwrap().push(moved);
     }
-
-    // Convert to HashMap and sort each list for determinism.
-    let mut out: HashMap<String, Vec<(String, i32)>> = HashMap::new();
-    for (k, mut v) in new_assignment {
-        v.sort();
-        out.insert(k, v);
-    }
-    out
-}
-
-fn pick_least_loaded(
-    subscribed: &BTreeSet<String>,
-    assignment: &BTreeMap<String, Vec<(String, i32)>>,
-) -> String {
-    let mut best: Option<(usize, String)> = None;
-    for id in subscribed {
-        let load = assignment.get(id).map_or(0, Vec::len);
-        match &best {
-            None => best = Some((load, id.clone())),
-            Some((bl, bid)) => {
-                if load < *bl || (load == *bl && id < bid) {
-                    best = Some((load, id.clone()));
-                }
-            }
-        }
-    }
-    best.expect("non-empty subscription").1
 }
 
 #[cfg(test)]
@@ -486,6 +512,36 @@ mod tests {
 
     fn total_assigned(out: &HashMap<String, Vec<(String, i32)>>) -> usize {
         out.values().map(Vec::len).sum()
+    }
+
+    fn member_ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    fn subs(items: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+        items
+            .iter()
+            .map(|(id, topics)| {
+                (
+                    (*id).to_string(),
+                    topics.iter().map(|t| (*t).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn topic_parts(items: &[(&str, i32)]) -> HashMap<String, i32> {
+        items
+            .iter()
+            .map(|(topic, count)| ((*topic).to_string(), *count))
+            .collect()
+    }
+
+    fn current(items: &[(&str, &[(&str, i32)])]) -> BTreeMap<String, Vec<(String, i32)>> {
+        items
+            .iter()
+            .map(|(id, partitions)| ((*id).to_string(), tp(partitions)))
+            .collect()
     }
 
     #[test]
@@ -514,6 +570,217 @@ mod tests {
         assert!(a["m1"].len() == 2);
         assert!(a["m2"].len() == 2);
         assert!(total_assigned(&a) == 4);
+    }
+
+    #[test]
+    fn prepopulate_prefers_higher_generation_and_drops_exact_ties() {
+        let topic_parts = topic_parts(&[("t", 3)]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]);
+        let gens = BTreeMap::from([
+            ("m1".to_string(), 5),
+            ("m2".to_string(), 4),
+            ("m3".to_string(), 5),
+        ]);
+
+        let out = prepopulate_current_assignments(
+            &[
+                (
+                    "m1".to_string(),
+                    topics(&["t"]),
+                    tp(&[("t", 0), ("t", 1)]),
+                    5,
+                ),
+                ("m2".to_string(), topics(&["t"]), tp(&[("t", 0)]), 4),
+                ("m3".to_string(), topics(&["t"]), tp(&[("t", 1)]), 5),
+            ],
+            &subs,
+            &gens,
+            &topic_parts,
+        );
+
+        assert!(out["m1"] == tp(&[("t", 0)]));
+        assert!(out["m2"].is_empty());
+        assert!(out["m3"].is_empty());
+    }
+
+    #[test]
+    fn general_assign_chooses_least_loaded_subscriber() {
+        let out = general_assign(
+            &member_ids(&["m1", "m2"]),
+            &subs(&[("m1", &["t"]), ("m2", &["t"])]),
+            &BTreeMap::new(),
+            &topic_parts(&[("t", 2)]),
+        );
+
+        assert!(out["m1"] == tp(&[("t", 0)]));
+        assert!(out["m2"] == tp(&[("t", 1)]));
+    }
+
+    #[test]
+    fn general_assign_keeps_previous_owner_only_when_subscribed_and_not_overloaded() {
+        let out = general_assign(
+            &member_ids(&["m1", "m2"]),
+            &subs(&[("m1", &["t"]), ("m2", &["t"])]),
+            &current(&[("m1", &[]), ("m2", &[("t", 0)])]),
+            &topic_parts(&[("t", 2)]),
+        );
+
+        assert!(out["m1"] == tp(&[("t", 1)]));
+        assert!(out["m2"] == tp(&[("t", 0)]));
+
+        let unsubscribed_previous_owner = general_assign(
+            &member_ids(&["m1", "m2"]),
+            &subs(&[("m1", &["t"]), ("m2", &["u"])]),
+            &current(&[("m1", &[]), ("m2", &[("t", 0)])]),
+            &topic_parts(&[("t", 1), ("u", 1)]),
+        );
+        assert!(unsubscribed_previous_owner["m1"] == tp(&[("t", 0)]));
+        assert!(unsubscribed_previous_owner["m2"] == tp(&[("u", 0)]));
+
+        let overloaded_previous_owner = general_assign(
+            &member_ids(&["m1", "m2", "m3"]),
+            &subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]),
+            &current(&[("m1", &[("t", 0), ("t", 1)]), ("m2", &[]), ("m3", &[])]),
+            &topic_parts(&[("t", 3)]),
+        );
+        assert!(overloaded_previous_owner["m1"] == tp(&[("t", 0)]));
+        assert!(overloaded_previous_owner["m2"] == tp(&[("t", 1)]));
+        assert!(overloaded_previous_owner["m3"] == tp(&[("t", 2)]));
+    }
+
+    #[test]
+    fn pick_least_loaded_prefers_lower_load_then_lexicographic_id() {
+        let subscribed: BTreeSet<String> = member_ids(&["m1", "m2", "m3"]).into_iter().collect();
+        let assignment = current(&[
+            ("m1", &[("t", 0)]),
+            ("m2", &[]),
+            ("m3", &[("t", 1), ("t", 2)]),
+        ]);
+
+        assert!(pick_least_loaded(&subscribed, &assignment) == "m2");
+
+        let tied = current(&[
+            ("m1", &[("t", 0)]),
+            ("m2", &[("t", 1)]),
+            ("m3", &[("t", 2), ("t", 3)]),
+        ]);
+        assert!(pick_least_loaded(&subscribed, &tied) == "m1");
+    }
+
+    #[test]
+    fn choose_assignment_owner_uses_least_loaded_and_sticky_previous_owner_bounds() {
+        let subscribed: BTreeSet<String> = member_ids(&["m1", "m2", "m3"]).into_iter().collect();
+        let assignment = current(&[
+            ("m1", &[("a", 0)]),
+            ("m2", &[]),
+            ("m3", &[("b", 0), ("b", 1)]),
+        ]);
+        let tp = ("t".to_string(), 0);
+
+        assert!(choose_assignment_owner(&tp, &subscribed, &HashMap::new(), &assignment) == "m2");
+
+        let sticky = HashMap::from([(tp.clone(), "m1".to_string())]);
+        assert!(choose_assignment_owner(&tp, &subscribed, &sticky, &assignment) == "m2");
+
+        let mut less_loaded_assignment = assignment.clone();
+        less_loaded_assignment.insert("m1".to_string(), Vec::new());
+        assert!(
+            choose_assignment_owner(&tp, &subscribed, &sticky, &less_loaded_assignment) == "m1"
+        );
+
+        let unsubscribed_sticky = HashMap::from([(tp.clone(), "mx".to_string())]);
+        assert!(
+            choose_assignment_owner(&tp, &subscribed, &unsubscribed_sticky, &assignment) == "m2"
+        );
+    }
+
+    #[test]
+    fn max_balance_iters_has_safety_slack_after_partition_member_product() {
+        assert!(max_balance_iters(0, 5) == 16);
+        assert!(max_balance_iters(3, 4) == 28);
+    }
+
+    #[test]
+    fn balance_assignment_moves_from_heaviest_to_lightest_with_sticky_candidate_order() {
+        let ids = member_ids(&["m1", "m2", "m3"]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]);
+        let prev_owner = HashMap::from([(("t".to_string(), 1), "m2".to_string())]);
+        let mut assignment = current(&[
+            ("m1", &[("t", 0), ("t", 1), ("t", 2), ("t", 3)]),
+            ("m2", &[]),
+            ("m3", &[]),
+        ]);
+
+        balance_assignment(&ids, &subs, &prev_owner, &mut assignment, 8);
+
+        assert!(assignment["m1"] == tp(&[("t", 2), ("t", 3)]));
+        assert!(assignment["m2"] == tp(&[("t", 0)]));
+        assert!(assignment["m3"] == tp(&[("t", 1)]));
+    }
+
+    #[test]
+    fn balance_assignment_selects_non_first_heaviest_and_non_sticky_candidate() {
+        let ids = member_ids(&["m1", "m2", "m3"]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]);
+        let prev_owner = HashMap::from([(("t".to_string(), 1), "m1".to_string())]);
+        let mut assignment = current(&[
+            ("m1", &[]),
+            ("m2", &[("t", 0), ("t", 1), ("t", 2)]),
+            ("m3", &[]),
+        ]);
+
+        balance_assignment(&ids, &subs, &prev_owner, &mut assignment, 1);
+
+        assert!(assignment["m1"] == tp(&[("t", 0)]));
+        assert!(assignment["m2"] == tp(&[("t", 1), ("t", 2)]));
+        assert!(assignment["m3"].is_empty());
+    }
+
+    #[test]
+    fn balance_assignment_keeps_lex_first_heaviest_on_equal_load() {
+        let ids = member_ids(&["m1", "m2", "m3"]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]);
+        let mut assignment = current(&[
+            ("m1", &[("t", 0), ("t", 1)]),
+            ("m2", &[("t", 2), ("t", 3)]),
+            ("m3", &[]),
+        ]);
+
+        balance_assignment(&ids, &subs, &HashMap::new(), &mut assignment, 1);
+
+        assert!(assignment["m1"] == tp(&[("t", 1)]));
+        assert!(assignment["m2"] == tp(&[("t", 2), ("t", 3)]));
+        assert!(assignment["m3"] == tp(&[("t", 0)]));
+    }
+
+    #[test]
+    fn balance_assignment_moves_partition_lightest_did_not_previously_own() {
+        let ids = member_ids(&["m1", "m2"]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"])]);
+        let prev_owner = HashMap::from([(("t".to_string(), 0), "m1".to_string())]);
+        let mut assignment = current(&[("m1", &[]), ("m2", &[("t", 0), ("t", 1), ("t", 2)])]);
+
+        balance_assignment(&ids, &subs, &prev_owner, &mut assignment, 1);
+
+        assert!(assignment["m1"] == tp(&[("t", 1)]));
+        assert!(assignment["m2"] == tp(&[("t", 0), ("t", 2)]));
+    }
+
+    #[test]
+    fn balance_assignment_stops_when_spread_is_at_most_one() {
+        let ids = member_ids(&["m1", "m2", "m3"]);
+        let subs = subs(&[("m1", &["t"]), ("m2", &["t"]), ("m3", &["t"])]);
+        let mut assignment = current(&[
+            ("m1", &[("t", 0), ("t", 1)]),
+            ("m2", &[("t", 2)]),
+            ("m3", &[("t", 3)]),
+        ]);
+
+        balance_assignment(&ids, &subs, &HashMap::new(), &mut assignment, 8);
+
+        assert!(assignment["m1"] == tp(&[("t", 0), ("t", 1)]));
+        assert!(assignment["m2"] == tp(&[("t", 2)]));
+        assert!(assignment["m3"] == tp(&[("t", 3)]));
     }
 
     #[test]
