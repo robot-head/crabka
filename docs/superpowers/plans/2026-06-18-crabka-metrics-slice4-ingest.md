@@ -206,10 +206,10 @@ message TimeSeries {
   repeated Histogram histograms = 3;
   repeated Exemplar exemplars = 4;
   Metadata metadata = 5;
-  int64 created_timestamp = 6;
+  reserved 6;                            // canonical: created/start ts live on Sample.start_timestamp / Histogram.start_timestamp, not here
 }
 
-message Sample { double value = 1; int64 timestamp = 2; }
+message Sample { double value = 1; int64 timestamp = 2; int64 start_timestamp = 3; }
 
 message Exemplar {
   repeated uint32 labels_refs = 1;
@@ -240,8 +240,9 @@ message Histogram {
   enum ResetHint { RESET_HINT_UNSPECIFIED = 0; RESET_HINT_YES = 1;
     RESET_HINT_NO = 2; RESET_HINT_GAUGE = 3; }
   ResetHint reset_hint = 14;
-  int64 timestamp = 15;
+  int64 timestamp = 15;                  // sample collection time
   repeated double custom_values = 16;
+  int64 start_timestamp = 17;            // counter-reset / created time (distinct from `timestamp`)
 }
 
 message BucketSpan { sint32 offset = 1; uint32 length = 2; }
@@ -634,7 +635,10 @@ mod tests {
         h.schema = -53;
         h.custom_values = vec![0.5, 1.0, 2.0];
         let out = v1_histogram_to_native(&h).unwrap();
-        assert!(out.is_nhcb());
+        // `is_nhcb()` is NOT in the Slice-1 shared contract (which enumerates the
+        // struct fields + encode/decode + ResetHint::from_i8/as_i8). Assert the
+        // field-level invariants the contract DOES guarantee instead.
+        assert!(out.schema == -53);
         assert!(out.custom_values == Some(vec![0.5, 1.0, 2.0]));
     }
 
@@ -675,7 +679,9 @@ struct RawHist<'a> {
     schema: i32,
     zero_threshold: f64,
     reset_hint: i32,
-    timestamp: i64,
+    /// Counter-reset / created time (v2 `Histogram.start_timestamp`, field 17).
+    /// `None` for v1 (no such field). NOT the sample collection `timestamp`.
+    start_timestamp_ms: Option<i64>,
     positive_spans: Vec<BucketSpan>,
     negative_spans: Vec<BucketSpan>,
     positive_deltas: &'a [i64],
@@ -739,7 +745,10 @@ fn decode_common(raw: &RawHist) -> Result<NativeHistogram, WireError> {
         negative_spans: raw.negative_spans.clone(),
         negative_counts,
         custom_values,
-        start_timestamp_ms: Some(raw.timestamp),
+        // v1 has no created/start-timestamp field; v2 carries it in
+        // `Histogram.start_timestamp` (field 17), distinct from the sample
+        // collection `timestamp` (field 15). Never reuse the sample ts here.
+        start_timestamp_ms: raw.start_timestamp_ms,
     })
 }
 
@@ -771,7 +780,9 @@ pub fn v1_histogram_to_native(h: &pb::v1::Histogram) -> Result<NativeHistogram, 
         schema: h.schema,
         zero_threshold: h.zero_threshold,
         reset_hint: h.reset_hint,
-        timestamp: h.timestamp,
+        // v1 `Histogram` has no created/start-timestamp field. `h.timestamp` is
+        // the sample collection time (captured by the caller), not the start ts.
+        start_timestamp_ms: None,
         positive_spans: h.positive_spans.iter().map(map_v1_span).collect(),
         negative_spans: h.negative_spans.iter().map(map_v1_span).collect(),
         positive_deltas: &h.positive_deltas,
@@ -804,7 +815,9 @@ pub fn v2_histogram_to_native(h: &pb::v2::Histogram) -> Result<NativeHistogram, 
         schema: h.schema,
         zero_threshold: h.zero_threshold,
         reset_hint: h.reset_hint,
-        timestamp: h.timestamp,
+        // v2 `Histogram.start_timestamp` (field 17) is the created/counter-reset
+        // time; 0 means "unset" → None. NOT the sample `timestamp` (field 15).
+        start_timestamp_ms: (h.start_timestamp != 0).then_some(h.start_timestamp),
         positive_spans: h.positive_spans.iter().map(map_v2_span).collect(),
         negative_spans: h.negative_spans.iter().map(map_v2_span).collect(),
         positive_deltas: &h.positive_deltas,
@@ -1406,7 +1419,8 @@ mod tests {
 
     #[test]
     fn exponential_histogram_downscales_when_scale_too_high() {
-        // scale 10 > 8 => must downscale by 2 to fit schema 8, merging bucket pairs.
+        // scale 10 > 8 => scale_down = 2 to fit schema 8. offset=0 so the index-
+        // merge collapses all four source buckets onto shifted index 1.
         let dp = ExponentialHistogramDataPoint {
             count: 4,
             scale: 10,
@@ -1416,9 +1430,30 @@ mod tests {
         };
         let h = exponential_histogram_to_native(&dp).unwrap();
         assert!(h.schema == 8);
-        // 4 buckets downscaled by factor 2^2=4 merge into 1 bucket of count 4.
-        let total: f64 = h.positive_counts.iter().sum();
-        assert!(total == 4.0);
+        // indices = [(i>>2)+1 for i in 0..4] = [1,1,1,1] => one merged bucket.
+        assert!(h.positive_spans == vec![crabka_metrics::BucketSpan { offset: 1, length: 1 }]);
+        assert!(h.positive_counts == vec![4.0]);
+    }
+
+    #[test]
+    fn exponential_histogram_downscale_odd_offset_index_merges() {
+        // Pins the Prometheus INDEX-merge (not array-pair-merge) for a non-2^scale_down
+        // -aligned offset. scale 9 > 8 => scale_down = 1, offset = 1, counts = [1,2,3,4].
+        // shifted indices = [((i+1)>>1)+1 for i in 0..4] = [1, 2, 2, 3]
+        //   => counts [1, 2+3, 4] = [1, 5, 4] at indices {1,2,3}.
+        // The old array-pair-merge would wrongly yield [3, 7] at {1,2}.
+        let dp = ExponentialHistogramDataPoint {
+            count: 10,
+            scale: 9,
+            positive: Some(Buckets { offset: 1, bucket_counts: vec![1, 2, 3, 4] }),
+            time_unix_nano: 5_000_000,
+            ..Default::default()
+        };
+        let h = exponential_histogram_to_native(&dp).unwrap();
+        assert!(h.schema == 8);
+        // Contiguous indices 1,2,3 => a single span at offset 1, length 3.
+        assert!(h.positive_spans == vec![crabka_metrics::BucketSpan { offset: 1, length: 3 }]);
+        assert!(h.positive_counts == vec![1.0, 5.0, 4.0]);
     }
 
     #[test]
@@ -1537,30 +1572,30 @@ fn attrs_to_labels(
 pub fn exponential_histogram_to_native(
     dp: &ExponentialHistogramDataPoint,
 ) -> Result<NativeHistogram, OtlpError> {
-    let mut scale = dp.scale;
-    // Downscale (merge adjacent bucket pairs) until scale <= MAX_SCHEMA.
-    let mut positive = dp.positive.clone().unwrap_or_default();
-    let mut negative = dp.negative.clone().unwrap_or_default();
-    while scale > MAX_SCHEMA {
-        positive = downscale_buckets(&positive);
-        negative = downscale_buckets(&negative);
-        scale -= 1;
-    }
-    if scale < MIN_SCHEMA {
+    if dp.scale < MIN_SCHEMA {
         return Err(OtlpError::InvalidExpHistogram(format!(
-            "scale {scale} below minimum {MIN_SCHEMA}; cannot represent"
+            "scale {} below minimum {MIN_SCHEMA}; cannot represent",
+            dp.scale
         )));
     }
+    // Clamp resolution to Prometheus' max schema. `scale_down` is how many bits
+    // of resolution we drop; the resulting schema is exactly MAX_SCHEMA when the
+    // source scale exceeds it, otherwise scale_down == 0 and schema == scale.
+    let scale_down = (dp.scale - MAX_SCHEMA).max(0);
+    let schema = dp.scale - scale_down; // == MAX_SCHEMA when downscaling, else dp.scale
 
-    let pos_counts: Vec<f64> = positive.bucket_counts.iter().map(|&c| c as f64).collect();
-    let neg_counts: Vec<f64> = negative.bucket_counts.iter().map(|&c| c as f64).collect();
+    let positive = dp.positive.clone().unwrap_or_default();
+    let negative = dp.negative.clone().unwrap_or_default();
 
-    let positive_spans = bucket_span(positive.offset, pos_counts.len());
-    let negative_spans = bucket_span(negative.offset, neg_counts.len());
+    // Index-merge (Prometheus `convertBucketsLayout`): each source bucket i maps
+    // to shifted index `((i + offset) >> scale_down)`; buckets sharing an index
+    // coalesce. Counts and spans are emitted together so they stay aligned.
+    let (positive_spans, pos_counts) = convert_buckets_layout(&positive, scale_down);
+    let (negative_spans, neg_counts) = convert_buckets_layout(&negative, scale_down);
 
     Ok(NativeHistogram {
         #[allow(clippy::cast_possible_truncation)]
-        schema: scale as i8,
+        schema: schema as i8,
         is_float: false,
         reset_hint: ResetHint::Unknown,
         zero_threshold: dp.zero_threshold,
@@ -1578,32 +1613,64 @@ pub fn exponential_histogram_to_native(
     })
 }
 
-/// One contiguous span starting at the (boundary-corrected) Prometheus offset.
-fn bucket_span(otlp_offset: i32, len: usize) -> Vec<BucketSpan> {
-    if len == 0 {
-        return vec![];
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    vec![BucketSpan { offset: otlp_offset + 1, length: len as u32 }]
-}
-
-/// Merge adjacent bucket pairs to halve resolution (downscale by one).
-fn downscale_buckets(
+/// Lower OTLP buckets to Prometheus spans + absolute counts, applying an
+/// optional resolution downscale by `scale_down` bits.
+///
+/// Mirrors Prometheus' `prometheusremotewrite/histograms.go::convertBucketsLayout`:
+/// each source bucket `i` maps to the **shifted bucket index**
+/// `bucket_idx = ((i as i32 + offset) >> scale_down) + 1` (arithmetic shift; the
+/// `+1` is Prometheus' lower-vs-upper-boundary offset convention). Consecutive
+/// source buckets that land on the *same* shifted index are coalesced into one
+/// merged count. The first emitted span's offset is `initial_offset =
+/// (offset >> scale_down) + 1`; any gap between non-adjacent shifted indices
+/// starts a fresh span (we emit a separate span per contiguous run).
+///
+/// Worked example — offset=1, scale_down=1, counts=[a,b,c,d]:
+/// shifted indices = [(1>>1)+1, (2>>1)+1, (3>>1)+1, (4>>1)+1] = [1, 2, 2, 3]
+/// → counts [a, b+c, d] at indices {1,2,3}.
+fn convert_buckets_layout(
     b: &opentelemetry_proto::tonic::metrics::v1::exponential_histogram_data_point::Buckets,
-) -> opentelemetry_proto::tonic::metrics::v1::exponential_histogram_data_point::Buckets {
-    use opentelemetry_proto::tonic::metrics::v1::exponential_histogram_data_point::Buckets;
-    let mut merged = Vec::with_capacity(b.bucket_counts.len().div_ceil(2));
-    let mut i = 0;
-    while i < b.bucket_counts.len() {
-        let a = b.bucket_counts[i];
-        let c = b.bucket_counts.get(i + 1).copied().unwrap_or(0);
-        merged.push(a + c);
-        i += 2;
+    scale_down: i32,
+) -> (Vec<BucketSpan>, Vec<f64>) {
+    if b.bucket_counts.is_empty() {
+        return (vec![], vec![]);
     }
-    Buckets {
-        offset: b.offset.div_euclid(2),
-        bucket_counts: merged,
+    let offset = b.offset;
+    let mut spans: Vec<BucketSpan> = Vec::new();
+    let mut counts: Vec<f64> = Vec::new();
+    let mut prev_idx: Option<i32> = None;
+    for (i, &c) in b.bucket_counts.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let idx = ((i as i32 + offset) >> scale_down) + 1;
+        match prev_idx {
+            // Same shifted index as the previous source bucket → coalesce.
+            Some(p) if p == idx => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    *counts.last_mut().expect("non-empty when prev_idx is Some") += c as f64;
+                }
+            }
+            // New index adjacent to the previous run → extend the current span.
+            Some(p) if idx == p + 1 => {
+                spans.last_mut().expect("non-empty when prev_idx is Some").length += 1;
+                #[allow(clippy::cast_precision_loss)]
+                counts.push(c as f64);
+                prev_idx = Some(idx);
+            }
+            // First bucket, or a gap → start a fresh span at this index.
+            _ => {
+                let span_offset = match prev_idx {
+                    None => idx,             // initial_offset = (offset >> scale_down) + 1
+                    Some(p) => idx - (p + 1), // gap relative to end of previous run
+                };
+                spans.push(BucketSpan { offset: span_offset, length: 1 });
+                #[allow(clippy::cast_precision_loss)]
+                counts.push(c as f64);
+                prev_idx = Some(idx);
+            }
+        }
     }
+    (spans, counts)
 }
 
 /// Decode an OTLP `MetricsData` into per-datapoint `DecodedSeries`.
@@ -1669,14 +1736,14 @@ fn number_series(name: &str, dp: &NumberDataPoint, strategy: TranslationStrategy
 }
 ```
 
-> **Verify against the broker's `otlp.rs` + the generated `opentelemetry-proto` types** (`crates/broker/src/client_metrics/otlp.rs` shows `MetricsData::decode`; the exact field names — `bucket_counts`, `offset`, `scale`, `zero_threshold`, `start_time_unix_nano` — are confirmed in `opentelemetry.proto.metrics.v1.rs`). `Buckets::default()` exists (prost derives `Default`). The downscale + boundary fix are the correctness traps; the two exponential-histogram tests pin them. If the boundary `+1` convention proves wrong against a real Prometheus/Mimir comparison (Slice 8 differential), adjust *with a failing test first*.
+> **Verify against the broker's `otlp.rs` + the generated `opentelemetry-proto` types** (`crates/broker/src/client_metrics/otlp.rs` shows `MetricsData::decode`; the exact field names — `bucket_counts`, `offset`, `scale`, `zero_threshold`, `start_time_unix_nano` — are confirmed in `opentelemetry.proto.metrics.v1.rs`). `Buckets::default()` exists (prost derives `Default`). The index-merge downscale + boundary fix are the correctness traps; the three exponential-histogram tests pin them (including the odd-offset case that distinguishes the real Prometheus INDEX-merge from a naive array-pair-merge). The merge MUST follow `prometheusremotewrite/histograms.go::convertBucketsLayout` (shift each source bucket's index by `scale_down`, coalesce equal shifted indices) — do not merge by array position. If the boundary `+1` convention proves wrong against a real Prometheus/Mimir comparison (Slice 8 differential), adjust *with a failing test first*.
 
 - [ ] **Step 4: Declare + run the pure tests**
 
 `lib.rs`: `mod otlp; pub use otlp::{decode_otlp, exponential_histogram_to_native, normalize_name, OtlpError, TranslationStrategy};`
 
 Run: `cargo test -p crabka-metrics --lib otlp`
-Expected: PASS (all 6 tests; delta path correctly errors until Step 7 — there is no delta test yet, so all green).
+Expected: PASS (all 7 tests; delta path correctly errors until Step 7 — there is no delta test yet, so all green).
 
 - [ ] **Step 5: Commit the cumulative path**
 
@@ -1742,15 +1809,16 @@ git commit -m "feat(metrics): OTLP delta-to-cumulative accumulator"
 
 **Interfaces:**
 - Produces:
-  - `struct HaTracker { elected: HashMap<(String, String), String> }` (in-memory view of the compacted HA-tracker topic)
+  - `struct HaTracker { elected: Mutex<HashMap<(String, String), String>> }` (in-memory view of the compacted HA-tracker topic; interior `Mutex` so first-seen election is atomic behind `&self`)
   - `const HA_TRACKER_TOPIC: &str = "__crabka_metrics_ha"`
-  - `HaTracker::elected_replica(&self, tenant: &str, cluster: &str) -> Option<&str>`
-  - `HaTracker::set_elected(&mut self, tenant, cluster, replica)`
+  - `HaTracker::elected_replica(&self, tenant: &str, cluster: &str) -> Option<String>`
+  - `HaTracker::set_elected(&self, tenant, cluster, replica)`
+  - `HaTracker::elect_or_get(&self, tenant: &str, cluster: &str, replica: &str) -> String` — atomically elect an unseen pair's first replica, else return the already-elected one.
   - `enum HaDecision { Accept, Drop }`
-  - `fn ha_decision(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) -> HaDecision` — inspect the **first** series' `cluster` + `__replica__` labels; if there is no `__replica__` label, `Accept` (HA disabled for this stream); else `Accept` iff this replica is the elected one for `(tenant, cluster)`.
+  - `fn ha_decision(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) -> HaDecision` — inspect the **first** series' `cluster` + `__replica__` labels; if there is no `__replica__` label, `Accept` (HA disabled for this stream); else `elect_or_get` the `(tenant, cluster)` pair and `Accept` iff this replica is the elected one (first-seen wins; others Drop — no fail-open double-write).
   - `fn strip_replica_label(series: &mut [DecodedSeries])` — remove `__replica__` from every series before WAL write.
 
-> HA-tracker leader election (lease acquisition / failover via the compacted topic) is a write-coordination concern. This task models the **read path** (consult elected replica) + the in-memory tracker fed from the compacted topic; producing election records to the HA topic on first-seen `(tenant,cluster)` is a focused follow-on noted with `// TODO(slice4-ha-election)`. The dedup *decision* + label stripping — the spec's HTTP-202 behavior — is fully implemented and tested here.
+> HA-tracker leader election (lease acquisition / failover via the compacted topic) is a write-coordination concern. This task models the **read path** (consult elected replica) + the in-memory tracker fed from the compacted topic, AND a minimal **in-process first-seen election** (`elect_or_get`) so an unseen `(tenant, cluster)` does not fail open — the first replica we see is elected atomically and all others Drop, exactly the Mimir dedup behavior. **Persisting/replaying** that election to the compacted HA topic (so it survives restart and spans distributor replicas) is the focused follow-on noted with `// TODO(slice4-ha-election)`. The dedup *decision* + label stripping — the spec's HTTP-202 behavior — is fully implemented and tested here, with no double-write for unseen clusters.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1774,7 +1842,7 @@ mod tests {
 
     #[test]
     fn elected_replica_accepts() {
-        let mut t = HaTracker::default();
+        let t = HaTracker::default();
         t.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r1")];
         assert!(matches!(ha_decision(&t, "tenant", &series), HaDecision::Accept));
@@ -1782,10 +1850,22 @@ mod tests {
 
     #[test]
     fn non_elected_replica_drops() {
-        let mut t = HaTracker::default();
+        let t = HaTracker::default();
         t.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r2")];
         assert!(matches!(ha_decision(&t, "tenant", &series), HaDecision::Drop));
+    }
+
+    #[test]
+    fn first_seen_replica_elected_second_dropped() {
+        // Fresh tracker, unseen (tenant, c1): the first replica we see wins the
+        // in-process election; a second replica for the same cluster is dropped.
+        // This is the dedup that prevents two HA replicas both double-writing.
+        let t = HaTracker::default();
+        let r1 = [series_with("c1", "r1")];
+        let r2 = [series_with("c1", "r2")];
+        assert!(matches!(ha_decision(&t, "tenant", &r1), HaDecision::Accept));
+        assert!(matches!(ha_decision(&t, "tenant", &r2), HaDecision::Drop));
     }
 
     #[test]
@@ -1821,6 +1901,7 @@ Expected: FAIL — `cannot find type HaTracker`.
 //! HTTP 202 on a drop so the losing replica doesn't retry.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::wire::DecodedSeries;
 
@@ -1828,27 +1909,49 @@ use crate::wire::DecodedSeries;
 pub const HA_TRACKER_TOPIC: &str = "__crabka_metrics_ha";
 
 /// In-memory view of the elected replica per `(tenant, cluster)`, rebuilt by
-/// replaying the compacted HA-tracker topic.
+/// replaying the compacted HA-tracker topic and extended in-process by
+/// first-seen election (see `elect_or_get`). Interior `Mutex` so the dedup
+/// decision can elect an unseen pair atomically behind a shared `&HaTracker`.
 #[derive(Debug, Default)]
 pub struct HaTracker {
-    elected: HashMap<(String, String), String>,
+    elected: Mutex<HashMap<(String, String), String>>,
 }
 
 impl HaTracker {
     #[must_use]
-    pub fn elected_replica(&self, tenant: &str, cluster: &str) -> Option<&str> {
+    pub fn elected_replica(&self, tenant: &str, cluster: &str) -> Option<String> {
         self.elected
+            .lock()
+            .expect("HaTracker mutex poisoned")
             .get(&(tenant.to_string(), cluster.to_string()))
-            .map(String::as_str)
+            .cloned()
     }
 
     pub fn set_elected(
-        &mut self,
+        &self,
         tenant: impl Into<String>,
         cluster: impl Into<String>,
         replica: impl Into<String>,
     ) {
-        self.elected.insert((tenant.into(), cluster.into()), replica.into());
+        self.elected
+            .lock()
+            .expect("HaTracker mutex poisoned")
+            .insert((tenant.into(), cluster.into()), replica.into());
+    }
+
+    /// Atomically elect `replica` for an unseen `(tenant, cluster)`, or return
+    /// the already-elected replica. The returned string is the winner; the
+    /// caller accepts iff it equals the request's replica. This is the minimal
+    /// in-process dedup that prevents two HA replicas both winning an unseen
+    /// pair. (Persisting/replaying the compacted topic is a follow-on TODO.)
+    #[must_use]
+    pub fn elect_or_get(&self, tenant: &str, cluster: &str, replica: &str) -> String {
+        self.elected
+            .lock()
+            .expect("HaTracker mutex poisoned")
+            .entry((tenant.to_string(), cluster.to_string()))
+            .or_insert_with(|| replica.to_string())
+            .clone()
     }
 }
 
@@ -1861,6 +1964,8 @@ pub enum HaDecision {
 
 /// Inspect the first series' `cluster` + `__replica__` labels. No `__replica__`
 /// => HA not in use => Accept. Otherwise Accept iff this is the elected replica.
+/// An unseen `(tenant, cluster)` elects the first replica we see (in-process,
+/// atomically) and drops the others — so two HA replicas can't both win.
 #[must_use]
 pub fn ha_decision(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) -> HaDecision {
     let Some(first) = series.first() else {
@@ -1870,14 +1975,15 @@ pub fn ha_decision(tracker: &HaTracker, tenant: &str, series: &[DecodedSeries]) 
         return HaDecision::Accept;
     };
     let cluster = first.labels.get("cluster").unwrap_or("");
-    match tracker.elected_replica(tenant, cluster) {
-        Some(elected) if elected == replica => HaDecision::Accept,
-        // TODO(slice4-ha-election): first-seen (tenant,cluster) should elect this
-        // replica by producing to HA_TRACKER_TOPIC; until then an unknown pair
-        // accepts (fail-open, no double-write because only one replica wins the
-        // election once it lands).
-        None => HaDecision::Accept,
-        Some(_) => HaDecision::Drop,
+    // `elect_or_get` first-seen-elects an unknown pair atomically, so the very
+    // first replica to arrive wins and all others Drop — no fail-open
+    // double-write. TODO(slice4-ha-election): also persist the election to
+    // HA_TRACKER_TOPIC so it survives restart / spans distributor replicas.
+    let elected = tracker.elect_or_get(tenant, cluster, replica);
+    if elected == replica {
+        HaDecision::Accept
+    } else {
+        HaDecision::Drop
     }
 }
 
@@ -1903,7 +2009,7 @@ pub fn strip_replica_label(series: &mut [DecodedSeries]) {
 `lib.rs`: `pub mod distributor;`. In `distributor/mod.rs`: `pub mod ha; pub use ha::{ha_decision, strip_replica_label, HaDecision, HaTracker, HA_TRACKER_TOPIC};`
 
 Run: `cargo test -p crabka-metrics --lib distributor::ha`
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2316,7 +2422,7 @@ git commit -m "test(metrics): end-to-end remote_write -> WAL -> compactor -> blo
 - broker round-trip test → Task 11.
 
 **Deviations flagged (deferred with explicit TODO markers, not silently dropped):**
-- HA *leader election* (producing election records to `HA_TRACKER_TOPIC`) — Task 7 models the read path + fail-open `// TODO(slice4-ha-election)`; the dedup decision + 202 + strip are fully implemented/tested.
+- HA *election persistence* (producing election records to `HA_TRACKER_TOPIC` so the in-process election survives restart / spans replicas) — Task 7 `// TODO(slice4-ha-election)`; the dedup decision (first-seen in-process election, no fail-open) + 202 + strip are fully implemented/tested.
 - Exemplar *sidecar block* write — Task 9 `// TODO(slice4-exemplar-block)`; exemplar wire-decode already lands in `WalRecord` (Tasks 4/5).
 - Classic OTLP `Histogram`/`Summary` → float series — Task 6 `// TODO(slice4-otlp-classic)`; the harder `ExponentialHistogram` path is done+tested.
 - TLS on the distributor + per-tenant rate-limit (429 via Crabka quotas) — `// TODO(slice4-tls)`/`// TODO(slice4-quota)`; structural caps (415/400) are enforced.

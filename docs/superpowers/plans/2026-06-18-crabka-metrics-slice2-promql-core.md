@@ -35,7 +35,7 @@
 
 1. **Data layer** — block schemas + native-histogram codec + symbol table. *(built)*
 2. **`crabka-promql` core** *(this plan)* — parser + operator pattern + selectors + rate-family + aggregations + binary ops + `.test` harness.
-3. **Query completeness** — `histogram_quantile` (classic + native), full function catalog, subqueries, `@`/`offset` general form. **Reuses this slice's operators (`SeriesDivide`/`SeriesNormalize`/`InstantManipulate`/`RangeManipulate`/`RangeArray`) and the `.test` DSL harness — those public names are frozen here.**
+3. **Query completeness** — `histogram_quantile` (classic + native), full function catalog, subqueries, `@`/`offset` general form. **Reuses this slice's operators (`SeriesDivide`/`SeriesNormalize`/`InstantManipulate`/`RangeManipulate`/`RangeArray`), the `InMemoryMetricStore` test double, and the `.test` DSL harness (`crabka_promql::testkit::{run_test_file(&TestFile), run_test_path(&str)}`) — those public names are frozen here.**
 4. **Ingest service** — remote_write v1/v2 + OTLP + Kafka produce + distributor + HA dedup + compactor.
 5. **Querier + Prometheus HTTP API** + hot/cold merge. **Replaces `InMemoryMetricStore` with a `BlockStore`-backed `MetricStore` — the trait is frozen here.**
 6. **Query-frontend** — split / shard / cache.
@@ -98,6 +98,12 @@ pub enum PromqlError { Parse(String), Plan(String), Exec(String), Store(String),
 //   rate-family ScalarUDFs: rate / increase / delta / irate / idelta
 // ---- parse entry ----
 //   promql_parser::parser::parse(&str) -> Result<promql_parser::parser::Expr, String>
+// ---- .test DSL harness (Slice 3 drives the full corpus through these) ----
+//   pub mod testkit {
+//       pub async fn run_test_file(file: &TestFile) -> Result<(), PromqlError>;
+//       pub async fn run_test_path(path: &str)  -> Result<(), PromqlError>;
+//   }
+//   (both also re-exported at the crate root: crabka_promql::{run_test_file, run_test_path})
 ```
 
 ---
@@ -1189,7 +1195,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use assert2::assert;
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_plan::{ExecutionPlan, collect};
     use datafusion::prelude::SessionContext;
 
@@ -1210,9 +1216,8 @@ mod tests {
     async fn divides_into_single_series_batches() {
         let batch = input_batch();
         let schema = batch.schema();
-        let mem = Arc::new(
-            MemoryExec::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
-        );
+        let mem =
+            MemorySourceConfig::try_new_exec(&[vec![batch]], schema.clone(), None).unwrap();
         let exec = SeriesDivideExec::new(vec!["job".to_string()], mem);
 
         let ctx = SessionContext::new();
@@ -1365,7 +1370,7 @@ impl DisplayAs for SeriesDivideExec {
 // behavior the test pins (single-series output batches, all rows preserved).
 ```
 
-> **Verify against datafusion rev `0838a4d` / GreptimeDB `series_divide.rs`:** the `UserDefinedLogicalNodeCore` method set (`with_exprs_and_inputs` vs `from_template`), the `ExecutionPlan` method set (`properties()`/`PlanProperties` vs separate `output_partitioning`/`execution_mode`), `MemoryExec` constructor name, and the row-equality kernel are all churn points. The arrow per-row equality in `boundaries` is illustrative — use whatever safe comparison the pinned arrow exposes (e.g. `arrow::compute::kernels::cmp` or a `make_comparator`). Do not change the test's asserted behavior.
+> **Verify against datafusion rev `0838a4d` / GreptimeDB `series_divide.rs`:** the `UserDefinedLogicalNodeCore` method set (`with_exprs_and_inputs` vs `from_template`), the `ExecutionPlan` method set (`properties()`/`PlanProperties` vs separate `output_partitioning`/`execution_mode`), and the row-equality kernel are all churn points. **Verify the in-memory source constructor against datafusion rev `0838a4d`** — `MemoryExec` was replaced by `MemorySourceConfig`/`DataSourceExec` in DF46, so the test uses `MemorySourceConfig::try_new_exec(...)` (returns an `Arc<dyn ExecutionPlan>` directly — no outer `Arc::new`). The arrow per-row equality in `boundaries` is illustrative — use whatever safe comparison the pinned arrow exposes (e.g. `arrow::compute::kernels::cmp` or a `make_comparator`). Do not change the test's asserted behavior.
 
 - [ ] **Step 4: Wire `extension/mod.rs` + `lib.rs`**
 
@@ -1408,7 +1413,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
     use assert2::assert;
-    use datafusion::physical_plan::memory::MemoryExec;
+    use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::physical_plan::{ExecutionPlan, collect};
     use datafusion::prelude::SessionContext;
 
@@ -1423,7 +1428,7 @@ mod tests {
             Field::new("value", DataType::Float64, false),
         ]));
         let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(ts), Arc::new(val)]).unwrap();
-        let mem = Arc::new(MemoryExec::try_new(&[vec![batch]], schema, None).unwrap());
+        let mem = MemorySourceConfig::try_new_exec(&[vec![batch]], schema, None).unwrap();
 
         let exec = SeriesNormalizeExec::new(0, "timestamp".into(), true, mem);
         let ctx = SessionContext::new();
@@ -1779,18 +1784,18 @@ git commit -m "feat(promql): counter-reset + extrapolation core (rate/increase/d
 **Interfaces:**
 - Consumes: `extrapolate::{extrapolated_rate, instant_delta, RangeFn, IrateFn}`, `RangeArray`.
 - Produces:
-  - `pub(crate) fn rate_udf() -> ScalarUDF` (and `increase_udf`, `delta_udf`, `irate_udf`, `idelta_udf`) — each a `ScalarUDF` whose `invoke` takes two `RangeArray`-dict columns `(timestamp_range, value_range)` + scalar args `(range_start_ms, range_end_ms, range_ms)` and returns a `Float64Array` (one value per grid cell; null where the algorithm returns `None`).
+  - `pub(crate) fn rate_udf() -> ScalarUDF` (and `increase_udf`, `delta_udf`, `irate_udf`, `idelta_udf`) — each a `ScalarUDF` whose `invoke` takes two `RangeArray`-dict columns `(timestamp_range, value_range)`, the **per-row aligned grid-timestamp column** (a plain `Int64Array`, one `rangeEnd = t` per grid cell, emitted by `RangeManipulate` at line 1506), and a single scalar literal `range_ms`, and returns a `Float64Array` (one value per grid cell; null where the algorithm returns `None`). **Boundaries are computed per cell:** `range_end = grid_ts[i]`, `range_start = grid_ts[i] - range_ms`. (Threading a single broadcast `range_end_ms` scalar would be correct only for an instant query's single grid point and would corrupt the extrapolation edges of every other grid point in a range query — hence the per-row grid-timestamp column.)
   - `pub(crate) fn register_rate_udfs(ctx: &SessionContext)` — registers all five under their PromQL names.
 
-> The UDF reads each cell with `RangeArray::try_from_dict_array(...).get(i)`, downcasts the timestamp window to `Int64Array` and the value window to `Float64Array`, calls the Phase-C1 core, and appends the result (or null). **Reference: GreptimeDB `functions/{rate,increase,delta,idelta}.rs`.**
+> The UDF reads each cell with `RangeArray::try_from_dict_array(...).get(i)`, downcasts the timestamp window to `Int64Array` and the value window to `Float64Array`, reads the aligned grid timestamp `t = grid_ts.value(i)`, computes `range_start = t - range_ms` / `range_end = t` for that cell, calls the Phase-C1 core, and appends the result (or null). **Reference: GreptimeDB `functions/{rate,increase,delta,idelta}.rs`.**
 
-- [ ] **Step 1: Write the failing test** — call `rate_udf().invoke_*` (verify the exact invoke entry point at the pinned rev) with a hand-built two-cell `RangeArray` and assert the output `Float64Array` matches the C1 literal values.
+- [ ] **Step 1: Write the failing test** — call `rate_udf().invoke_*` (verify the exact invoke entry point at the pinned rev) with a hand-built **two-cell** `RangeArray` (two grid points `t` with *differing* edge gaps, so the per-cell `range_end` is actually exercised — a single-cell test would not catch a broadcast-scalar boundary bug) plus the matching two-element grid-timestamp `Int64Array`, and assert the output `Float64Array` matches the per-cell C1 literal values.
 
 - [ ] **Step 2: Run to verify it fails** — `cannot find function rate_udf`.
 
 - [ ] **Step 3: Implement `rate.rs`**
 
-Build each UDF with `ScalarUDF::new_from_impl(...)` over a `struct RateUdf { kind: RangeFn }` implementing `ScalarUDFImpl` (`name`, `signature`, `return_type` = `Float64`, `invoke_with_args`). The `invoke` body decodes the two `RangeArray` columns, loops cells, calls `extrapolated_rate`, builds a `Float64Array` with nulls for `None`. Provide the full real decode/loop/build code; keep the `ScalarUDFImpl` trait method set + the `invoke_with_args` signature behind a "verify against datafusion rev `0838a4d`" note (the invoke signature `ScalarFunctionArgs` vs `&[ColumnarValue]` is the churn point).
+Build each UDF with `ScalarUDF::new_from_impl(...)` over a `struct RateUdf { kind: RangeFn }` implementing `ScalarUDFImpl` (`name`, `signature`, `return_type` = `Float64`, `invoke_with_args`). The `invoke` body decodes the two `RangeArray` columns and the per-row grid-timestamp `Int64Array`, reads the `range_ms` scalar literal, loops cells computing `range_end = grid_ts.value(i)` and `range_start = range_end - range_ms` for each cell, calls `extrapolated_rate(.., range_start, range_end, range_ms, kind)`, builds a `Float64Array` with nulls for `None`. Provide the full real decode/loop/build code; keep the `ScalarUDFImpl` trait method set + the `invoke_with_args` signature behind a "verify against datafusion rev `0838a4d`" note (the invoke signature `ScalarFunctionArgs` vs `&[ColumnarValue]` is the churn point).
 
 - [ ] **Step 4: Run + wire + commit** (`feat(promql): rate-family ScalarUDFs over RangeArray columns`).
 
@@ -1855,13 +1860,13 @@ Build each UDF with `ScalarUDF::new_from_impl(...)` over a `struct RateUdf { kin
 **Interfaces:**
 - Consumes: `plan_matrix_selector`, `register_rate_udfs`, the rate UDFs.
 - Produces:
-  - `pub(crate) async fn plan_call(planner, call: &promql_parser::parser::Call) -> Result<PlannedQuery, PromqlError>` — for `rate`/`increase`/`delta`/`irate`/`idelta`: plan the single matrix-selector arg, register the rate UDFs on its `ctx`, and project the `RangeArray` value column through the matching UDF, yielding an instant vector. Unsupported function names → `PromqlError::Unsupported(name)`.
+  - `pub(crate) async fn plan_call(planner, call: &promql_parser::parser::Call) -> Result<PlannedQuery, PromqlError>` — for `rate`/`increase`/`delta`/`irate`/`idelta`: plan the single matrix-selector arg, register the rate UDFs on its `ctx`, and project the `RangeArray` timestamp + value columns **plus the aligned grid-timestamp column** (emitted by `RangeManipulate`) and the `range_ms` literal through the matching UDF, yielding an instant vector. Unsupported function names → `PromqlError::Unsupported(name)`.
 
-- [ ] **Step 1: Write the failing test** — `InMemoryMetricStore` with a counter `http_requests_total` 0,1,2,3,4 at 60s spacing; `query_instant`-style drive of `rate(http_requests_total[5m])` at the right time; assert the single returned value ≈ the C1 literal (`5/300`). (Use a test helper executing the `PlannedQuery`; full `query_instant` lands in Phase D/E — here drive the plan directly.)
+- [ ] **Step 1: Write the failing tests** — (a) **instant grid point:** `InMemoryMetricStore` with a counter `http_requests_total` 0,1,2,3,4 at 60s spacing; `query_instant`-style drive of `rate(http_requests_total[5m])` at the right time; assert the single returned value ≈ the C1 literal (`5/300`). (b) **range query (≥2 grid points):** drive `rate(http_requests_total[5m])` over a range with **at least two grid points whose window edge gaps differ** (e.g. one grid `t` landing exactly on the last sample, another `t` with a non-zero `durationToEnd`), and assert each grid point's value matches the per-cell C1 extrapolation — this exercises the per-row grid-timestamp boundary and would catch a broadcast-scalar `range_end` regression that the single-grid-point test (a) cannot. (Use a test helper executing the `PlannedQuery`; full `query_instant`/`query_range` lands in Phase D/E — here drive the plan directly.)
 
 - [ ] **Step 2: Run to verify it fails** — `cannot find function plan_call`.
 
-- [ ] **Step 3: Implement `call.rs`** — match the call name, plan the matrix arg, `register_rate_udfs(&ctx)`, build a projection that calls the UDF over the timestamp+value `RangeArray` columns + the literal range args, return `PlannedQuery::DataFusion { value_kind: InstantVector }`. Wire into `plan`'s `Call` arm.
+- [ ] **Step 3: Implement `call.rs`** — match the call name, plan the matrix arg, `register_rate_udfs(&ctx)`, build a projection that calls the UDF over the timestamp+value `RangeArray` columns + the aligned grid-timestamp column + the `range_ms` literal, return `PlannedQuery::DataFusion { value_kind: InstantVector }`. Wire into `plan`'s `Call` arm.
 
 - [ ] **Step 4: Phase C gate + commit**
 
@@ -2124,8 +2129,9 @@ yet implemented in `crabka-promql` (tracked for Slice 3).
 
 **Interfaces:**
 - Consumes: `TestFile`/`Statement`, `InMemoryMetricStore`, `PromqlEngine`, `QueryResult`.
-- Produces:
-  - `pub async fn run_test_file(file: &TestFile) -> Result<(), PromqlError>` — interprets statements: `Load` pushes the expanded `(metric labels, ts, value)` rows into an `InMemoryMetricStore` (ts derived from the `load` step and the value index); `EvalInstant` runs `query_instant` and asserts the `InstantVector` matches the `expect` lines (label set + value, order-independent, float tolerance `1e-9`); `EvalRange` runs `query_range`; `Clear` resets the store; `fail` statements assert an error. Returns the first mismatch as `PromqlError::Exec`.
+- Produces (all under `pub mod testkit`, re-exported at the crate root — **frozen names Slice 3 interlocks on**):
+  - `pub async fn testkit::run_test_file(file: &TestFile) -> Result<(), PromqlError>` — interprets statements: `Load` pushes the expanded `(metric labels, ts, value)` rows into an `InMemoryMetricStore` (ts derived from the `load` step and the value index); `EvalInstant` runs `query_instant` and asserts the `InstantVector` matches the `expect` lines (label set + value, order-independent, float tolerance `1e-9`); `EvalRange` runs `query_range`; `Clear` resets the store; `fail` statements assert an error. Returns the first mismatch as `PromqlError::Exec`.
+  - `pub async fn testkit::run_test_path(path: &str) -> Result<(), PromqlError>` — thin convenience wrapper: read the file at `path`, `parse_test_file`, then `run_test_file`. (Slice 3's corpus driver calls this path-based form.)
   - `pub(crate) fn metric_to_labels(metric: &str) -> Labels` — parse `name{a="b",c="d"}` into `Labels` (with `__name__`).
 
 - [ ] **Step 1: Write the failing integration test**
@@ -2136,12 +2142,11 @@ Create `crates/promql/tests/conformance.rs`:
 //! Runs the vendored Prometheus `.test` subsets through the engine via the
 //! in-memory store. The headline conformance signal for Slice 2.
 
-use crabka_promql::{parse_test_file, run_test_file};
+use crabka_promql::testkit::run_test_path;
 
 async fn run_file(path: &str) {
-    let src = std::fs::read_to_string(path).unwrap();
-    let file = parse_test_file(&src).expect("parse .test");
-    run_test_file(&file).await.expect("conformance");
+    // `run_test_path` = read + `parse_test_file` + `run_test_file(&TestFile)`.
+    run_test_path(path).await.expect("conformance");
 }
 
 #[tokio::test]
@@ -2158,9 +2163,9 @@ async fn functions_subset_conforms() {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-promql --test conformance`
-Expected: FAIL — `cannot find function run_test_file` (then, once wired, real conformance failures to drive fixes against).
+Expected: FAIL — `cannot find function run_test_path` / unresolved `crabka_promql::testkit` (then, once wired, real conformance failures to drive fixes against).
 
-- [ ] **Step 3: Implement `runner.rs`** — the statement interpreter + `metric_to_labels` + the `InstantVector`/`expect` comparison (build a `BTreeMap<Labels, f64>` from each side and compare with tolerance). Provide the full real code. Wire `run_test_file` into `conformance/mod.rs` and re-export from `lib.rs`.
+- [ ] **Step 3: Implement `runner.rs`** — the statement interpreter (`run_test_file(&TestFile)`) + the `run_test_path(&str)` read+parse+run wrapper + `metric_to_labels` + the `InstantVector`/`expect` comparison (build a `BTreeMap<Labels, f64>` from each side and compare with tolerance). Provide the full real code. Expose both under a `pub mod testkit` (whose `run_test_file`/`run_test_path` are the frozen names Slice 3 consumes); wire it into `conformance/mod.rs` and re-export `testkit` (and `run_test_file`/`run_test_path` at the crate root) from `lib.rs`.
 
 - [ ] **Step 4: Iterate to green**
 

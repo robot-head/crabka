@@ -4,7 +4,7 @@
 
 **Goal:** Make the metrics backend production-faithful at its multi-tenant edges and prove it against the real ecosystem. Add per-tenant limits/quotas (ingestion rate, active series, label/sample/range caps) with Prometheus-shaped errors and a YAML runtime-overrides file; harden tenant isolation so org A can never observe org B; implement `remote_read` (`POST /api/v1/read`); add the three Mimir cardinality APIs; wire the PromQL `.test` corpus as a CI gate with a per-file coverage report; and build the three external-system differential suites — `prometheus/compliance`, **differential-vs-real-Mimir**, and **Grafana**. The two headline tests are (1) end-to-end tenant isolation through the HTTP API with two `X-Scope-OrgID`s and (2) query-corpus equality vs real Mimir over identically-ingested data.
 
-**Architecture:** This slice adds **no new query semantics** — it is a hardening band around the Slice 4 distributor (ingest), the Slice 5 querier + Prometheus HTTP API, and the Slice 2/3 `PromqlEngine`. New code lives in three areas of `crabka-metrics`: (a) a `limits` module (a per-tenant `Limits` struct, a YAML `OverridesProvider` modeled on Mimir's `runtime.yaml`, and enforcement points wired into the distributor write path and the querier read path, reusing the broker's `TokenBucket` token-bucket for the two *rate* limits); (b) a `wire::remote_read` module (Prometheus `ReadRequest`/`ReadResponse` protobuf + snappy-block, translating matchers+range into a `PromqlEngine` series query); (c) HTTP handlers for `/api/v1/read` and the three `/api/v1/cardinality/*` endpoints, which read from the same `Index` the querier uses. Tenant isolation is **not** a new mechanism — it is the assertion that every existing key (WAL partition key, block/index object key, HA-tracker key, quota bucket key, in-memory head map key) is already `(tenant, …)`-prefixed; this slice adds the tests that prove it and fixes any leak they expose. The external suites (`prometheus`, Mimir, Grafana) are black-box harnesses over the compiled HTTP server + Docker containers, all `#[ignore]`, run in a dedicated CI job.
+**Architecture:** This slice adds **no new query semantics** — it is a hardening band around the Slice 4 distributor (ingest), the Slice 5 querier + Prometheus HTTP API, and the Slice 2/3 `PromqlEngine`. New code lives in three areas of `crabka-metrics`: (a) a `limits` module (a per-tenant `Limits` struct, a YAML `OverridesProvider` modeled on Mimir's `runtime.yaml`, and enforcement points wired into the distributor write path and the querier read path, reusing the broker's `TokenBucket` token-bucket — lifted into a shared `crabka-throttle` crate and given an independent-burst knob — for the *rate* limit); (b) a `wire::remote_read` module (Prometheus `ReadRequest`/`ReadResponse` protobuf + snappy-block, translating matchers+range into a `PromqlEngine` series query); (c) HTTP handlers for `/api/v1/read` and the three `/api/v1/cardinality/*` endpoints, which read from the same `Index` the querier uses. Tenant isolation is **not** a new mechanism — it is the assertion that every existing key (WAL partition key, block/index object key, HA-tracker key, quota bucket key, in-memory head map key) is already `(tenant, …)`-prefixed; this slice adds the tests that prove it and fixes any leak they expose. The external suites (`prometheus`, Mimir, Grafana) are black-box harnesses over the compiled HTTP server + Docker containers, all `#[ignore]`, run in a dedicated CI job.
 
 **Tech Stack:** Rust 2024 · `arrow` 59 · `axum` 0.8 (handlers, reuse Slice 5 router) · `prost` 0.14 + `prost-build` (remote_read protobuf) · `snap` 1 (snappy-block) · `serde_yaml` 0.9 + `serde` (overrides file) · the broker `TokenBucket` (KIP-73, via a thin re-export) · `thiserror`. Tests: `assert2`; `reqwest` 0.13 + `tokio` for in-process HTTP drive; `testcontainers` 0.27 + `testcontainers-modules` 0.15 for the Docker differential suites; `serde_json` for response diffing.
 
@@ -15,9 +15,9 @@
 - **Lints:** `clippy::pedantic` is `warn`. New code clippy-pedantic clean. Run `cargo clippy -p crabka-metrics --all-targets` before each commit.
 - **Formatting:** `cargo fmt -p crabka-metrics` before every commit (never `cargo +nightly fmt --all` — OS error 206 in deep worktrees on Windows; always `-p`).
 - **Assertions:** `assert2::assert!` / `assert2::check!` in tests.
-- **Kafka wire compat is the only external contract that must not drift.** This slice touches no Kafka bytes. The Prometheus/Mimir HTTP byte-exactness is the *analog* constraint here: error bodies, status codes, and `data.resultType` shapes must match Prometheus/Mimir exactly (that is what the differential suites verify).
+- **Kafka wire compat is the only external contract that must not drift.** This slice touches no Kafka bytes. The Prometheus/Mimir HTTP byte-exactness is the *analog* constraint here: status codes and `data.resultType` shapes must match Prometheus/Mimir exactly (that is what the differential suites verify). **Error-body shape is per-surface**, not uniform: the **query API** (`/query`, `/query_range`, `/series`) returns the Prometheus JSON `errorType` envelope; the **push API** (`/api/v1/push`) returns Mimir's **plain-text `err-mimir-*` bodies** (no JSON `errorType`). Match the right shape for each surface (Task 7) — do not assert the query envelope on the push path.
 - **Docker/external-system tests are `#[ignore]`.** Every test that needs a running Prometheus, Mimir, or Grafana container is annotated `#[ignore = "requires Docker"]` and lives behind the dedicated CI job (`metrics-differential`), never in the default `cargo test --workspace` path. Reuse the Confluent-image rationale and bootstrap-retry patterns from `crates/client-core/tests/integration.rs`.
-- **Reuse, don't reinvent, the token bucket.** Per-tenant *rate* limits (ingestion rate) use the broker's `crabka_broker::throttle::TokenBucket` semantics (KIP-73 `plan_consume`: `capped = min(available+refill, rate)`, `grant = min(requested, capped)`). Do not write a second rate limiter. The *count/length* limits (max active series, max label length, max samples-per-query, max series-per-query, max range) are plain comparisons, not buckets.
+- **Reuse, don't reinvent, the token bucket.** Per-tenant *rate* limits (ingestion rate) use the broker's `TokenBucket` semantics (KIP-73 `plan_consume`: `capped = min(available+refill, rate)`, `grant = min(requested, capped)`), lifted into a shared `crabka-throttle` crate and extended with `set_rate_with_burst(rate, burst)` so Mimir's independent `ingestion_burst_size` is honored (Task 3). Do not write a second rate limiter. The *count/length* limits (max active series, max label length, max samples-per-query, max series-per-query, max range) are plain comparisons, not buckets.
 
 ---
 
@@ -88,7 +88,7 @@
   - `impl Default for Limits` — generous Mimir-default-ish values (e.g. `ingestion_rate: 10_000.0`, `max_global_series_per_user: 150_000`, `max_label_name_length: 1024`, `max_label_value_length: 2048`, `max_samples_per_query: 50_000_000`, `max_fetched_series_per_query: 100_000`, `max_query_lookback: 0` ⇒ unlimited, `max_query_length: 0` ⇒ unlimited).
   - `enum LimitError` (`thiserror`) with the variants below, each carrying the over-limit value + the cap, and each mapping to a Prometheus status:
     - `IngestionRateExceeded` → **429**
-    - `MaxSeriesPerUser` → **429** (Mimir returns 429 `per-user series limit`)
+    - `MaxSeriesPerUser` → **400** (`bad_data`; Mimir's per-user series limit is a non-retriable validation error returned as HTTP 400, *not* 429 — only the ingestion-rate/request-rate limits are 429)
     - `LabelNameTooLong` / `LabelValueTooLong` → **400**
     - `SamplesPerQueryExceeded` / `SeriesPerQueryExceeded` → **422** (`execution`)
     - `QueryLookbackExceeded` / `QueryRangeTooLong` → **422**
@@ -138,7 +138,7 @@ Expected: FAIL — `cannot find type Limits`.
 
 - [ ] **Step 3: Implement `Limits` + `LimitError`**
 
-Prepend above `tests`. Define `Limits` with the fields/`Default` above (using the `_secs` duration form), and `LimitError` with `thiserror`, the carried fields, and the three `impl` methods. Map statuses exactly: `IngestionRateExceeded`/`MaxSeriesPerUser` ⇒ 429; `LabelNameTooLong`/`LabelValueTooLong` ⇒ 400 (`bad_data`); the four query caps ⇒ 422 (`execution`). Add `serde` (with `derive`) to `Cargo.toml`.
+Prepend above `tests`. Define `Limits` with the fields/`Default` above (using the `_secs` duration form), and `LimitError` with `thiserror`, the carried fields, and the three `impl` methods. Map statuses exactly: `IngestionRateExceeded` ⇒ 429; `MaxSeriesPerUser`/`LabelNameTooLong`/`LabelValueTooLong` ⇒ 400 (`bad_data`); the four query caps ⇒ 422 (`execution`). Add `serde` (with `derive`) to `Cargo.toml`.
 
 - [ ] **Step 4: Wire into `lib.rs`** — `pub mod limits;` and `pub use limits::{Limits, LimitError};`.
 
@@ -254,14 +254,15 @@ git commit -m "feat(metrics): Mimir-style runtime.yaml OverridesProvider"
 **Files:**
 - Create: `crates/metrics/src/limits/enforce.rs`
 - Modify: `crates/metrics/src/limits/mod.rs` (declare submodule + re-export)
-- Modify: `crates/metrics/Cargo.toml` (add `crabka-broker` path dep for `TokenBucket`, or re-export the bucket — see note)
+- Modify: `crates/metrics/Cargo.toml` (add `crabka-throttle` path dep for `TokenBucket` — the lifted bucket crate, see note)
+- Create: `crates/throttle/` (`crabka-throttle`) — lift `bucket.rs` (+ `plan_consume`) out of `crabka-broker`, add `set_rate_with_burst`; re-export from `crabka-broker` so the broker keeps `crabka_broker::throttle::TokenBucket`.
 
 **Interfaces:**
-- Consumes: `Limits`, `LimitError` (Task 1); `crabka_broker::throttle::TokenBucket`; `Labels`.
+- Consumes: `Limits`, `LimitError` (Task 1); `crabka_throttle::TokenBucket` (with `set_rate_with_burst(rate, burst)`); `Labels`.
 - Produces:
   - `struct IngestEnforcer` holding a `DashMap<String /*tenant*/, Arc<TokenBucket>>` for the per-tenant ingestion-rate bucket and a `DashMap<String, u64>` (or an injected active-series counter) for active-series accounting.
   - `impl IngestEnforcer`:
-    - `pub fn check_sample_rate(&self, limits: &Limits, tenant: &str, n_samples: u64) -> Result<(), LimitError>` — `0.0` rate ⇒ Ok; else get-or-create the tenant bucket at `ingestion_rate` (as `u64` samples/sec, burst `ingestion_burst_size`), `try_consume(n_samples)`; if granted `< n_samples` ⇒ `IngestionRateExceeded`.
+    - `pub fn check_sample_rate(&self, limits: &Limits, tenant: &str, n_samples: u64) -> Result<(), LimitError>` — `0.0` rate ⇒ Ok; else get-or-create the tenant bucket at refill `ingestion_rate` (as `u64` samples/sec) with capacity `ingestion_burst_size` via `set_rate_with_burst(rate, burst)` (the burst is **independent** of the rate, matching Mimir), `try_consume(n_samples)`; if granted `< n_samples` ⇒ `IngestionRateExceeded`.
     - `pub fn check_active_series(&self, limits: &Limits, tenant: &str, would_add: u64, current: u64) -> Result<(), LimitError>` — `current + would_add > max_global_series_per_user` (when nonzero) ⇒ `MaxSeriesPerUser`.
     - `pub fn check_labels(limits: &Limits, labels: &Labels) -> Result<(), LimitError>` — any label name longer than `max_label_name_length` ⇒ `LabelNameTooLong`; value too long ⇒ `LabelValueTooLong`. (Associated fn — no state.)
   - `struct QueryEnforcer` (stateless; associated fns):
@@ -269,7 +270,7 @@ git commit -m "feat(metrics): Mimir-style runtime.yaml OverridesProvider"
     - `pub fn check_series_count(limits: &Limits, selected: u64) -> Result<(), LimitError>` — `> max_fetched_series_per_query` ⇒ `SeriesPerQueryExceeded`.
     - `pub fn check_sample_count(limits: &Limits, processed: u64) -> Result<(), LimitError>` — `> max_samples_per_query` ⇒ `SamplesPerQueryExceeded`.
 
-> **TokenBucket reuse note:** `crabka_broker::throttle::TokenBucket` is the KIP-73 bucket (`new()`, `set_rate(u64)`, `try_consume(u64) -> u64` granted). It meters in whatever integer unit you set the rate in; here the unit is *samples*, rate = `ingestion_rate` rounded to `u64`, and `set_rate` seeds a one-second burst. If `crabka-broker` is too heavy a dep for `crabka-metrics`, lift `bucket.rs` (+ `plan_consume`) into a tiny `crabka-throttle` crate first and depend on that from both — but the cheap path is a direct path dep on `crabka-broker` re-exporting `throttle::TokenBucket`; **prefer the path dep** unless a cycle appears, and note the choice in the commit. The pure arithmetic (`plan_consume`) is already unit-tested in the broker, so this task only tests the *mapping* (limit → bucket config → decision), not the bucket math.
+> **TokenBucket reuse note:** `crabka_broker::throttle::TokenBucket` is the KIP-73 bucket (`new()`, `set_rate(u64)`, `try_consume(u64) -> u64` granted). It meters in whatever integer unit you set the rate in; here the unit is *samples* and refill rate = `ingestion_rate` rounded to `u64`. **Burst caveat:** the existing `set_rate(rate)` unconditionally seeds `available = rate` (`crates/broker/src/throttle/bucket.rs:47-51`, `self.available.store(new_rate)`) — there is **no** API to set the burst capacity independently of the rate, so a naive reuse would silently ignore `ingestion_burst_size` whenever `burst != rate`. Since Mimir's `ingestion_burst_size` **is** independent of `ingestion_rate`, this task must extend the bucket with a `set_rate_with_burst(rate, burst)` that seeds `available = burst` while keeping `rate` as the refill — and because that extension changes broker code, lift `bucket.rs` (+ `plan_consume`) into a tiny `crabka-throttle` crate first and depend on that from both `crabka-broker` and `crabka-metrics` (the note already contemplated this lift; the burst knob makes it required, not optional). The pure refill arithmetic (`plan_consume`) is already unit-tested in the broker, so this task tests the *mapping* (limit → bucket config → decision) **including a `burst != rate` case**, not the refill math.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -327,6 +328,19 @@ mod tests {
     }
 
     #[test]
+    fn ingestion_burst_is_independent_of_rate() {
+        // burst (1000) > rate (100): the bucket must honor the larger burst capacity,
+        // not silently clamp the initial budget to `rate`. (set_rate_with_burst, not set_rate.)
+        let e = IngestEnforcer::new();
+        let l = Limits { ingestion_rate: 100.0, ingestion_burst_size: 1000, ..Limits::default() };
+        // A single 500-sample push fits the 1000 burst even though rate is only 100/s.
+        assert!(e.check_sample_rate(&l, "t", 500).is_ok());
+        // Drain the rest of the burst, then the next push (no refill yet) is rejected.
+        assert!(e.check_sample_rate(&l, "t", 500).is_ok());
+        assert!(e.check_sample_rate(&l, "t", 1).is_err());
+    }
+
+    #[test]
     fn query_range_and_lookback_caps() {
         let l = Limits { max_query_length_secs: 3600, max_query_lookback_secs: 86_400,
                          ..Limits::default() };
@@ -357,14 +371,14 @@ Expected: FAIL — `cannot find type IngestEnforcer`.
 
 - [ ] **Step 3: Implement `enforce.rs`**
 
-Implement `IngestEnforcer` (with `DashMap` bucket cache, `new()`), `QueryEnforcer`, and the seven check methods exactly per the interfaces. For `check_sample_rate`: round `ingestion_rate` to `u64`; get-or-create the tenant's `TokenBucket`, `set_rate` on creation (seeds the burst); `try_consume(n)`. Add `crabka-broker` (path) + `dashmap` to `Cargo.toml` dev/normal deps as needed.
+Implement `IngestEnforcer` (with `DashMap` bucket cache, `new()`), `QueryEnforcer`, and the seven check methods exactly per the interfaces. First lift `bucket.rs` into a `crabka-throttle` crate and add `set_rate_with_burst(rate, burst)` (seeds `available = burst`, keeps `rate` as refill). For `check_sample_rate`: round `ingestion_rate` to `u64`; get-or-create the tenant's `TokenBucket`, `set_rate_with_burst(rate, ingestion_burst_size)` on creation (seeds the independent burst); `try_consume(n)`. Add `crabka-throttle` (path) + `dashmap` to `Cargo.toml` dev/normal deps as needed.
 
 - [ ] **Step 4: Wire into `mod.rs`** — `mod enforce; pub use enforce::{IngestEnforcer, QueryEnforcer};` + re-export from `lib.rs`.
 
 - [ ] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-metrics --lib enforce`
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 6: Commit**
 
@@ -489,13 +503,13 @@ git commit -m "feat(metrics): remote_read protobuf + snappy-block (SAMPLES path)
   - `read.rs`: `async fn remote_read(tenant, body) -> Response` — read raw body, `decode_read_request`, for each `Query`: `matchers_to_selectors` → `QueryEnforcer::check_range` (tenant limits) → engine `series` fetch (tenant-scoped) → `series_to_timeseries` → assemble `ReadResponse` → `encode_read_response` → respond `200` with `Content-Type: application/x-protobuf`, `Content-Encoding: snappy`. Limit/decode errors map to the Prometheus error envelope (`422`/`400`).
   - `cardinality.rs`: three handlers returning Mimir's JSON shapes:
     - `GET /api/v1/cardinality/label_names` → `{ "label_values_count_total": N, "label_names_count": M, "cardinality": [ {"label_name": …, "label_values_count": …}, … ] }` (top-N by `label_values_count`, honoring `?limit=`).
-    - `GET /api/v1/cardinality/label_values?label_names=foo` → `{ "label_values_count": N, "cardinality": [ {"label_name":"foo","label_value":…,"series_count":…}, … ] }`.
-    - `GET /api/v1/cardinality/active_series?selector=…` → `{ "data": [ {"metric": {labels}, … } ], "status":"success" }` (Mimir's active-series shape; series from `Index::series_for`, tenant-scoped).
+    - `GET /api/v1/cardinality/label_values?label_names=foo` → Mimir's nested shape: `{ "series_count_total": N, "labels": [ {"label_name":"foo","label_values_count":…,"series_count":…,"cardinality":[ {"label_value":…,"series_count":…}, … ]}, … ] }` (top-level `series_count_total` + per-label `labels[]`, each carrying its own nested `cardinality[]` of `{label_value, series_count}`).
+    - `GET /api/v1/cardinality/active_series?selector=…` → `{ "data": [ {"__name__":"up","job":"…", …}, … ] }` (Mimir's active-series shape: each array element is the label map **directly** — no `"metric"` wrapper — and there is **no** `"status"` field; series from `Index::series_for`, tenant-scoped).
 - **Tenancy:** every handler resolves `tenant` from the `TenantId` extractor and passes it to every `Index`/engine call. The isolation test (Task 6) is what proves these are wired right.
 
 - [ ] **Step 1: Write the failing test** (in-process, no Docker)
 
-Create `crates/metrics/tests/cardinality_api.rs` that boots the in-process server (Task 6's `support::metrics_server`), seeds one tenant with a handful of series across two metric names, hits `/api/v1/cardinality/label_names` and `/label_values?label_names=__name__`, and asserts the counts + JSON shape. Also `tests/remote_read.rs` that POSTs a snappy `ReadRequest` for a seeded metric and asserts the decoded `ReadResponse` has the expected samples.
+Create `crates/metrics/tests/cardinality_api.rs` that boots the in-process server (Task 6's `support::metrics_server`), seeds one tenant with a handful of series across two metric names, hits `/api/v1/cardinality/label_names`, `/label_values?label_names=__name__`, and `/active_series?selector=…`, and asserts the counts + JSON shape against Mimir's exact shapes: for `label_values` assert on the top-level `series_count_total` and the nested `labels[].cardinality[]` (`{label_value, series_count}`); for `active_series` assert each element of `data[]` is a flat label map (e.g. `data[0]["__name__"]`) with no `metric` key and no `status` field. Also `tests/remote_read.rs` that POSTs a snappy `ReadRequest` for a seeded metric and asserts the decoded `ReadResponse` has the expected samples.
 
 (These depend on the `support::metrics_server` boot helper — write that helper first in Task 6 Step 1, or stub a minimal boot here and converge. Cross-reference noted.)
 
@@ -618,7 +632,7 @@ git commit -m "test(metrics): headline multi-tenant isolation across all read su
 
 ---
 
-### Task 7: Limit enforcement wired into the live write/read paths (HTTP error-body parity)
+### Task 7: Limit enforcement wired into the live write/read paths (per-surface HTTP error-body parity)
 
 **Files:**
 - Modify: the distributor write handler (Slice 4) — call `IngestEnforcer` before WAL append.
@@ -628,15 +642,17 @@ git commit -m "test(metrics): headline multi-tenant isolation across all read su
 
 **Interfaces:**
 - Consumes: Task 3 enforcers, Task 1 `LimitError` (→ HTTP status/body), Task 2 `OverridesProvider`, the server boot from Task 6.
-- Produces: enforcement at the live edges + a test asserting **Prometheus-shaped error bodies** end-to-end:
-  - over-rate push → `429` (retriable) with the Prometheus error envelope.
-  - over-long label → `400` `{"status":"error","errorType":"bad_data","error":…}`.
-  - query exceeding `max_query_length` → `422` `{"status":"error","errorType":"execution","error":…}`.
-  - over-`max_global_series_per_user` push → `429`.
+- Produces: enforcement at the live edges + a test asserting error bodies end-to-end, **split by surface** (the two surfaces have different body shapes in real Mimir):
+  - **QUERY API** (`/query_range`, `/series`) — the Prometheus JSON `errorType` envelope, byte-matched to Mimir:
+    - query exceeding `max_query_length` → `422` `{"status":"error","errorType":"execution","error":…}`.
+  - **PUSH path** (`/api/v1/push`) — Mimir's push validation errors are **plain-text bodies carrying `err-mimir-*` codes**, *not* the JSON `errorType` envelope (that envelope is the query-API shape only). Assert `(status, body_text)`, matching Mimir's plain-text `err-mimir-*` form (or Crabka's own documented push-error body — drop the "matches Mimir exactly" claim for the push surface if Crabka diverges):
+    - over-long label → `400`, body carries `err-mimir-label-value-too-long` (plain text, no JSON `errorType`).
+    - over-rate push → `429` (retriable), plain-text rate-limit body.
+    - over-`max_global_series_per_user` push → `400` (`bad_data`; non-retriable validation, matching Mimir's per-user series limit), plain-text `err-mimir-max-series-per-user` body.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `crates/metrics/tests/limits_overrides.rs`. Boot the server with an `OverridesProvider` carrying tight caps for `tenant-tight`; drive each over-limit case over real HTTP and assert `(status, body.errorType)` exactly. Example skeleton:
+Create `crates/metrics/tests/limits_overrides.rs`. Boot the server with an `OverridesProvider` carrying tight caps for `tenant-tight`; drive each over-limit case over real HTTP and assert the per-surface body shape: the QUERY-API case asserts `(status, body.errorType)` against the JSON envelope, while the PUSH-path cases assert `(status, body_text)` against Mimir's plain-text `err-mimir-*` body (`push_expect_error` returns the raw body string, not an `errorType`). Example skeleton:
 
 ```rust
 mod support;
@@ -655,20 +671,22 @@ overrides:
 "#;
     let s = srv::start_in_process_with_overrides(overrides).await;
 
-    // label too long -> 400 bad_data
-    let (st, ty) = srv::push_expect_error(&s.base_url, "tenant-tight",
+    // PUSH path: label too long -> 400 with a plain-text err-mimir-* body
+    // (push errors are NOT the JSON errorType envelope — that is the query API only).
+    let (st, body) = srv::push_expect_error(&s.base_url, "tenant-tight",
         &[(labels(&[("__name__","m"),("x","toolong")]), vec![(1,1.0)])]).await;
-    check!(st == 400 && ty == "bad_data");
+    check!(st == 400);
+    check!(body.contains("err-mimir-label-value-too-long"));
 
-    // query range > 60s -> 422 execution
+    // QUERY API: range > 60s -> 422 execution, JSON errorType envelope
     let (st, ty) = srv::query_range_expect_error(&s.base_url, "tenant-tight",
         "m", 0.0, 3600.0, 15).await;
     check!(st == 422 && ty == "execution");
 
-    // burst then over-rate -> 429
+    // PUSH path: burst then over-rate -> 429 (plain-text rate body)
     let _ = srv::push_samples(&s.base_url, "tenant-tight",
         &[(labels(&[("__name__","m")]), vec![(1,1.0)])]).await;
-    let (st, _) = srv::push_expect_error(&s.base_url, "tenant-tight",
+    let (st, _body) = srv::push_expect_error(&s.base_url, "tenant-tight",
         &[(labels(&[("__name__","m")]), vec![(2,1.0)])]).await;
     check!(st == 429);
 }
@@ -726,7 +744,7 @@ const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[
 
 #[test]
 fn full_promql_test_corpus_passes() {
-    let report = crabka_promql::testharness::run_corpus_dir(
+    let report = crabka_promql::testkit::run_corpus_dir(
         "tests/testdata/promql", // vendored
     );
     // Write the per-file report.
@@ -747,7 +765,7 @@ Expected: FAIL — `run_corpus_dir`/`Report::write_to` missing, **or** a real co
 
 - [ ] **Step 3: Implement the report API on the harness + the gate**
 
-Add `run_corpus_dir(dir) -> Report` and `Report { files: Vec<FileResult { name, passed, passed_cases, total_cases }>, write_to(path) }` to the Slice 2/3 harness (small addition — the per-file iteration + a text writer). Vendor the corpus if not already (Apache-2.0 attribution).
+Add **public** `crabka_promql::testkit::run_corpus_dir(dir) -> Report` and `pub struct Report { pub files: Vec<FileResult { name, passed, passed_cases, total_cases }> }` with `Report::write_to(path)` to the Slice 2/3 harness `testkit` module (small addition — the per-file iteration + a text writer). These must be `pub` in `crabka-promql` so this slice's `crabka-metrics` test crate can import them. Vendor the corpus if not already (Apache-2.0 attribution).
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -994,7 +1012,7 @@ git commit -m "ci(metrics): conformance gate + dedicated metrics-differential Do
 **Spec coverage (against §8 API, §9 limits/HA, §10 testing, §11 Slice 8):**
 - Per-tenant limits/quotas (ingestion rate, max series, label-name/value length, samples-per-query, query lookback/range, series-per-query) on the token-bucket where it fits → Tasks 1–3, enforced live in Task 7. Token-bucket reused for the *rate* limits only (Task 3 note); count/length caps are plain comparisons (correct — a bucket would be wrong for a one-shot cap).
 - Per-tenant overrides YAML (Mimir runtime.yaml) → Task 2.
-- Prometheus-shaped errors `429`/`422`/`400` → Task 1 (`LimitError` status/type) + Task 7 (end-to-end body assertions).
+- Prometheus-shaped errors `429`/`422`/`400` → Task 1 (`LimitError` status/type) + Task 7 (end-to-end body assertions). Ingestion-rate ⇒ 429 (retriable); per-user series limit ⇒ 400 `bad_data` (non-retriable validation, matching Mimir); label-length ⇒ 400 `bad_data`; query caps ⇒ 422 `execution`.
 - Multi-tenancy isolation (read/labels/values/series/exemplars/quota; tenant-prefixed keys) **end-to-end via two `X-Scope-OrgID`s** → Task 6 (**headline**), with the quota-per-tenant assertion in Step 4.
 - remote_read `POST /api/v1/read` (ReadRequest/Response protobuf + snappy, SAMPLES path) → Tasks 4 (wire) + 5 (handler); STREAMED_XOR_CHUNKS explicitly out of scope with a documented limitation (matches the spec's "or at least SAMPLES").
 - Cardinality APIs (`label_names`/`label_values`/`active_series`) from the `Index` → Task 5.
@@ -1016,4 +1034,4 @@ git commit -m "ci(metrics): conformance gate + dedicated metrics-differential Do
 
 **Type/name consistency.** `Limits` field set is identical across Tasks 1/2/3/7 and every test (`ingestion_rate`, `max_global_series_per_user`, `max_label_name_length`/`value`, `max_fetched_series_per_query`, `max_samples_per_query`, `max_query_length_secs`, `max_query_lookback_secs`). `LimitError` variants and their `http_status`/`error_type` mapping are defined once (Task 1) and asserted unchanged in Tasks 3/7. The remote_read function set (`decode_read_request`/`encode_read_response`/`matchers_to_selectors`/`series_to_timeseries`) is consistent between Tasks 4 and 5. The `support::metrics_server` and `support::diff_corpus` helper signatures are fixed in Tasks 6/9 and consumed unchanged in Tasks 5/7/10/11/12.
 
-**Known risks (flagged).** (1) The `crabka-broker` path dep for `TokenBucket` could introduce a heavy/cyclic dependency into `crabka-metrics`; Task 3's note gives the escape hatch (lift `bucket.rs` into a tiny `crabka-throttle` crate) and prefers the path dep unless a cycle appears. (2) Docker-host reachability for Grafana (Task 12) is platform-specific (`host.docker.internal` + `--add-host`); flagged with the exact knob. (3) Mimir/Prometheus internal-label and header noise (Tasks 10/11) is contained by `normalize` + an explicit per-suite `KNOWN_DIVERGENCE` list rather than loosening the differ. (4) The `.test` corpus + remote_read proto must pin the **same** Prometheus tag (Tasks 4/8) — called out in both tasks.
+**Known risks (flagged).** (1) `crabka-metrics` needs `TokenBucket` but the existing `crabka_broker` bucket has no independent-burst knob (`set_rate` clamps the initial budget to `rate`), so honoring Mimir's independent `ingestion_burst_size` requires both a code change and avoiding a heavy/cyclic dep on the broker. Task 3 resolves both by lifting `bucket.rs` into a tiny `crabka-throttle` crate and adding `set_rate_with_burst(rate, burst)` there (broker re-exports it, so its public path is unchanged); a `burst != rate` test pins the new behavior. (2) Docker-host reachability for Grafana (Task 12) is platform-specific (`host.docker.internal` + `--add-host`); flagged with the exact knob. (3) Mimir/Prometheus internal-label and header noise (Tasks 10/11) is contained by `normalize` + an explicit per-suite `KNOWN_DIVERGENCE` list rather than loosening the differ. (4) The `.test` corpus + remote_read proto must pin the **same** Prometheus tag (Tasks 4/8) — called out in both tasks.

@@ -81,7 +81,13 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
-axum = { workspace = true }
+# The workspace `axum` is `default-features = false` and NO crate enables the
+# `json` feature; `api.rs` returns `axum::Json<Value>`, which REQUIRES it.
+# Enable `json` here or `cargo build -p crabka-metrics` fails to compile.
+axum = { workspace = true, features = ["json"] }
+# `service.rs` stores a `tokio_util::sync::CancellationToken`, so tokio-util is a
+# normal dep (not dev-only).
+tokio-util = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = { workspace = true }
 # crabka-promql / Slice-4 produce path: add the path deps once those crates exist.
@@ -91,6 +97,8 @@ tracing = { workspace = true }
 # ...existing (assert2, proptest)...
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util"] }
 tempfile = { workspace = true }
+# Task 11/13 tests drive the axum router via `tower::ServiceExt::oneshot`.
+tower = { workspace = true }
 ```
 
 If the workspace root `Cargo.toml` has no `reqwest`, add:
@@ -99,7 +107,7 @@ If the workspace root `Cargo.toml` has no `reqwest`, add:
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }
 ```
 
-> **Verify-note (workspace deps):** `serde_yaml`, `serde_json`, `axum`, `tokio`, `tracing`, `tempfile` are already `[workspace.dependencies]` (confirmed in root `Cargo.toml`). Only `reqwest` may be new — it is referenced today only in comments. Use `default-features = false` + `rustls-tls` to match the workspace's rustls-everywhere posture (no native-tls/openssl).
+> **Verify-note (workspace deps):** `serde_yaml`, `serde_json`, `axum`, `tokio`, `tokio-util`, `tower`, `tracing`, `tempfile` are already `[workspace.dependencies]` (confirmed in root `Cargo.toml`). Only `reqwest` may be new — it is referenced today only in comments. Use `default-features = false` + `rustls-tls` to match the workspace's rustls-everywhere posture (no native-tls/openssl). The workspace `axum` is `default-features = false` and no crate enables `json`; this crate must opt into `features = ["json"]` because `api.rs` returns `axum::Json<Value>`.
 
 - [ ] **Step 2: Create the `contract` shim + module decls**
 
@@ -131,8 +139,54 @@ pub mod state;
 pub mod contract {
     use std::collections::BTreeMap;
 
-    /// Ordered label set (matches blockstore/Slice-1 `Labels`).
-    pub type Labels = BTreeMap<String, String>;
+    /// Ordered label set. This is a **newtype struct** with the EXACT restricted
+    /// API of the real shared `Labels` (`crabka-blockstore`), NOT a bare
+    /// `BTreeMap` alias — so every ruler call site is written against the same
+    /// surface that survives the re-export swap. Notably: `get` returns
+    /// `Option<&str>` (not `Option<&String>`), `insert` takes `impl Into<String>`,
+    /// there is **no** `remove`, **no** `Deref`, and `FromIterator` is provided
+    /// here for ergonomics (drop it if the real type lacks it and convert at the
+    /// boundary instead).
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Labels(BTreeMap<String, String>);
+
+    impl Labels {
+        #[must_use]
+        pub fn new() -> Self {
+            Self(BTreeMap::new())
+        }
+        /// Matches blockstore: returns `Option<&str>`, not `Option<&String>`.
+        #[must_use]
+        pub fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).map(String::as_str)
+        }
+        pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+            self.0.insert(key.into(), value.into());
+        }
+        /// Iterates `(&String, &String)` like the real type. (No `remove`: drop a
+        /// key by rebuilding without it — see `eval.rs::full_alert_labels`.)
+        pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+            self.0.iter()
+        }
+        #[must_use]
+        pub fn contains_key(&self, key: &str) -> bool {
+            self.0.contains_key(key)
+        }
+    }
+
+    impl<'a> IntoIterator for &'a Labels {
+        type Item = (&'a String, &'a String);
+        type IntoIter = std::collections::btree_map::Iter<'a, String, String>;
+        fn into_iter(self) -> Self::IntoIter {
+            self.0.iter()
+        }
+    }
+
+    impl FromIterator<(String, String)> for Labels {
+        fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+            Self(iter.into_iter().collect())
+        }
+    }
 
     /// One instant-vector sample.
     #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +194,16 @@ pub mod contract {
         pub labels: Labels,
         pub ts_ms: i64,
         pub value: SampleValue,
+    }
+
+    /// One series in a range matrix (carried so the enum matches the real
+    /// 4-variant shape even though rules only read instant vectors/scalars).
+    /// Field names/types mirror Slice 2's `crabka_promql::RangeSeries`
+    /// (`samples: Vec<(i64, SampleValue)>`) so the re-export swap is a no-op.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct RangeSeries {
+        pub labels: Labels,
+        pub samples: Vec<(i64, SampleValue)>,
     }
 
     /// A sample value: float or native histogram. (`Histogram` carried as an
@@ -151,25 +215,77 @@ pub mod contract {
         Histogram(()),
     }
 
-    /// PromQL query result.
+    /// PromQL query result. Carries **all four** real `crabka-promql` variants
+    /// (`Scalar`, `InstantVector`, `RangeMatrix`, `Str`) even though the ruler
+    /// only consumes the first two — so `eval.rs::as_vector`'s `match` stays
+    /// exhaustive after the re-export swap.
     #[derive(Clone, Debug, PartialEq)]
     pub enum QueryResult {
         Scalar { ts_ms: i64, value: f64 },
         InstantVector(Vec<InstantSample>),
+        RangeMatrix(Vec<RangeSeries>),
+        Str { ts_ms: i64, value: String },
     }
 
-    /// Engine error surface.
+    /// Engine error surface. Mirrors Slice 2's `crabka_promql::PromqlError`
+    /// 5-variant set so the re-export swap is a no-op (the ruler only carries
+    /// this opaquely via `EvalError`, never matching/constructing variants).
     #[derive(Debug, thiserror::Error)]
     pub enum PromqlError {
-        #[error("promql error: {0}")]
-        Eval(String),
+        #[error("parse error: {0}")]
+        Parse(String),
+        #[error("plan error: {0}")]
+        Plan(String),
+        #[error("execution error: {0}")]
+        Exec(String),
+        #[error("store error: {0}")]
+        Store(String),
+        #[error("unsupported: {0}")]
+        Unsupported(String),
     }
 }
 
-pub use contract::{InstantSample, Labels, PromqlError, QueryResult, SampleValue};
+pub use contract::{InstantSample, Labels, PromqlError, QueryResult, RangeSeries, SampleValue};
+
+#[cfg(test)]
+mod contract_tests {
+    use assert2::assert;
+
+    use super::contract::{Labels, QueryResult, RangeSeries};
+
+    // Pins the restricted real-struct `Labels` API so a re-export to the
+    // blockstore newtype can't silently break call sites: `get -> Option<&str>`,
+    // `insert(impl Into<String>, …)`, `iter` over `(&String, &String)`,
+    // `FromIterator<(String, String)>`. There is deliberately no `remove`.
+    #[test]
+    fn labels_newtype_api() {
+        let mut l = Labels::new();
+        l.insert("a", "1"); // impl Into<String> for &str
+        l.insert("__name__".to_string(), "x".to_string());
+        let got: Option<&str> = l.get("a");
+        assert!(got == Some("1"));
+        assert!(l.get("missing").is_none());
+        assert!(l.contains_key("__name__"));
+        let collected: Vec<(String, String)> =
+            l.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        assert!(collected.len() == 2);
+        let rebuilt: Labels = collected.into_iter().collect(); // FromIterator
+        assert!(rebuilt.get("a") == Some("1"));
+    }
+
+    // Pins all four `QueryResult` variants so `eval.rs::as_vector` stays
+    // exhaustive after the real 4-variant enum is re-exported.
+    #[test]
+    fn query_result_has_four_variants() {
+        let _ = QueryResult::Scalar { ts_ms: 0, value: 1.0 };
+        let _ = QueryResult::InstantVector(vec![]);
+        let _ = QueryResult::RangeMatrix(Vec::<RangeSeries>::new());
+        let _ = QueryResult::Str { ts_ms: 0, value: String::new() };
+    }
+}
 ```
 
-> **Re-export-swap note:** the moment `crabka-promql` lands, replace the bodies of `contract` with `pub use crabka_promql::{...};` and `pub use crabka_metrics_ingest::WalRecord;` (or wherever Slice 4 puts the produce entry point). The `Histogram(())` placeholder becomes `Histogram(crate::NativeHistogram)`. No other ruler file references the upstream crates directly — they all go through `contract`, so this is a one-file swap.
+> **Re-export-swap note:** the moment `crabka-promql` lands, replace the bodies of `contract` with `pub use crabka_promql::{Labels, PromqlEngine, MetricStore, QueryResult, InstantSample, RangeSeries, SampleValue, PromqlError};` (note `Labels` is actually `crabka_blockstore::Labels`, re-exported by promql) and `pub use crate::WalRecord;` (Slice 4 lands `WalRecord` in this same `crabka-metrics` crate — `crates/metrics/src/wal.rs`). The `Histogram(())` placeholder becomes `Histogram(crate::NativeHistogram)`. The shim `Labels`/`QueryResult`/`RangeSeries`/`PromqlError` already mirror the real type signatures (newtype `Labels` with `get -> Option<&str>` / no `remove`; the 4-variant `QueryResult`; `RangeSeries.samples: Vec<(i64, SampleValue)>`; the 5-variant `PromqlError`), so the swap is genuinely a one-file change — but only because every ruler call site is written against that restricted API, not bare `BTreeMap`/2-variant semantics. Flag any signature drift loudly.
 
 - [ ] **Step 3: Wire into `lib.rs`**
 
@@ -179,10 +295,13 @@ Add `pub mod ruler;` to `crates/metrics/src/lib.rs`.
 
 Create empty-but-compiling `clock.rs`, `model.rs`, `state.rs`, `sinks.rs`, `eval.rs`, `alertmanager.rs`, `produce.rs`, `sharding.rs`, `api.rs`, `service.rs` each with a `//!` doc line. (Each fills in its own Task below; they must exist for `mod.rs` to compile.)
 
-- [ ] **Step 5: Build**
+- [ ] **Step 5: Build + pin the contract API**
 
 Run: `cargo build -p crabka-metrics`
 Expected: compiles (empty modules + contract shim).
+
+Run: `cargo test -p crabka-metrics --lib ruler::contract_tests`
+Expected: PASS (2 tests) — pins the restricted `Labels` newtype API and the 4-variant `QueryResult` so the eventual re-export swap can't silently break call sites.
 
 - [ ] **Step 6: Commit**
 
@@ -205,7 +324,8 @@ git commit -m "feat(metrics): scaffold ruler module + contract shim + deps"
   - `struct RuleGroups { pub groups: Vec<RuleGroup> }` (`serde`, `PartialEq`).
   - `struct RuleGroup { pub name: String, pub interval: Option<Duration>, pub rules: Vec<Rule> }` — `interval` parsed from a Prometheus duration string (`"30s"`, `"1m"`), `None` ⇒ a service default.
   - `enum Rule { Recording { record: String, expr: String, labels: Labels }, Alerting { alert: String, expr: String, for_: Duration, keep_firing_for: Duration, labels: Labels, annotations: BTreeMap<String,String> } }` — discriminated by the presence of `record` vs `alert` keys (Prometheus's untagged form).
-  - `fn parse_rule_groups_yaml(yaml: &str) -> Result<RuleGroups, RuleModelError>`
+  - `fn parse_rule_groups_yaml(yaml: &str) -> Result<RuleGroups, RuleModelError>` (multi-group `groups:` document).
+  - `fn parse_rule_group_yaml(yaml: &str) -> Result<RuleGroup, RuleModelError>` (a **single** bare group — the body shape of Mimir's per-namespace `POST`).
   - `fn to_yaml(&RuleGroups) -> Result<String, RuleModelError>`
   - `enum RuleModelError` (`thiserror`): `Yaml(String)`, `BadDuration(String)`, `MissingRecordOrAlert`, `BothRecordAndAlert`, `DuplicateGroup(String)`.
   - `fn parse_prom_duration(s: &str) -> Result<Duration, RuleModelError>` (supports `ms`/`s`/`m`/`h`/`d`/`w`/`y`, compound like `1h30m`).
@@ -253,7 +373,7 @@ groups:
         match &grp.rules[0] {
             Rule::Recording { record, labels, .. } => {
                 assert!(record == "job:http_requests:rate5m");
-                assert!(labels.get("team").map(String::as_str) == Some("sre"));
+                assert!(labels.get("team") == Some("sre"));
             }
             other => panic!("expected recording, got {other:?}"),
         }
@@ -481,7 +601,15 @@ fn convert_rule(r: RawRule) -> Result<Rule, RuleModelError> {
     }
 }
 
-/// Parse rule-group YAML (the body of the Mimir config API).
+fn convert_group(g: RawGroup) -> Result<RuleGroup, RuleModelError> {
+    let interval = g.interval.as_deref().map(parse_prom_duration).transpose()?;
+    let rules = g.rules.into_iter().map(convert_rule).collect::<Result<_, _>>()?;
+    Ok(RuleGroup { name: g.name, interval, rules })
+}
+
+/// Parse a multi-group rule document (`groups: [...]`). Used by the eval-loop
+/// config store and the `GET` read paths — **not** by Mimir's per-namespace
+/// `POST`, which sends a single bare group (see `parse_rule_group_yaml`).
 pub fn parse_rule_groups_yaml(yaml: &str) -> Result<RuleGroups, RuleModelError> {
     let raw: RawGroups = serde_yaml::from_str(yaml).map_err(|e| RuleModelError::Yaml(e.to_string()))?;
     let mut seen = BTreeSet::new();
@@ -490,26 +618,60 @@ pub fn parse_rule_groups_yaml(yaml: &str) -> Result<RuleGroups, RuleModelError> 
         if !seen.insert(g.name.clone()) {
             return Err(RuleModelError::DuplicateGroup(g.name));
         }
-        let interval = g.interval.as_deref().map(parse_prom_duration).transpose()?;
-        let rules = g.rules.into_iter().map(convert_rule).collect::<Result<_, _>>()?;
-        groups.push(RuleGroup { name: g.name, interval, rules });
+        groups.push(convert_group(g)?);
     }
     Ok(RuleGroups { groups })
 }
 
-/// Serialize back to YAML (config-API GET response body).
+/// Parse a **single** rule group (`name:`/`interval:`/`rules:` at the TOP level,
+/// no `groups:` wrapper). This is the exact body shape Mimir's
+/// `POST /prometheus/config/v1/rules/{namespace}` requires ("The request body
+/// must contain the definition of one and only one rule group"). Used by
+/// `api.rs::post_namespace`.
+pub fn parse_rule_group_yaml(yaml: &str) -> Result<RuleGroup, RuleModelError> {
+    let raw: RawGroup = serde_yaml::from_str(yaml).map_err(|e| RuleModelError::Yaml(e.to_string()))?;
+    convert_group(raw)
+}
+
+fn raw_from_group(grp: &RuleGroup) -> RawGroup {
+    RawGroup {
+        name: grp.name.clone(),
+        interval: grp.interval.map(fmt_duration),
+        rules: grp.rules.iter().map(raw_from_rule).collect(),
+    }
+}
+
+/// Serialize back to YAML (config-API GET response body for a `groups:` doc).
 pub fn to_yaml(g: &RuleGroups) -> Result<String, RuleModelError> {
-    let raw = RawGroups {
-        groups: g
-            .groups
-            .iter()
-            .map(|grp| RawGroup {
-                name: grp.name.clone(),
-                interval: grp.interval.map(fmt_duration),
-                rules: grp.rules.iter().map(raw_from_rule).collect(),
-            })
-            .collect(),
-    };
+    let raw = RawGroups { groups: g.groups.iter().map(raw_from_group).collect() };
+    serde_yaml::to_string(&raw).map_err(|e| RuleModelError::Yaml(e.to_string()))
+}
+
+/// Serialize a **single** rule group as a bare group document (`name:`/
+/// `interval:`/`rules:` at the top level — the inverse of `parse_rule_group_yaml`
+/// and the body shape `GET /{namespace}/{group}` returns).
+pub fn group_to_yaml(group: &RuleGroup) -> Result<String, RuleModelError> {
+    serde_yaml::to_string(&raw_from_group(group)).map_err(|e| RuleModelError::Yaml(e.to_string()))
+}
+
+/// Serialize a single namespace's groups in Mimir's documented per-namespace
+/// `GET /{namespace}` shape: a bare YAML **list of groups** (no `groups:` map
+/// wrapper). `RawGroup` stays private to this module.
+pub fn namespace_groups_to_yaml(groups: &[RuleGroup]) -> Result<String, RuleModelError> {
+    let raw: Vec<RawGroup> = groups.iter().map(raw_from_group).collect();
+    serde_yaml::to_string(&raw).map_err(|e| RuleModelError::Yaml(e.to_string()))
+}
+
+/// Serialize the all-namespaces `GET /prometheus/config/v1/rules` response:
+/// a real YAML **mapping** `namespace -> [groups]` (Mimir's documented shape),
+/// not concatenated documents. Input is ordered `(namespace, groups)` pairs.
+pub fn namespaces_to_yaml_map(
+    by_namespace: &BTreeMap<String, Vec<RuleGroup>>,
+) -> Result<String, RuleModelError> {
+    let raw: BTreeMap<String, Vec<RawGroup>> = by_namespace
+        .iter()
+        .map(|(ns, groups)| (ns.clone(), groups.iter().map(raw_from_group).collect()))
+        .collect();
     serde_yaml::to_string(&raw).map_err(|e| RuleModelError::Yaml(e.to_string()))
 }
 
@@ -1175,9 +1337,9 @@ mod tests {
         let (tenant, rows) = &calls[0];
         assert!(tenant == "t");
         let (out_labels, ts, val) = &rows[0];
-        assert!(out_labels.get("__name__").map(String::as_str) == Some("job:http:rate5m"));
-        assert!(out_labels.get("job").map(String::as_str) == Some("api"));
-        assert!(out_labels.get("team").map(String::as_str) == Some("sre"));
+        assert!(out_labels.get("__name__") == Some("job:http:rate5m"));
+        assert!(out_labels.get("job") == Some("api"));
+        assert!(out_labels.get("team") == Some("sre"));
         assert!(*ts == 60_000 && (*val - 0.42).abs() < 1e-9);
         assert!(alerts.calls().is_empty()); // recording rules never dispatch
     }
@@ -1209,9 +1371,9 @@ mod tests {
         let calls = sink.calls();
         assert!(calls.len() == 1);
         let dispatched = &calls[0].1[0];
-        assert!(dispatched.labels.get("alertname").map(String::as_str) == Some("HighErr"));
-        assert!(dispatched.labels.get("severity").map(String::as_str) == Some("page"));
-        assert!(dispatched.labels.get("job").map(String::as_str) == Some("api"));
+        assert!(dispatched.labels.get("alertname") == Some("HighErr"));
+        assert!(dispatched.labels.get("severity") == Some("page"));
+        assert!(dispatched.labels.get("job") == Some("api"));
         // templated annotation
         assert!(dispatched.annotations.get("summary").unwrap() == "job api at 7");
 
@@ -1248,6 +1410,32 @@ mod tests {
         // missing label → empty
         let out2 = template_annotation("{{ $labels.missing }}!", 0.0, &Labels::new());
         assert!(out2 == "!");
+    }
+
+    #[tokio::test]
+    async fn templated_label_value_expands() {
+        // A rule label whose VALUE is a template — Prometheus expands label
+        // values too, against the result series labels (not just annotations).
+        let q = ScriptQuerier::default();
+        let rec = MockRecordingSink::default();
+        let sink = MockAlertSink::default();
+        let state = InMemoryStateStore::default();
+        let group = RuleGroup {
+            name: "g".into(),
+            interval: Some(Duration::from_secs(60)),
+            rules: vec![Rule::Alerting {
+                alert: "HighErr".into(),
+                expr: "errors > 0".into(),
+                for_: Duration::ZERO, // fire immediately so we can read dispatched labels
+                keep_firing_for: Duration::ZERO,
+                labels: lbls(&[("target", "{{ $labels.host }}")]),
+                annotations: BTreeMap::new(),
+            }],
+        };
+        q.push(vector(&[(lbls(&[("host", "node-7")]), 5.0)], 0));
+        evaluate_group("t", &group, 0, &q, &rec, &sink, &state).await.unwrap();
+        let dispatched = &sink.calls()[0].1[0];
+        assert!(dispatched.labels.get("target") == Some("node-7"));
     }
 }
 ```
@@ -1303,6 +1491,11 @@ pub struct GroupEvalReport {
 
 /// Coerce a `QueryResult` to an instant vector (recording/alerting both read
 /// vectors; a scalar is lifted to a single label-less sample).
+///
+/// The match handles all four `QueryResult` variants explicitly so it stays
+/// exhaustive after `contract` re-exports the real 4-variant enum: `RangeMatrix`
+/// and `Str` are not valid rule outputs (Prometheus rejects range-vector/string
+/// rule expressions), so they coerce to an empty vector here.
 fn as_vector(r: QueryResult) -> Vec<InstantSample> {
     match r {
         QueryResult::InstantVector(v) => v,
@@ -1311,6 +1504,8 @@ fn as_vector(r: QueryResult) -> Vec<InstantSample> {
             ts_ms,
             value: SampleValue::Float(value),
         }],
+        // Not valid rule-expression result types → no samples.
+        QueryResult::RangeMatrix(_) | QueryResult::Str { .. } => Vec::new(),
     }
 }
 
@@ -1339,7 +1534,8 @@ pub fn template_annotation(text: &str, value: f64, labels: &Labels) -> String {
         if expr == "$value" {
             out.push_str(&fmt_value(value));
         } else if let Some(label) = expr.strip_prefix("$labels.") {
-            out.push_str(labels.get(label).map_or("", String::as_str));
+            // `Labels::get` already returns `Option<&str>` (blockstore signature).
+            out.push_str(labels.get(label).unwrap_or(""));
         } else {
             // unknown directive: leave it untouched (visible, not silently lost)
             out.push_str("{{ ");
@@ -1360,11 +1556,25 @@ fn fmt_value(v: f64) -> String {
 
 /// Build the full alert label set: `alertname` + rule labels override series
 /// labels. (Matches Prometheus: rule `labels:` take precedence on collision.)
-fn full_alert_labels(alertname: &str, rule_labels: &Labels, series: &Labels) -> Labels {
-    let mut l: Labels = series.clone();
-    l.remove("__name__"); // alerts never carry __name__
+///
+/// Rule **label values** are run through the template expander, exactly like
+/// annotation values (Prometheus `rules/alerting.go`:
+/// `r.labels.Range(func(l){ lb.Set(l.Name, expand(l.Value)) })`). The template
+/// context is the result `value` + the series labels, so e.g.
+/// `instance: '{{ $labels.host }}'` resolves against the result series.
+///
+/// `Labels` has no `remove`, so we drop `__name__` by rebuilding from the
+/// series' other labels rather than cloning-and-removing.
+fn full_alert_labels(alertname: &str, rule_labels: &Labels, series: &Labels, value: f64) -> Labels {
+    let mut l = Labels::new();
+    for (k, v) in series {
+        if k.as_str() != "__name__" {
+            // alerts never carry __name__
+            l.insert(k.clone(), v.clone());
+        }
+    }
     for (k, v) in rule_labels {
-        l.insert(k.clone(), v.clone());
+        l.insert(k.clone(), template_annotation(v, value, series));
     }
     l.insert("alertname".to_string(), alertname.to_string());
     l
@@ -1396,8 +1606,14 @@ where
                 let mut rows = Vec::with_capacity(samples.len());
                 for s in &samples {
                     let Some(v) = float_value(&s.value) else { continue };
-                    let mut out = s.labels.clone();
-                    out.remove("__name__");
+                    // `Labels` has no `remove`; rebuild without the source
+                    // `__name__`, then merge rule labels and set the new name.
+                    let mut out = Labels::new();
+                    for (k, val) in &s.labels {
+                        if k.as_str() != "__name__" {
+                            out.insert(k.clone(), val.clone());
+                        }
+                    }
                     for (k, val) in labels {
                         out.insert(k.clone(), val.clone());
                     }
@@ -1449,7 +1665,7 @@ where
 
     for s in samples {
         let Some(value) = float_value(&s.value) else { continue };
-        let labels = full_alert_labels(alert, rule_labels, &s.labels);
+        let labels = full_alert_labels(alert, rule_labels, &s.labels, value);
         let fp = alert_fingerprint(&labels);
 
         let templated: BTreeMap<String, String> = annotations
@@ -1505,7 +1721,7 @@ where
 ```
 
 > **Prometheus-fidelity verify-notes (pin these empirically before declaring done):**
-> 1. **Label precedence** — `full_alert_labels` makes rule `labels:` override series labels. Confirm against Prometheus (`rules/alerting.go` `Alert.Labels`): the result-vector labels are the base, rule labels overlaid, `alertname` last. The test `alert_goes_pending_then_firing` pins `job` (series) + `severity` (rule) + `alertname` coexisting.
+> 1. **Label precedence + value templating** — `full_alert_labels` makes rule `labels:` override series labels, and runs each rule **label value** through `template_annotation` (Prometheus `rules/alerting.go` expands label values, not just annotations: `r.labels.Range(func(l){ lb.Set(l.Name, expand(l.Value)) })`). Confirm against Prometheus (`Alert.Labels`): the result-vector labels are the base, templated rule labels overlaid, `alertname` last. The test `alert_goes_pending_then_firing` pins `job` (series) + `severity` (rule) + `alertname` coexisting; `templated_label_value_expands` pins a `{{ $labels.X }}` rule label resolving against the series.
 > 2. **`for:` boundary** — Prometheus fires when `now - activeAt >= for` (inclusive at the boundary). The `t=120s, for=120s` test pins the inclusive boundary. If cp-prometheus differs (strict `>`), flip the comparison and the test together.
 > 3. **`$value` formatting** — `fmt_value` uses Rust's `{}` float format. Prometheus templates render via Go's `%v`/`humanize`; for integers-as-floats (`7.0 → "7"`) Rust's `{}` already yields `"7"`. For non-round values verify against Prometheus and adjust (this is a known fidelity gap — flagged in self-review, not load-bearing for Slice 7's state-machine correctness).
 > 4. **Re-dispatch / resends** — `evaluate_group` dispatches ONLY the pending→firing transition. Prometheus/Alertmanager re-send still-firing alerts on a resend interval; that scheduling belongs to the service loop (Task 9) + Alertmanager's own dedup, and is flagged there.
@@ -1513,7 +1729,7 @@ where
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-metrics --lib ruler::eval`
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Add re-exports**
 
@@ -1544,6 +1760,7 @@ git commit -m "feat(metrics): ruler evaluate_group — recording write-back + fo
     - `get_namespace(&self, tenant: &str, ns: &str) -> Vec<(String /*group*/, RuleGroup, String /*raw_yaml*/)>`
     - `get_group(&self, tenant: &str, ns: &str, group: &str) -> Option<(RuleGroup, String)>`
     - `put_namespace(&self, tenant: &str, ns: &str, groups: &RuleGroups, raw_yaml: &str)`
+    - `put_group(&self, tenant: &str, ns: &str, group: RuleGroup, raw_yaml: &str)` — upsert a single group (Mimir's per-namespace `POST` semantics).
     - `delete_namespace(&self, tenant: &str, ns: &str)`
     - `delete_group(&self, tenant: &str, ns: &str, group: &str)`
     - `all_groups(&self, tenant: &str) -> Vec<(String /*ns*/, RuleGroup)>` (the eval loop's source).
@@ -1684,6 +1901,10 @@ pub trait RuleConfigStore: Send + Sync {
     fn get_namespace(&self, tenant: &str, ns: &str) -> Vec<(String, RuleGroup, String)>;
     fn get_group(&self, tenant: &str, ns: &str, group: &str) -> Option<(RuleGroup, String)>;
     fn put_namespace(&self, tenant: &str, ns: &str, groups: &RuleGroups, raw_yaml: &str);
+    /// Upsert a **single** group into a namespace (Mimir's per-namespace `POST`
+    /// semantics: create-or-replace that one group, leaving siblings intact).
+    /// `raw_yaml` is the verbatim single-group body, echoed by `GET /{ns}/{group}`.
+    fn put_group(&self, tenant: &str, ns: &str, group: RuleGroup, raw_yaml: &str);
     fn delete_namespace(&self, tenant: &str, ns: &str);
     fn delete_group(&self, tenant: &str, ns: &str, group: &str);
     fn all_groups(&self, tenant: &str) -> Vec<(String, RuleGroup)>;
@@ -1721,12 +1942,23 @@ impl RuleConfigStore for InMemoryConfigStore {
             .groups
             .iter()
             .map(|grp| {
-                let single = RuleGroups { groups: vec![grp.clone()] };
-                let raw = super::model::to_yaml(&single).unwrap_or_default();
+                // store the single-bare-group form so GET /{ns}/{group} echoes
+                // exactly what Mimir's per-group GET returns.
+                let raw = super::model::group_to_yaml(grp).unwrap_or_default();
                 (grp.clone(), raw)
             })
             .collect();
         self.inner.lock().expect("poisoned").insert((tenant.to_string(), ns.to_string()), value);
+    }
+    fn put_group(&self, tenant: &str, ns: &str, group: RuleGroup, raw_yaml: &str) {
+        let mut g = self.inner.lock().expect("poisoned");
+        let entry = g.entry((tenant.to_string(), ns.to_string())).or_default();
+        let raw = raw_yaml.to_string();
+        if let Some(slot) = entry.iter_mut().find(|(grp, _)| grp.name == group.name) {
+            *slot = (group, raw); // replace existing group of the same name
+        } else {
+            entry.push((group, raw)); // create-or-append
+        }
     }
     fn delete_namespace(&self, tenant: &str, ns: &str) {
         self.inner.lock().expect("poisoned").remove(&(tenant.to_string(), ns.to_string()));
@@ -2128,7 +2360,7 @@ mod tests {
         let rows = vec![(lbls(&[("__name__", "x")]), 10_i64, 1.5_f64)];
         let wal = to_wal_samples(&rows);
         assert!(wal.len() == 1);
-        assert!(wal[0].labels.get("__name__").map(String::as_str) == Some("x"));
+        assert!(wal[0].labels.get("__name__") == Some("x"));
         assert!(wal[0].ts_ms == 10 && (wal[0].value - 1.5).abs() < 1e-9);
     }
 
@@ -2218,7 +2450,7 @@ impl<P: WalProducer> RecordingSink for WalRecordingSink<P> {
 }
 ```
 
-> **Churn-surface verify-note:** the real `WalProducer` impl wraps Slice 4's produce path — it serializes `WalSeriesSample` to the WAL record's wire shape (`crabka-metrics` `WalRecord`) and produces to the metrics WAL topic partitioned by `(tenant, series_fingerprint)` (spec §5.4). That serialization is Slice 4's contract; this trait keeps it out of the ruler. When Slice 4 lands, add `produce.rs::KafkaWalProducer` implementing `WalProducer` over the `crabka-client-producer` `Producer` + the Slice-4 `WalRecord` encoder. The `to_wal_samples` test pins the field mapping regardless.
+> **Churn-surface verify-note:** the real `WalProducer` impl wraps Slice 4's produce path — it serializes `WalSeriesSample` to the WAL record's wire shape (`crabka-metrics` `WalRecord`, via `WalRecord::encode`) and produces to Slice 4's metrics WAL topic `crate::WAL_TOPIC` (`"__crabka_metrics_wal"`), partitioned by `(tenant, series_fingerprint)` via Slice 4's `partition_key` (spec §5.4). That serialization is Slice 4's contract; this trait keeps it out of the ruler. When Slice 4 lands, add `produce.rs::KafkaWalProducer` implementing `WalProducer` over the `crabka-client-producer` `Producer` + the Slice-4 `WalRecord` encoder, defaulting its topic to `crate::WAL_TOPIC`. The `to_wal_samples` test pins the field mapping regardless.
 
 - [ ] **Step 4: Add re-exports** in `ruler/mod.rs` (`pub use produce::{WalProducer, WalRecordingSink, WalSeriesSample, to_wal_samples};`).
 
@@ -2244,14 +2476,14 @@ git commit -m "feat(metrics): ruler WAL recording sink (WalProducer seam onto Sl
 - Modify: `crates/metrics/src/ruler/api.rs`
 
 **Interfaces:**
-- Consumes: `RuleConfigStore`, `RuleStateStore`, `model::{parse_rule_groups_yaml, to_yaml}`, `AlertState`.
+- Consumes: `RuleConfigStore`, `RuleStateStore`, `model::{parse_rule_group_yaml, namespace_groups_to_yaml, namespaces_to_yaml_map}`, `AlertState`.
 - Produces:
   - `struct RulerApiState { config: Arc<dyn RuleConfigStore>, state: Arc<dyn RuleStateStore>, default_interval_secs: u64 }` (`Clone`).
   - `fn router(state: RulerApiState) -> axum::Router` mounting:
-    - `POST /prometheus/config/v1/rules/{namespace}` — body = rule-group YAML; `X-Scope-OrgID` tenant; 202/201.
-    - `GET /prometheus/config/v1/rules` — all namespaces' YAML (Mimir's map-of-namespace→groups).
-    - `GET /prometheus/config/v1/rules/{namespace}` — one namespace's YAML.
-    - `GET /prometheus/config/v1/rules/{namespace}/{group}` — one group's YAML.
+    - `POST /prometheus/config/v1/rules/{namespace}` — body = a **single** bare rule group (Mimir: "one and only one rule group", no `groups:` wrapper); upserts it into the namespace; `X-Scope-OrgID` tenant; 202/201.
+    - `GET /prometheus/config/v1/rules` — all namespaces as a YAML **map** `namespace -> [groups]` (Mimir's documented shape).
+    - `GET /prometheus/config/v1/rules/{namespace}` — one namespace's groups as a bare YAML **list**.
+    - `GET /prometheus/config/v1/rules/{namespace}/{group}` — one group's YAML (stored single-group body, echoed verbatim).
     - `DELETE /prometheus/config/v1/rules/{namespace}` and `.../{namespace}/{group}` — 202.
     - `GET /api/v1/rules` — Prometheus rules JSON (`data.groups[].rules[]` with `type`/`state`/`health`).
     - `GET /api/v1/alerts` — Prometheus alerts JSON (`data.alerts[]` with `state`/`labels`/`annotations`/`activeAt`/`value`).
@@ -2274,7 +2506,7 @@ mod tests {
 
     use super::*;
     use crate::ruler::config_store::InMemoryConfigStore;
-    use crate::ruler::model::parse_rule_groups_yaml;
+    use crate::ruler::model::parse_rule_group_yaml;
     use crate::ruler::state::{ActiveAlert, AlertState, InMemoryStateStore};
 
     fn test_state() -> RulerApiState {
@@ -2289,7 +2521,9 @@ mod tests {
     async fn post_then_get_namespace_round_trips_yaml() {
         let state = test_state();
         let app = router(state.clone());
-        let yaml = "groups:\n  - name: g\n    rules:\n      - record: r\n        expr: up\n";
+        // Mimir's POST body is a SINGLE bare rule group — `name:`/`rules:` at the
+        // TOP level, NO `groups:` wrapper.
+        let yaml = "name: g\nrules:\n  - record: r\n    expr: up\n";
 
         let resp = app
             .clone()
@@ -2303,9 +2537,11 @@ mod tests {
             .unwrap();
         assert!(resp.status() == StatusCode::ACCEPTED || resp.status() == StatusCode::CREATED);
 
+        // GET the single group back — `GET /{ns}/{group}` echoes the stored
+        // single-group YAML verbatim.
         let resp = app
             .oneshot(
-                Request::get("/prometheus/config/v1/rules/ns1")
+                Request::get("/prometheus/config/v1/rules/ns1/g")
                     .header("X-Scope-OrgID", "t")
                     .body(Body::empty())
                     .unwrap(),
@@ -2315,8 +2551,8 @@ mod tests {
         assert!(resp.status() == StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
-        let parsed = parse_rule_groups_yaml(&text).unwrap();
-        assert!(parsed.groups[0].name == "g");
+        let parsed = parse_rule_group_yaml(&text).unwrap();
+        assert!(parsed.name == "g");
     }
 
     #[tokio::test]
@@ -2378,10 +2614,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use serde_json::{Value, json};
 
+use std::collections::BTreeMap;
+
 use super::alertmanager::rfc3339_millis;
 use super::config_store::RuleConfigStore;
 use super::contract::Labels;
-use super::model::{RuleGroups, parse_rule_groups_yaml, to_yaml};
+use super::model::{
+    RuleGroup, namespace_groups_to_yaml, namespaces_to_yaml_map, parse_rule_group_yaml,
+};
 use super::state::RuleStateStore;
 
 #[derive(Clone)]
@@ -2442,8 +2682,11 @@ async fn post_namespace(
     body: String,
 ) -> Result<StatusCode, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
-    let groups = parse_rule_groups_yaml(&body).map_err(|e| ApiError::BadYaml(e.to_string()))?;
-    st.config.put_namespace(&tenant, &namespace, &groups, &body);
+    // Mimir's POST body is a SINGLE bare rule group (`name:`/`interval:`/`rules:`
+    // at top level), NOT a `groups:` document — parse it as one group and upsert
+    // it into the namespace.
+    let group = parse_rule_group_yaml(&body).map_err(|e| ApiError::BadYaml(e.to_string()))?;
+    st.config.put_group(&tenant, &namespace, group, &body);
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2452,14 +2695,17 @@ async fn get_all_rules(
     headers: HeaderMap,
 ) -> Result<String, ApiError> {
     let tenant = tenant_from_headers(&headers)?;
-    // Mimir returns YAML: namespace -> [groups]. Concatenate per-namespace docs.
-    let mut out = String::new();
-    for ns in st.config.list_namespaces(&tenant) {
-        let groups: Vec<_> = st.config.get_namespace(&tenant, &ns).into_iter().map(|(_, g, _)| g).collect();
-        out.push_str(&format!("# namespace: {ns}\n"));
-        out.push_str(&to_yaml(&RuleGroups { groups }).map_err(|e| ApiError::BadYaml(e.to_string()))?);
-    }
-    Ok(out)
+    // Mimir returns a YAML MAP `namespace -> [groups]` (not concatenated docs).
+    let by_namespace: BTreeMap<String, Vec<RuleGroup>> = st
+        .config
+        .list_namespaces(&tenant)
+        .into_iter()
+        .map(|ns| {
+            let groups = st.config.get_namespace(&tenant, &ns).into_iter().map(|(_, g, _)| g).collect();
+            (ns, groups)
+        })
+        .collect();
+    namespaces_to_yaml_map(&by_namespace).map_err(|e| ApiError::BadYaml(e.to_string()))
 }
 
 async fn get_namespace(
@@ -2473,7 +2719,8 @@ async fn get_namespace(
     if groups.is_empty() {
         return Err(ApiError::NotFound);
     }
-    to_yaml(&RuleGroups { groups }).map_err(|e| ApiError::BadYaml(e.to_string()))
+    // Mimir returns the namespace content directly: a bare list of groups.
+    namespace_groups_to_yaml(&groups).map_err(|e| ApiError::BadYaml(e.to_string()))
 }
 
 async fn get_group(
@@ -2590,7 +2837,7 @@ pub fn alerts_json(state: &dyn RuleStateStore, tenant: &str) -> Value {
 > **Prometheus-shape verify-notes:**
 > 1. `value` is a **string** in both `/api/v1/alerts` and query results — pinned by `alerts_json_matches_prometheus_shape`. Keep it stringified.
 > 2. `/api/v1/rules` here returns empty `alerts: []` per alerting rule (the rule's *firing instances* belong on the rule, not just `/api/v1/alerts`). Joining live `ActiveAlert`s onto their rule is a Slice-8 polish — flagged; Grafana's rule view tolerates the empty array.
-> 3. Mimir's `GET /prometheus/config/v1/rules` returns a YAML map `namespace: [groups]`. The `get_all_rules` handler approximates with per-namespace concatenation + a comment header; verify exact framing against cp-mimir and tighten under Slice 8 if differential testing flags it. The single-namespace and single-group GETs are the load-bearing ones for `kafka`-tool-equivalent admin flows and are exact.
+> 3. Mimir's `GET /prometheus/config/v1/rules` returns a YAML **map** `namespace: [groups]`; `get_all_rules` builds a real `BTreeMap<String, Vec<RuleGroup>>` and serializes it via `namespaces_to_yaml_map` (no comment framing). `GET /{namespace}` returns the namespace's groups as a bare YAML **list** via `namespace_groups_to_yaml`, and `GET /{namespace}/{group}` echoes the stored single-group YAML. Confirm the exact field ordering against cp-mimir under Slice 8 differential testing, but the documented shapes (map / list / single group) are produced in-slice — not approximated.
 
 - [ ] **Step 4: Add re-exports** in `ruler/mod.rs` (`pub use api::{RulerApiState, alerts_json, router, rules_json};`).
 
@@ -2912,7 +3159,8 @@ impl Querier for FiringQuerier {
     }
 }
 
-const RULES: &str = "groups:\n  - name: g\n    interval: 30s\n    rules:\n      - record: job:up:sum\n        expr: sum(up)\n      - alert: AlwaysFires\n        expr: up\n        for: 1m\n        annotations:\n          summary: 'val {{ $value }}'\n";
+// Mimir's per-namespace POST body is a SINGLE bare rule group (no `groups:`).
+const RULES: &str = "name: g\ninterval: 30s\nrules:\n  - record: job:up:sum\n    expr: sum(up)\n  - alert: AlwaysFires\n    expr: up\n    for: 1m\n    annotations:\n      summary: 'val {{ $value }}'\n";
 
 #[tokio::test]
 async fn ruler_end_to_end_records_and_fires() {
@@ -2958,7 +3206,7 @@ async fn ruler_end_to_end_records_and_fires() {
     let _ = svc.eval_once("t").await.unwrap();
     assert!(alerting.calls().len() == 1);
     let dispatched = &alerting.calls()[0].1[0];
-    assert!(dispatched.labels.get("alertname").map(String::as_str) == Some("AlwaysFires"));
+    assert!(dispatched.labels.get("alertname") == Some("AlwaysFires"));
     assert!(dispatched.annotations.get("summary").unwrap() == "val 9");
 
     // 4. read API reflects the firing alert.
@@ -3138,13 +3386,13 @@ git commit -m "feat(metrics): --target ruler binary + end-to-end ruler integrati
 2. Alert **resend** interval (re-dispatch of still-firing alerts) — `evaluate_group` dispatches only the pending→firing transition; resends are a service-loop + Alertmanager-dedup concern, flagged in Tasks 6 + 12.
 3. Per-group **precise interval** scheduling — `run` is a single-base-ticker loop; precise per-group scheduling is flagged in Task 12. Correctness lives in the fully-tested `eval_once`.
 4. `/api/v1/rules` **live-alert join** (firing instances on each rule) — returns `alerts: []`; flagged in Task 11.
-5. `GET /prometheus/config/v1/rules` (all-namespaces) **exact YAML framing** — approximated; single-ns/single-group GETs are exact; flagged in Task 11.
+5. `GET /prometheus/config/v1/rules` (all-namespaces) — emits a real YAML map `namespace -> [groups]`; single-namespace returns a bare group list; single-group echoes the stored body. Documented shapes produced in-slice; only exact field-ordering parity is left to Slice-8 differential testing.
 6. `$value` **template formatting** for non-round floats — Rust `{}` vs Go `humanize`; flagged in Task 6, not load-bearing for state-machine correctness.
 7. Cross-instance **sharding coordination** (membership) — the assignment fn is exact + tested; `my_index`/`n_instances` are injected (static today); consumer-group membership is Slice 8.
 8. Topic-backed `RuleConfigStore`/`RuleStateStore` impls — codecs defined + tested here; the live Kafka-backed impls land with the service's broker wiring (Slice 8 / once Slice 4's client is shared).
 
 **Placeholder scan:** no "TBD"/"add later"/"similar to Task N". Every step has runnable code or an exact command. The bounded hand-waves — the upstream `contract` types, the real `WalProducer`/`Querier` impls, the binary's placeholder querier — are explicitly trait-gated, compile-and-test in isolation, and pinned by tests on the pure logic, exactly as the no-placeholders rule requires for not-yet-merged dependencies.
 
-**Type consistency:** `Labels` is `BTreeMap<String,String>` everywhere (sorted → stable fingerprints/JSON). `AlertState` strings (`inactive`/`pending`/`firing`) match Prometheus and are used identically in `state.rs`, `eval.rs`, and `api.rs`. `DispatchAlert`/`WalSeriesSample`/`ActiveAlert` field sets are identical across their definition, the eval producer, and the mocks. `SinkError` is the single sink error; `EvalError` wraps it via `#[from]`. The `rfc3339_millis` helper is defined once (Task 9) and reused by the read API (Task 11).
+**Type consistency:** `Labels` is the `contract` newtype wrapping a sorted `BTreeMap<String,String>` (sorted → stable fingerprints/JSON) with the **exact** restricted API of the real shared type (`get -> Option<&str>`, `insert(impl Into…)`, `iter`, no `remove`, no `Deref`) — every ruler call site is written against that surface so the re-export swap is a one-file change. `QueryResult` carries all four real variants so `as_vector`'s match stays exhaustive post-swap. `AlertState` strings (`inactive`/`pending`/`firing`) match Prometheus and are used identically in `state.rs`, `eval.rs`, and `api.rs`. `DispatchAlert`/`WalSeriesSample`/`ActiveAlert` field sets are identical across their definition, the eval producer, and the mocks. `SinkError` is the single sink error; `EvalError` wraps it via `#[from]`. The `rfc3339_millis` helper is defined once (Task 9) and reused by the read API (Task 11).
 
 **Greenfield compliance:** no `#[serde(default)]`-for-old-data (the `#[serde(default)]` on `rules`/`labels`/`annotations` is for *absent optional YAML fields*, not back-compat — correct), no V1/V2 dual variants, no migration code. Kafka wire identity preserved: recording-rule samples are ordinary series through the Slice-4 produce path (no ruler-private record format).

@@ -70,12 +70,41 @@ Also consumes `crabka-metrics` (`NativeHistogram`, `BucketSpan`, `ResetHint`, `n
 | `src/planner/subquery.rs` | `expr[range:resolution]` planning (nests; resolution defaults to eval interval) | **new** |
 | `src/planner/at_offset.rs` | order-independent `@`/`offset` folding (incl. `@ start()` / `@ end()`) | **new** |
 | `src/feature.rs` | `experimental` cargo feature gate for the experimental function tier | **new** |
-| `testdata/promqltest/*.test` | vendored Prometheus `.test` corpus (21 files) | **new** |
-| `tests/promqltest_corpus.rs` | drive every corpus file through the Slice-2 harness | extended |
+| `src/test_support.rs` | test-only store builders (`eval_instant`/`store_with_*`/`nh`) + `QueryResult`/`InstantSample` accessor helpers (`.single()`/`.value_f64()`/…) built on the real Slice-2 API | **new** |
+| `testdata/promqltest/*.test` | vendored Prometheus `.test` corpus (21 files; 6 out-of-scope files `#[ignore]`d) | **new** |
+| `tests/promqltest_corpus.rs` | sync `#[test]` driver that `block_on`s Slice 2's async `crabka_promql::testkit::run_test_path(path: &str)` per in-scope corpus file | extended |
 
 ---
 
 ## Phase A — `histogram_quantile`: classic path + native path + native accessors
+
+### Task 0: `test_support` module + `QueryResult` accessor helpers (prerequisite for every Phase A–D test)
+
+**Files:**
+- Create: `crates/promql/src/test_support.rs`
+- Modify: `crates/promql/src/lib.rs` (add a test-only `mod test_support;`)
+
+**Why this task exists:** every Phase A–D test in this plan calls helpers (`eval_instant`, `eval_instant_nh`, `eval_instant_err`, `store_with_series`, `store_with_series_multi`, `store_with_labeled_series`, `store_with_classic_histogram`, `empty_store`, `nh`) and result accessors (`.single()`, `.value_f64()`, `.as_scalar()`, `.values_f64()`, `.is_empty()`, `.iter()`, `.len()`). **None of these exist in the Slice 2 contract** — Slice 2 ships `InMemoryMetricStore` + `PromqlEngine::query_instant -> QueryResult { Scalar, InstantVector(Vec<InstantSample>), RangeMatrix, Str }` with `InstantSample { labels, ts_ms, value: SampleValue }`. This task builds the missing test glue on top of that real API so the rest of the plan compiles.
+
+**Interfaces:**
+- Consumes: the real Slice-2 `InMemoryMetricStore`, `PromqlEngine::query_instant`, `QueryResult`, `InstantSample`, `SampleValue`, plus `crabka-metrics` `NativeHistogram`.
+- Produces (all `#[cfg(test)]` / test-only):
+  - store builders: `store_with_series(name, &[(ts_ms, f64)])`, `store_with_series_multi(&[(selector, f64)])`, `store_with_labeled_series(name, &[(k, v)], f64)`, `store_with_classic_histogram()` (the `_bucket{le=...}` fixture), `empty_store()`, and `nh(count, sum, schema, &[(idx, count)]) -> NativeHistogram`.
+  - eval shims: `eval_instant(&store, query, ts_ms) -> QueryResult`, `eval_instant_nh(name, &NativeHistogram) -> Store`, `eval_instant_err(&store, query, ts_ms) -> Result<QueryResult, PromqlError>` (the `_err` variant returns the `Result` instead of unwrapping).
+  - `QueryResult`/`InstantSample` extension methods (a `trait` impl in the same module): `.single() -> &InstantSample` (asserts exactly one sample), `.value_f64() -> f64` (the float of an `InstantSample`'s `SampleValue::Float`), `.as_scalar() -> f64` (the `QueryResult::Scalar` payload), `.values_f64() -> Vec<f64>` (in series order), `.is_empty() -> bool`, `.iter()`, `.len()`.
+
+- [ ] **Step 1:** Implement `test_support.rs` against the real `query_instant` + `QueryResult` enum; wire `mod test_support;` (test-only) into `lib.rs`. A trivial self-test (`store_with_series` round-trips through `eval_instant(...).single().value_f64()`) confirms the glue compiles and runs.
+
+- [ ] **Step 2: Commit**
+
+```bash
+cargo fmt -p crabka-promql
+cargo clippy -p crabka-promql --all-targets
+git add crates/promql/
+git commit -m "test(promql): test_support helpers + QueryResult accessors for slice 3 tests"
+```
+
+---
 
 ### Task 1: `HistogramFold` operator — classic `le`-bucket fold (logical node + skeleton)
 
@@ -290,7 +319,7 @@ git commit -m "feat(promql): HistogramFold operator — classic histogram_quanti
 
 - [ ] **Step 1: Write the failing engine-level test**
 
-Create `crates/promql/src/functions/histogram.rs` test module (uses an in-memory `MetricStore` test double from Slice 2 — `tests/support` or the Slice-2 `MemStore`):
+Create `crates/promql/src/functions/histogram.rs` test module (uses Slice 2's in-memory `MetricStore` test double — `crate::InMemoryMetricStore`):
 
 ```rust
 #[cfg(test)]
@@ -384,14 +413,15 @@ Append to the `functions::histogram` test module:
 
     #[test]
     fn native_histogram_quantile_within_exponential_bucket() {
-        // schema 0 => base 2: bucket i covers (2^(i-1), 2^i].
-        // 10 obs spread so the median lands in bucket index 1 => (1, 2]; q=0.5 interpolates.
-        let h = nh(10.0, 0.0, 0, &[(0, 5.0), (1, 5.0)]); // cumulative 5,10
+        // schema 0 => base 2: bucket index 1 covers (1, 2].
+        // single bucket (1,2] with count 10; q=0.5 => rank 5 lands STRICTLY INSIDE the
+        // bucket (fraction 0.5). Prometheus interpolates LOGARITHMICALLY within an
+        // exponential bucket: lower * (upper/lower)^fraction = 1 * 2^0.5 = sqrt(2).
+        // A linear interpolation would (wrongly) give 1.5 — this test fails under linear.
+        let h = nh(10.0, 0.0, 0, &[(1, 10.0)]); // index-1 bucket (1,2], count 10
         let store = eval_instant_nh("h", &h);
         let v = eval_instant(&store, "histogram_quantile(0.5, h)", 0).single().value_f64();
-        // bucket index 0 covers (0.5,1], index 1 covers (1,2]; rank=5 is exactly at the
-        // index-0/index-1 boundary => 1.0 (the upper bound of bucket 0).
-        assert!((v - 1.0).abs() < 1e-9);
+        assert!((v - std::f64::consts::SQRT_2).abs() < 1e-9); // ~1.41421356, NOT linear 1.5
     }
 
     #[test]
@@ -417,14 +447,16 @@ Add a pure helper module computing, for a `NativeHistogram`, the ordered list of
 - schema `-53` (NHCB): `custom_values[i]` are the explicit upper bounds; bucket `i` is `(custom_values[i-1], custom_values[i]]`.
 
 Then:
-- `histogram_quantile(q, nh)` = `fold_buckets`-style interpolation over these native buckets (reuse the *interpolation rule* from Task 1's kernel, generalized to per-bucket `(lower, upper, cumulative)`).
+- `histogram_quantile(q, nh)` = bucket-fold over these native buckets, but with **two interpolation paths** (Prometheus does NOT reuse the classic linear kernel here):
+  - **exponential-schema buckets** (schema in `[-4, 8]`): interpolate **logarithmically**. With `lower = getBound(idx-1)`, `upper = getBound(idx)`, and `fraction = (rank - cum_below) / bucket_count`, the result is `lower * (upper/lower)^fraction` (equivalently `exp(ln(lower) + fraction * (ln(upper) - ln(lower)))`).
+  - **zero bucket and NHCB buckets** (schema `-53`, `custom_values`): interpolate **linearly** (`lower + (upper - lower) * fraction`), as the classic path does.
 - `histogram_count` = `nh.count`; `histogram_sum` = `nh.sum`; `histogram_avg` = `sum/count` (NaN if `count == 0`).
 - `histogram_fraction(lower, upper, nh)` = sum of bucket counts fully inside `[lower, upper)` + interpolated partial buckets, divided by `count`.
 - `histogram_stddev`/`histogram_stdvar` = population variance/stddev from bucket midpoints weighted by count (`mean = sum/count`).
 
 Each is a `ScalarUDF` reading the `NativeHistogram` columns via `decode_native_histograms` on the input batch (or a column-direct reader if Slice 2 exposes one). Register all in `functions/mod.rs`.
 
-> **Native quantile fidelity:** Prometheus's native `histogramQuantile` (`promql/quantile.go`) interpolates *linearly within the log-scale bucket bound* exactly as the classic path does between `(lower, upper)`. The `native_histograms.test` corpus is the authority — keep the unit tests above as the fast pin and refine bucket-bound math against any corpus failure with a `// verify against native_histograms.test` note.
+> **Native quantile fidelity:** Prometheus's native `histogramQuantile` (`promql/quantile.go`) interpolates on a **logarithmic scale** for standard exponential buckets ("we interpolate on a logarithmic scale ... finally return to the normal scale by applying the exponential function"); only the zero bucket and custom/NHCB buckets use linear interpolation. The `native_histograms.test` corpus is the authority — keep the unit tests above as the fast pin and refine bucket-bound math against any corpus failure with a `// verify against native_histograms.test` note.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -453,7 +485,10 @@ git commit -m "feat(promql): native histogram_quantile + histogram_count/sum/avg
 **Interfaces:**
 - Consumes: the Slice-2 `RangeArray` (each cell = the samples in one step's `(t-range, t]` window) and the `ScalarUDF`-over-`RangeArray` pattern the rate-family uses.
 - Produces `ScalarUDF`s, each folding one `RangeArray` cell → one scalar:
-  - `avg_over_time`/`min_over_time`/`max_over_time`/`sum_over_time`/`count_over_time`/`last_over_time`/`present_over_time`/`stddev_over_time`/`stdvar_over_time`/`quantile_over_time(q, range)`/`mad_over_time` (median absolute deviation).
+  - **ungated:** `avg_over_time`/`min_over_time`/`max_over_time`/`sum_over_time`/`count_over_time`/`last_over_time`/`present_over_time`/`stddev_over_time`/`stdvar_over_time`/`quantile_over_time(q, range)`.
+  - **experimental** (`#[cfg(feature = "experimental")]`, registered only when `experimental_enabled()` — mirrors Prometheus's `--enable-feature=promql-experimental-functions` gating): `mad_over_time` (median absolute deviation). *(The `feature.rs` gate is created in Task 5; if Task 4 runs first in a parallel batch, add the `#[cfg(feature = "experimental")]` guard and a `[features] experimental = []` stub in `Cargo.toml` here, reconciling with Task 5.)*
+
+> **Other upstream-experimental `_over_time`/util functions** (`ts_of_min_over_time`/`ts_of_max_over_time`/`ts_of_last_over_time`, `first_over_time`, `sort_by_label`/`sort_by_label_desc`) are **out of scope for this slice** — do not register them ungated. They are deferred; their corpus stanzas are skipped by the stanza-level experimental gate (Task 16) or live in `#[ignore]`d files.
 
 - [ ] **Step 1: Write the failing tests** (encode the exact rules)
 
@@ -502,7 +537,7 @@ Expected: FAIL — functions unregistered.
 
 - [ ] **Step 3: Implement the family**
 
-Each is a `ScalarUDF` whose `invoke` reads the `RangeArray` cell (a `&[f64]` window of values + their timestamps), folds it, and returns `f64`. `present_over_time` → `1.0` if the window is non-empty else absent (no output row); `last_over_time` → the last sample value; `quantile_over_time` uses Prometheus's linear-interpolation quantile over the *sorted value list*; `mad_over_time` → median of `|x - median(window)|`. Empty window → no output sample (Prometheus emits nothing). Register all in `functions/mod.rs`.
+Each is a `ScalarUDF` whose `invoke` reads the `RangeArray` cell (a `&[f64]` window of values + their timestamps), folds it, and returns `f64`. `present_over_time` → `1.0` if the window is non-empty else absent (no output row); `last_over_time` → the last sample value; `quantile_over_time` uses Prometheus's linear-interpolation quantile over the *sorted value list*. `mad_over_time` → median of `|x - median(window)|`, **behind `#[cfg(feature = "experimental")]` and registered only when `experimental_enabled()`** (upstream gates it under `--enable-feature=promql-experimental-functions`). Empty window → no output sample (Prometheus emits nothing). Register the ungated functions unconditionally and `mad_over_time` only under the experimental feature in `functions/mod.rs`.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -780,8 +815,9 @@ mod tests {
 
     #[test]
     fn datetime_fields_are_utc() {
-        // 2026-06-19T00:00:00Z = 1781481600 s. hour=0, day_of_week=Friday=5, month=6, year=2026.
-        let t = 1_781_481_600_000_i64;
+        // 2026-06-19T00:00:00Z = 1781827200 s. hour=0, day_of_week=Friday=5, month=6, year=2026.
+        // (Prometheus funcDayOfWeek = float64(t.Weekday()), Sunday=0 => Friday=5.)
+        let t = 1_781_827_200_000_i64;
         let store = store_with_series("m", &[(t, 1.0)]);
         assert!(eval_instant(&store, "hour(m)", t).single().value_f64() == 0.0);
         assert!(eval_instant(&store, "month(m)", t).single().value_f64() == 6.0);
@@ -1266,11 +1302,12 @@ git commit -m "feat(promql): subqueries expr[range:resolution] (nesting, default
 - Modify: `crates/promql/testdata/promqltest/VERSION` (records the pinned tag + upstream path)
 
 **Interfaces:**
-- Produces: the vendored corpus. The 21 files (Prometheus `promql/promqltest/testdata/`): `aggregators`, `at_modifier`, `collision`, `functions`, `histograms`, `name_label_dropping`, `native_histograms`, `operators`, `range_queries`, `selectors`, `staleness`, `subquery`, `trig_functions`, `limit`, `info`, plus the remaining files present at the pinned tag (total 21). Some exercise experimental functions — those are gated in Task 16.
+- Produces: the vendored corpus. The 21 files (Prometheus `promql/promqltest/testdata/`): `aggregators`, `at_modifier`, `collision`, `duration_expression`, `extended_vectors`, `fill-modifier`, `functions`, `histograms`, `info`, `limit`, `literals`, `name_label_dropping`, `native_histograms`, `operators`, `range_queries`, `selectors`, `staleness`, `start_timestamps`, `subquery`, `trig_functions`, `type_and_unit`.
+- **Feature scope (read before believing "all 21 green"):** this slice implements only a subset of the features the 21 files exercise. **6 files require features this slice (and the 8-slice roadmap) never implements** and therefore cannot pass: `info` (the `info()` function / OTLP `target_info` joins), `type_and_unit` (per-series type & unit metadata), `duration_expression` (duration-expression syntax), `extended_vectors` (extended/experimental selectors), `fill-modifier` (the fill modifier), and `start_timestamps` (sample start-timestamp semantics). These six are vendored byte-for-byte but their corpus `#[test]`s are marked `#[ignore]` in Task 15 with a TODO citing the slice that will enable them; the remaining 15 (plus `native_histograms`, gated experimental stanzas) are driven green. Experimental-function stanzas are gated in Task 16.
 
 - [ ] **Step 1: Record the pin + fetch**
 
-Pick a tagged Prometheus release whose `.test` DSL uses the single new `expect` assertion form the Slice-2 harness implements (per spec §13: "pin to a tagged release to get a single assertion form" — choose the first tag where the migration is complete, e.g. a `v3.x` tag). Write the chosen tag + commit + upstream path to `VERSION`. Copy all `.test` files from `promql/promqltest/testdata/` verbatim. Copy Prometheus's `LICENSE` (Apache-2.0) and write `ATTRIBUTION.md` crediting the Prometheus Authors + the tag.
+Pick a tagged Prometheus release (e.g. a recent `v3.x` tag) and pin it. **The corpus DSL is mid-migration: even on `main` the files mix the legacy assertion forms (`eval_fail`, `eval_range ... expect no_warn`) with the newer `expect` forms (`expect warn msg:`, `expect info`, `expect no_info`, `expect no_warn`, `expect ordered`, `expect fail`). There is no tag where a single uniform assertion form exists** — so the harness must support BOTH legacy and new forms (handled in Task 15a). Write the chosen tag + commit + upstream path to `VERSION`. Copy all `.test` files from `promql/promqltest/testdata/` verbatim. Copy Prometheus's `LICENSE` (Apache-2.0) and write `ATTRIBUTION.md` crediting the Prometheus Authors + the tag.
 
 > **Do not hand-author `.test` content.** These are upstream conformance files — vendor them byte-for-byte. The harness adapts to them, never the reverse.
 
@@ -1288,36 +1325,90 @@ git commit -m "test(promql): vendor Prometheus .test conformance corpus (Apache-
 
 ---
 
+### Task 15a: Annotation/warning subsystem + dual-form harness assertions
+
+**Files:**
+- Modify: `crates/promql/src/lib.rs` (thread a warnings+info annotation collector through `QueryResult`, or a side channel)
+- Modify: the `functions::*`/`aggregations` sites that emit annotations
+- Modify: `crates/promql/src/conformance.rs` (or wherever `run_test_file` lives) — dual-form assertion parsing
+
+**Why this task exists:** the real corpus is mid-migration (Task 14 Step 1) and many stanzas assert annotations: `expect warn msg:`, `expect info`, `expect no_warn`, `expect no_info`, `expect ordered`, `expect fail`, alongside legacy `eval_fail`/`eval_warn`. Slice 2's harness only parses `eval_fail`/`expect-fail`, and nothing in the engine *surfaces* annotations — so `expect warn`/`expect info` lines are unevaluable. This task makes them evaluable.
+
+**Interfaces:**
+- Consumes: the per-function annotation prose already in this slice (histogram-ignored aggregations, mixed-type binops, native-counter-as-gauge `irate`, etc.).
+- Produces:
+  - an annotation collector (`warnings: Vec<String>`, `infos: Vec<String>`) reachable from `query_instant`/`query_range` results, emitting the **exact Prometheus annotation strings** (e.g. `PromQL info: ignored histogram ...`, `PromQL warning: ...`).
+  - `run_test_file` support for BOTH legacy (`eval_fail`, `eval_warn`) AND new forms (`expect warn msg:`, `expect info`, `expect no_warn`, `expect no_info`, `expect ordered`, `expect fail`), asserting the collected annotations against each stanza's expectations.
+
+- [ ] **Step 1:** Thread the annotation collector through `QueryResult` (or a side channel returned alongside it) and have the histogram-ignoring aggregations (Task 9), mixed-type binops, and `irate`-on-counter cases push the exact Prometheus annotation strings.
+
+- [ ] **Step 2:** Extend `run_test_file` to parse and assert both legacy and new assertion forms (`expect warn/info/no_warn/no_info/ordered/fail`), comparing against the collected `warnings`/`infos`. Add a focused harness unit test feeding a tiny `.test` stanza with an `expect warn msg:` line and asserting the harness fails when the warning is absent and passes when present.
+
+> **If the annotation subsystem cannot be completed in this slice:** narrow the goal from "corpus green" to "corpus green on stanzas with no `warn`/`info` expectations", and have `run_test_file` *skip* (not silently pass) stanzas carrying `expect warn`/`expect info`/`expect no_warn`/`expect no_info`, counting skips so the gap is visible. Do NOT mark such a stanza green without driving its annotation.
+
+- [ ] **Step 3: Commit**
+
+```bash
+cargo fmt -p crabka-promql
+cargo clippy -p crabka-promql --all-targets
+git add crates/promql/
+git commit -m "feat(promql): annotation/warning collector + dual-form .test assertions"
+```
+
+---
+
 ### Task 15: Turn on the non-experimental corpus files through the Slice-2 harness
 
 **Files:**
 - Modify: `crates/promql/tests/promqltest_corpus.rs` (the Slice-2 harness driver)
 
 **Interfaces:**
-- Consumes: the Slice-2 `.test` harness (`run_test_file(path)` — load / eval-instant / eval-range / `expect` assertions / native-histogram literals).
-- Produces: a `#[test]` per non-experimental corpus file, each running the full file through the harness.
+- Consumes: Slice 2's frozen public harness API `crabka_promql::testkit::run_test_path(path: &str) -> Result<(), PromqlError>` (async) as extended in Task 15a (load / eval-instant / eval-range / BOTH legacy and `expect` assertion forms / annotation assertions / native-histogram literals).
+- Produces: a `#[test]` per in-scope corpus file (15 driven green + 6 `#[ignore]`d for out-of-scope features), each running the full file through the harness.
+
+> **API reconciliation (consume Slice 2 verbatim).** Slice 2 freezes the public harness API as **`crabka_promql::testkit::{run_test_file(file: &TestFile), run_test_path(path: &str)}` — both `async fn` returning `Result<(), PromqlError>`** (re-exported at the crate root). The path-based form `run_test_path` already does exactly what the corpus driver needs: read the file → `parse_test_file` → `run_test_file(&TestFile)`. Do **not** add a shadowing sync `testkit::run_test_file(path: &str)`. Instead the sync `#[test]` macro below calls the canonical async `run_test_path` under a `block_on` and `unwrap()`s (panicking on failure so `#[test]` reports it).
 
 - [ ] **Step 1: Write the failing per-file tests**
 
 In `tests/promqltest_corpus.rs`, add one `#[test]` per non-experimental file (drive via the harness). Example:
 
 ```rust
-use crabka_promql::testkit::run_test_file;
+use crabka_promql::testkit::run_test_path;
+
+/// Run one corpus file through Slice 2's canonical async `run_test_path`,
+/// `block_on`ned for a sync `#[test]` and `unwrap()`ed so failures surface.
+fn run_corpus_file(path: &str) {
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(run_test_path(path))
+        .unwrap();
+}
 
 macro_rules! corpus {
     ($name:ident, $file:literal) => {
         #[test]
         fn $name() {
-            run_test_file(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/promqltest/", $file));
+            run_corpus_file(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/promqltest/", $file));
+        }
+    };
+    // ignored form: vendored byte-for-byte, but the features it exercises are out of
+    // scope for this slice; the TODO cites the slice that will enable it.
+    (#[ignore = $why:literal] $name:ident, $file:literal) => {
+        #[test]
+        #[ignore = $why]
+        fn $name() {
+            run_corpus_file(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/promqltest/", $file));
         }
     };
 }
 
+// --- driven green by this slice ---
 corpus!(aggregators, "aggregators.test");
 corpus!(at_modifier, "at_modifier.test");
 corpus!(collision, "collision.test");
 corpus!(functions, "functions.test");
 corpus!(histograms, "histograms.test");
+corpus!(literals, "literals.test");
 corpus!(name_label_dropping, "name_label_dropping.test");
 corpus!(operators, "operators.test");
 corpus!(range_queries, "range_queries.test");
@@ -1327,6 +1418,15 @@ corpus!(subquery, "subquery.test");
 corpus!(trig_functions, "trig_functions.test");
 corpus!(limit, "limit.test");
 // native_histograms + any experimental-gated files added in Task 16.
+
+// --- vendored but ignored: features out of scope for this slice (8-slice roadmap) ---
+// TODO: un-ignore when the cited slice lands the feature.
+corpus!(#[ignore = "TODO: info() / target_info OTLP joins — out of scope for this slice (no metrics slice implements it)"] info, "info.test");
+corpus!(#[ignore = "TODO: per-series type & unit metadata — out of scope for this slice"] type_and_unit, "type_and_unit.test");
+corpus!(#[ignore = "TODO: duration-expression syntax — out of scope for this slice"] duration_expression, "duration_expression.test");
+corpus!(#[ignore = "TODO: extended/experimental selectors — out of scope for this slice"] extended_vectors, "extended_vectors.test");
+corpus!(#[ignore = "TODO: fill modifier — out of scope for this slice"] fill_modifier, "fill-modifier.test");
+corpus!(#[ignore = "TODO: sample start-timestamp semantics — out of scope for this slice"] start_timestamps, "start_timestamps.test");
 ```
 
 - [ ] **Step 2: Run to verify it fails (then iterate)**
@@ -1362,26 +1462,23 @@ git commit -m "test(promql): conform to the non-experimental Prometheus .test co
 
 **Interfaces:**
 - Consumes: the `experimental` feature (Task 5) + `native_histograms.test` (Task 3's native path).
-- Produces: experimental-gated `#[test]`s that only run under `--features experimental` (for files exercising `double_exponential_smoothing` and any other experimental functions), plus the `native_histograms.test` driver (native histograms are stable; gate only what upstream gates).
+- Produces: a `native_histograms.test` driver (native histograms are stable) plus a **stanza-level** experimental gate in `run_test_file` so the real files (`functions.test`, etc.) that carry inline experimental stanzas run under both feature settings — the previously-skipped experimental stanzas additionally run under `--features experimental`. Gate only what upstream gates.
 
 - [ ] **Step 1: Write the gated tests**
 
 ```rust
 corpus!(native_histograms, "native_histograms.test"); // native histograms are stable
 
-#[cfg(feature = "experimental")]
-mod experimental {
-    use super::*;
-    // files (or sub-stanzas) that use double_exponential_smoothing / other
-    // --enable-feature functions. If upstream keeps experimental cases inline
-    // in functions.test rather than separate files, the harness must skip the
-    // `@require experimental` stanzas unless the feature is on — implement that
-    // skip in run_test_file and assert it here.
-    corpus!(experimental_functions, "functions_experimental.test");
-}
+// NOTE: there is NO separate experimental .test file in Prometheus — experimental
+// cases (e.g. double_exponential_smoothing) live INLINE in functions.test (and any
+// other file with experimental stanzas). The gate is therefore stanza-level in the
+// harness, not a split file. `run_test_file` skips stanzas tagged experimental (or
+// stanzas that use an experimental function) when `experimental_enabled()` is false,
+// and the SAME real files (functions.test, etc.) are driven under BOTH feature
+// settings — under --features experimental the previously-skipped stanzas run.
 ```
 
-> **If upstream inlines experimental cases** (e.g. `double_exponential_smoothing` stanzas live inside `functions.test`), do not split the file — instead teach the harness to *skip* experimental stanzas when `experimental_enabled()` is false (a stanza-level gate), and run the whole file under both feature settings. The corpus file stays byte-for-byte upstream; the gate lives in the harness.
+> **Stanza-level experimental gate (no fabricated split file).** Do NOT invent a `functions_experimental.test` — it does not exist upstream and would fail to open. Teach `run_test_file` to skip experimental stanzas when `experimental_enabled()` is false, and run the real `functions.test` (and any other file with inline experimental cases) under both `--features experimental` and not. The corpus files stay byte-for-byte upstream; the gate lives in the harness.
 
 - [ ] **Step 2: Run both ways**
 
@@ -1442,7 +1539,7 @@ git commit -m "chore(promql): clippy/fmt clean across feature combinations for s
 - Remaining aggregations `topk`/`bottomk`/`quantile`/`count_values`/`stddev`/`stdvar`/`group` (label-preservation + histogram-ignore rules) → Task 9.
 - Set ops `and`/`or`/`unless` → Task 10; many-to-one/one-to-many `group_left()`/`group_right()` → Task 11.
 - `@`/`offset` order-independent (incl. `@ start()`/`@ end()`) → Task 12; subqueries `expr[range:resolution]` (nesting, default resolution) → Task 13.
-- Full `.test` corpus: vendored 21 files at a pinned tag (Apache-2.0, attributed) → Task 14; non-experimental driven through the Slice-2 harness → Task 15; experimental gated + native-histogram corpus → Task 16; whole-crate gate → Task 17.
+- Full `.test` corpus: vendored 21 files at a pinned tag (Apache-2.0, attributed), with the 6 out-of-scope files (`info`/`type_and_unit`/`duration_expression`/`extended_vectors`/`fill-modifier`/`start_timestamps`) `#[ignore]`d and TODO'd → Task 14; annotation/warning collector + dual-form (legacy + `expect`) harness assertions → Task 15a; the 15 in-scope files driven through the harness → Task 15; stanza-level experimental gate + native-histogram corpus → Task 16; whole-crate gate → Task 17.
 
 **Rule-fidelity (the subtle ones are pinned by a unit test BEFORE the corpus turns on):** classic-bucket interpolation + forced-monotonic + `+Inf`/`q∉[0,1]`/`<2 buckets` edges (Task 1 kernel tests); native exponential bucket bounds + `histogram_fraction` (Task 3); `irate`/`idelta` last-two-sample semantics + `predict_linear` regression (Task 5); `round` half-up + `clamp` min>max-drops (Task 6); `label_replace` anchored-regex capture expansion (Task 7); UTC calendar fields + `absent` synthesized labels (Task 8); `topk` original-label preservation + `count_values` per-distinct-value series (Task 9); set-op match-keys (Task 10); `group_left` extra-label copy + unmodified-many-to-one error (Task 11); `@`/`offset` commutativity + `start()`/`end()` (Task 12); subquery inner-range→outer-fold alignment (Task 13). The corpus (Tasks 15–16) is the backstop that catches everything the hand-written tests miss.
 
@@ -1450,6 +1547,6 @@ git commit -m "chore(promql): clippy/fmt clean across feature combinations for s
 
 **Greenfield / no-back-compat respected:** the only feature flag (`experimental`) mirrors Prometheus's own `--enable-feature` tier (spec §6.2 — "experimental function tier ... behind a feature flag"), not a back-compat gate; no shims, no `V2` variants, no migration code. Schemas/registry shapes from Slice 2 are extended in place.
 
-**Parallelization note (for the executor):** within Phase B, Tasks 4/6/7/8 touch **disjoint** new files (`over_time.rs`/`math.rs`/`labels.rs`/`datetime.rs`+`absent.rs`) and each only appends a registration line to `functions/mod.rs` — dispatch them as one parallel batch, then reconcile the `functions/mod.rs` registrations (the one shared file). Task 5 also adds `feature.rs` + a `Cargo.toml` feature, so sequence it just before/after that batch to avoid the `Cargo.toml`/`mod.rs` overlap. Tasks 10 + 11 share `planner/binary.rs` → sequential. Phase D Tasks 12 + 13 touch different files (`at_offset.rs` vs `subquery.rs`) but both modify `planner/mod.rs` → run sequentially or reconcile the `mod.rs` wiring. Phase E is inherently sequential (vendor → drive → gate → final). Phase A Tasks 1→2→3 are sequential (each builds on the prior).
+**Parallelization note (for the executor):** **Task 0 (`test_support`) is a hard prerequisite for every Phase A–D test and must land before any of them** — run it first, alone. Within Phase B, Tasks 4/6/7/8 touch **disjoint** new files (`over_time.rs`/`math.rs`/`labels.rs`/`datetime.rs`+`absent.rs`) and each only appends a registration line to `functions/mod.rs` — dispatch them as one parallel batch, then reconcile the `functions/mod.rs` registrations (the one shared file). **Caveat: Task 4 now also gates `mad_over_time` behind the `experimental` feature, so it touches `feature.rs`/`Cargo.toml` just like Task 5** — sequence Task 4 and Task 5 together (one creates `feature.rs` + the `[features] experimental = []` entry, the other reconciles) rather than running both in the same parallel batch. Task 5 adds `feature.rs` + a `Cargo.toml` feature, so sequence it adjacent to Task 4 to avoid the `Cargo.toml`/`mod.rs` overlap. Tasks 10 + 11 share `planner/binary.rs` → sequential. Phase D Tasks 12 + 13 touch different files (`at_offset.rs` vs `subquery.rs`) but both modify `planner/mod.rs` → run sequentially or reconcile the `mod.rs` wiring. Phase E is inherently sequential (vendor → drive → gate → final). Phase A Tasks 1→2→3 are sequential (each builds on the prior).
 
 **Placeholder scan:** no "TBD"/"add the rest"/"similar to Task N". Every implementation step has runnable code or a precise rule + the exact command to run. The bounded hand-waves — `HistogramFold`/exec trait signatures and native bucket-bound math — are each explicitly tagged `// verify against rev 0838a4d` / `// verify against native_histograms.test` and pinned by a behavior test, exactly as the plan's constraints require.
