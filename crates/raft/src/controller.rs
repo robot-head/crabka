@@ -437,6 +437,12 @@ struct DialerSubmitTransport<'a> {
 
 #[async_trait::async_trait]
 impl SubmitChangeTransport for DialerSubmitTransport<'_> {
+    // The only un-mockable step: dial + one `API_KEY_SUBMIT_CHANGE` + close, with
+    // no offline signal (a `crabka_client_core::Connection` cannot be built in a
+    // test). `#[mutants::skip]` rather than an `exclude_re` because cargo-mutants'
+    // name-regex exclusions do not reliably match the struct-field-deletion mutant
+    // this method's `ConnectionOptions { .. }` literal generates.
+    #[cfg_attr(test, mutants::skip)]
     async fn send_submit_change(
         &self,
         leader: NodeId,

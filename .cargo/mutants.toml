@@ -161,15 +161,13 @@ exclude_re = [
     # raft leader-forwarding IO seam (no offline signal). The serialize/translate
     # decisions are extracted into `encode_submit_change_body` /
     # `translate_submit_change_response` / `forward_submit_via`, unit-tested
-    # against a `mockall` `SubmitChangeTransport` mock and mutation-caught. What
-    # stays excluded is the irreducible socket IO:
-    #  - `DialerSubmitTransport::send_submit_change`: dials the leader's controller
-    #    listener, issues one `API_KEY_SUBMIT_CHANGE`, and closes the connection
-    #    (a `crabka_client_core::Connection` cannot be built in a test).
-    #  - `ControllerHandle::forward_submit_to`: now a thin wrapper that constructs
-    #    the live `DialerSubmitTransport` (from `self.dialer`) and delegates to
-    #    `forward_submit_via` — only reachable with a real dialer.
-    "raft/src/controller\\.rs.*DialerSubmitTransport.*send_submit_change",
+    # against a `mockall` `SubmitChangeTransport` mock and mutation-caught.
+    # `ControllerHandle::forward_submit_to` is now a thin wrapper that constructs
+    # the live `DialerSubmitTransport` (from `self.dialer`) and delegates — only
+    # reachable with a real dialer. (The socket adapter itself,
+    # `DialerSubmitTransport::send_submit_change`, carries `#[cfg_attr(test,
+    # mutants::skip)]` in-source: its `ConnectionOptions { .. }` literal generates
+    # a struct-field-deletion mutant that name-regex exclusions can't filter.)
     "raft/src/controller\\.rs.*ControllerHandle::forward_submit_to",
     # `PostgresWalSource::connect` is the only connect-postgres function with no
     # offline signal: it dials a live PostgreSQL via `TokioPgCatalog::connect`.
@@ -187,13 +185,18 @@ exclude_re = [
     # forever (`transaction.is_some() || row.commit_lsn.is_none()`), so
     # cargo-mutants reports a timeout instead of an assertion gap.
     "connect-postgres/src/source\\.rs.*replace && with \\|\\| in <impl Source<Bytes, Bytes> for PostgresWalSource>::poll",
-    # `<impl FetchTransport for Connection>::fetch` is the live-socket adapter
-    # behind client-core's `FetchTransport` seam: it issues one fetch over a
-    # broker `Connection` and returns the decoded response — no offline signal.
-    # The request-construction + response-decoding + isolation/fallback decisions
-    # are extracted into `fetch_partition_on` / `fetch_partition_with_isolation_on`,
-    # unit-tested against a `mockall` mock and mutation-caught.
+    # client-core's `FetchTransport` seam. The request-construction +
+    # response-decoding + isolation/fallback decisions are extracted into
+    # `fetch_partition_on` / `fetch_partition_with_isolation_on`, unit-tested
+    # against a `mockall` mock and mutation-caught. What stays excluded is the
+    # live socket IO with no offline signal:
+    #  - `<impl FetchTransport for Connection>::fetch`: the adapter issuing one
+    #    fetch over a broker `Connection`.
+    #  - the public `fetch_partition` / `fetch_partition_with_isolation` entry
+    #    points, now thin wrappers that build the `Connection` adapter and delegate
+    #    to the `_on` cores — only reachable with a live broker socket.
     "(crates/)?client-core/src/fetch\\.rs.*<impl FetchTransport for Connection>::fetch",
+    "(crates/)?client-core/src/fetch\\.rs.*replace fetch_partition(_with_isolation)? ->",
     # `BrokerPool::close_all` consumes `self` and explicitly drops the pooled
     # connections; that is behaviourally identical to letting the consumed `self`
     # drop at end of scope, so `close_all -> ()` is an equivalent mutant. The

@@ -2432,6 +2432,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "mockall",
+ "mutants",
  "serde",
  "serde-wincode",
  "stateright",
@@ -5267,6 +5268,12 @@ name = "murmurhash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
+
+[[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
 
 [[package]]
 name = "native-tls"

@@ -47,6 +47,10 @@ stateright = "=0.31.0"
 # Dev-dependency only — `#[cfg_attr(test, mockall::automock)]` keeps it out of
 # shipped builds.
 mockall = "0.13"
+# mutants: `#[cfg_attr(test, mutants::skip)]` attribute for cargo-mutants. Used
+# only where `exclude_re` cannot reliably suppress a mutant (struct-field-deletion
+# mutants on a live-IO adapter). Dev-dependency only; expands to nothing.
+mutants = "0.0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }
