@@ -453,7 +453,12 @@ fn spanset_to_sql(
                     "nested selector table was not registered".into(),
                 ));
             };
-            Ok(format!("SELECT * FROM {}", selector::ident(table_name)))
+            let nested_table = selector::ident(table_name);
+            if selector::has_parent_scope(fe) {
+                selector::selector_sql_with_parent_table(&nested_table, table, fe)
+            } else {
+                Ok(format!("SELECT * FROM {nested_table}"))
+            }
         }
         SpansetExpr::Selector(fe) => selector::selector_sql(table, fe),
         SpansetExpr::Or(lhs, rhs) => Ok(format!(

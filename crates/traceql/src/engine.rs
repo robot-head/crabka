@@ -1935,6 +1935,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mixed_parent_and_event_selector_keeps_parent_predicate() {
+        let mut wanted = sp(9, 2, Some(1), "b");
+        wanted.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut wrong_parent = sp(8, 2, Some(1), "b");
+        wrong_parent.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp(9, 1, None, "a"), wanted]);
+        s.push_trace("t", "x", "root", vec![sp(8, 1, None, "x"), wrong_parent]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ parent.svc = \"a\" && event:name = \"cache.miss\" }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
     async fn search_limit_uses_default_for_zero_and_caps_result_count() {
         let e = engine();
         let r = e

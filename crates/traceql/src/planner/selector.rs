@@ -31,6 +31,11 @@ pub(crate) async fn plan_selector<S: SpanStore>(
     let scan = store
         .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
         .await?;
+    let parent_table = if has_nested_scope(fe) && has_parent_scope(fe) {
+        register_unfiltered_parent_table(store, ctx, &scan.ctx).await?
+    } else {
+        scan.span_table.clone()
+    };
     if !has_nested_scope(fe)
         && !has_parent_scope(fe)
         && field_expr_to_matcher_disjuncts(fe).is_some_and(|disjuncts| disjuncts.len() == 1)
@@ -46,7 +51,7 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         });
     }
     let table = ident(&scan.span_table);
-    let sql = selector_sql(&table, fe)?;
+    let sql = selector_sql_with_parent_table(&table, &ident(&parent_table), fe)?;
     let df = scan.ctx.sql(&sql).await?;
     let plan = df.into_unoptimized_plan();
     Ok(PlannedSpanset {
@@ -82,12 +87,50 @@ async fn plan_selector_disjuncts<S: SpanStore>(
     Ok(PlannedSpanset { ctx, plan })
 }
 
+async fn register_unfiltered_parent_table<S: SpanStore>(
+    store: &S,
+    ctx: &PlannerContext,
+    target_ctx: &SessionContext,
+) -> Result<String> {
+    let parent_scan = store
+        .scan(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns)
+        .await?;
+    let batches = collect_table(&parent_scan.ctx, &parent_scan.span_table).await?;
+    let schema = batches
+        .first()
+        .map_or_else(crate::span_columns::span_schema, RecordBatch::schema);
+    let table = MemTable::try_new(schema, vec![batches])?;
+    let table_name = "parent_spans";
+    target_ctx.register_table(table_name, Arc::new(table))?;
+    Ok(table_name.to_string())
+}
+
 async fn collect_table(ctx: &SessionContext, table: &str) -> Result<Vec<RecordBatch>> {
     Ok(ctx.table(table).await?.collect().await?)
 }
 
 pub(crate) fn selector_sql(table: &str, fe: &FieldExpr) -> Result<String> {
+    selector_sql_with_parent_table(table, table, fe)
+}
+
+pub(crate) fn selector_sql_with_parent_table(
+    table: &str,
+    parent_table: &str,
+    fe: &FieldExpr,
+) -> Result<String> {
     if has_nested_scope(fe) {
+        if has_parent_scope(fe)
+            && let Some(predicate) = parent_field_expr_to_sql_qualified(fe, "s", "p")?
+        {
+            let trace = ident(COL_TRACE_ID);
+            let parent = ident(COL_PARENT_ID);
+            let left = ident(COL_NS_LEFT);
+            return Ok(format!(
+                "SELECT s.* FROM {table} AS s JOIN {parent_table} AS p \
+                 ON s.{trace} = p.{trace} AND s.{parent} = p.{left} \
+                 WHERE {predicate}"
+            ));
+        }
         return Ok(format!("SELECT * FROM {table}"));
     }
     if has_parent_scope(fe) {
@@ -103,6 +146,46 @@ pub(crate) fn selector_sql(table: &str, fe: &FieldExpr) -> Result<String> {
     } else {
         let predicate = field_expr_to_sql(fe)?;
         Ok(format!("SELECT * FROM {table} WHERE {predicate}"))
+    }
+}
+
+fn parent_field_expr_to_sql_qualified(
+    fe: &FieldExpr,
+    span_alias: &str,
+    parent_alias: &str,
+) -> Result<Option<String>> {
+    match fe {
+        FieldExpr::Comparison { lhs, op, rhs } if matches!(lhs.scope, Scope::Parent) => Ok(Some(
+            comparison_to_sql_qualified(lhs, *op, rhs, span_alias, parent_alias)?,
+        )),
+        FieldExpr::Field(field) if matches!(field.scope, Scope::Parent) => Ok(Some(format!(
+            "{} IS NOT NULL",
+            qualified_field_ident(field, span_alias, parent_alias)?
+        ))),
+        FieldExpr::And(a, b) => {
+            let left = parent_field_expr_to_sql_qualified(a, span_alias, parent_alias)?;
+            let right = parent_field_expr_to_sql_qualified(b, span_alias, parent_alias)?;
+            Ok(match (left, right) {
+                (Some(left), Some(right)) => Some(format!("({left} AND {right})")),
+                (Some(predicate), None) | (None, Some(predicate)) => Some(predicate),
+                (None, None) => None,
+            })
+        }
+        FieldExpr::Or(a, b) => {
+            let left = parent_field_expr_to_sql_qualified(a, span_alias, parent_alias)?;
+            let right = parent_field_expr_to_sql_qualified(b, span_alias, parent_alias)?;
+            Ok(match (left, right) {
+                (Some(left), Some(right)) => Some(format!("({left} OR {right})")),
+                (Some(_) | None, None) | (None, Some(_)) => None,
+            })
+        }
+        FieldExpr::Not(inner) => {
+            Ok(
+                parent_field_expr_to_sql_qualified(inner, span_alias, parent_alias)?
+                    .map(|predicate| format!("(NOT {predicate})")),
+            )
+        }
+        FieldExpr::Comparison { .. } | FieldExpr::Field(_) => Ok(None),
     }
 }
 
@@ -184,7 +267,7 @@ pub(crate) fn has_nested_scope(fe: &FieldExpr) -> bool {
     }
 }
 
-fn has_parent_scope(fe: &FieldExpr) -> bool {
+pub(crate) fn has_parent_scope(fe: &FieldExpr) -> bool {
     match fe {
         FieldExpr::Comparison { lhs, .. } | FieldExpr::Field(lhs) => {
             matches!(lhs.scope, Scope::Parent)
