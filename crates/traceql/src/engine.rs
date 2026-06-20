@@ -889,6 +889,7 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Intrinsic(Intrinsic::Status) => Ok(COL_STATUS_CODE.to_string()),
         Scope::Intrinsic(Intrinsic::StatusMessage) => Ok(COL_STATUS_MESSAGE.to_string()),
         Scope::Intrinsic(Intrinsic::TraceId) => Ok(COL_TRACE_ID.to_string()),
+        Scope::Intrinsic(Intrinsic::TraceDuration) => Ok(COL_TRACE_DURATION.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootService) => Ok(COL_ROOT_SERVICE_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootName) => Ok(COL_ROOT_SPAN_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::InstrumentationName) => {
@@ -1881,6 +1882,40 @@ mod tests {
             .await
             .unwrap();
         assert!(max.series[0].points == vec![(0, 300.0), (60_000, 50.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn sum_over_time_can_fold_trace_duration_intrinsic() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    duration_nanos: 100,
+                    ..sp_at(1, 1, None, "api", 0)
+                },
+                InputSpan {
+                    duration_nanos: 300,
+                    ..sp_at(1, 2, None, "api", 50)
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | sum_over_time(trace:duration)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(got.series[0].points == vec![(0, 700.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
