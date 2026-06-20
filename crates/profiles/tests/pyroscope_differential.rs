@@ -103,6 +103,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
 
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
     assert_label_values_match(&client, &pyroscope_base, &crabka.querier_base, "env").await?;
+    assert_select_merge_stacktraces_match(&client, &pyroscope_base, &crabka.querier_base).await?;
 
     assert_profile_types_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_names_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
@@ -674,6 +675,42 @@ async fn assert_select_merge_stacktraces_has_symbol(
     Ok(())
 }
 
+async fn assert_select_merge_stacktraces_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+) -> TestResult {
+    let body = select_merge_stacktraces_body();
+    let pyroscope = connect_json_until(
+        client,
+        pyroscope_base,
+        None,
+        "SelectMergeStacktraces",
+        body.clone(),
+        |value| {
+            value
+                .get("flamegraph")
+                .is_some_and(|flamegraph| flamegraph_ticks(flamegraph) > 0)
+        },
+    )
+    .await?;
+    let crabka = connect_json_until(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "SelectMergeStacktraces",
+        body,
+        |value| {
+            value
+                .get("flamegraph")
+                .is_some_and(|flamegraph| flamegraph_ticks(flamegraph) > 0)
+        },
+    )
+    .await?;
+
+    assert_connect_flamegraph_equal("SelectMergeStacktraces", &pyroscope, &crabka)
+}
+
 async fn assert_diff_has_ticks(
     client: &reqwest::Client,
     base: &str,
@@ -715,6 +752,17 @@ async fn assert_diff_has_ticks(
         return Err(format!("Diff had no positive side ticks: {response}").into());
     }
     Ok(())
+}
+
+fn select_merge_stacktraces_body() -> Value {
+    json!({
+        "profileTypeID": PROFILE_TYPE,
+        "labelSelector": SELECTOR,
+        "start": query_start_ms(),
+        "end": query_end_ms(),
+        "maxNodes": 1024,
+        "format": "PROFILE_FORMAT_FLAMEGRAPH",
+    })
 }
 
 async fn connect_json_until(
@@ -894,6 +942,54 @@ fn assert_canonical_json_equal(method: &str, expected: Value, actual: Value) -> 
     Ok(())
 }
 
+fn assert_connect_flamegraph_equal(method: &str, expected: &Value, actual: &Value) -> TestResult {
+    assert_canonical_json_equal(
+        method,
+        canonical_connect_flamegraph(expected)?,
+        canonical_connect_flamegraph(actual)?,
+    )
+}
+
+fn canonical_connect_flamegraph(value: &Value) -> TestResult<Value> {
+    let flamegraph = value
+        .get("flamegraph")
+        .ok_or_else(|| format!("response missing flamegraph object: {value}"))?;
+    let names = flamegraph
+        .get("names")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("flamegraph missing names array: {value}"))?;
+    let level_values = flamegraph
+        .get("levels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("flamegraph missing levels array: {value}"))?;
+    let mut levels = Vec::with_capacity(level_values.len());
+    for level in level_values {
+        levels.push(
+            level
+                .get("values")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| format!("flamegraph level missing values array: {value}"))?,
+        );
+    }
+    let total = flamegraph
+        .get("total")
+        .and_then(json_i64)
+        .ok_or_else(|| format!("flamegraph missing total: {value}"))?;
+    let max_self = flamegraph
+        .get("maxSelf")
+        .or_else(|| flamegraph.get("max_self"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("flamegraph missing maxSelf: {value}"))?;
+
+    Ok(json!({
+        "names": names,
+        "levels": levels,
+        "total": total,
+        "maxSelf": max_self,
+    }))
+}
+
 fn canonical_json(value: Value) -> Value {
     match value {
         Value::Array(values)
@@ -993,4 +1089,28 @@ fn connect_differential_rejects_canonical_response_drift() {
 
     let err = assert_canonical_json_equal("LabelNames", expected, actual).unwrap_err();
     assert!(err.to_string().contains("LabelNames mismatch"));
+}
+
+#[test]
+fn connect_flamegraph_differential_rejects_tick_drift() {
+    let expected = json!({
+        "flamegraph": {
+            "names": ["total", "main"],
+            "levels": [{ "values": [0, 7, 0, 0] }, { "values": [0, 7, 7, 1] }],
+            "total": 7,
+            "maxSelf": 7
+        }
+    });
+    let actual = json!({
+        "flamegraph": {
+            "names": ["total", "main"],
+            "levels": [{ "values": [0, 8, 0, 0] }, { "values": [0, 8, 8, 1] }],
+            "total": 8,
+            "maxSelf": 8
+        }
+    });
+
+    let err =
+        assert_connect_flamegraph_equal("SelectMergeStacktraces", &expected, &actual).unwrap_err();
+    assert!(err.to_string().contains("SelectMergeStacktraces mismatch"));
 }
