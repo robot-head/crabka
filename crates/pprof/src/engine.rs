@@ -8,8 +8,8 @@ use arrow::datatypes::{Int64Type, UInt64Type};
 use crabka_blockstore::{LabelMatcher, MatchOp};
 
 use crate::{
-    FlameGraph, FlameGraphDiff, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, Tree,
-    diff_trees,
+    FlameGraph, FlameGraphDiff, Heatmap, ProfileError, ProfileStore, ProfileType, Series,
+    SeriesAgg, Tree, bin_heatmap, diff_trees,
     samples::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
         PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
@@ -270,6 +270,55 @@ impl<S: ProfileStore> FlameEngine<S> {
         };
         Ok(tree.to_flamegraph(max_nodes))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_heatmap(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        time_buckets: usize,
+        value_buckets: usize,
+    ) -> Result<Heatmap, ProfileError> {
+        let matchers = crate::matcher::parse_label_selector(label_selector)?;
+        let scan = self
+            .store
+            .select(tenant, profile_type, &matchers, start_ms, end_ms)
+            .await?;
+        let sql = format!(
+            "SELECT {timestamp}, MAX({total}) AS total \
+             FROM {table} GROUP BY {timestamp}, {fingerprint}",
+            timestamp = COL_TIMESTAMP,
+            total = PCOL_TOTAL_VALUE,
+            table = scan.samples_table,
+            fingerprint = COL_FINGERPRINT,
+        );
+        let batches = scan
+            .ctx
+            .sql(&sql)
+            .await
+            .map_err(|err| ProfileError::Plan(err.to_string()))?
+            .collect()
+            .await
+            .map_err(|err| ProfileError::Exec(err.to_string()))?;
+        let mut points = Vec::new();
+        for batch in batches {
+            let timestamps = batch.column(0).as_primitive::<Int64Type>();
+            let totals = batch.column(1).as_primitive::<Int64Type>();
+            for row in 0..batch.num_rows() {
+                points.push((timestamps.value(row), totals.value(row)));
+            }
+        }
+        Ok(bin_heatmap(
+            &points,
+            start_ms,
+            end_ms,
+            time_buckets,
+            value_buckets,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -480,6 +529,50 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn select_heatmap_bins_profile_totals() {
+        let mut store = InMemoryProfileStore::new();
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            1,
+            2,
+            5,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            2,
+            3,
+            5,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            1,
+            30,
+            30,
+            60,
+        );
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+
+        let heatmap = engine
+            .select_heatmap("tenant-a", PT, "{}", 0, 100, 2, 2)
+            .await
+            .unwrap();
+
+        assert!(heatmap.counts[0][0] == 1);
+        assert!(heatmap.counts[1][1] == 1);
     }
 
     #[tokio::test]
