@@ -39,6 +39,10 @@ struct Cli {
     /// Fail on any unparseable JSON instead of skipping it.
     #[arg(long)]
     strict: bool,
+    /// Exit non-zero unless every failover cell proves Crabka recovered no
+    /// slower than Kafka, with rate, drop, latency-spike, and topology evidence.
+    #[arg(long)]
+    failover_gate: bool,
 }
 
 fn main() -> Result<()> {
@@ -87,6 +91,21 @@ fn main() -> Result<()> {
         std::fs::write(p, frag)
             .with_context(|| format!("write web fragment to {}", p.display()))?;
         println!("wrote {}", p.display());
+    }
+
+    if cli.failover_gate {
+        let violations = report::failover_gate_violations(&cli.input_dir, cli.strict)?;
+        if violations.is_empty() {
+            println!("failover gate: PASS");
+        } else {
+            for violation in &violations {
+                eprintln!("failover gate: {violation}");
+            }
+            anyhow::bail!(
+                "failover gate failed with {} violation(s)",
+                violations.len()
+            );
+        }
     }
 
     Ok(())

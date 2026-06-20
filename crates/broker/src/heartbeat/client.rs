@@ -72,6 +72,23 @@ fn all_log_dirs_offline(cfg: &Config) -> bool {
     all_dirs_offline(&cfg.all_log_dirs, &cfg.log_dir_status)
 }
 
+fn heartbeat_rpc_timeout(interval: Duration) -> Duration {
+    interval
+        .saturating_mul(2)
+        .max(Duration::from_millis(500))
+        .min(Duration::from_secs(1))
+}
+
+fn heartbeat_connection_options(broker_id: i32, interval: Duration) -> ConnectionOptions {
+    let timeout = heartbeat_rpc_timeout(interval);
+    ConnectionOptions {
+        client_id: format!("crabka-broker-{broker_id}-heartbeat"),
+        connect_timeout: timeout,
+        request_timeout: timeout,
+        ..ConnectionOptions::default()
+    }
+}
+
 /// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
 /// the supervisor. Called from every early-exit path so the check is not
 /// accidentally skipped when the controller is temporarily unreachable.
@@ -121,28 +138,38 @@ pub(crate) async fn run(mut cfg: Config) {
                 || (broker_rec.host.clone(), broker_rec.port),
                 |e| (e.host.clone(), e.port),
             );
-        let opts = ConnectionOptions {
-            client_id: format!("crabka-broker-{}-heartbeat", cfg.broker_id),
-            ..ConnectionOptions::default()
-        };
-        let client_res = cfg
-            .inter_broker_client
-            .connect_as_connection(
+        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval);
+        let rpc_timeout = heartbeat_rpc_timeout(cfg.interval);
+        let client_res = tokio::time::timeout(
+            rpc_timeout,
+            cfg.inter_broker_client.connect_as_connection(
                 &host,
                 port,
                 cfg.inter_broker_listener_protocol,
                 "localhost",
                 opts,
-            )
-            .await;
-        let Ok(client) = client_res else {
-            debug!("heartbeat: connect failed");
-            continue;
+            ),
+        )
+        .await;
+        let client = match client_res {
+            Ok(Ok(client)) => client,
+            Ok(Err(error)) => {
+                debug!(%error, "heartbeat: connect failed");
+                continue;
+            }
+            Err(_) => {
+                debug!(
+                    timeout_ms = rpc_timeout.as_millis(),
+                    "heartbeat: connect timed out"
+                );
+                continue;
+            }
         };
         let want_shut_down = *cfg.want_shutdown.borrow_and_update();
         let offline_log_dirs = offline_dir_uuids(&cfg.log_dir_status, &cfg.log_dir_ids);
-        let resp = client
-            .send(BrokerHeartbeatRequest {
+        let resp = tokio::time::timeout(
+            rpc_timeout,
+            client.send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
                 broker_epoch: 0,
                 current_metadata_offset: 0,
@@ -150,10 +177,11 @@ pub(crate) async fn run(mut cfg: Config) {
                 want_shut_down,
                 offline_log_dirs,
                 ..Default::default()
-            })
-            .await;
+            }),
+        )
+        .await;
         match resp {
-            Ok(r) => {
+            Ok(Ok(r)) => {
                 if r.should_shut_down {
                     // Latch true; never flip back. The
                     // `BrokerHandle::controlled_shutdown` waiter is
@@ -161,7 +189,11 @@ pub(crate) async fn run(mut cfg: Config) {
                     let _ = cfg.should_shutdown.send(true);
                 }
             }
-            Err(e) => warn!(error = %e, "heartbeat send failed"),
+            Ok(Err(e)) => warn!(error = %e, "heartbeat send failed"),
+            Err(_) => warn!(
+                timeout_ms = rpc_timeout.as_millis(),
+                "heartbeat send timed out"
+            ),
         }
 
         // KIP-112: re-check after the heartbeat round-trip. This covers the
@@ -222,5 +254,21 @@ mod tests {
         // Both offline: true.
         status.mark_offline(b.path(), "disk error");
         assert!(all_dirs_offline(&paths, &status));
+    }
+
+    #[test]
+    fn heartbeat_rpc_timeout_tracks_interval_with_bounds() {
+        assert!(heartbeat_rpc_timeout(Duration::from_millis(50)) == Duration::from_millis(500));
+        assert!(heartbeat_rpc_timeout(Duration::from_millis(500)) == Duration::from_secs(1));
+        assert!(heartbeat_rpc_timeout(Duration::from_secs(5)) == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn heartbeat_connection_options_use_bounded_rpc_timeout() {
+        let opts = heartbeat_connection_options(9, Duration::from_millis(500));
+
+        assert!(opts.client_id == "crabka-broker-9-heartbeat");
+        assert!(opts.connect_timeout == Duration::from_secs(1));
+        assert!(opts.request_timeout == Duration::from_secs(1));
     }
 }

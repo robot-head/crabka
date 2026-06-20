@@ -219,6 +219,8 @@ impl Consumer {
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
         #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
         #[builder(default = Assignor::Range)] assignor: Assignor,
+        #[builder(default = std::time::Duration::from_secs(30))]
+        request_timeout: std::time::Duration,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
@@ -232,6 +234,8 @@ impl Consumer {
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .connect_timeout(request_timeout)
+            .request_timeout(request_timeout)
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -459,6 +463,8 @@ impl Consumer {
         let coordinator_client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .connect_timeout(request_timeout)
+            .request_timeout(request_timeout)
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -585,6 +591,7 @@ mod security_arg_tests {
     use super::*;
     use assert2::assert;
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_client_core::{ClientError, MockBroker};
     use crabka_security::ListenerProtocol;
 
     #[test]
@@ -717,6 +724,35 @@ mod security_arg_tests {
         assert!(position.leader_id == -1);
         assert!(position.leader_epoch == -1);
         assert!(!position.awaiting_validation);
+    }
+
+    #[tokio::test]
+    async fn consumer_builder_uses_request_timeout_for_initial_connect_handshake() {
+        let mock = MockBroker::start(|_api_key, _version, _corr_id, _body| None).await;
+
+        let build = Consumer::builder()
+            .bootstrap(mock.addr.to_string())
+            .client_id("timeout-consumer")
+            .group_id("timeout-group")
+            .subscribe(vec!["orders".to_string()])
+            .request_timeout(Duration::from_millis(100))
+            .build();
+        let res = tokio::time::timeout(Duration::from_millis(500), build).await;
+
+        mock.stop();
+
+        let Err(err) = res.expect("consumer build should not retain the 30s connect timeout")
+        else {
+            panic!("silent broker must time out during build")
+        };
+        assert!(
+            matches!(
+                err,
+                ConsumerError::Client(ClientError::Timeout(d))
+                    if d == Duration::from_millis(100)
+            ),
+            "expected 100ms timeout, got {err:?}"
+        );
     }
 
     async fn test_consumer() -> Consumer {

@@ -164,21 +164,43 @@ impl ControllerLivenessState {
             .collect()
     }
 
-    /// Seed the liveness registry with the given broker ids. Each id that
-    /// is not already present is inserted as `Alive` with
+    /// Seed the liveness registry with the given broker ids as `Alive` with
     /// `last_heartbeat = now`. This is called when this broker becomes the
-    /// raft leader so that peers which stop heartbeating (because they are
-    /// dead) will be detected by [`tick`](Self::tick) after `timeout` ms
-    /// even if they never sent a heartbeat to this specific node before.
-    ///
-    /// Ids already in the registry are left untouched (their existing
-    /// `last_heartbeat` and `state` are preserved).
+    /// raft leader so that live peers get a full timeout window to redirect
+    /// their heartbeat loop at the new controller, while dead peers are still
+    /// detected by [`tick`](Self::tick) after `timeout` ms.
     pub(crate) async fn seed_brokers(&self, broker_ids: impl IntoIterator<Item = u64>) {
         let mut map = self.brokers.lock().await;
         let now = Instant::now();
         for id in broker_ids {
+            map.entry(id)
+                .and_modify(|entry| {
+                    entry.last_heartbeat = now;
+                    entry.state = BrokerLivenessState::Alive;
+                })
+                .or_insert(BrokerEntry {
+                    last_heartbeat: now,
+                    state: BrokerLivenessState::Alive,
+                });
+        }
+    }
+
+    /// Seed brokers as alive, but with only `grace` remaining before timeout.
+    /// Used when this node becomes controller leader: live peers should heartbeat
+    /// quickly, while a broker that died with the previous leader should not get
+    /// a full fresh session timeout.
+    pub(crate) async fn seed_brokers_expiring_after(
+        &self,
+        broker_ids: impl IntoIterator<Item = u64>,
+        grace: Duration,
+    ) {
+        let mut map = self.brokers.lock().await;
+        let now = Instant::now();
+        let backdated = self.timeout.saturating_sub(grace);
+        let last_heartbeat = now.checked_sub(backdated).unwrap_or(now);
+        for id in broker_ids {
             map.entry(id).or_insert(BrokerEntry {
-                last_heartbeat: now,
+                last_heartbeat,
                 state: BrokerLivenessState::Alive,
             });
         }
@@ -220,6 +242,59 @@ mod tests {
         let transition = liveness.record_heartbeat(3).await;
         assert!(transition == Some(LivenessTransition::DeadToAlive(3)));
         assert!(liveness.state(3).await == Some(BrokerLivenessState::Alive));
+    }
+
+    #[tokio::test]
+    async fn expiring_seed_times_out_without_fresh_heartbeat() {
+        let liveness = ControllerLivenessState::new(Duration::from_millis(10));
+        liveness
+            .seed_brokers_expiring_after([7], Duration::from_nanos(1))
+            .await;
+        std::thread::sleep(Duration::from_millis(1));
+
+        let transitions = liveness.tick().await;
+
+        assert!(transitions == vec![LivenessTransition::AliveToDead(7)]);
+    }
+
+    #[tokio::test]
+    async fn normal_seed_gives_brokers_full_timeout_window() {
+        let liveness = ControllerLivenessState::new(Duration::from_millis(50));
+        liveness.seed_brokers([7]).await;
+        std::thread::sleep(Duration::from_millis(1));
+
+        let transitions = liveness.tick().await;
+
+        assert!(transitions.is_empty());
+        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
+    }
+
+    #[tokio::test]
+    async fn normal_seed_refreshes_existing_entries() {
+        let liveness = ControllerLivenessState::new(Duration::from_millis(10));
+        liveness.record_heartbeat(7).await;
+        std::thread::sleep(Duration::from_millis(20));
+
+        liveness.seed_brokers([7]).await;
+        std::thread::sleep(Duration::from_millis(1));
+        let transitions = liveness.tick().await;
+
+        assert!(transitions.is_empty());
+        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
+    }
+
+    #[tokio::test]
+    async fn expiring_seed_stays_alive_after_fresh_heartbeat() {
+        let liveness = ControllerLivenessState::new(Duration::from_mins(1));
+        liveness
+            .seed_brokers_expiring_after([7], Duration::from_nanos(1))
+            .await;
+        liveness.record_heartbeat(7).await;
+
+        let transitions = liveness.tick().await;
+
+        assert!(transitions.is_empty());
+        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]

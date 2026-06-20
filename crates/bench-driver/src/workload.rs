@@ -3,13 +3,17 @@
 //! phases, optionally triggers a failover mid-measurement, and merges
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use hdrhistogram::Histogram;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -17,7 +21,7 @@ use tracing::{info, warn};
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
-use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_security::ListenerProtocol;
 
 use crate::hist;
@@ -34,6 +38,23 @@ use crate::scenario::{
 /// per-slice counts + a per-slice latency histogram locally (no shared locks
 /// on the hot path), and `run()` merges them into the `samples` series.
 const SAMPLE_INTERVAL_MS: u64 = 2000;
+const PRODUCER_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const CONSUMER_BUILD_ATTEMPTS: u32 = 6;
+
+type AckResult =
+    Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
+type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
+
+fn producer_request_timeout() -> Duration {
+    Duration::from_secs(2)
+}
+
+fn consumer_request_timeout(stack: Stack) -> Duration {
+    match stack {
+        Stack::Crabka => Duration::from_secs(5),
+        Stack::Kafka => Duration::from_secs(30),
+    }
+}
 
 /// The fixed sampling grid, shared (by Copy) with every task so all tasks
 /// bucket into the same slices.
@@ -192,8 +213,10 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let stop = stop.clone();
         let sid = cfg.scenario_id;
         let sec = security.clone();
-        cons_set
-            .spawn(async move { run_consumer(i, s, bootstrap, topic, sid, stop, sec, grid).await });
+        let stack = cfg.stack;
+        cons_set.spawn(async move {
+            run_consumer(i, s, bootstrap, topic, sid, stop, sec, grid, stack).await
+        });
     }
 
     // ── Failover orchestrator task ──────────────────────────────────────────
@@ -202,6 +225,9 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
         let spec = scenario.failover.clone().expect("checked above");
         let stack = cfg.stack;
         let namespace = cfg.namespace.clone();
+        let bootstrap = cfg.bootstrap.clone();
+        let topic = cfg.topic.clone();
+        let security = security.clone();
         let kill_at = kill_at_ms.clone();
         tokio::spawn(async move {
             tokio::time::sleep_until(t_start + Duration::from_secs(spec.kill_at_s)).await;
@@ -209,7 +235,27 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             kill_at.store(ms, Ordering::SeqCst);
             match crate::failover::try_client().await {
                 Ok(client) => {
-                    match crate::failover::kill_first_broker(&client, stack, &namespace).await {
+                    let leader_id = if spec.target == "partition0_leader" {
+                        match crate::failover::partition0_leader_from_metadata(
+                            &bootstrap, &topic, security,
+                        )
+                        .await
+                        {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "failover: partition0_leader lookup failed; falling back to first broker pod"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    match crate::failover::kill_broker_pod(&client, stack, &namespace, leader_id)
+                        .await
+                    {
                         Ok(name) => info!(pod = %name, "failover: killed broker"),
                         Err(e) => warn!(error = %e, "failover: kill_first_broker failed"),
                     }
@@ -509,11 +555,11 @@ async fn run_producer(
         // keep every partition's pipeline busy.
         .max_in_flight_per_connection(128)
         // A produce to a healthy broker completes in low single-digit ms, so a
-        // 10s ceiling never trips under normal load — but it bounds how long a
+        // 2s ceiling should not trip under normal load — but it bounds how long a
         // send to a *killed* leader blocks before the client re-routes, so the
         // measured failover recovery reflects the cluster's leader re-election
-        // (single-digit seconds) rather than the 30s default request timeout.
-        .request_timeout(Duration::from_secs(10))
+        // rather than the 30s default request timeout.
+        .request_timeout(producer_request_timeout())
         // `None` → plaintext (default). `Some` → all produce traffic for this
         // task goes over the broker's TLS listener.
         .maybe_security(security)
@@ -564,12 +610,7 @@ async fn run_producer(
     // measured the driver, not the cluster. A bounded window lets throughput
     // track the cluster while keeping memory in hand.
     let max_inflight: usize = 512;
-    let mut inflight: std::collections::VecDeque<(
-        tokio::sync::oneshot::Receiver<
-            Result<crabka_client_producer::RecordMetadata, crabka_client_producer::ProducerError>,
-        >,
-        Instant,
-    )> = std::collections::VecDeque::new();
+    let mut inflight: FuturesUnordered<AckFuture> = FuturesUnordered::new();
 
     // Record one *settled* send (`Ok` = ack, `Err` = producer error). A macro,
     // not a closure, so it can mutate the per-task accumulators in place.
@@ -626,6 +667,14 @@ async fn run_producer(
             }
         }};
     }
+    macro_rules! handle_ack_result {
+        ($res:expr, $t0:expr) => {{
+            match $res {
+                Ok(res) => handle_ack!(res, $t0),
+                Err(_) => handle_dropped!(),
+            }
+        }};
+    }
 
     loop {
         let state = stop.load(Ordering::Relaxed);
@@ -634,27 +683,15 @@ async fn run_producer(
         }
         // Drain every ack that has already settled — promptly, so the recorded
         // latency is the real send→ack time, not how long a record waited in
-        // the in-flight queue.
-        while let Some((rx, _)) = inflight.front_mut() {
-            match rx.try_recv() {
-                Ok(res) => {
-                    let (_rx, t0) = inflight.pop_front().expect("front present");
-                    handle_ack!(res, t0);
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    inflight.pop_front();
-                    handle_dropped!();
-                }
-            }
+        // the in-flight set behind an older stuck send.
+        while let Some((res, t0)) = inflight.next().now_or_never().flatten() {
+            handle_ack_result!(res, t0);
         }
-        // Back-pressure: at capacity, block on the oldest before sending more.
+        // Back-pressure: at capacity, block until any send completes. Waiting
+        // for the oldest can make one dead-leader send hide live-partition acks.
         while inflight.len() >= max_inflight {
-            let (rx, t0) = inflight.pop_front().expect("len checked");
-            if let Ok(res) = rx.await {
-                handle_ack!(res, t0);
-            } else {
-                handle_dropped!();
+            if let Some((res, t0)) = inflight.next().await {
+                handle_ack_result!(res, t0);
             }
         }
         if let Some(p) = pacer.as_mut() {
@@ -668,15 +705,35 @@ async fn run_producer(
         };
         let t0 = Instant::now();
         let rx = producer.send(rec).await;
-        inflight.push_back((rx, t0));
+        inflight.push(Box::pin(async move { (rx.await, t0) }));
     }
 
-    // Drain anything still outstanding when the measurement window closed.
-    while let Some((rx, t0)) = inflight.pop_front() {
-        if let Ok(res) = rx.await {
-            handle_ack!(res, t0);
-        } else {
-            handle_dropped!();
+    // Drain anything still outstanding when the measurement window closed, but
+    // do not let a stuck producer retry slot keep the whole benchmark job alive
+    // forever. Unsettled sends are counted as drops so failover reports capture
+    // the stall instead of timing out without a JSON result.
+    let drain_until = Instant::now() + PRODUCER_FINAL_DRAIN_TIMEOUT;
+    while !inflight.is_empty() {
+        let now = Instant::now();
+        if now >= drain_until {
+            let unresolved = inflight.len() as u64;
+            dropped += unresolved;
+            if error.is_empty() {
+                error = format!("producer-{idx}-final-drain-timeout:{unresolved}");
+            }
+            break;
+        }
+        match tokio::time::timeout_at(drain_until, inflight.next()).await {
+            Ok(Some((res, t0))) => handle_ack_result!(res, t0),
+            Ok(None) => break,
+            Err(_) => {
+                let unresolved = inflight.len() as u64;
+                dropped += unresolved;
+                if error.is_empty() {
+                    error = format!("producer-{idx}-final-drain-timeout:{unresolved}");
+                }
+                break;
+            }
         }
     }
 
@@ -708,20 +765,18 @@ async fn run_consumer(
     stop: Arc<AtomicU8>,
     security: Option<ClientSecurity>,
     grid: Grid,
+    stack: Stack,
 ) -> ConsumerOut {
     let group_id = format!("crabka-bench-{}", scenario.name);
-    let mut consumer = match Consumer::builder()
-        .bootstrap(bootstrap.clone())
-        .client_id(format!("bench-consumer-{idx}"))
-        .group_id(group_id)
-        .subscribe(vec![topic.clone()])
-        .auto_offset_reset(AutoOffsetReset::Earliest)
-        // `None` → plaintext (default). `Some` → all fetch traffic for this
-        // task goes over the broker's TLS listener (kTLS sendfile on crabka).
-        .maybe_security(security)
-        .build()
-        .await
-        .context("build consumer")
+    let mut consumer = match build_consumer_with_retry(
+        idx,
+        &bootstrap,
+        group_id,
+        &topic,
+        security,
+        consumer_request_timeout(stack),
+    )
+    .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -791,6 +846,58 @@ async fn run_consumer(
     }
 }
 
+async fn build_consumer_with_retry(
+    idx: usize,
+    bootstrap: &str,
+    group_id: String,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    request_timeout: Duration,
+) -> Result<Consumer> {
+    let backoff = exponential_backoff::Backoff::new(
+        CONSUMER_BUILD_ATTEMPTS,
+        Duration::from_millis(100),
+        Some(Duration::from_secs(2)),
+    );
+    for (attempt_idx, delay) in backoff.into_iter().enumerate() {
+        let attempt = attempt_idx + 1;
+        let result = Consumer::builder()
+            .bootstrap(bootstrap.to_string())
+            .client_id(format!("bench-consumer-{idx}"))
+            .group_id(group_id.clone())
+            .subscribe(vec![topic.to_string()])
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .request_timeout(request_timeout)
+            // `None` → plaintext (default). `Some` → all fetch traffic for this
+            // task goes over the broker's TLS listener (kTLS sendfile on crabka).
+            .maybe_security(security.clone())
+            .build()
+            .await
+            .context("build consumer");
+
+        match result {
+            Ok(consumer) => return Ok(consumer),
+            Err(e) => match delay {
+                Some(delay) => {
+                    warn!(
+                        attempt,
+                        retry_after_ms = delay.as_millis(),
+                        error = %e,
+                        "consumer build failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                None => {
+                    return Err(
+                        e.context(format!("build consumer failed after {attempt} attempts"))
+                    );
+                }
+            },
+        }
+    }
+    unreachable!("exponential_backoff::Backoff yields a terminal attempt");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,6 +942,14 @@ mod tests {
     fn bytes_to_mb_is_proper_mebibyte() {
         assert!((bytes_to_mb(1_048_576) - 1.0).abs() < 1e-9);
         assert!(bytes_to_mb(0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn request_timeout_policy_bounds_producers_and_only_crabka_consumers() {
+        assert!(producer_request_timeout() == Duration::from_secs(2));
+        assert!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
+        assert!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
+        assert!(CONSUMER_BUILD_ATTEMPTS == 6);
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose

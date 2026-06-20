@@ -241,6 +241,7 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
                 mean(&spike),
             ));
         }
+        render_failover_comparison(&mut out, &crabka, &kafka);
 
         // ── Notes & errors (deduped across runs) ────────────────────────────
         for (label, stack_runs) in [("crabka", &crabka), ("kafka", &kafka)] {
@@ -272,6 +273,18 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
     }
 
     Ok(out)
+}
+
+/// Return human-readable failover gate violations. An empty vector means every
+/// failover cell with both stacks present has the evidence needed for the
+/// objective: Crabka recovered no slower than Kafka, and both stacks emitted
+/// producer and consumer message-rate samples over time.
+pub fn failover_gate_violations(input_dir: &Path, strict: bool) -> Result<Vec<String>> {
+    let runs: Vec<RunOutput> = collect_runs(input_dir, strict)?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect();
+    Ok(failover_gate_violations_for_runs(&runs))
 }
 
 fn truncate_list(items: &[String], n: usize) -> String {
@@ -316,6 +329,335 @@ fn sample_stddev(v: &[f64]) -> f64 {
     let m = mean(v);
     let var = v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0);
     var.sqrt()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateRecovery {
+    baseline_mps: f64,
+    min_after_kill_mps: f64,
+    recovery_ms: Option<u64>,
+}
+
+fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[&RunOutput]) {
+    let c_recovery = mean_failover_recovery(crabka);
+    let k_recovery = mean_failover_recovery(kafka);
+    let (Some(c_recovery), Some(k_recovery)) = (c_recovery, k_recovery) else {
+        return;
+    };
+
+    let verdict = if c_recovery <= k_recovery {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+    let delta = (c_recovery - k_recovery).abs().round() as u64;
+    let faster = if c_recovery <= k_recovery {
+        "faster than"
+    } else {
+        "slower than"
+    };
+    out.push_str(&format!(
+        "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {c_recovery:.0} ms, kafka {k_recovery:.0} ms).\n\n",
+    ));
+
+    let c_producer_rate = mean_rate_recovery(crabka, producer_sample_rate);
+    let k_producer_rate = mean_rate_recovery(kafka, producer_sample_rate);
+    let c_consumer_rate = mean_rate_recovery(crabka, consumer_sample_rate);
+    let k_consumer_rate = mean_rate_recovery(kafka, consumer_sample_rate);
+    if c_producer_rate.is_none()
+        && k_producer_rate.is_none()
+        && c_consumer_rate.is_none()
+        && k_consumer_rate.is_none()
+    {
+        return;
+    }
+
+    out.push_str("| stack | recovery ms | producer baseline msgs/s | producer min after kill msgs/s | producer rate recovery ms | consumer baseline msgs/s | consumer min after kill msgs/s | consumer rate recovery ms |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    render_rate_recovery_row(out, "crabka", c_recovery, c_producer_rate, c_consumer_rate);
+    render_rate_recovery_row(out, "kafka", k_recovery, k_producer_rate, k_consumer_rate);
+    out.push('\n');
+}
+
+fn failover_gate_violations_for_runs(runs: &[RunOutput]) -> Vec<String> {
+    let mut by_group: BTreeMap<(String, u32, i32, i16), Vec<&RunOutput>> = BTreeMap::new();
+    for r in runs.iter().filter(|r| r.scenario.failover.is_some()) {
+        by_group
+            .entry((
+                r.scenario.name.clone(),
+                r.topology.broker_count,
+                r.topology.partitions,
+                r.topology.replication_factor,
+            ))
+            .or_default()
+            .push(r);
+    }
+
+    let mut violations = Vec::new();
+    if by_group.is_empty() {
+        violations.push("missing failover results".into());
+        return violations;
+    }
+
+    for ((scenario, brokers, partitions, rf), group) in by_group {
+        let crabka: Vec<&RunOutput> = group
+            .iter()
+            .copied()
+            .filter(|r| r.stack == Stack::Crabka)
+            .collect();
+        let kafka: Vec<&RunOutput> = group
+            .iter()
+            .copied()
+            .filter(|r| r.stack == Stack::Kafka)
+            .collect();
+        let label = format!("{scenario} @ {brokers} broker(s), {partitions} partitions, RF={rf}");
+
+        let Some(c_recovery) = mean_failover_recovery(&crabka) else {
+            violations.push(format!(
+                "{label}: missing Crabka failover disturbance result"
+            ));
+            continue;
+        };
+        let Some(k_recovery) = mean_failover_recovery(&kafka) else {
+            violations.push(format!(
+                "{label}: missing kafka failover disturbance result"
+            ));
+            continue;
+        };
+        if c_recovery > k_recovery {
+            violations.push(format!(
+                "{label}: Crabka recovery {c_recovery:.0} ms is slower than kafka {k_recovery:.0} ms"
+            ));
+        }
+        compare_failover_smoothness(&mut violations, &label, &crabka, &kafka);
+
+        require_rate_samples(&mut violations, &label, "crabka", &crabka);
+        require_rate_samples(&mut violations, &label, "kafka", &kafka);
+        compare_rate_recovery(
+            &mut violations,
+            &label,
+            &crabka,
+            &kafka,
+            "producer",
+            producer_sample_rate,
+        );
+        compare_rate_recovery(
+            &mut violations,
+            &label,
+            &crabka,
+            &kafka,
+            "consumer",
+            consumer_sample_rate,
+        );
+    }
+
+    violations
+}
+
+fn compare_failover_smoothness(
+    violations: &mut Vec<String>,
+    label: &str,
+    crabka: &[&RunOutput],
+    kafka: &[&RunOutput],
+) {
+    if let (Some(c_drops), Some(k_drops)) =
+        (mean_failover_dropped(crabka), mean_failover_dropped(kafka))
+        && c_drops > k_drops
+    {
+        violations.push(format!(
+            "{label}: Crabka dropped {c_drops:.0} messages vs kafka {k_drops:.0}"
+        ));
+    }
+    if let (Some(c_spike), Some(k_spike)) = (
+        mean_failover_latency_spike(crabka),
+        mean_failover_latency_spike(kafka),
+    ) && c_spike > k_spike
+    {
+        violations.push(format!(
+            "{label}: Crabka latency spike {c_spike:.1} ms is higher than kafka {k_spike:.1} ms"
+        ));
+    }
+}
+
+fn compare_rate_recovery(
+    violations: &mut Vec<String>,
+    label: &str,
+    crabka: &[&RunOutput],
+    kafka: &[&RunOutput],
+    metric: &str,
+    select: fn(&crate::scenario::Sample) -> f64,
+) {
+    let (Some(c_rate), Some(k_rate)) = (
+        mean_rate_recovery(crabka, select),
+        mean_rate_recovery(kafka, select),
+    ) else {
+        return;
+    };
+
+    match (c_rate.recovery_ms, k_rate.recovery_ms) {
+        (Some(c_ms), Some(k_ms)) if c_ms > k_ms => violations.push(format!(
+            "{label}: Crabka {metric} rate recovery {c_ms} ms is slower than kafka {k_ms} ms"
+        )),
+        (None, Some(k_ms)) => violations.push(format!(
+            "{label}: Crabka {metric} rate did not recover while kafka recovered in {k_ms} ms"
+        )),
+        (None, None) => violations.push(format!("{label}: Crabka {metric} rate did not recover")),
+        _ => {}
+    }
+}
+
+fn require_rate_samples(
+    violations: &mut Vec<String>,
+    label: &str,
+    stack_label: &str,
+    runs: &[&RunOutput],
+) {
+    if runs.is_empty() {
+        return;
+    }
+    for (idx, run) in runs.iter().enumerate() {
+        if rate_recovery_for_run(run, producer_sample_rate).is_none()
+            || rate_recovery_for_run(run, consumer_sample_rate).is_none()
+        {
+            violations.push(format!(
+                "{label}: {stack_label} failover run is missing message-rate samples (run {})",
+                idx + 1
+            ));
+        }
+    }
+}
+
+fn mean_failover_recovery(runs: &[&RunOutput]) -> Option<f64> {
+    let vals: Vec<f64> = runs
+        .iter()
+        .filter_map(|r| r.disturbance.as_ref())
+        .map(|d| d.recovery_at_ms.saturating_sub(d.kill_at_ms) as f64)
+        .collect();
+    (!vals.is_empty()).then(|| mean(&vals))
+}
+
+fn mean_failover_dropped(runs: &[&RunOutput]) -> Option<f64> {
+    let vals: Vec<f64> = runs
+        .iter()
+        .filter_map(|r| r.disturbance.as_ref())
+        .map(|d| d.dropped as f64)
+        .collect();
+    (!vals.is_empty()).then(|| mean(&vals))
+}
+
+fn mean_failover_latency_spike(runs: &[&RunOutput]) -> Option<f64> {
+    let vals: Vec<f64> = runs
+        .iter()
+        .filter_map(|r| r.disturbance.as_ref())
+        .map(|d| d.latency_spike_max_ms)
+        .collect();
+    (!vals.is_empty()).then(|| mean(&vals))
+}
+
+fn mean_rate_recovery(
+    runs: &[&RunOutput],
+    select: fn(&crate::scenario::Sample) -> f64,
+) -> Option<RateRecovery> {
+    let vals: Vec<RateRecovery> = runs
+        .iter()
+        .filter_map(|r| rate_recovery_for_run(r, select))
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    let baselines: Vec<f64> = vals.iter().map(|v| v.baseline_mps).collect();
+    let mins: Vec<f64> = vals.iter().map(|v| v.min_after_kill_mps).collect();
+    let recoveries: Vec<f64> = vals
+        .iter()
+        .filter_map(|v| v.recovery_ms.map(|ms| ms as f64))
+        .collect();
+    Some(RateRecovery {
+        baseline_mps: mean(&baselines),
+        min_after_kill_mps: mean(&mins),
+        recovery_ms: (!recoveries.is_empty()).then(|| mean(&recoveries).round() as u64),
+    })
+}
+
+fn rate_recovery_for_run(
+    r: &RunOutput,
+    select: fn(&crate::scenario::Sample) -> f64,
+) -> Option<RateRecovery> {
+    let failover = r.scenario.failover.as_ref()?;
+    if r.samples.is_empty() {
+        return None;
+    }
+    let kill_offset_ms = failover
+        .kill_at_s
+        .saturating_sub(r.scenario.warmup_s)
+        .saturating_mul(1000);
+    let baseline: Vec<f64> = r
+        .samples
+        .iter()
+        .filter(|s| s.t_offset_ms < kill_offset_ms)
+        .map(select)
+        .collect();
+    if baseline.is_empty() {
+        return None;
+    }
+    let baseline_mps = mean(&baseline);
+    let after: Vec<&crate::scenario::Sample> = r
+        .samples
+        .iter()
+        .filter(|s| s.t_offset_ms >= kill_offset_ms)
+        .collect();
+    if after.is_empty() {
+        return None;
+    }
+    let min_after_kill_mps = after
+        .iter()
+        .map(|s| select(s))
+        .fold(f64::INFINITY, f64::min);
+    let threshold = baseline_mps * 0.90;
+    let recovery_ms = after
+        .iter()
+        .find(|s| select(s) >= threshold)
+        .map(|s| s.t_offset_ms.saturating_sub(kill_offset_ms));
+
+    Some(RateRecovery {
+        baseline_mps,
+        min_after_kill_mps,
+        recovery_ms,
+    })
+}
+
+fn producer_sample_rate(s: &crate::scenario::Sample) -> f64 {
+    s.producer_msgs_per_sec
+}
+
+fn consumer_sample_rate(s: &crate::scenario::Sample) -> f64 {
+    s.consumer_msgs_per_sec
+}
+
+fn render_rate_recovery_row(
+    out: &mut String,
+    stack: &str,
+    failover_recovery_ms: f64,
+    producer_rate: Option<RateRecovery>,
+    consumer_rate: Option<RateRecovery>,
+) {
+    match (producer_rate, consumer_rate) {
+        (Some(producer_rate), Some(consumer_rate)) => out.push_str(&format!(
+            "| {stack} | {failover_recovery_ms:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
+            producer_rate.baseline_mps,
+            producer_rate.min_after_kill_mps,
+            producer_rate
+                .recovery_ms
+                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string()),
+            consumer_rate.baseline_mps,
+            consumer_rate.min_after_kill_mps,
+            consumer_rate
+                .recovery_ms
+                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string())
+        )),
+        _ => out.push_str(&format!(
+            "| {stack} | {failover_recovery_ms:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n"
+        )),
+    }
 }
 
 /// Render per-run samples as `mean` (single run) or `mean (±cv%)` (multiple
@@ -604,7 +946,9 @@ pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scenario::{Acks, Compression, LoadMode, ModeTag, Scenario, Throughput, Topology};
+    use crate::scenario::{
+        Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput, Topology,
+    };
     use assert2::assert;
     use tempfile::tempdir;
 
@@ -646,6 +990,56 @@ mod tests {
             },
             ..RunOutput::default_placeholder()
         }
+    }
+
+    fn fake_failover_run(stack: Stack, recovery_ms: u64, post_kill_min_mps: f64) -> RunOutput {
+        let mut r = fake_run(stack, 600_000);
+        r.scenario.name = "failover".into();
+        r.scenario.mode_tag = ModeTag::Cluster;
+        r.scenario.partitions = 12;
+        r.scenario.replication_factor = 3;
+        r.scenario.duration_s = 12;
+        r.scenario.warmup_s = 0;
+        r.scenario.failover = Some(crate::scenario::FailoverSpec {
+            kill_at_s: 4,
+            target: "partition0_leader".into(),
+        });
+        r.topology.partitions = 12;
+        r.topology.replication_factor = 3;
+        r.topology.broker_count = 3;
+        r.disturbance = Some(Disturbance {
+            kill_at_ms: 4_000,
+            recovery_at_ms: 4_000 + recovery_ms,
+            dropped: 0,
+            latency_spike_max_ms: 42.0,
+        });
+        r.samples = vec![
+            Sample {
+                t_offset_ms: 0,
+                producer_msgs_per_sec: 10_000.0,
+                consumer_msgs_per_sec: 9_800.0,
+                ..Sample::default()
+            },
+            Sample {
+                t_offset_ms: 2_000,
+                producer_msgs_per_sec: 10_200.0,
+                consumer_msgs_per_sec: 9_900.0,
+                ..Sample::default()
+            },
+            Sample {
+                t_offset_ms: 4_000,
+                producer_msgs_per_sec: post_kill_min_mps,
+                consumer_msgs_per_sec: post_kill_min_mps * 0.9,
+                ..Sample::default()
+            },
+            Sample {
+                t_offset_ms: 6_000,
+                producer_msgs_per_sec: 9_500.0,
+                consumer_msgs_per_sec: 9_200.0,
+                ..Sample::default()
+            },
+        ];
+        r
     }
 
     // Spare default impl scoped to tests.
@@ -746,6 +1140,299 @@ mod tests {
         let dir = tempdir().unwrap();
         let md = render_markdown(dir.path(), false).unwrap();
         assert!(md.contains("no `RunOutput` JSON files found"));
+    }
+
+    #[test]
+    fn failover_summary_compares_recovery_and_rate_over_time() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, 2_000, 8_000.0)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let md = render_markdown(dir.path(), true).unwrap();
+
+        assert!(md.contains("**Failover comparison:** PASS"));
+        assert!(md.contains("Crabka recovered 1000 ms faster than kafka"));
+        assert!(md.contains("| stack | recovery ms | producer baseline msgs/s | producer min after kill msgs/s | producer rate recovery ms | consumer baseline msgs/s | consumer min after kill msgs/s | consumer rate recovery ms |"));
+        assert!(md.contains("| crabka | 2000 | 10100 | 8000 | 2000 | 9850 | 7200 | 2000 |"));
+        assert!(md.contains("| kafka | 3000 | 10100 | 6000 | 2000 | 9850 | 5400 | 2000 |"));
+    }
+
+    #[test]
+    fn failover_gate_passes_when_crabka_recovers_no_slower_with_rate_samples() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, 2_000, 8_000.0)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations.is_empty(),
+            "unexpected violations: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_without_failover_results() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path()
+                .join("crabka-small-msg-saturate-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Crabka, 600_000)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path()
+                .join("kafka-small-msg-saturate-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_run(Stack::Kafka, 400_000)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("missing failover results")),
+            "missing no-failover violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_does_not_compare_different_topologies() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        crabka.topology.partitions = 12;
+        crabka.topology.replication_factor = 3;
+        let mut kafka = fake_failover_run(Stack::Kafka, 3_000, 6_000.0);
+        kafka.topology.partitions = 24;
+        kafka.topology.replication_factor = 3;
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-24p-run01.json"),
+            serde_json::to_string(&kafka).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("failover @ 3 broker(s), 12 partitions, RF=3: missing kafka failover disturbance result")),
+            "missing crabka-topology violation: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("failover @ 3 broker(s), 24 partitions, RF=3: missing Crabka failover disturbance result")),
+            "missing kafka-topology violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_recovers_slower_or_rate_samples_missing() {
+        let dir = tempdir().unwrap();
+        let mut kafka = fake_failover_run(Stack::Kafka, 2_000, 6_000.0);
+        kafka.samples.clear();
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, 4_000, 8_000.0)).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&kafka).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Crabka recovery 4000 ms is slower than kafka 2000 ms")),
+            "missing slower-recovery violation: {violations:?}"
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("kafka failover run is missing message-rate samples")),
+            "missing rate-sample violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_message_rate_recovers_slower_than_kafka() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        crabka.samples[3].producer_msgs_per_sec = 8_500.0;
+        crabka.samples.push(Sample {
+            t_offset_ms: 8_000,
+            producer_msgs_per_sec: 9_500.0,
+            consumer_msgs_per_sec: 9_200.0,
+            ..Sample::default()
+        });
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations.iter().any(|v| v
+                .contains("Crabka producer rate recovery 4000 ms is slower than kafka 2000 ms")),
+            "missing rate-recovery violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_message_rate_never_recovers() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        for sample in crabka
+            .samples
+            .iter_mut()
+            .filter(|sample| sample.t_offset_ms >= 4_000)
+        {
+            sample.producer_msgs_per_sec = 8_500.0;
+        }
+        let mut kafka = fake_failover_run(Stack::Kafka, 3_000, 6_000.0);
+        for sample in kafka
+            .samples
+            .iter_mut()
+            .filter(|sample| sample.t_offset_ms >= 4_000)
+        {
+            sample.producer_msgs_per_sec = 8_500.0;
+        }
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&kafka).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Crabka producer rate did not recover")),
+            "missing unrecovered-rate violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_consumer_rate_recovers_slower_than_kafka() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        crabka.samples[3].consumer_msgs_per_sec = 8_000.0;
+        crabka.samples.push(Sample {
+            t_offset_ms: 8_000,
+            producer_msgs_per_sec: 9_500.0,
+            consumer_msgs_per_sec: 9_200.0,
+            ..Sample::default()
+        });
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations.iter().any(|v| v
+                .contains("Crabka consumer rate recovery 4000 ms is slower than kafka 2000 ms")),
+            "missing consumer-rate violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_drops_more_messages_than_kafka() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        crabka.disturbance.as_mut().unwrap().dropped = 5;
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Crabka dropped 5 messages vs kafka 0")),
+            "missing dropped-message violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn failover_gate_fails_when_crabka_latency_spike_is_higher_than_kafka() {
+        let dir = tempdir().unwrap();
+        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        crabka.disturbance.as_mut().unwrap().latency_spike_max_ms = 90.0;
+        std::fs::write(
+            dir.path().join("crabka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&crabka).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("kafka-failover-3broker-rf3-run01.json"),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+        )
+        .unwrap();
+
+        let violations = failover_gate_violations(dir.path(), true).unwrap();
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Crabka latency spike 90.0 ms is higher than kafka 42.0 ms")),
+            "missing latency-spike violation: {violations:?}"
+        );
     }
 
     #[test]

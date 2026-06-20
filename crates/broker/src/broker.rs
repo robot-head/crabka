@@ -2022,8 +2022,32 @@ impl Broker {
                         endpoints,
                     },
                 );
-                if let Err(e) = controller.submit_change(vec![self_reg]).await {
-                    tracing::warn!(error = %e, "self-registration failed; continuing");
+                let backoff = exponential_backoff::Backoff::new(
+                    8,
+                    std::time::Duration::from_millis(100),
+                    Some(std::time::Duration::from_secs(5)),
+                );
+                for (attempt_idx, delay) in backoff.into_iter().enumerate() {
+                    let attempt = attempt_idx + 1;
+                    match controller.submit_change(vec![self_reg.clone()]).await {
+                        Ok(()) => break,
+                        Err(e) => match delay {
+                            Some(delay) => {
+                                tracing::warn!(
+                                    attempt,
+                                    retry_after_ms = delay.as_millis(),
+                                    error = %e,
+                                    "self-registration failed; retrying before serving"
+                                );
+                                tokio::time::sleep(delay).await;
+                            }
+                            None => {
+                                return Err(BrokerError::Startup(format!(
+                                    "self-registration failed after {attempt} attempts: {e}"
+                                )));
+                            }
+                        },
+                    }
                 }
             }
 
@@ -2540,12 +2564,11 @@ impl Broker {
 
         // 4e-2. Leadership-change watcher: whenever this broker becomes the
         //       raft leader it seeds the liveness registry with all brokers
-        //       known in the current metadata image.  This ensures that peers
-        //       which were heartbeating to the previous leader (and therefore
-        //       have no entry in *this* broker's liveness map) are detected as
-        //       dead after `heartbeat_timeout_ms` if they stop sending to us.
-        //       Without seeding, `AliveToDead` never fires for a broker that
-        //       dies while a *different* raft node is the leader.
+        //       known in the current metadata image. This gives live brokers a
+        //       full heartbeat timeout window to discover the new controller
+        //       before liveness failover runs against this node's fresh local
+        //       heartbeat map. Without seeding, `AliveToDead` never fires for a
+        //       broker that dies while a *different* raft node is the leader.
         {
             let mut leader_watch = controller.watch_leader();
             let this_node = config.node_id;

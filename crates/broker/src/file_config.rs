@@ -63,6 +63,24 @@ pub struct FileConfig {
     /// Maps to `BrokerConfig::replica_selector`.
     #[serde(default)]
     pub replica_selector: Option<String>,
+    /// How often this broker sends `BrokerHeartbeat` to the controller leader.
+    /// Absent leaves the `BrokerConfig` default intact.
+    #[serde(default)]
+    pub heartbeat_interval_ms: Option<u64>,
+    /// Controller-side session timeout for broker heartbeats. Absent leaves the
+    /// `BrokerConfig` default intact.
+    #[serde(default)]
+    pub heartbeat_timeout_ms: Option<u64>,
+    /// Maximum follower lag before the leader proposes ISR shrink. Absent
+    /// leaves the `BrokerConfig` default intact.
+    #[serde(default)]
+    pub replica_lag_time_max_ms: Option<u64>,
+    /// Controller election timeout. Absent leaves the `BrokerConfig` default intact.
+    #[serde(default)]
+    pub controller_election_timeout_ms: Option<u64>,
+    /// Controller heartbeat interval. Absent leaves the `BrokerConfig` default intact.
+    #[serde(default)]
+    pub controller_heartbeat_interval_ms: Option<u64>,
     pub inter_broker_listener_name: Option<String>,
 
     /// Maximum number of live broker connections across all listeners
@@ -836,6 +854,31 @@ impl FileConfig {
             .map_err(|bad| {
                 FileConfigError::InvalidConfig(format!("unknown replica_selector: {bad}"))
             })?;
+        }
+        if let Some(ms) = self.heartbeat_interval_ms
+            && cfg.heartbeat_interval_ms == defaults.heartbeat_interval_ms
+        {
+            cfg.heartbeat_interval_ms = ms;
+        }
+        if let Some(ms) = self.heartbeat_timeout_ms
+            && cfg.heartbeat_timeout_ms == defaults.heartbeat_timeout_ms
+        {
+            cfg.heartbeat_timeout_ms = ms;
+        }
+        if let Some(ms) = self.replica_lag_time_max_ms
+            && cfg.replica_lag_time_max_ms == defaults.replica_lag_time_max_ms
+        {
+            cfg.replica_lag_time_max_ms = ms;
+        }
+        if let Some(ms) = self.controller_election_timeout_ms
+            && cfg.controller_election_timeout == defaults.controller_election_timeout
+        {
+            cfg.controller_election_timeout = std::time::Duration::from_millis(ms);
+        }
+        if let Some(ms) = self.controller_heartbeat_interval_ms
+            && cfg.controller_heartbeat_interval == defaults.controller_heartbeat_interval
+        {
+            cfg.controller_heartbeat_interval = std::time::Duration::from_millis(ms);
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -1859,6 +1902,29 @@ controller_quorum_voters = ["foo@127.0.0.1:9093"]
         file.apply_to(&mut cfg).unwrap();
 
         assert!(cfg.broker_id == 42);
+    }
+
+    #[test]
+    fn apply_to_fills_heartbeat_and_lag_tunables() {
+        use crate::config::BrokerConfig;
+
+        let src = r"
+heartbeat_interval_ms = 500
+heartbeat_timeout_ms = 1500
+replica_lag_time_max_ms = 2000
+controller_election_timeout_ms = 500
+controller_heartbeat_interval_ms = 100
+";
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = BrokerConfig::default();
+
+        file.apply_to(&mut cfg).unwrap();
+
+        assert!(cfg.heartbeat_interval_ms == 500);
+        assert!(cfg.heartbeat_timeout_ms == 1500);
+        assert!(cfg.replica_lag_time_max_ms == 2000);
+        assert!(cfg.controller_election_timeout == std::time::Duration::from_millis(500));
+        assert!(cfg.controller_heartbeat_interval == std::time::Duration::from_millis(100));
     }
 
     #[test]
