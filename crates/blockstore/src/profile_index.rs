@@ -151,6 +151,24 @@ impl ProfileIndex {
         self.series.label_values_for_fingerprints(tenant, name, fps)
     }
 
+    pub fn profile_types_for_fingerprints(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+    ) -> Vec<String> {
+        self.extras
+            .get(tenant)
+            .map(|extras| {
+                extras
+                    .profile_types
+                    .iter()
+                    .filter(|(_, type_fps)| !type_fps.is_disjoint(fps))
+                    .map(|(profile_type, _)| profile_type.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn label_names_for_time(
         &self,
         tenant: &str,

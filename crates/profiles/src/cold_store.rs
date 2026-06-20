@@ -179,7 +179,10 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
-        Ok(self.index.profile_types_for_time(tenant, start_ms, end_ms))
+        let active = self
+            .active_fingerprints_for_rows(tenant, &[], start_ms, end_ms)
+            .await?;
+        Ok(self.index.profile_types_for_fingerprints(tenant, &active))
     }
 
     async fn series(
@@ -532,6 +535,35 @@ mod tests {
         let types = cold.profile_types("t", 2_000, 3_000).await.unwrap();
 
         assert!(types.is_empty(), "{types:?}");
+    }
+
+    #[tokio::test]
+    async fn cold_store_profile_types_do_not_leak_types_outside_time_range_in_same_block() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cpu = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let mut memory = record_at("t", "api", vec![0], 7, 3_000_000_000);
+        memory.profile_type = "memory:alloc_space:bytes:space:bytes".to_string();
+        memory.labels = vec![
+            ("__name__".to_string(), "memory".to_string()),
+            ("__profile_type__".to_string(), memory.profile_type.clone()),
+            ("service_name".to_string(), "api".to_string()),
+        ];
+        let records = vec![cpu.clone(), memory.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in &records {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let types = cold.profile_types("t", 1_000, 1_000).await.unwrap();
+
+        assert!(types == vec![PT.to_string()], "{types:?}");
     }
 
     #[tokio::test]
