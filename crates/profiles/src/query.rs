@@ -898,9 +898,18 @@ fn parse_render_time_param(
     if let Some(offset) = value.strip_prefix("now-") {
         return Ok(now_ms - parse_render_duration_ms(offset)?);
     }
-    value
+    let numeric = value
         .parse::<i64>()
-        .map_err(|err| ProfileError::Plan(format!("invalid render time {value:?}: {err}")))
+        .map_err(|err| ProfileError::Plan(format!("invalid render time {value:?}: {err}")))?;
+    Ok(normalize_render_unix_time(numeric))
+}
+
+fn normalize_render_unix_time(value: i64) -> i64 {
+    if value.abs() < 10_000_000_000 {
+        value.saturating_mul(1000)
+    } else {
+        value
+    }
 }
 
 fn parse_render_duration_ms(value: &str) -> Result<i64, ProfileError> {
@@ -1584,11 +1593,23 @@ overrides:
         let now_ms = 1_700_000_000_000;
 
         assert!(parse_render_time_param(None, now_ms, 0).unwrap() == 0);
-        assert!(parse_render_time_param(Some("123"), now_ms, 0).unwrap() == 123);
         assert!(parse_render_time_param(Some("now"), now_ms, 0).unwrap() == now_ms);
         assert!(parse_render_time_param(Some("now-1h"), now_ms, 0).unwrap() == now_ms - 3_600_000);
         assert!(
             parse_render_time_param(Some("now-15m"), now_ms, 0).unwrap() == now_ms - 15 * 60_000
+        );
+    }
+
+    #[test]
+    fn render_time_params_accept_unix_seconds_and_millis() {
+        let now_ms = 1_700_000_000_000;
+
+        assert!(parse_render_time_param(Some("123"), now_ms, 0).unwrap() == 123_000);
+        assert!(
+            parse_render_time_param(Some("1700000000"), now_ms, 0).unwrap() == 1_700_000_000_000
+        );
+        assert!(
+            parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
         );
     }
 
