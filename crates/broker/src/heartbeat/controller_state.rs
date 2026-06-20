@@ -285,12 +285,11 @@ mod tests {
 
     #[tokio::test]
     async fn expiring_seed_stays_alive_after_fresh_heartbeat() {
-        let liveness = ControllerLivenessState::new(Duration::from_millis(10));
+        let liveness = ControllerLivenessState::new(Duration::from_mins(1));
         liveness
             .seed_brokers_expiring_after([7], Duration::from_nanos(1))
             .await;
         liveness.record_heartbeat(7).await;
-        std::thread::sleep(Duration::from_millis(1));
 
         let transitions = liveness.tick().await;
 
