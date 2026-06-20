@@ -1484,6 +1484,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_not_nested_or_excludes_each_branch() {
+        let mut miss_span = sp(9, 1, None, "a");
+        miss_span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut hit_span = sp(9, 2, Some(1), "b");
+        hit_span.events = vec![EventRef {
+            time_since_start_nano: 60,
+            name: "cache.hit".into(),
+            attributes: Vec::new(),
+        }];
+        let peer = sp(9, 3, Some(1), "c");
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![miss_span, hit_span, peer]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ !(event:name = \"cache.miss\" || event:name = \"cache.hit\") }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [3; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_not_nested_and_uses_disjuncts() {
+        let mut miss_users = sp(9, 1, None, "a");
+        miss_users.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
+        }];
+        let mut miss_orders = sp(9, 2, Some(1), "b");
+        miss_orders.events = vec![EventRef {
+            time_since_start_nano: 60,
+            name: "cache.miss".into(),
+            attributes: vec![("cache.key".into(), AttrValue::Str("orders".into()))],
+        }];
+        let mut hit_users = sp(9, 3, Some(1), "c");
+        hit_users.events = vec![EventRef {
+            time_since_start_nano: 70,
+            name: "cache.hit".into(),
+            attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![miss_users, miss_orders, hit_users]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ !(event:name = \"cache.miss\" && event.cache.key = \"users\") }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 2);
+        let spans = &r.traces[0].span_sets[0].spans;
+        assert!(!spans.iter().any(|span| span.span_id == [1; 8]));
+        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
+        assert!(spans.iter().any(|span| span.span_id == [3; 8]));
+    }
+
+    #[tokio::test]
     async fn search_selector_or_with_nested_event_filters_each_branch() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {

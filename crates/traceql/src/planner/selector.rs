@@ -283,9 +283,12 @@ pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
             out
         }
         FieldExpr::Comparison { .. } => matcher_from_field_expr(fe).into_iter().collect(),
-        FieldExpr::Not(inner) if has_nested_scope(inner) => matcher_from_field_expr(inner)
-            .map(|matcher| vec![negate_matcher(matcher)])
-            .unwrap_or_default(),
+        FieldExpr::Not(inner) if has_nested_scope(inner) => {
+            field_expr_to_negated_matcher_disjuncts(inner)
+                .filter(|disjuncts| disjuncts.len() == 1)
+                .and_then(|mut disjuncts| disjuncts.pop())
+                .unwrap_or_default()
+        }
         FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) => vec![],
     }
 }
@@ -318,9 +321,38 @@ fn field_expr_to_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher
             Some(out)
         }
         FieldExpr::Not(inner) if has_nested_scope(inner) => {
-            matcher_from_field_expr(inner).map(|matcher| vec![vec![negate_matcher(matcher)]])
+            field_expr_to_negated_matcher_disjuncts(inner)
         }
         FieldExpr::Not(_) => None,
+    }
+}
+
+fn field_expr_to_negated_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher>>> {
+    match fe {
+        FieldExpr::Comparison { .. } | FieldExpr::Field(_) => {
+            matcher_from_field_expr(fe).map(|matcher| vec![vec![negate_matcher(matcher)]])
+        }
+        FieldExpr::Or(a, b) => {
+            let left = field_expr_to_negated_matcher_disjuncts(a)?;
+            let right = field_expr_to_negated_matcher_disjuncts(b)?;
+            Some(
+                left.iter()
+                    .flat_map(|l| {
+                        right.iter().map(move |r| {
+                            let mut out = l.clone();
+                            out.extend(r.clone());
+                            out
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        FieldExpr::And(a, b) => {
+            let mut out = field_expr_to_negated_matcher_disjuncts(a)?;
+            out.extend(field_expr_to_negated_matcher_disjuncts(b)?);
+            Some(out)
+        }
+        FieldExpr::Not(inner) => field_expr_to_matcher_disjuncts(inner),
     }
 }
 
