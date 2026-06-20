@@ -95,10 +95,13 @@ where
     let limit = query_param(&uri, "limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let spss = query_param(&uri, "spss")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
 
     match state
         .engine
-        .search(&tenant, &query, start_ns, end_ns, limit)
+        .search_with_spss(&tenant, &query, start_ns, end_ns, limit, spss)
         .await
     {
         Ok(resp) => Json(search_json(resp)).into_response(),
@@ -704,6 +707,18 @@ mod tests {
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_honors_spss_parameter() {
+        let (status, body) = get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&spss=1").await;
+        let spans = body["traces"][0]["spanSets"][0]["spans"]
+            .as_array()
+            .unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"][0]["spanSets"][0]["matched"] == 2);
+        assert!(spans.len() == 1);
     }
 
     #[tokio::test]

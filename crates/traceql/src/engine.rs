@@ -82,6 +82,19 @@ impl<S: SpanStore> TraceqlEngine<S> {
         end_ns: i64,
         limit: usize,
     ) -> Result<SearchResponse> {
+        self.search_with_spss(tenant, query, start_ns, end_ns, limit, 0)
+            .await
+    }
+
+    pub async fn search_with_spss(
+        &self,
+        tenant: &str,
+        query: &str,
+        start_ns: i64,
+        end_ns: i64,
+        limit: usize,
+        spss: usize,
+    ) -> Result<SearchResponse> {
         let q = parse(query)?;
         let planned = plan_query(
             self.store.as_ref(),
@@ -105,7 +118,12 @@ impl<S: SpanStore> TraceqlEngine<S> {
             limit
         }
         .min(self.opts.max_traces);
-        assemble_search_response(&batches, effective_limit, self.opts.default_spss)
+        let effective_spss = if spss == 0 {
+            self.opts.default_spss
+        } else {
+            spss
+        };
+        assemble_search_response(&batches, effective_limit, effective_spss)
     }
 
     pub async fn query_range(
