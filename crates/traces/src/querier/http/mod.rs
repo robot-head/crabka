@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -11,6 +11,17 @@ use crabka_traceql::{
     AttrValue, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore, TagScope,
     TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
 };
+use opentelemetry_proto::tonic::common::v1::{
+    AnyValue as OtlpAnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
+    any_value::Value as OtlpValue,
+};
+use opentelemetry_proto::tonic::resource::v1::Resource as OtlpResource;
+use opentelemetry_proto::tonic::trace::v1::{
+    ResourceSpans as OtlpResourceSpans, ScopeSpans as OtlpScopeSpans, Span as OtlpSpan,
+    Status as OtlpStatus,
+    span::{Event as OtlpEvent, Link as OtlpLink},
+};
+use prost::Message as _;
 use serde_json::{Map, Value, json};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
@@ -363,11 +374,21 @@ where
     };
 
     match state.engine.trace_by_id(&tenant, &trace_id).await {
-        Ok(Some(trace)) => Json(trace_json(
-            &filter_trace_spans(trace, start_ns, end_ns),
-            state.cfg.max_trace_spans,
-        ))
-        .into_response(),
+        Ok(Some(trace)) => {
+            let trace = filter_trace_spans(trace, start_ns, end_ns);
+            if wants_protobuf(&headers) {
+                match trace_protobuf(&trace, state.cfg.max_trace_spans) {
+                    Ok(bytes) => {
+                        ([(header::CONTENT_TYPE, "application/x-protobuf")], bytes).into_response()
+                    }
+                    Err(err) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                    }
+                }
+            } else {
+                Json(trace_json(&trace, state.cfg.max_trace_spans)).into_response()
+            }
+        }
         Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
@@ -380,6 +401,21 @@ fn tenant(headers: &HeaderMap) -> String {
         .filter(|v| !v.is_empty())
         .unwrap_or("anonymous")
         .to_string()
+}
+
+fn wants_protobuf(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                let media_type = part.split(';').next().unwrap_or_default().trim();
+                matches!(
+                    media_type,
+                    "application/protobuf" | "application/x-protobuf"
+                )
+            })
+        })
 }
 
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
@@ -1097,6 +1133,136 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
     })
 }
 
+fn trace_protobuf(
+    trace: &TraceSpans,
+    max_trace_spans: usize,
+) -> Result<Vec<u8>, prost::EncodeError> {
+    let data = OtlpTracesData {
+        resource_spans: vec![OtlpResourceSpans {
+            resource: Some(OtlpResource {
+                attributes: vec![otlp_kv(
+                    "service.name",
+                    &AttrValue::Str(trace.root_service_name.clone()),
+                )],
+                ..OtlpResource::default()
+            }),
+            scope_spans: otlp_scope_spans(trace, trace.spans.len().min(max_trace_spans)),
+            ..OtlpResourceSpans::default()
+        }],
+    };
+    let mut bytes = Vec::with_capacity(data.encoded_len());
+    data.encode(&mut bytes)?;
+    Ok(bytes)
+}
+
+type OtlpTracesData = opentelemetry_proto::tonic::trace::v1::TracesData;
+
+fn otlp_scope_spans(trace: &TraceSpans, returned_spans: usize) -> Vec<OtlpScopeSpans> {
+    let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
+    for span in trace.spans.iter().take(returned_spans) {
+        let key = (
+            span.instrumentation_name.clone(),
+            span.instrumentation_version.clone(),
+        );
+        if let Some((_, spans)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
+            spans.push(span);
+        } else {
+            groups.push((key, vec![span]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|((name, version), spans)| OtlpScopeSpans {
+            scope: (!name.is_empty() || !version.is_empty()).then_some(InstrumentationScope {
+                name,
+                version,
+                ..InstrumentationScope::default()
+            }),
+            spans: spans
+                .into_iter()
+                .map(|span| otlp_span(trace.trace_id, span))
+                .collect(),
+            ..OtlpScopeSpans::default()
+        })
+        .collect()
+}
+
+fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
+    OtlpSpan {
+        trace_id: trace_id.to_vec(),
+        span_id: span.span_id.to_vec(),
+        parent_span_id: span
+            .parent_span_id
+            .map(|parent| parent.to_vec())
+            .unwrap_or_default(),
+        name: span.name.clone(),
+        kind: span.kind,
+        start_time_unix_nano: span.start_time_unix_nano,
+        end_time_unix_nano: span
+            .start_time_unix_nano
+            .saturating_add(span.duration_nanos),
+        attributes: otlp_attrs(&span.attributes),
+        events: span
+            .events
+            .iter()
+            .map(|event| otlp_event(span, event))
+            .collect(),
+        links: span.links.iter().map(otlp_link).collect(),
+        status: otlp_status(span.status_code, &span.status_message),
+        ..OtlpSpan::default()
+    }
+}
+
+fn otlp_event(span: &SpanRef, event: &crabka_traceql::EventRef) -> OtlpEvent {
+    OtlpEvent {
+        time_unix_nano: span
+            .start_time_unix_nano
+            .saturating_add(event.time_since_start_nano),
+        name: event.name.clone(),
+        attributes: otlp_attrs(&event.attributes),
+        ..OtlpEvent::default()
+    }
+}
+
+fn otlp_link(link: &crabka_traceql::LinkRef) -> OtlpLink {
+    OtlpLink {
+        trace_id: link.trace_id.to_vec(),
+        span_id: link.span_id.to_vec(),
+        attributes: otlp_attrs(&link.attributes),
+        ..OtlpLink::default()
+    }
+}
+
+fn otlp_status(code: i32, message: &str) -> Option<OtlpStatus> {
+    (code != 0 || !message.is_empty()).then(|| OtlpStatus {
+        code,
+        message: message.to_string(),
+    })
+}
+
+fn otlp_attrs(attrs: &[(String, AttrValue)]) -> Vec<OtlpKeyValue> {
+    attrs
+        .iter()
+        .map(|(key, value)| otlp_kv(key, value))
+        .collect()
+}
+
+fn otlp_kv(key: &str, value: &AttrValue) -> OtlpKeyValue {
+    OtlpKeyValue {
+        key: key.to_string(),
+        value: Some(OtlpAnyValue {
+            value: Some(match value {
+                AttrValue::Str(value) => OtlpValue::StringValue(value.clone()),
+                AttrValue::Int(value) => OtlpValue::IntValue(*value),
+                AttrValue::Float(value) => OtlpValue::DoubleValue(*value),
+                AttrValue::Bool(value) => OtlpValue::BoolValue(*value),
+            }),
+        }),
+        ..OtlpKeyValue::default()
+    }
+}
+
 fn scope_spans_json(trace: &TraceSpans, returned_spans: usize) -> Value {
     let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
     for span in trace.spans.iter().take(returned_spans) {
@@ -1278,6 +1444,8 @@ mod tests {
         AttrValue, EngineOpts, EventRef, InMemorySpanStore, InputSpan, LinkRef, TraceqlEngine,
     };
     use http_body_util::BodyExt;
+    use opentelemetry_proto::tonic::trace::v1::TracesData;
+    use prost::Message as _;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
@@ -1775,6 +1943,35 @@ mod tests {
                 "message": ""
             })
         );
+    }
+
+    #[tokio::test]
+    async fn by_id_honors_protobuf_accept_header() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .header("accept", "application/protobuf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let data = TracesData::decode(bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(content_type.as_deref() == Some("application/x-protobuf"));
+        assert!(data.resource_spans.len() == 1);
+        assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
+        assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 
     #[tokio::test]
