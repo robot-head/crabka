@@ -11,11 +11,11 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{BlockIndex, BlockStore, TraceIndex, span_block_schema};
 use crabka_traceql::{
-    ATTR_PREFIX, AttrValue, COL_DURATION, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION,
-    COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
-    COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
-    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult, ScopedTag, SpanMatcher,
-    SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
+    ATTR_PREFIX, AttrValue, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
+    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
+    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
+    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult, ScopedTag,
+    SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -291,10 +291,7 @@ fn collect_intrinsic_value(
 ) -> Result<(), TraceqlError> {
     match tag {
         "span:duration" => {
-            values.insert((
-                "duration".to_string(),
-                int64_value(batch, COL_DURATION, row)?.to_string(),
-            ));
+            insert_i64_value(batch, row, values, "duration", COL_DURATION)?;
         }
         "span:id" => {
             values.insert((
@@ -303,13 +300,13 @@ fn collect_intrinsic_value(
             ));
         }
         "span:kind" => {
-            values.insert((
-                "int".to_string(),
-                int32_value(batch, COL_KIND, row)?.to_string(),
-            ));
+            insert_i32_value(batch, row, values, COL_KIND)?;
         }
         "span:name" => {
-            values.insert(("string".to_string(), string_value(batch, COL_NAME, row)?));
+            insert_string_value(batch, row, values, COL_NAME)?;
+        }
+        "span:childCount" => {
+            insert_i32_value(batch, row, values, COL_CHILD_COUNT)?;
         }
         "span:parentID" => {
             if let Some(parent_id) = nullable_fixed_value::<8>(batch, COL_PARENT_SPAN_ID, row)? {
@@ -317,10 +314,7 @@ fn collect_intrinsic_value(
             }
         }
         "span:status" => {
-            values.insert((
-                "int".to_string(),
-                int32_value(batch, COL_STATUS_CODE, row)?.to_string(),
-            ));
+            insert_i32_value(batch, row, values, COL_STATUS_CODE)?;
         }
         "span:statusMessage" => {
             let message = string_value(batch, COL_STATUS_MESSAGE, row)?;
@@ -329,28 +323,16 @@ fn collect_intrinsic_value(
             }
         }
         "span:nestedSetLeft" => {
-            values.insert((
-                "int".to_string(),
-                int32_value(batch, COL_NS_LEFT, row)?.to_string(),
-            ));
+            insert_i32_value(batch, row, values, COL_NS_LEFT)?;
         }
         "span:nestedSetParent" | "span:Parent" => {
-            values.insert((
-                "int".to_string(),
-                int32_value(batch, COL_PARENT_ID, row)?.to_string(),
-            ));
+            insert_i32_value(batch, row, values, COL_PARENT_ID)?;
         }
         "span:nestedSetRight" => {
-            values.insert((
-                "int".to_string(),
-                int32_value(batch, COL_NS_RIGHT, row)?.to_string(),
-            ));
+            insert_i32_value(batch, row, values, COL_NS_RIGHT)?;
         }
         "trace:duration" => {
-            values.insert((
-                "duration".to_string(),
-                int64_value(batch, COL_TRACE_DURATION, row)?.to_string(),
-            ));
+            insert_i64_value(batch, row, values, "duration", COL_TRACE_DURATION)?;
         }
         "trace:id" => {
             values.insert((
@@ -359,19 +341,56 @@ fn collect_intrinsic_value(
             ));
         }
         "trace:rootName" => {
-            values.insert((
-                "string".to_string(),
-                string_value(batch, COL_ROOT_SPAN_NAME, row)?,
-            ));
+            insert_string_value(batch, row, values, COL_ROOT_SPAN_NAME)?;
         }
         "trace:rootService" => {
-            values.insert((
-                "string".to_string(),
-                string_value(batch, COL_ROOT_SERVICE_NAME, row)?,
-            ));
+            insert_string_value(batch, row, values, COL_ROOT_SERVICE_NAME)?;
+        }
+        "instrumentation:name" => {
+            insert_string_value(batch, row, values, COL_INSTRUMENTATION_NAME)?;
+        }
+        "instrumentation:version" => {
+            insert_string_value(batch, row, values, COL_INSTRUMENTATION_VERSION)?;
         }
         _ => {}
     }
+    Ok(())
+}
+
+fn insert_string_value(
+    batch: &RecordBatch,
+    row: usize,
+    values: &mut BTreeSet<(String, String)>,
+    column: &str,
+) -> Result<(), TraceqlError> {
+    values.insert(("string".to_string(), string_value(batch, column, row)?));
+    Ok(())
+}
+
+fn insert_i32_value(
+    batch: &RecordBatch,
+    row: usize,
+    values: &mut BTreeSet<(String, String)>,
+    column: &str,
+) -> Result<(), TraceqlError> {
+    values.insert((
+        "int".to_string(),
+        int32_value(batch, column, row)?.to_string(),
+    ));
+    Ok(())
+}
+
+fn insert_i64_value(
+    batch: &RecordBatch,
+    row: usize,
+    values: &mut BTreeSet<(String, String)>,
+    type_: &str,
+    column: &str,
+) -> Result<(), TraceqlError> {
+    values.insert((
+        type_.to_string(),
+        int64_value(batch, column, row)?.to_string(),
+    ));
     Ok(())
 }
 
@@ -611,6 +630,29 @@ mod tests {
         assert!(got.root_service_name == "api");
         assert!(got.spans.len() == 1);
         assert!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
+    }
+
+    #[test]
+    fn cold_intrinsic_values_include_child_count_and_instrumentation() {
+        let batches = vec![batch()];
+        assert!(
+            intrinsic_values_from_batches("span:childCount", &batches)
+                .unwrap()
+                .iter()
+                .any(|value| value.type_ == "int" && value.value == "0")
+        );
+        assert!(
+            intrinsic_values_from_batches("instrumentation:name", &batches)
+                .unwrap()
+                .iter()
+                .any(|value| value.type_ == "string" && value.value == "tracer")
+        );
+        assert!(
+            intrinsic_values_from_batches("instrumentation:version", &batches)
+                .unwrap()
+                .iter()
+                .any(|value| value.type_ == "string")
+        );
     }
 
     #[tokio::test]
