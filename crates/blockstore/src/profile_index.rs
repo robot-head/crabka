@@ -127,6 +127,21 @@ impl ProfileIndex {
             .unwrap_or_default()
     }
 
+    pub fn label_values_for_time(
+        &self,
+        tenant: &str,
+        name: &str,
+        matchers: &[LabelMatcher],
+        min_ts: i64,
+        max_ts: i64,
+    ) -> Result<Vec<String>> {
+        let fps = self.matching_fingerprints(tenant, matchers)?;
+        let active = self.active_fingerprints_for_time(tenant, &fps, min_ts, max_ts);
+        Ok(self
+            .series
+            .label_values_for_fingerprints(tenant, name, &active))
+    }
+
     #[must_use]
     pub fn fingerprints_for_profile_type(
         &self,
@@ -138,6 +153,23 @@ impl ProfileIndex {
             .and_then(|extras| extras.profile_types.get(profile_type))
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn active_fingerprints_for_time(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+        min_ts: i64,
+        max_ts: i64,
+    ) -> BTreeSet<SeriesFingerprint> {
+        fps.iter()
+            .copied()
+            .filter(|fp| {
+                !self
+                    .candidate_blocks_for_series(tenant, &BTreeSet::from([*fp]), min_ts, max_ts)
+                    .is_empty()
+            })
+            .collect()
     }
 
     pub fn add_profile_block(&mut self, _tenant: &str, object_key: &str, partitions: Vec<u64>) {

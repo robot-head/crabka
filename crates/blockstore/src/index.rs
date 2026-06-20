@@ -149,6 +149,26 @@ impl SeriesIndex {
         Ok(values.into_iter().collect())
     }
 
+    pub fn label_values_for_fingerprints(
+        &self,
+        tenant: &str,
+        name: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+    ) -> Vec<String> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Vec::new();
+        };
+        let mut values = BTreeSet::new();
+        for fp in fps {
+            if let Some(labels) = index.series.get(fp)
+                && let Some(value) = labels.get(name)
+            {
+                values.insert(value.to_string());
+            }
+        }
+        values.into_iter().collect()
+    }
+
     pub fn series(
         &self,
         tenant: &str,
