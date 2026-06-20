@@ -15,8 +15,9 @@ use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectRespon
 use crabka_blockstore::{LabelMatcher, MatchOp};
 use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
-    LabeledHeatmap, PCOL_SPAN_ID, PCOL_TOTAL_VALUE, ProfileError, ProfileStore, ProfileType,
-    Series, SeriesAgg, bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
+    LabeledHeatmap, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE,
+    PCOL_VALUE, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, bin_heatmap,
+    parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
 use serde::Deserialize;
@@ -326,6 +327,7 @@ impl<S: ProfileStore> QuerierState<S> {
         step_secs: f64,
         start_ms: i64,
         end_ms: i64,
+        call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let step_ms = step_ms_from_secs(step_secs)?;
@@ -362,8 +364,14 @@ impl<S: ProfileStore> QuerierState<S> {
                 .store
                 .select(tenant, profile_type, &matchers, start_ms, end_ms)
                 .await?;
-            let exemplars =
-                individual_exemplars_from_scan(&scan, step_ms, &series_labels, &profile_id).await?;
+            let exemplars = individual_exemplars_from_scan(
+                &scan,
+                step_ms,
+                &series_labels,
+                &profile_id,
+                call_sites,
+            )
+            .await?;
             let points = out.entry(series_labels).or_default();
             for (timestamp, mut exemplars) in exemplars {
                 points.entry(timestamp).or_default().append(&mut exemplars);
@@ -661,6 +669,70 @@ async fn individual_exemplars_from_scan(
     step_ms: i64,
     labels: &[(String, String)],
     profile_id: &str,
+    call_sites: &[String],
+) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
+    if call_sites.is_empty() {
+        return individual_exemplars_from_totals(scan, step_ms, labels, profile_id).await;
+    }
+    let sql = format!(
+        "SELECT {timestamp}, {fingerprint}, {partition}, {stacktrace}, SUM({value}) AS v \
+         FROM {table} GROUP BY {timestamp}, {fingerprint}, {partition}, {stacktrace} \
+         ORDER BY {timestamp}, {fingerprint}, {partition}, {stacktrace}",
+        timestamp = COL_TIMESTAMP,
+        fingerprint = COL_FINGERPRINT,
+        partition = PCOL_STACKTRACE_PARTITION,
+        stacktrace = PCOL_STACKTRACE_ID,
+        value = PCOL_VALUE,
+        table = scan.samples_table,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut per_profile: BTreeMap<(i64, u64), i64> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let fingerprints = batch.column(1).as_primitive::<UInt64Type>();
+        let partitions = batch.column(2).as_primitive::<UInt64Type>();
+        let stacktrace_ids = batch.column(3).as_primitive::<UInt64Type>();
+        let values = batch.column(4).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            let partition = partitions.value(row);
+            let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
+                ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
+            })?;
+            let frames = scan.symbols.resolve(partition, stacktrace_id);
+            if frames_match_call_sites(&frames, call_sites) {
+                *per_profile
+                    .entry((timestamps.value(row), fingerprints.value(row)))
+                    .or_default() += values.value(row);
+            }
+        }
+    }
+    let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
+    for ((timestamp, _fingerprint), value) in per_profile {
+        out.entry(step_bucket_ms(timestamp, step_ms))
+            .or_default()
+            .push(pb::types::v1::Exemplar {
+                timestamp,
+                profile_id: profile_id.to_string(),
+                span_id: String::new(),
+                value,
+                labels: types_label_pairs(labels.to_vec()),
+            });
+    }
+    Ok(out)
+}
+
+async fn individual_exemplars_from_totals(
+    scan: &crabka_pprof::ProfileScan,
+    step_ms: i64,
+    labels: &[(String, String)],
+    profile_id: &str,
 ) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
     let sql = format!(
         "SELECT {timestamp}, MAX({total}) AS total \
@@ -697,6 +769,14 @@ async fn individual_exemplars_from_scan(
         }
     }
     Ok(out)
+}
+
+fn frames_match_call_sites(frames: &[crabka_pprof::Frame], call_sites: &[String]) -> bool {
+    call_sites.iter().all(|site| {
+        frames
+            .iter()
+            .any(|frame| frame.function == *site || frame.file == *site)
+    })
 }
 
 async fn heatmap_span_exemplars_from_scan(
@@ -1142,6 +1222,7 @@ where
                 req.step,
                 req.start,
                 req.end,
+                &stack_trace_call_sites,
             )
             .await
             .map_err(connect_error)?,
@@ -2283,6 +2364,43 @@ mod tests {
         store
     }
 
+    fn store_with_profile_ids_and_leaf_frames(
+        frames: &[(&str, &str, i64)],
+    ) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        for (profile_id, name, value) in frames {
+            let name_ref = store.symbols_mut().intern_string(name);
+            let function_id = store.symbols_mut().intern_function(FunctionRec {
+                name: name_ref,
+                system_name: name_ref,
+                filename: 0,
+                start_line: 0,
+            });
+            let location_id = store.symbols_mut().intern_location(LocationRec {
+                address: 0,
+                mapping_id: 0,
+                lines: vec![LineRec {
+                    function_id,
+                    line: 1,
+                }],
+            });
+            let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+            store.push_sample(
+                "tenant-a",
+                PT,
+                vec![
+                    ("service_name".to_string(), "api".to_string()),
+                    ("__profile_id__".to_string(), (*profile_id).to_string()),
+                ],
+                0,
+                stacktrace,
+                *value,
+                10,
+            );
+        }
+        store
+    }
+
     fn json_i64(value: &serde_json::Value) -> Option<i64> {
         value
             .as_i64()
@@ -3175,6 +3293,62 @@ overrides:
 
         assert!(profile_ids.contains(&"profile-a"), "{response}");
         assert!(profile_ids.contains(&"profile-b"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_series_individual_exemplar_honors_stack_trace_selector() {
+        let state = Arc::new(QuerierState::new(Arc::new(
+            store_with_profile_ids_and_leaf_frames(&[
+                ("profile-a", "hot.path", 5),
+                ("profile-b", "cold.path", 7),
+            ]),
+        )));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectSeries"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "groupBy": ["service_name"],
+                "step": 60.0,
+                "stackTraceSelector": {
+                    "callSite": [{ "name": "hot.path" }]
+                },
+                "exemplarType": "EXEMPLAR_TYPE_INDIVIDUAL"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let exemplars = response
+            .pointer("/series/0/points/0/exemplars")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("missing individual exemplars: {response}"));
+        let profile_ids: Vec<_> = exemplars
+            .iter()
+            .filter_map(|exemplar| {
+                exemplar
+                    .get("profileId")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+
+        assert!(profile_ids == vec!["profile-a"], "{response}");
     }
 
     #[tokio::test]
