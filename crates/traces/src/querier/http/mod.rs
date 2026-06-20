@@ -98,13 +98,26 @@ where
     let spss = query_param(&uri, "spss")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let min_duration_ns = match duration_param(&uri, "minDuration") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let max_duration_ns = match duration_param(&uri, "maxDuration") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     match state
         .engine
         .search_with_spss(&tenant, &query, start_ns, end_ns, limit, spss)
         .await
     {
-        Ok(resp) => Json(search_json(resp)).into_response(),
+        Ok(resp) => Json(search_json(filter_search_duration(
+            resp,
+            min_duration_ns,
+            max_duration_ns,
+        )))
+        .into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
@@ -327,6 +340,90 @@ fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
 }
 
+fn duration_param(uri: &Uri, key: &str) -> Result<Option<u64>, String> {
+    query_param(uri, key)
+        .map(|value| parse_go_duration_ns(&value).map_err(|err| format!("invalid {key}: {err}")))
+        .transpose()
+}
+
+fn parse_go_duration_ns(value: &str) -> Result<u64, String> {
+    if value.is_empty() {
+        return Err("empty duration".into());
+    }
+
+    let mut total = 0_u128;
+    let mut rest = value;
+    while !rest.is_empty() {
+        let number_len = rest
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+            .map(|(idx, c)| idx + c.len_utf8())
+            .last()
+            .ok_or_else(|| format!("expected number in {value:?}"))?;
+        let (number, tail) = rest.split_at(number_len);
+        let unit_len = tail
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_alphabetic() || *c == 'µ')
+            .map(|(idx, c)| idx + c.len_utf8())
+            .last()
+            .ok_or_else(|| format!("expected unit after {number:?}"))?;
+        let (unit, next) = tail.split_at(unit_len);
+        let multiplier = match unit {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            _ => return Err(format!("unsupported unit {unit:?}")),
+        };
+        total = total
+            .checked_add(parse_duration_component_ns(number, multiplier)?)
+            .ok_or_else(|| "duration out of range".to_string())?;
+        rest = next;
+    }
+
+    u64::try_from(total).map_err(|_| "duration out of range".into())
+}
+
+fn parse_duration_component_ns(number: &str, multiplier: u128) -> Result<u128, String> {
+    let (whole, fraction) = number.split_once('.').map_or((number, ""), |parts| parts);
+    if whole.is_empty() && fraction.is_empty() {
+        return Err(format!("invalid number {number:?}"));
+    }
+    if fraction.contains('.') {
+        return Err(format!("invalid number {number:?}"));
+    }
+
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u128>()
+            .map_err(|_| format!("invalid number {number:?}"))?
+    };
+    let whole_ns = whole
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration out of range".to_string())?;
+    if fraction.is_empty() {
+        return Ok(whole_ns);
+    }
+
+    let fraction = fraction
+        .parse::<u128>()
+        .map_err(|_| format!("invalid number {number:?}"))?;
+    let scale = (0..number.rsplit_once('.').map_or(0, |(_, frac)| frac.len()))
+        .try_fold(1_u128, |acc, _| acc.checked_mul(10))
+        .ok_or_else(|| "duration out of range".to_string())?;
+    let fraction_ns = fraction
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration out of range".to_string())?
+        / scale;
+    whole_ns
+        .checked_add(fraction_ns)
+        .ok_or_else(|| "duration out of range".to_string())
+}
+
 fn parse_tag_scope(scope: &str) -> Option<TagScope> {
     match scope {
         "resource" => Some(TagScope::Resource),
@@ -369,6 +466,22 @@ fn search_json(resp: SearchResponse) -> Value {
             "inspectedBytes": 0,
         },
     })
+}
+
+fn filter_search_duration(
+    mut resp: SearchResponse,
+    min_duration_ns: Option<u64>,
+    max_duration_ns: Option<u64>,
+) -> SearchResponse {
+    if min_duration_ns.is_none() && max_duration_ns.is_none() {
+        return resp;
+    }
+    resp.traces.retain(|trace| {
+        let duration_ns = trace.duration_ms.saturating_mul(1_000_000);
+        min_duration_ns.is_none_or(|min| duration_ns >= min)
+            && max_duration_ns.is_none_or(|max| duration_ns <= max)
+    });
+    resp
 }
 
 fn search_tags_json(tags: &[ScopedTag]) -> Value {
@@ -719,6 +832,84 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(body["traces"][0]["spanSets"][0]["matched"] == 2);
         assert!(spans.len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_honors_min_duration_parameter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "short",
+            vec![span_at(1, 1, None, "a", 1_000_000_000)],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "long",
+            vec![
+                span_at(2, 1, None, "b", 1_000_000_000),
+                span_at(2, 2, Some(1), "b", 4_000_000_000),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["rootTraceName"] == "long");
+    }
+
+    #[tokio::test]
+    async fn search_honors_max_duration_parameter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "short",
+            vec![span_at(1, 1, None, "a", 1_000_000_000)],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "long",
+            vec![
+                span_at(2, 1, None, "b", 1_000_000_000),
+                span_at(2, 2, Some(1), "b", 4_000_000_000),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&maxDuration=2s")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["rootTraceName"] == "short");
     }
 
     #[tokio::test]
