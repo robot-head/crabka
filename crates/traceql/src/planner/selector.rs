@@ -1,3 +1,9 @@
+use std::sync::Arc;
+
+use arrow::record_batch::RecordBatch;
+use datafusion::catalog::MemTable;
+use datafusion::prelude::SessionContext;
+
 use crate::ast::{ComparisonOp, Field, FieldExpr, Intrinsic, Scope, Value};
 use crate::error::{Result, TraceqlError};
 use crate::planner::{PlannedSpanset, PlannerContext};
@@ -14,6 +20,13 @@ pub(crate) async fn plan_selector<S: SpanStore>(
     ctx: &PlannerContext,
     fe: &FieldExpr,
 ) -> Result<PlannedSpanset> {
+    if has_nested_scope(fe)
+        && let Some(disjuncts) = field_expr_to_matcher_disjuncts(fe)
+        && disjuncts.len() > 1
+    {
+        return plan_selector_disjuncts(store, ctx, &disjuncts).await;
+    }
+
     let matchers = field_expr_to_matchers(fe);
     let scan = store
         .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
@@ -26,6 +39,37 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         ctx: scan.ctx,
         plan,
     })
+}
+
+async fn plan_selector_disjuncts<S: SpanStore>(
+    store: &S,
+    ctx: &PlannerContext,
+    disjuncts: &[Vec<SpanMatcher>],
+) -> Result<PlannedSpanset> {
+    let mut batches = Vec::new();
+    let mut schema = None;
+    for matchers in disjuncts {
+        let scan = store
+            .scan(&ctx.tenant, matchers, ctx.start_ns, ctx.end_ns)
+            .await?;
+        let mut scan_batches = collect_table(&scan.ctx, &scan.span_table).await?;
+        if schema.is_none() {
+            schema = scan_batches.first().map(RecordBatch::schema);
+        }
+        batches.append(&mut scan_batches);
+    }
+
+    let schema = schema.unwrap_or_else(crate::span_columns::span_schema);
+    let ctx = SessionContext::new();
+    let table = MemTable::try_new(schema, vec![batches])?;
+    ctx.register_table("spans", Arc::new(table))?;
+    let df = ctx.sql("SELECT DISTINCT * FROM spans").await?;
+    let plan = df.into_unoptimized_plan();
+    Ok(PlannedSpanset { ctx, plan })
+}
+
+async fn collect_table(ctx: &SessionContext, table: &str) -> Result<Vec<RecordBatch>> {
+    Ok(ctx.table(table).await?.collect().await?)
 }
 
 pub(crate) fn selector_sql(table: &str, fe: &FieldExpr) -> Result<String> {
@@ -245,6 +289,44 @@ pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
             value: match_value(rhs),
         }],
         FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) => vec![],
+    }
+}
+
+fn field_expr_to_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher>>> {
+    match fe {
+        FieldExpr::Comparison { lhs, op, rhs } => Some(vec![vec![SpanMatcher {
+            scope: match_scope(&lhs.scope),
+            key: matcher_key(lhs),
+            op: match_cmp(*op),
+            value: match_value(rhs),
+        }]]),
+        FieldExpr::Field(field) => Some(vec![vec![SpanMatcher {
+            scope: match_scope(&field.scope),
+            key: matcher_key(field),
+            op: MatchCmp::Neq,
+            value: MatchValue::Nil,
+        }]]),
+        FieldExpr::And(a, b) => {
+            let left = field_expr_to_matcher_disjuncts(a)?;
+            let right = field_expr_to_matcher_disjuncts(b)?;
+            Some(
+                left.iter()
+                    .flat_map(|l| {
+                        right.iter().map(move |r| {
+                            let mut out = l.clone();
+                            out.extend(r.clone());
+                            out
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        FieldExpr::Or(a, b) => {
+            let mut out = field_expr_to_matcher_disjuncts(a)?;
+            out.extend(field_expr_to_matcher_disjuncts(b)?);
+            Some(out)
+        }
+        FieldExpr::Not(_) => None,
     }
 }
 

@@ -1438,6 +1438,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_or_with_nested_event_filters_each_branch() {
+        let mut event_span = sp(9, 1, None, "a");
+        event_span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let attr_span = sp(9, 2, Some(1), "b");
+        let unrelated = sp(9, 3, Some(1), "c");
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![event_span, attr_span, unrelated]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ event:name = \"cache.miss\" || .svc = \"b\" }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 2);
+        let spans = &r.traces[0].span_sets[0].spans;
+        assert!(spans.iter().any(|span| span.span_id == [1; 8]));
+        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
+        assert!(!spans.iter().any(|span| span.span_id == [3; 8]));
+    }
+
+    #[tokio::test]
     async fn search_selector_matches_link_attribute_scope() {
         let mut span = sp(9, 1, None, "a");
         span.links = vec![LinkRef {
