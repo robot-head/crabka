@@ -239,10 +239,11 @@ fn merge_span_sets(existing_span_sets: &mut Vec<Value>, new_span_sets: &[Value])
 
         let Some(existing_span_set) = existing_span_sets.first_mut() else {
             let mut span_set = span_set.clone();
-            set_matched_to_span_count(&mut span_set);
+            ensure_matched_count(&mut span_set);
             existing_span_sets.push(span_set);
             continue;
         };
+        add_matched_count(existing_span_set, span_set);
         let Some(existing_spans) = existing_span_set
             .get_mut("spans")
             .and_then(Value::as_array_mut)
@@ -258,7 +259,7 @@ fn merge_span_sets(existing_span_sets: &mut Vec<Value>, new_span_sets: &[Value])
                 existing_spans.push(span.clone());
             }
         }
-        set_matched_to_span_count(existing_span_set);
+        ensure_matched_count(existing_span_set);
     }
 }
 
@@ -278,15 +279,31 @@ fn same_span_id(lhs: &Value, rhs: &Value) -> bool {
     rhs.get("spanID").and_then(Value::as_str) == Some(lhs)
 }
 
-fn set_matched_to_span_count(span_set: &mut Value) {
+fn add_matched_count(existing: &mut Value, incoming: &Value) {
+    let lhs = span_set_matched(existing).unwrap_or_else(|| span_count(existing));
+    let rhs = span_set_matched(incoming).unwrap_or_else(|| span_count(incoming));
+    existing["matched"] = json!(lhs.saturating_add(rhs));
+}
+
+fn ensure_matched_count(span_set: &mut Value) {
+    if span_set_matched(span_set).is_none() {
+        span_set["matched"] = json!(span_count(span_set));
+    }
+}
+
+fn span_set_matched(span_set: &Value) -> Option<u64> {
+    span_set.get("matched").and_then(Value::as_u64)
+}
+
+fn span_count(span_set: &Value) -> u64 {
     let Some(count) = span_set
         .get("spans")
         .and_then(Value::as_array)
         .map(Vec::len)
     else {
-        return;
+        return 0;
     };
-    span_set["matched"] = json!(count);
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 fn build_querier_request(
@@ -375,4 +392,34 @@ fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn merge_span_sets_preserves_total_matched_count_across_shards() {
+        let mut existing = vec![json!({
+            "spans": [{ "spanID": "01" }],
+            "matched": 4,
+        })];
+        let incoming = vec![json!({
+            "spans": [{ "spanID": "02" }],
+            "matched": 3,
+        })];
+
+        merge_span_sets(&mut existing, &incoming);
+
+        assert!(existing[0]["matched"] == 7);
+        assert!(
+            existing[0]["spans"]
+                == json!([
+                    { "spanID": "01" },
+                    { "spanID": "02" },
+                ])
+        );
+    }
 }
