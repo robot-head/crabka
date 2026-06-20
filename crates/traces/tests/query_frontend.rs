@@ -75,6 +75,34 @@ async fn frontend_proxies_by_id_route_with_tenant_and_query() {
     assert!(json["tenant"] == "tenant-a");
 }
 
+#[tokio::test]
+async fn frontend_merges_duplicate_trace_results_across_shards() {
+    let upstream_url = spawn_sharded_search_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["traces"].as_array().unwrap().len() == 1);
+    assert!(json["traces"][0]["traceID"] == "0123456789abcdef0123456789abcdef");
+    assert!(json["traces"][0]["spanSets"].as_array().unwrap().len() == 2);
+    assert!(json["metrics"]["totalBlocks"] == 3);
+    assert!(json["metrics"]["inspectedTraces"] == 12);
+}
+
 async fn spawn_recording_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(record_request))
@@ -95,5 +123,48 @@ async fn record_request(State(()): State<()>, headers: HeaderMap, uri: Uri) -> a
             .get("x-scope-orgid")
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default(),
+    }))
+}
+
+async fn spawn_sharded_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(sharded_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn sharded_search_response(State(()): State<()>, headers: HeaderMap) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let (span_id, total_blocks, inspected_traces) = match tier {
+        "backend" => ("1111111111111111", 1, 5),
+        "live" => ("2222222222222222", 2, 7),
+        other => panic!("unexpected query tier {other}"),
+    };
+
+    axum::Json(json!({
+        "traces": [{
+            "traceID": "0123456789abcdef0123456789abcdef",
+            "rootServiceName": "svc",
+            "rootTraceName": "root",
+            "startTimeUnixNano": "1000000000",
+            "durationMs": 2,
+            "spanSets": [{
+                "spans": [{ "spanID": span_id }],
+                "matched": 1
+            }]
+        }],
+        "metrics": {
+            "totalBlocks": total_blocks,
+            "inspectedTraces": inspected_traces,
+            "inspectedBytes": 0
+        }
     }))
 }

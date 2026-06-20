@@ -158,7 +158,9 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
             return (status, body.to_string()).into_response();
         }
         if let Some(traces) = body.get("traces").and_then(Value::as_array) {
-            merged_traces.extend(traces.iter().cloned());
+            for trace in traces {
+                merge_trace(&mut merged_traces, trace.clone());
+            }
         }
         merge_metrics(&mut metrics, body.get("metrics"));
     }
@@ -194,6 +196,27 @@ async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> R
             .insert(header::CONTENT_TYPE, content_type);
     }
     response
+}
+
+fn merge_trace(traces: &mut Vec<Value>, trace: Value) {
+    let Some(trace_id) = trace.get("traceID").and_then(Value::as_str) else {
+        traces.push(trace);
+        return;
+    };
+    let Some(existing) = traces
+        .iter_mut()
+        .find(|existing| existing.get("traceID").and_then(Value::as_str) == Some(trace_id))
+    else {
+        traces.push(trace);
+        return;
+    };
+
+    let Some(new_span_sets) = trace.get("spanSets").and_then(Value::as_array) else {
+        return;
+    };
+    if let Some(existing_span_sets) = existing.get_mut("spanSets").and_then(Value::as_array_mut) {
+        existing_span_sets.extend(new_span_sets.iter().cloned());
+    }
 }
 
 fn build_querier_request(
