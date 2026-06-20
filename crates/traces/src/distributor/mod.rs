@@ -12,9 +12,16 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use crabka_client_producer::{Producer, ProducerRecord};
 use flate2::read::GzDecoder;
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+    trace_service_server::{TraceService, TraceServiceServer},
+};
 use opentelemetry_proto::tonic::trace::v1::TracesData;
 use prost::Message as _;
 use tokio_util::sync::CancellationToken;
+use tonic::metadata::MetadataMap;
+use tonic::transport::Server as GrpcServer;
+use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 
 use crate::error::TracesError;
 use crate::span::{AttrValue, KeyValue, Span};
@@ -129,6 +136,56 @@ pub async fn serve(
     Ok(bound)
 }
 
+/// Serve the OTLP/gRPC trace receiver until cancelled.
+pub async fn serve_otlp_grpc(
+    addr: SocketAddr,
+    state: Arc<DistributorState>,
+    shutdown: CancellationToken,
+) -> Result<(), tonic::transport::Error> {
+    GrpcServer::builder()
+        .add_service(TraceServiceServer::new(OtlpGrpcService::new(state)))
+        .serve_with_shutdown(addr, async move {
+            shutdown.cancelled().await;
+        })
+        .await
+}
+
+/// OTLP/gRPC trace export service backed by the traces WAL.
+pub struct OtlpGrpcService {
+    state: Arc<DistributorState>,
+}
+
+impl OtlpGrpcService {
+    #[must_use]
+    pub fn new(state: Arc<DistributorState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl TraceService for OtlpGrpcService {
+    async fn export(
+        &self,
+        request: GrpcRequest<ExportTraceServiceRequest>,
+    ) -> Result<GrpcResponse<ExportTraceServiceResponse>, GrpcStatus> {
+        let metadata = request.metadata().clone();
+        let data = TracesData {
+            resource_spans: request.into_inner().resource_spans,
+        };
+        let spans =
+            decode_otlp(&data).map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        validate(&spans, &self.state.limits)
+            .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        let tenant = tenant_metadata(&metadata);
+        produce_spans(self.state.sink.as_ref(), &tenant, spans)
+            .await
+            .map_err(|err| GrpcStatus::internal(err.to_string()))?;
+        Ok(GrpcResponse::new(ExportTraceServiceResponse {
+            partial_success: None,
+        }))
+    }
+}
+
 async fn otlp_push(
     State(state): State<Arc<DistributorState>>,
     headers: HeaderMap,
@@ -224,6 +281,15 @@ fn tenant(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+fn tenant_metadata(metadata: &MetadataMap) -> String {
+    metadata
+        .get(TENANT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("anonymous")
+        .to_string()
+}
+
 /// Validate decoded spans against per-tenant structural limits.
 pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError> {
     if spans.len() > limits.max_spans_per_request {
@@ -294,10 +360,12 @@ mod tests {
     use assert2::assert;
     use axum::body::Body;
     use axum::http::Request;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::trace::v1::{
         ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
     };
     use prost::Message as _;
+    use tonic::Request as GrpcRequest;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -381,6 +449,25 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.status() == StatusCode::OK);
+        assert!(sink.count() == 1);
+        assert!(sink.tenant(0) == "tenant-a");
+    }
+
+    #[tokio::test]
+    async fn otlp_grpc_export_appends_and_returns_success() {
+        let (state, sink) = test_state();
+        let service = OtlpGrpcService::new(state);
+        let mut req = GrpcRequest::new(ExportTraceServiceRequest {
+            resource_spans: TracesData::decode(otlp_body().as_slice())
+                .unwrap()
+                .resource_spans,
+        });
+        req.metadata_mut()
+            .insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        let resp = service.export(req).await.unwrap();
+
+        assert!(resp.into_inner().partial_success.is_none());
         assert!(sink.count() == 1);
         assert!(sink.tenant(0) == "tenant-a");
     }

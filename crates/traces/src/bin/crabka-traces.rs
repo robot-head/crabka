@@ -34,6 +34,8 @@ struct Cli {
     target: Target,
     #[arg(long, default_value = "127.0.0.1:3200")]
     listen: String,
+    #[arg(long, default_value = "127.0.0.1:4317")]
+    grpc_listen: String,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
@@ -127,6 +129,14 @@ async fn run_distributor(
         producer,
     )))));
     let addr: SocketAddr = cli.listen.parse()?;
+    let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
+    let grpc_shutdown = shutdown.clone();
+    let grpc_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(err) = distributor::serve_otlp_grpc(grpc_addr, grpc_state, grpc_shutdown).await {
+            tracing::warn!(error = %err, "traces distributor OTLP/gRPC server error");
+        }
+    });
     let bound = distributor::serve(addr, state, shutdown.clone()).await?;
     tracing::info!(%bound, "traces distributor listening");
     shutdown.cancelled().await;
@@ -330,6 +340,21 @@ mod tests {
     fn parses_distributor_target() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
         assert!(matches!(cli.target, Target::Distributor));
+    }
+
+    #[test]
+    fn parses_distributor_grpc_listener() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--grpc-listen",
+            "127.0.0.1:4317",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Distributor));
+        assert!(cli.grpc_listen == "127.0.0.1:4317");
     }
 
     #[test]

@@ -43,6 +43,7 @@ snap = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 wincode = { workspace = true }
