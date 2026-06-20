@@ -322,7 +322,7 @@ impl SpanStore for InMemorySpanStore {
                 values.insert(("string".to_string(), trace.root_service_name.clone()));
             }
             for (idx, input) in trace.spans.iter().enumerate() {
-                collect_span_intrinsic_values(input, trace.nested.get(idx), tag, &mut values);
+                collect_span_intrinsic_values(input, &trace.nested, idx, tag, &mut values);
                 values.extend(
                     input
                         .attrs
@@ -379,11 +379,22 @@ fn collect_trace_intrinsic_values(
 
 fn collect_span_intrinsic_values(
     span: &InputSpan,
-    nested: Option<&NestedSet>,
+    nested_sets: &[NestedSet],
+    idx: usize,
     tag: &str,
     values: &mut BTreeSet<(String, String)>,
 ) {
+    let nested = nested_sets.get(idx);
     match tag {
+        "span:childCount" => {
+            if let Some(nested) = nested {
+                let count = nested_sets
+                    .iter()
+                    .filter(|other| other.parent_id == nested.left)
+                    .count();
+                values.insert(("int".to_string(), count.to_string()));
+            }
+        }
         "span:duration" => {
             values.insert(("duration".to_string(), span.duration_nanos.to_string()));
         }
@@ -598,6 +609,24 @@ mod tests {
                     value: "b".into(),
                 },
             ]
+        );
+
+        let child_count = s
+            .tag_values("t", "span:childCount", 0, 10_000)
+            .await
+            .unwrap();
+        assert!(
+            child_count
+                == vec![
+                    TypedValue {
+                        type_: "int".into(),
+                        value: "0".into(),
+                    },
+                    TypedValue {
+                        type_: "int".into(),
+                        value: "2".into(),
+                    },
+                ]
         );
     }
 }

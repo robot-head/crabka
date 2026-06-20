@@ -736,7 +736,7 @@ fn tag_values_from_traces(traces: &[TraceSpans], tag: &str) -> Vec<TypedValue> {
             values.insert(("string".to_string(), trace.root_service_name.clone()));
         }
         for span in &trace.spans {
-            collect_span_intrinsic_values(span, tag, &mut values);
+            collect_span_intrinsic_values(span, &trace.spans, tag, &mut values);
             values.extend(
                 span.attributes
                     .iter()
@@ -794,10 +794,18 @@ fn trace_duration_nanos(trace: &TraceSpans) -> Option<u64> {
 
 fn collect_span_intrinsic_values(
     span: &SpanRef,
+    spans: &[SpanRef],
     tag: &str,
     values: &mut BTreeSet<(String, String)>,
 ) {
     match tag {
+        "span:childCount" => {
+            let count = spans
+                .iter()
+                .filter(|other| other.nested_set_parent == span.nested_set_left)
+                .count();
+            values.insert(("int".to_string(), count.to_string()));
+        }
         "span:duration" => {
             values.insert(("duration".to_string(), span.duration_nanos.to_string()));
         }
@@ -1940,6 +1948,7 @@ mod tests {
         );
 
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(
@@ -1966,6 +1975,41 @@ mod tests {
                     {
                         "type": "int",
                         "value": "2"
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/span:childCount/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "int",
+                        "value": "0"
+                    },
+                    {
+                        "type": "int",
+                        "value": "1"
                     }
                 ],
                 "metrics": {
