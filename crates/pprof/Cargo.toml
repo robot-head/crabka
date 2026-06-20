@@ -1,0 +1,39 @@
+[package]
+name = "crabka-pprof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Language-less continuous-profiling engine (Grafana-Pyroscope-equivalent) for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pprof"
+readme = "README.md"
+keywords = ["observability", "pyroscope", "profiling", "flamegraph", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+async-trait = { workspace = true }
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+datafusion = { workspace = true }
+prost = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde-wincode = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+wincode = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

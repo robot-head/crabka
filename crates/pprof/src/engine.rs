@@ -1,0 +1,515 @@
+//! Flamegraph merge engine.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use arrow::array::AsArray;
+use arrow::datatypes::{Int64Type, UInt64Type};
+use crabka_blockstore::{LabelMatcher, MatchOp};
+
+use crate::{
+    FlameGraph, FlameGraphDiff, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, Tree,
+    diff_trees, tree_to_pprof,
+    samples::{
+        COL_FINGERPRINT, COL_TIMESTAMP, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION,
+        PCOL_TOTAL_VALUE, PCOL_VALUE,
+    },
+    series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
+};
+
+/// Engine configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EngineOpts {
+    pub default_max_nodes: i64,
+}
+
+impl Default for EngineOpts {
+    fn default() -> Self {
+        Self {
+            default_max_nodes: 2048,
+        }
+    }
+}
+
+/// Profiles flamegraph engine.
+pub struct FlameEngine<S: ProfileStore> {
+    store: Arc<S>,
+    opts: EngineOpts,
+}
+
+impl<S: ProfileStore> FlameEngine<S> {
+    #[must_use]
+    pub fn new(store: Arc<S>, opts: EngineOpts) -> Self {
+        Self { store, opts }
+    }
+
+    pub async fn select_merge_stacktraces(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        let tree = self
+            .merge_to_tree(tenant, profile_type, label_selector, start_ms, end_ms)
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_flamegraph(max_nodes))
+    }
+
+    pub(crate) async fn merge_to_tree(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Tree, ProfileError> {
+        let matchers = crate::matcher::parse_label_selector(label_selector)?;
+        let scan = self
+            .store
+            .select(tenant, profile_type, &matchers, start_ms, end_ms)
+            .await?;
+        let sql = format!(
+            "SELECT {partition}, {stacktrace}, SUM({value}) AS v \
+             FROM {table} GROUP BY {partition}, {stacktrace}",
+            partition = PCOL_STACKTRACE_PARTITION,
+            stacktrace = PCOL_STACKTRACE_ID,
+            value = PCOL_VALUE,
+            table = scan.samples_table,
+        );
+        let batches = scan
+            .ctx
+            .sql(&sql)
+            .await
+            .map_err(|err| ProfileError::Plan(err.to_string()))?
+            .collect()
+            .await
+            .map_err(|err| ProfileError::Exec(err.to_string()))?;
+
+        let mut tree = Tree::new();
+        for batch in batches {
+            let partitions = batch.column(0).as_primitive::<UInt64Type>();
+            let stacktrace_ids = batch.column(1).as_primitive::<UInt64Type>();
+            let values = batch.column(2).as_primitive::<Int64Type>();
+            for row in 0..batch.num_rows() {
+                let partition = partitions.value(row);
+                let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
+                    ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
+                })?;
+                let value = values.value(row);
+                let frames = scan.symbols.resolve(partition, stacktrace_id);
+                tree.add_stack(&frames, value);
+            }
+        }
+        Ok(tree)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_series(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        agg: SeriesAgg,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<Series>, ProfileError> {
+        let step_ms = step_ms_from_secs(step_secs)?;
+        let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
+        let groups = if group_by.is_empty() {
+            vec![Vec::new()]
+        } else {
+            self.store
+                .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+                .await?
+        };
+
+        let mut out = Vec::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let sql = format!(
+                "SELECT {timestamp}, MAX({total}) AS total \
+                 FROM {table} GROUP BY {timestamp}, {fingerprint}",
+                timestamp = COL_TIMESTAMP,
+                total = PCOL_TOTAL_VALUE,
+                table = scan.samples_table,
+                fingerprint = COL_FINGERPRINT,
+            );
+            let batches = scan
+                .ctx
+                .sql(&sql)
+                .await
+                .map_err(|err| ProfileError::Plan(err.to_string()))?
+                .collect()
+                .await
+                .map_err(|err| ProfileError::Exec(err.to_string()))?;
+            let mut buckets: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+            for batch in batches {
+                let timestamps = batch.column(0).as_primitive::<Int64Type>();
+                let totals = batch.column(1).as_primitive::<Int64Type>();
+                for row in 0..batch.num_rows() {
+                    let bucket = step_bucket_ms(timestamps.value(row), step_ms);
+                    buckets.entry(bucket).or_default().push(totals.value(row));
+                }
+            }
+            if buckets.is_empty() {
+                continue;
+            }
+            out.push(Series {
+                labels,
+                points: buckets
+                    .into_iter()
+                    .map(|(bucket, values)| (bucket, fold_bucket(agg, &values)))
+                    .collect(),
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn diff(
+        &self,
+        tenant: &str,
+        left: (&str, &str, i64, i64),
+        right: (&str, &str, i64, i64),
+        max_nodes: i64,
+    ) -> Result<FlameGraphDiff, ProfileError> {
+        let left_tree = self
+            .merge_to_tree(tenant, left.0, left.1, left.2, left.3)
+            .await?;
+        let right_tree = self
+            .merge_to_tree(tenant, right.0, right.1, right.2, right.3)
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(diff_trees(left_tree, right_tree, max_nodes))
+    }
+
+    pub async fn select_merge_profile(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<u8>, ProfileError> {
+        let profile_type = ProfileType::parse(profile_type)?;
+        let tree = self
+            .merge_to_tree(tenant, &profile_type.to_string(), label_selector, start_ms, end_ms)
+            .await?;
+        Ok(tree_to_pprof(&tree, &profile_type).encode())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+
+    use super::*;
+    use crate::{FunctionRec, InMemoryProfileStore, LineRec, LocationRec, SeriesAgg};
+
+    const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+
+    fn merge_fixture() -> FlameEngine<InMemoryProfileStore> {
+        let mut store = InMemoryProfileStore::new();
+        let (work_stack, other_stack) = {
+            let db = store.symbols_mut();
+            let main = intern_location(db, "main");
+            let work = intern_location(db, "work");
+            let other = intern_location(db, "other");
+            (
+                db.intern_stacktrace(0, &[work, main]),
+                db.intern_stacktrace(0, &[other, main]),
+            )
+        };
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            work_stack,
+            10,
+            100,
+        );
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            work_stack,
+            5,
+            110,
+        );
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "worker".to_string())],
+            0,
+            other_stack,
+            3,
+            120,
+        );
+        FlameEngine::new(Arc::new(store), EngineOpts::default())
+    }
+
+    fn intern_location(db: &mut crate::SymbolDb, name: &str) -> u32 {
+        let name_ref = db.intern_string(name);
+        let filename_ref = db.intern_string(&format!("{name}.go"));
+        let function_id = db.intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: filename_ref,
+            start_line: 1,
+        });
+        db.intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        })
+    }
+
+    fn self_value_for(fg: &FlameGraph, name: &str) -> i64 {
+        let name_index = fg
+            .names
+            .iter()
+            .position(|value| value == name)
+            .expect("name exists");
+        fg.levels
+            .iter()
+            .flat_map(|level| level.values.chunks_exact(4))
+            .find(|chunk| chunk[3] == i64::try_from(name_index).expect("index fits i64"))
+            .expect("bar exists")[2]
+    }
+
+    #[test]
+    fn default_max_nodes_is_2048() {
+        assert!(EngineOpts::default().default_max_nodes == 2048);
+    }
+
+    #[tokio::test]
+    async fn engine_diff_two_windows() {
+        let mut store = InMemoryProfileStore::new();
+        let (stack_a, stack_b) = {
+            let db = store.symbols_mut();
+            let a = intern_location(db, "a");
+            let b = intern_location(db, "b");
+            (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
+        };
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_a,
+            10,
+            10,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_a,
+            10,
+            15,
+            30_000,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_b,
+            5,
+            15,
+            30_000,
+        );
+        let engine = FlameEngine::new(
+            Arc::new(store),
+            EngineOpts {
+                default_max_nodes: 2048,
+            },
+        );
+
+        let diff = engine
+            .diff("tenant-a", (PT, "{}", 0, 1), (PT, "{}", 29_000, 60_000), 0)
+            .await
+            .unwrap();
+
+        assert!(diff.left_ticks == 10);
+        assert!(diff.right_ticks == 15);
+        assert!(diff.names.iter().any(|name| name == "b"));
+    }
+
+    #[tokio::test]
+    async fn select_merge_profile_returns_merged_pprof_bytes() {
+        let bytes = merge_fixture()
+            .select_merge_profile("tenant-a", PT, r#"{service="api"}"#, 0, 200)
+            .await
+            .unwrap();
+        let profile = crate::PprofProfile::decode(&bytes).unwrap();
+        let total: i64 = profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value.iter().sum::<i64>())
+            .sum();
+
+        assert!(total == 15);
+    }
+
+    #[tokio::test]
+    async fn merge_folds_duplicate_ids_before_symbolize() {
+        let fg = merge_fixture()
+            .select_merge_stacktraces("tenant-a", PT, "{}", 0, 200, 2048)
+            .await
+            .unwrap();
+
+        assert!(fg.total == 18);
+        assert!(fg.levels[0].values == vec![0, 18, 0, 0]);
+        assert!(self_value_for(&fg, "work") == 15);
+    }
+
+    #[tokio::test]
+    async fn merge_applies_label_selector_and_max_nodes_fallback() {
+        let fg = merge_fixture()
+            .select_merge_stacktraces("tenant-a", PT, r#"{service="api"}"#, 0, 200, 0)
+            .await
+            .unwrap();
+
+        assert!(fg.total == 15);
+        assert!(fg.names[0] == "total");
+        assert!(self_value_for(&fg, "work") == 15);
+        assert!(!fg.names.iter().any(|name| name == "other"));
+    }
+
+    fn series_fixture() -> FlameEngine<InMemoryProfileStore> {
+        let mut store = InMemoryProfileStore::new();
+        let stack_a = 1;
+        let stack_b = 2;
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            stack_a,
+            60,
+            100,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            stack_b,
+            40,
+            100,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            stack_a,
+            50,
+            50,
+            16_000,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "web".to_string())],
+            0,
+            stack_a,
+            7,
+            7,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            "memory:alloc_space:bytes:space:bytes",
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            stack_a,
+            999,
+            999,
+            0,
+        );
+        FlameEngine::new(Arc::new(store), EngineOpts::default())
+    }
+
+    #[tokio::test]
+    async fn select_series_sum_buckets_total_value_once_per_profile() {
+        let mut got = series_fixture()
+            .select_series(
+                "tenant-a",
+                PT,
+                "{}",
+                &["service".to_string()],
+                15.0,
+                SeriesAgg::Sum,
+                0,
+                60_000,
+            )
+            .await
+            .unwrap();
+        got.sort_by(|left, right| left.labels.cmp(&right.labels));
+
+        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
+        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
+        assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
+        assert!(got[1].points == vec![(0, 7.0)]);
+    }
+
+    #[tokio::test]
+    async fn select_series_average_and_label_selector() {
+        let got = series_fixture()
+            .select_series(
+                "tenant-a",
+                PT,
+                r#"{service="api"}"#,
+                &[],
+                60.0,
+                SeriesAgg::Average,
+                0,
+                60_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            got == vec![Series {
+                labels: Vec::new(),
+                points: vec![(0, 75.0)],
+            }]
+        );
+    }
+}

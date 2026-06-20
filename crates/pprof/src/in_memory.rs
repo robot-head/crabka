@@ -1,0 +1,433 @@
+//! Test in-memory profile store.
+
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder};
+use arrow::datatypes::Int32Type;
+use arrow::record_batch::RecordBatch;
+use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
+use datafusion::catalog::MemTable;
+use datafusion::prelude::SessionContext;
+use regex::Regex;
+
+use crate::error::ProfileError;
+use crate::samples::profile_samples_schema;
+use crate::store::{ProfileScan, ProfileStore};
+use crate::symbol_db::SymbolDb;
+
+#[derive(Clone, Debug)]
+struct SampleRow {
+    profile_type: String,
+    fingerprint: u64,
+    labels: Vec<(String, String)>,
+    partition: u64,
+    stacktrace_id: u32,
+    value: i64,
+    total_value: i64,
+    span_id: Option<u64>,
+    trace_id: Option<Vec<u8>>,
+    timestamp_ms: i64,
+}
+
+/// In-memory `ProfileStore` used by engine tests.
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryProfileStore {
+    samples: HashMap<String, Vec<SampleRow>>,
+    symbols: SymbolDb,
+}
+
+impl InMemoryProfileStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            samples: HashMap::new(),
+            symbols: SymbolDb::new(),
+        }
+    }
+
+    pub fn symbols_mut(&mut self) -> &mut SymbolDb {
+        &mut self.symbols
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_sample(
+        &mut self,
+        tenant: &str,
+        profile_type: &str,
+        labels: Vec<(String, String)>,
+        partition: u64,
+        stacktrace_id: u32,
+        value: i64,
+        timestamp_ms: i64,
+    ) {
+        self.push_sample_with_total(
+            tenant,
+            profile_type,
+            labels,
+            partition,
+            stacktrace_id,
+            value,
+            value,
+            timestamp_ms,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_sample_with_total(
+        &mut self,
+        tenant: &str,
+        profile_type: &str,
+        labels: Vec<(String, String)>,
+        partition: u64,
+        stacktrace_id: u32,
+        value: i64,
+        total_value: i64,
+        timestamp_ms: i64,
+    ) {
+        let fingerprint = fingerprint_labels(&labels);
+        self.samples
+            .entry(tenant.to_string())
+            .or_default()
+            .push(SampleRow {
+                profile_type: profile_type.to_string(),
+                fingerprint,
+                labels,
+                partition,
+                stacktrace_id,
+                value,
+                total_value,
+                span_id: None,
+                trace_id: None,
+                timestamp_ms,
+            });
+    }
+}
+
+#[async_trait::async_trait]
+impl ProfileStore for InMemoryProfileStore {
+    async fn select(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<ProfileScan, ProfileError> {
+        let compiled = compile_matchers(matchers)?;
+        let rows: Vec<&SampleRow> = self
+            .samples
+            .get(tenant)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter(|row| row.profile_type == profile_type)
+            .filter(|row| row.timestamp_ms >= start_ms && row.timestamp_ms <= end_ms)
+            .filter(|row| row_matches(row, &compiled))
+            .collect();
+        let batch = encode_rows(&rows)?;
+        let table = MemTable::try_new(profile_samples_schema(), vec![vec![batch]])
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        let ctx = SessionContext::new();
+        let samples_table = "samples".to_string();
+        ctx.register_table(&samples_table, Arc::new(table))
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        Ok(ProfileScan {
+            ctx,
+            samples_table,
+            symbols: Arc::new(self.symbols.clone()),
+        })
+    }
+
+    async fn label_names(
+        &self,
+        tenant: &str,
+        _matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<String>, ProfileError> {
+        let mut names = BTreeSet::new();
+        for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            names.extend(row.labels.iter().map(|(name, _)| name.clone()));
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    async fn label_values(
+        &self,
+        tenant: &str,
+        name: &str,
+        _matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<String>, ProfileError> {
+        let mut values = BTreeSet::new();
+        for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            for (label_name, value) in &row.labels {
+                if label_name == name {
+                    values.insert(value.clone());
+                }
+            }
+        }
+        Ok(values.into_iter().collect())
+    }
+
+    async fn profile_types(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<String>, ProfileError> {
+        let mut types = BTreeSet::new();
+        for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            types.insert(row.profile_type.clone());
+        }
+        Ok(types.into_iter().collect())
+    }
+
+    async fn series(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        label_names: &[String],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<Vec<(String, String)>>, ProfileError> {
+        let compiled = compile_matchers(matchers)?;
+        let mut out = BTreeSet::new();
+        for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            if !row_matches(row, &compiled) {
+                continue;
+            }
+            let projected: Vec<_> = label_names
+                .iter()
+                .filter_map(|want| {
+                    row.labels
+                        .iter()
+                        .find(|(name, _)| name == want)
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                })
+                .collect();
+            if !projected.is_empty() {
+                out.insert(projected);
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+}
+
+impl InMemoryProfileStore {
+    fn rows_in_range(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> impl Iterator<Item = &SampleRow> {
+        self.samples
+            .get(tenant)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter(move |row| row.timestamp_ms >= start_ms && row.timestamp_ms <= end_ms)
+    }
+}
+
+fn encode_rows(rows: &[&SampleRow]) -> Result<RecordBatch, ProfileError> {
+    let mut fp = UInt64Builder::new();
+    let mut ts = Int64Builder::new();
+    let mut profile_type = StringDictionaryBuilder::<Int32Type>::new();
+    let mut stacktrace_id = UInt64Builder::new();
+    let mut value = Int64Builder::new();
+    let mut partition = UInt64Builder::new();
+    let mut total_value = Int64Builder::new();
+    let mut span_id = UInt64Builder::new();
+    let mut trace_id = BinaryBuilder::new();
+
+    for row in rows {
+        fp.append_value(row.fingerprint);
+        ts.append_value(row.timestamp_ms);
+        profile_type
+            .append(&row.profile_type)
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        stacktrace_id.append_value(u64::from(row.stacktrace_id));
+        value.append_value(row.value);
+        partition.append_value(row.partition);
+        total_value.append_value(row.total_value);
+        match row.span_id {
+            Some(value) => span_id.append_value(value),
+            None => span_id.append_null(),
+        }
+        match &row.trace_id {
+            Some(value) => trace_id.append_value(value),
+            None => trace_id.append_null(),
+        }
+    }
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(fp.finish()),
+        Arc::new(ts.finish()),
+        Arc::new(profile_type.finish()),
+        Arc::new(stacktrace_id.finish()),
+        Arc::new(value.finish()),
+        Arc::new(partition.finish()),
+        Arc::new(total_value.finish()),
+        Arc::new(span_id.finish()),
+        Arc::new(trace_id.finish()),
+    ];
+    RecordBatch::try_new(profile_samples_schema(), columns)
+        .map_err(|err| ProfileError::Store(err.to_string()))
+}
+
+fn fingerprint_labels(labels: &[(String, String)]) -> u64 {
+    let mut canonical = Labels::new();
+    for (name, value) in labels {
+        canonical.insert(name.clone(), value.clone());
+    }
+    canonical.fingerprint()
+}
+
+enum CompiledMatcher<'a> {
+    Literal(&'a LabelMatcher),
+    Regex(&'a LabelMatcher, Regex),
+}
+
+fn compile_matchers(matchers: &[LabelMatcher]) -> Result<Vec<CompiledMatcher<'_>>, ProfileError> {
+    matchers
+        .iter()
+        .map(|matcher| match matcher.op {
+            MatchOp::Eq | MatchOp::Neq => Ok(CompiledMatcher::Literal(matcher)),
+            MatchOp::Re | MatchOp::Nre => Regex::new(&format!("^(?:{})$", matcher.value))
+                .map(|regex| CompiledMatcher::Regex(matcher, regex))
+                .map_err(|err| ProfileError::Plan(format!("bad matcher regex: {err}"))),
+        })
+        .collect()
+}
+
+fn row_matches(row: &SampleRow, matchers: &[CompiledMatcher<'_>]) -> bool {
+    matchers.iter().all(|matcher| match matcher {
+        CompiledMatcher::Literal(matcher) => {
+            let value = label_value(row, &matcher.name);
+            match matcher.op {
+                MatchOp::Eq => value.is_some_and(|value| value == matcher.value),
+                MatchOp::Neq => value.is_none_or(|value| value != matcher.value),
+                MatchOp::Re | MatchOp::Nre => unreachable!("regex matchers are compiled"),
+            }
+        }
+        CompiledMatcher::Regex(matcher, regex) => {
+            let regex_matched =
+                label_value(row, &matcher.name).is_some_and(|value| regex.is_match(value));
+            match matcher.op {
+                MatchOp::Re => regex_matched,
+                MatchOp::Nre => !regex_matched,
+                MatchOp::Eq | MatchOp::Neq => unreachable!("literal matchers are not compiled"),
+            }
+        }
+    })
+}
+
+fn label_value<'a>(row: &'a SampleRow, name: &str) -> Option<&'a str> {
+    row.labels
+        .iter()
+        .find(|(label_name, _)| label_name == name)
+        .map(|(_, value)| value.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use crabka_blockstore::LabelMatcher;
+    use datafusion::arrow::array::AsArray;
+    use datafusion::arrow::datatypes::Int64Type;
+
+    use super::*;
+    use crate::{FunctionRec, LineRec, LocationRec};
+
+    fn store_with_two_samples() -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let n_main = store.symbols_mut().intern_string("main");
+        let f_main = store.symbols_mut().intern_function(FunctionRec {
+            name: n_main,
+            system_name: n_main,
+            filename: 0,
+            start_line: 0,
+        });
+        let n_work = store.symbols_mut().intern_string("work");
+        let f_work = store.symbols_mut().intern_function(FunctionRec {
+            name: n_work,
+            system_name: n_work,
+            filename: 0,
+            start_line: 0,
+        });
+        let l_main = store.symbols_mut().intern_location(LocationRec {
+            address: 0x10,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id: f_main,
+                line: 1,
+            }],
+        });
+        let l_work = store.symbols_mut().intern_location(LocationRec {
+            address: 0x20,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id: f_work,
+                line: 2,
+            }],
+        });
+        let st_work = store.symbols_mut().intern_stacktrace(0, &[l_work, l_main]);
+        let st_main = store.symbols_mut().intern_stacktrace(0, &[l_main]);
+        let pt = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+        let labels = vec![("service_name".to_string(), "checkout".to_string())];
+        store.push_sample("t", pt, labels.clone(), 0, st_work, 10, 1000);
+        store.push_sample("t", pt, labels.clone(), 0, st_work, 5, 1000);
+        store.push_sample("t", pt, labels, 0, st_main, 3, 1000);
+        store
+    }
+
+    #[tokio::test]
+    async fn select_registers_samples_table_and_symbols() {
+        let store = store_with_two_samples();
+        let scan = store
+            .select(
+                "t",
+                "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+                &[],
+                0,
+                5000,
+            )
+            .await
+            .unwrap();
+        let df = scan
+            .ctx
+            .sql(&format!("SELECT count(*) AS c FROM {}", scan.samples_table))
+            .await
+            .unwrap();
+        let out = df.collect().await.unwrap();
+        let count = out[0].column(0).as_primitive::<Int64Type>().value(0);
+        assert!(count == 3);
+        assert!(!scan.symbols.resolve(0, 0).is_empty() || !scan.symbols.resolve(0, 1).is_empty());
+    }
+
+    #[tokio::test]
+    async fn profile_types_and_label_values() {
+        let store = store_with_two_samples();
+        let pts = store.profile_types("t", 0, 5000).await.unwrap();
+        assert!(pts == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string()]);
+        let vals = store
+            .label_values("t", "service_name", &[], 0, 5000)
+            .await
+            .unwrap();
+        assert!(vals == vec!["checkout".to_string()]);
+        let names = store.label_names("t", &[], 0, 5000).await.unwrap();
+        assert!(names == vec!["service_name".to_string()]);
+        let series = store
+            .series(
+                "t",
+                &[] as &[LabelMatcher],
+                &["service_name".to_string()],
+                0,
+                5000,
+            )
+            .await
+            .unwrap();
+        assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+    }
+}

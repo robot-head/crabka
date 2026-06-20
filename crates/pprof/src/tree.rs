@@ -1,0 +1,397 @@
+//! Symbolized profile tree and flamegraph encoding.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use crate::Frame;
+
+const ROOT_NAME: &str = "total";
+const OTHER_NAME: &str = "other";
+
+/// One flamegraph level. Values are groups of four:
+/// `[xOffsetDelta, total, self, nameIndex]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Level {
+    pub values: Vec<i64>,
+}
+
+/// Pyroscope-compatible single flamegraph projection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlameGraph {
+    pub names: Vec<String>,
+    pub levels: Vec<Level>,
+    pub total: i64,
+    pub max_self: i64,
+}
+
+/// Diff flamegraph type frozen for the next slice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlameGraphDiff {
+    pub names: Vec<String>,
+    pub levels: Vec<Level>,
+    pub left_ticks: i64,
+    pub right_ticks: i64,
+}
+
+#[derive(Clone, Debug)]
+struct Node {
+    name: String,
+    total: i64,
+    self_: i64,
+    children: BTreeMap<String, usize>,
+}
+
+/// Symbolized profile tree. Root is the synthetic `"total"` node.
+#[derive(Clone, Debug)]
+pub struct Tree {
+    nodes: Vec<Node>,
+    root: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TreeSnapshotNode {
+    pub name: String,
+    pub total: i64,
+    pub self_: i64,
+    pub children: Vec<usize>,
+}
+
+impl Tree {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            nodes: vec![Node {
+                name: ROOT_NAME.to_string(),
+                total: 0,
+                self_: 0,
+                children: BTreeMap::new(),
+            }],
+            root: 0,
+        }
+    }
+
+    pub fn add_stack(&mut self, frames: &[Frame], value: i64) {
+        let mut current = self.root;
+        self.nodes[current].total += value;
+        for frame in frames.iter().rev() {
+            let name = frame.function.clone();
+            let child = if let Some(child) = self.nodes[current].children.get(&name) {
+                *child
+            } else {
+                let idx = self.nodes.len();
+                self.nodes.push(Node {
+                    name: name.clone(),
+                    total: 0,
+                    self_: 0,
+                    children: BTreeMap::new(),
+                });
+                self.nodes[current].children.insert(name, idx);
+                idx
+            };
+            current = child;
+            self.nodes[current].total += value;
+        }
+        if !frames.is_empty() {
+            self.nodes[current].self_ += value;
+        }
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn merge(&mut self, other: Tree) {
+        self.merge_node(self.root, &other, other.root);
+    }
+
+    fn merge_node(&mut self, target: usize, other: &Tree, source: usize) {
+        self.nodes[target].total += other.nodes[source].total;
+        self.nodes[target].self_ += other.nodes[source].self_;
+        for (name, source_child) in &other.nodes[source].children {
+            let target_child = if let Some(child) = self.nodes[target].children.get(name) {
+                *child
+            } else {
+                let idx = self.nodes.len();
+                self.nodes.push(Node {
+                    name: name.clone(),
+                    total: 0,
+                    self_: 0,
+                    children: BTreeMap::new(),
+                });
+                self.nodes[target].children.insert(name.clone(), idx);
+                idx
+            };
+            self.merge_node(target_child, other, *source_child);
+        }
+    }
+
+    #[must_use]
+    pub fn to_flamegraph(self, max_nodes: i64) -> FlameGraph {
+        let keep = self.keep_set(max_nodes);
+        let mut names = vec![ROOT_NAME.to_string()];
+        let mut name_index = HashMap::from([(ROOT_NAME.to_string(), 0_i64)]);
+        let mut levels = Vec::new();
+        let mut current = vec![Bar {
+            node: Some(self.root),
+            name: ROOT_NAME.to_string(),
+            total: self.nodes[self.root].total,
+            self_: self.nodes[self.root].self_,
+            x_start: 0,
+        }];
+        let mut max_self = 0;
+
+        while !current.is_empty() {
+            let mut values = Vec::with_capacity(current.len() * 4);
+            let mut next = Vec::new();
+            let mut previous_end = 0;
+            for bar in &current {
+                let name_idx = name_slot(&mut names, &mut name_index, &bar.name);
+                let delta = bar.x_start - previous_end;
+                values.extend([delta, bar.total, bar.self_, name_idx]);
+                previous_end = bar.x_start + bar.total;
+                max_self = max_self.max(bar.self_);
+                append_children(&self, &keep, bar, &mut next);
+            }
+            levels.push(Level { values });
+            current = next;
+        }
+
+        FlameGraph {
+            total: self.nodes[self.root].total,
+            names,
+            levels,
+            max_self,
+        }
+    }
+
+    fn keep_set(&self, max_nodes: i64) -> HashSet<usize> {
+        let max_nodes = usize::try_from(max_nodes.max(1)).unwrap_or(usize::MAX);
+        if self.nodes.len() <= max_nodes {
+            return (0..self.nodes.len()).collect();
+        }
+        let parents = self.parents();
+        let mut ranked: Vec<usize> = (0..self.nodes.len())
+            .filter(|node| *node != self.root)
+            .collect();
+        ranked.sort_by(|left, right| {
+            self.nodes[*right]
+                .total
+                .cmp(&self.nodes[*left].total)
+                .then_with(|| self.nodes[*left].name.cmp(&self.nodes[*right].name))
+                .then_with(|| left.cmp(right))
+        });
+        let mut keep = HashSet::from([self.root]);
+        for node in ranked {
+            let mut path = Vec::new();
+            let mut current = Some(node);
+            while let Some(idx) = current {
+                if keep.contains(&idx) {
+                    break;
+                }
+                path.push(idx);
+                current = parents[idx];
+            }
+            if keep.len() + path.len() <= max_nodes {
+                keep.extend(path);
+            }
+        }
+        keep
+    }
+
+    fn parents(&self) -> Vec<Option<usize>> {
+        let mut parents = vec![None; self.nodes.len()];
+        for (parent, node) in self.nodes.iter().enumerate() {
+            for child in node.children.values() {
+                parents[*child] = Some(parent);
+            }
+        }
+        parents
+    }
+
+    pub(crate) fn snapshot(&self) -> (usize, Vec<TreeSnapshotNode>) {
+        (
+            self.root,
+            self.nodes
+                .iter()
+                .map(|node| TreeSnapshotNode {
+                    name: node.name.clone(),
+                    total: node.total,
+                    self_: node.self_,
+                    children: node.children.values().copied().collect(),
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    fn total_of(&self, path: &[&str]) -> i64 {
+        self.node_at(path).total
+    }
+
+    #[cfg(test)]
+    fn self_of(&self, path: &[&str]) -> i64 {
+        self.node_at(path).self_
+    }
+
+    #[cfg(test)]
+    fn node_at(&self, path: &[&str]) -> &Node {
+        assert!(!path.is_empty());
+        assert!(path[0] == ROOT_NAME);
+        let mut idx = self.root;
+        for name in &path[1..] {
+            idx = *self.nodes[idx].children.get(*name).expect("path exists");
+        }
+        &self.nodes[idx]
+    }
+}
+
+impl Default for Tree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Bar {
+    node: Option<usize>,
+    name: String,
+    total: i64,
+    self_: i64,
+    x_start: i64,
+}
+
+fn append_children(tree: &Tree, keep: &HashSet<usize>, parent: &Bar, next: &mut Vec<Bar>) {
+    let Some(parent_node) = parent.node else {
+        return;
+    };
+    let mut x = parent.x_start;
+    let mut other_total = 0;
+    let mut other_self = 0;
+    for child in tree.nodes[parent_node].children.values() {
+        let node = &tree.nodes[*child];
+        if keep.contains(child) {
+            next.push(Bar {
+                node: Some(*child),
+                name: node.name.clone(),
+                total: node.total,
+                self_: node.self_,
+                x_start: x,
+            });
+        } else {
+            other_total += node.total;
+            other_self += subtree_self(tree, *child);
+        }
+        x += node.total;
+    }
+    if other_total > 0 {
+        next.push(Bar {
+            node: None,
+            name: OTHER_NAME.to_string(),
+            total: other_total,
+            self_: other_self,
+            x_start: parent.x_start + parent.total - other_total,
+        });
+    }
+}
+
+fn subtree_self(tree: &Tree, node: usize) -> i64 {
+    tree.nodes[node].self_
+        + tree.nodes[node]
+            .children
+            .values()
+            .map(|child| subtree_self(tree, *child))
+            .sum::<i64>()
+}
+
+fn name_slot(names: &mut Vec<String>, index: &mut HashMap<String, i64>, name: &str) -> i64 {
+    if let Some(slot) = index.get(name) {
+        return *slot;
+    }
+    let slot = i64::try_from(names.len()).expect("name index fits i64");
+    names.push(name.to_string());
+    index.insert(name.to_string(), slot);
+    slot
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+    use crate::Frame;
+
+    fn frame(name: &str) -> Frame {
+        Frame {
+            function: name.to_string(),
+            file: String::new(),
+            line: 0,
+        }
+    }
+
+    fn stack(names: &[&str]) -> Vec<Frame> {
+        names.iter().map(|name| frame(name)).collect()
+    }
+
+    #[test]
+    fn add_stack_totals_along_path_and_self_at_leaf() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["work", "main"]), 10);
+        tree.add_stack(&stack(&["other", "main"]), 3);
+
+        assert!(tree.total_of(&["total"]) == 13);
+        assert!(tree.self_of(&["total"]) == 0);
+        assert!(tree.total_of(&["total", "main"]) == 13);
+        assert!(tree.self_of(&["total", "main"]) == 0);
+        assert!(tree.total_of(&["total", "main", "work"]) == 10);
+        assert!(tree.self_of(&["total", "main", "work"]) == 10);
+        assert!(tree.self_of(&["total", "main", "other"]) == 3);
+    }
+
+    #[test]
+    fn merge_combines_partial_trees() {
+        let mut a = Tree::new();
+        a.add_stack(&stack(&["work", "main"]), 10);
+        let mut b = Tree::new();
+        b.add_stack(&stack(&["work", "main"]), 5);
+        b.add_stack(&stack(&["new", "main"]), 2);
+        a.merge(b);
+        assert!(a.total_of(&["total"]) == 17);
+        assert!(a.total_of(&["total", "main", "work"]) == 15);
+        assert!(a.self_of(&["total", "main", "new"]) == 2);
+    }
+
+    #[test]
+    fn to_flamegraph_root_level_and_names() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["a", "main"]), 6);
+        tree.add_stack(&stack(&["b", "main"]), 4);
+        let fg = tree.to_flamegraph(2048);
+        assert!(fg.names[0] == "total");
+        assert!(fg.total == 10);
+        assert!(fg.levels[0].values == vec![0, 10, 0, 0]);
+    }
+
+    #[test]
+    fn to_flamegraph_xoffset_is_delta_from_previous_bar_end() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["a", "main"]), 6);
+        tree.add_stack(&stack(&["b", "main"]), 4);
+        let fg = tree.to_flamegraph(2048);
+        assert!(fg.levels[1].values[0..4] == [0, 10, 0, names_index(&fg, "main")]);
+        let a = &fg.levels[2].values[0..4];
+        assert!(a[0] == 0 && a[1] == 6 && a[2] == 6);
+        let b = &fg.levels[2].values[4..8];
+        assert!(b[0] == 0 && b[1] == 4 && b[2] == 4);
+    }
+
+    #[test]
+    fn to_flamegraph_truncates_with_synthetic_other() {
+        let mut tree = Tree::new();
+        for idx in 0..10 {
+            tree.add_stack(&stack(&[&format!("leaf{idx}"), "main"]), 1);
+        }
+        let fg = tree.to_flamegraph(4);
+        assert!(fg.names.iter().any(|name| name == "other"));
+        assert!(fg.total == 10);
+    }
+
+    fn names_index(fg: &FlameGraph, name: &str) -> i64 {
+        i64::try_from(fg.names.iter().position(|n| n == name).unwrap()).unwrap()
+    }
+}
