@@ -9,6 +9,7 @@ use crate::metricsgen::series::{Series, SeriesSample, sorted_labels};
 const NS_PER_SEC: f64 = 1_000_000_000.0;
 
 type EdgeKey = ([u8; 16], [u8; 8]);
+type LabelKey = (String, String, ConnectionType);
 
 /// Tempo service-graph connection classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -71,9 +72,9 @@ pub struct EdgeStore {
     ttl_ns: i64,
     enable_messaging_latency: bool,
     edges: HashMap<EdgeKey, Edge>,
-    aggregates: HashMap<(String, String, ConnectionType), EdgeAgg>,
-    unpaired: HashMap<ConnectionType, f64>,
-    dropped: f64,
+    aggregates: HashMap<LabelKey, EdgeAgg>,
+    unpaired: HashMap<LabelKey, f64>,
+    dropped: HashMap<LabelKey, f64>,
 }
 
 impl EdgeStore {
@@ -86,7 +87,7 @@ impl EdgeStore {
             edges: HashMap::new(),
             aggregates: HashMap::new(),
             unpaired: HashMap::new(),
-            dropped: 0.0,
+            dropped: HashMap::new(),
         }
     }
 
@@ -118,7 +119,10 @@ impl EdgeStore {
         }
 
         if self.edges.len() >= self.max_items {
-            self.dropped += 1.0;
+            *self
+                .dropped
+                .entry(label_key_for_span(span, is_client, connection_type))
+                .or_insert(0.0) += 1.0;
             return RecordOutcome::Dropped;
         }
 
@@ -146,7 +150,10 @@ impl EdgeStore {
 
         for key in &expired {
             let edge = self.edges.remove(key).expect("expired key exists");
-            *self.unpaired.entry(edge.connection_type).or_insert(0.0) += 1.0;
+            *self
+                .unpaired
+                .entry(label_key_for_edge(&edge))
+                .or_insert(0.0) += 1.0;
         }
 
         expired.len()
@@ -205,11 +212,8 @@ impl EdgeStore {
             }
         }
 
-        for (connection_type, value) in self.unpaired.drain() {
-            let labels = sorted_labels(vec![(
-                "connection_type".to_string(),
-                connection_type.as_label().to_string(),
-            )]);
+        for (label_key, value) in self.unpaired.drain() {
+            let labels = service_graph_labels(label_key);
             out.push(counter(
                 "traces_service_graph_unpaired_spans_total",
                 &labels,
@@ -218,14 +222,14 @@ impl EdgeStore {
             ));
         }
 
-        if self.dropped > 0.0 {
+        for (label_key, value) in self.dropped.drain() {
+            let labels = service_graph_labels(label_key);
             out.push(counter(
                 "traces_service_graph_dropped_spans_total",
-                &[],
-                self.dropped,
+                &labels,
+                value,
                 timestamp_ms,
             ));
-            self.dropped = 0.0;
         }
 
         out
@@ -257,6 +261,37 @@ impl EdgeStore {
             agg.messaging_seconds_sum += ns_to_seconds(ns);
             agg.messaging_seconds_count += 1.0;
         }
+    }
+}
+
+fn service_graph_labels((client, server, connection_type): LabelKey) -> Vec<(String, String)> {
+    sorted_labels(vec![
+        ("client".to_string(), client),
+        ("server".to_string(), server),
+        (
+            "connection_type".to_string(),
+            connection_type.as_label().to_string(),
+        ),
+    ])
+}
+
+fn label_key_for_edge(edge: &Edge) -> LabelKey {
+    (
+        edge.client_service.clone().unwrap_or_default(),
+        edge.server_service.clone().unwrap_or_default(),
+        edge.connection_type,
+    )
+}
+
+fn label_key_for_span(
+    span: &SpanRecord,
+    is_client: bool,
+    connection_type: ConnectionType,
+) -> LabelKey {
+    if is_client {
+        (span.service_name.clone(), String::new(), connection_type)
+    } else {
+        (String::new(), span.service_name.clone(), connection_type)
     }
 }
 
@@ -380,6 +415,10 @@ mod tests {
             })
     }
 
+    fn labels_for<'a>(series: &'a [Series], name: &str) -> &'a [(String, String)] {
+        &series.iter().find(|s| s.name == name).unwrap().labels
+    }
+
     fn histogram_sum(series: &[Series], name: &str) -> f64 {
         series
             .iter()
@@ -498,6 +537,36 @@ mod tests {
     }
 
     #[test]
+    fn unpaired_client_span_keeps_service_graph_labels() {
+        let cfg = MetricsGenConfig {
+            edge_ttl: Duration::from_secs(10),
+            ..MetricsGenConfig::default()
+        };
+        let mut store = EdgeStore::new(&cfg);
+        let client = span(
+            "frontend",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert!(store.expire(10_000_000_000) == 1);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_unpaired_spans_total");
+        assert!(
+            labels
+                == [
+                    ("client".to_string(), "frontend".to_string()),
+                    ("connection_type".to_string(), String::new()),
+                    ("server".to_string(), String::new()),
+                ]
+        );
+    }
+
+    #[test]
     fn store_full_drops_new_spans() {
         let cfg = MetricsGenConfig {
             edge_store_max_items: 1,
@@ -512,6 +581,39 @@ mod tests {
 
         let out = store.drain(1_000);
         assert!((counter(&out, "traces_service_graph_dropped_spans_total") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dropped_client_span_keeps_service_graph_labels() {
+        let cfg = MetricsGenConfig {
+            edge_store_max_items: 1,
+            ..MetricsGenConfig::default()
+        };
+        let mut store = EdgeStore::new(&cfg);
+        let a = span("s1", [0x1; 8], [0; 8], SpanKind::Client, StatusCode::Ok, 1);
+        let mut b = span(
+            "database",
+            [0x2; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        b.attributes.push(("db.system".into(), "postgresql".into()));
+
+        assert!(store.record_span(&a, 0) == RecordOutcome::Recorded);
+        assert!(store.record_span(&b, 1) == RecordOutcome::Dropped);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_dropped_spans_total");
+        assert!(
+            labels
+                == [
+                    ("client".to_string(), "database".to_string()),
+                    ("connection_type".to_string(), "database".to_string()),
+                    ("server".to_string(), String::new()),
+                ]
+        );
     }
 
     #[test]
