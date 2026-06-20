@@ -113,12 +113,14 @@ where
     let Some(query) = search_query(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
-    let start_ns = query_param(&uri, "start")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(0);
-    let end_ns = query_param(&uri, "end")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(i64::MAX);
+    let start_ns = match required_seconds_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end_ns = match required_seconds_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let limit = query_param(&uri, "limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -1334,8 +1336,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_requires_start_and_end() {
+        let (status, body) = get_text("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D").await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "missing query parameter start");
+
+        let (status, body) =
+            get_text("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0").await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "missing query parameter end");
+    }
+
+    #[tokio::test]
     async fn search_accepts_legacy_tags_parameter() {
-        let (status, body) = get_json("/api/search?tags=svc%3Db").await;
+        let (status, body) = get_json("/api/search?tags=svc%3Db&start=0&end=10").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
         assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
@@ -1351,7 +1365,8 @@ mod tests {
 
     #[tokio::test]
     async fn search_honors_spss_parameter() {
-        let (status, body) = get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&spss=1").await;
+        let (status, body) =
+            get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&spss=1&start=0&end=10").await;
         let spans = body["traces"][0]["spanSets"][0]["spans"]
             .as_array()
             .unwrap();
@@ -1384,7 +1399,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s")
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s&start=0&end=10")
                     .header("x-scope-orgid", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
@@ -1423,7 +1438,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&maxDuration=2s")
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&maxDuration=2s&start=0&end=10")
                     .header("x-scope-orgid", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
@@ -1462,7 +1477,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s&limit=1")
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s&limit=1&start=0&end=10")
                     .header("x-scope-orgid", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
@@ -1480,7 +1495,8 @@ mod tests {
 
     #[tokio::test]
     async fn search_returns_tempo_search_shape() {
-        let (status, body) = get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D").await;
+        let (status, body) =
+            get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
         assert!(status == StatusCode::OK);
         assert!(
             body == json!({
