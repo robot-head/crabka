@@ -365,6 +365,30 @@ mod tests {
     }
 
     #[test]
+    fn select_merge_profile_request_uses_upstream_selector_fields() {
+        let request = pb::querier::v1::SelectMergeProfileRequest {
+            profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
+            label_selector: "{}".to_string(),
+            start: 10,
+            end: 20,
+            max_nodes: 30,
+            stack_trace_selector: Some(pb::types::v1::StackTraceSelector {
+                call_site: vec![pb::types::v1::Location {
+                    name: "main".to_string(),
+                }],
+                go_pgo: None,
+            }),
+            profile_id_selector: vec!["profile-a".to_string()],
+        };
+
+        let bytes = request.encode_to_vec();
+
+        assert!(bytes.contains(&0x28)); // max_nodes, field 5
+        assert!(bytes.contains(&0x32)); // stack_trace_selector, field 6
+        assert!(bytes.contains(&0x3a)); // profile_id_selector, field 7
+    }
+
+    #[test]
     fn span_profile_request_uses_upstream_span_selector_field() {
         let request = pb::querier::v1::SelectMergeSpanProfileRequest {
             profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),

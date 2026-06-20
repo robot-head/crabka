@@ -713,17 +713,21 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
+    let label_selector = merge_profile_id_selector(&req.label_selector, &req.profile_id_selector)
+        .map_err(connect_error)?;
+    let stack_trace_call_sites = stack_trace_call_sites(req.stack_trace_selector.as_ref());
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
     let profile = state
         .engine
-        .select_merge_profile(
+        .select_merge_profile_with_stack_trace_selector(
             &tenant,
             &req.profile_type_id,
-            &req.label_selector,
+            &label_selector,
             req.start,
             req.end,
+            &stack_trace_call_sites,
         )
         .await
         .map_err(connect_error)?;
@@ -2065,6 +2069,109 @@ overrides:
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
         assert!(total == Some(5), "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_profile_profile_id_selector_filters_profiles() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_profile_ids())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeProfile"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "profileIdSelector": ["profile-a"],
+                "start": 0,
+                "end": 100,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let profile = response
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|profile| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(profile)
+                    .ok()
+            })
+            .and_then(|profile| crabka_pprof::PprofProfile::decode(&profile).ok())
+            .unwrap();
+        let total: i64 = profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value.iter().sum::<i64>())
+            .sum();
+
+        assert!(total == 5, "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_profile_stack_trace_selector_filters_call_sites() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("hot.path", 7),
+            ("cold.path", 10),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeProfile"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "stackTraceSelector": {
+                    "callSite": [{ "name": "hot.path" }]
+                },
+                "start": 0,
+                "end": 100,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let profile = response
+            .get("profile")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|profile| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(profile)
+                    .ok()
+            })
+            .and_then(|profile| crabka_pprof::PprofProfile::decode(&profile).ok())
+            .unwrap();
+        let total: i64 = profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value.iter().sum::<i64>())
+            .sum();
+
+        assert!(total == 7, "{response}");
     }
 
     #[tokio::test]

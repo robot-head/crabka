@@ -540,6 +540,26 @@ impl<S: ProfileStore> FlameEngine<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<u8>, ProfileError> {
+        self.select_merge_profile_with_stack_trace_selector(
+            tenant,
+            profile_type,
+            label_selector,
+            start_ms,
+            end_ms,
+            &[],
+        )
+        .await
+    }
+
+    pub async fn select_merge_profile_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        call_sites: &[String],
+    ) -> Result<Vec<u8>, ProfileError> {
         let profile_type = ProfileType::parse(profile_type)?;
         let tree = self
             .merge_to_tree(
@@ -549,7 +569,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 start_ms,
                 end_ms,
                 None,
-                &[],
+                call_sites,
             )
             .await?;
         Ok(tree_to_pprof(&tree, &profile_type).encode())
