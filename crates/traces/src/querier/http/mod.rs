@@ -281,12 +281,14 @@ where
     let Some(query) = query_param(&uri, "q") else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
-    let start_ns = query_param(&uri, "start")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(0);
-    let end_ns = query_param(&uri, "end")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(start_ns);
+    let start_ns = match required_seconds_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end_ns = match required_seconds_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let step_ns = match step_param(&uri) {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -420,6 +422,13 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+}
+
+fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
+    let Some(value) = query_param(uri, key) else {
+        return Err(format!("missing query parameter {key}"));
+    };
+    parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
 }
 
 fn parse_step_to_ns(value: &str) -> Option<i64> {
@@ -1229,6 +1238,28 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "missing query parameter step");
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_requires_start() {
+        let (status, body) = get_text(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&end=1&step=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "missing query parameter start");
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_requires_end() {
+        let (status, body) = get_text(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&step=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "missing query parameter end");
     }
 
     #[tokio::test]
