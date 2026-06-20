@@ -92,14 +92,13 @@ impl EdgeStore {
     }
 
     pub fn record_span(&mut self, span: &SpanRecord, now_ns: i64) -> RecordOutcome {
-        if !matches!(span.kind, SpanKind::Client | SpanKind::Server) {
+        let Some(is_client) = edge_side(span.kind) else {
             return RecordOutcome::Ignored;
-        }
+        };
 
         let Some(key) = edge_key(span) else {
             return RecordOutcome::Ignored;
         };
-        let is_client = span.kind == SpanKind::Client;
         let connection_type = classify(span);
         let failed = span.status == StatusCode::Error;
         let latency_ns = span.duration_ns.max(0);
@@ -297,11 +296,19 @@ fn label_key_for_span(
 
 fn edge_key(span: &SpanRecord) -> Option<EdgeKey> {
     match span.kind {
-        SpanKind::Client => Some((span.trace_id, span.span_id)),
-        SpanKind::Server if span.parent_span_id != [0; 8] => {
+        SpanKind::Client | SpanKind::Producer => Some((span.trace_id, span.span_id)),
+        SpanKind::Server | SpanKind::Consumer if span.parent_span_id != [0; 8] => {
             Some((span.trace_id, span.parent_span_id))
         }
         _ => None,
+    }
+}
+
+fn edge_side(kind: SpanKind) -> Option<bool> {
+    match kind {
+        SpanKind::Client | SpanKind::Producer => Some(true),
+        SpanKind::Server | SpanKind::Consumer => Some(false),
+        SpanKind::Unspecified | SpanKind::Internal => None,
     }
 }
 
@@ -426,6 +433,16 @@ mod tests {
             .find(|s| s.name == name)
             .map_or(0.0, |s| match s.sample {
                 SeriesSample::ClassicHistogram { sum, .. } => sum,
+                _ => panic!("{name} not a histogram"),
+            })
+    }
+
+    fn histogram_count(series: &[Series], name: &str) -> f64 {
+        series
+            .iter()
+            .find(|s| s.name == name)
+            .map_or(0.0, |s| match s.sample {
+                SeriesSample::ClassicHistogram { count, .. } => count,
                 _ => panic!("{name} not a histogram"),
             })
     }
@@ -685,6 +702,70 @@ mod tests {
                 .labels
                 .iter()
                 .any(|(k, v)| k == "connection_type" && v == "database")
+        );
+    }
+
+    #[test]
+    fn messaging_producer_consumer_pair_emits_service_graph_edge() {
+        let cfg = MetricsGenConfig {
+            enable_messaging_system_latency: true,
+            ..MetricsGenConfig::default()
+        };
+        let mut store = EdgeStore::new(&cfg);
+        let mut producer = span(
+            "publisher",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Producer,
+            StatusCode::Ok,
+            7_000_000,
+        );
+        producer
+            .attributes
+            .push(("messaging.system".into(), "kafka".into()));
+        let mut consumer = span(
+            "worker",
+            [0xB; 8],
+            [0xA; 8],
+            SpanKind::Consumer,
+            StatusCode::Ok,
+            5_000_000,
+        );
+        consumer
+            .attributes
+            .push(("messaging.system".into(), "kafka".into()));
+
+        assert!(store.record_span(&producer, 0) == RecordOutcome::Recorded);
+        assert!(store.record_span(&consumer, 1) == RecordOutcome::Completed);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_request_total");
+        assert!(
+            labels
+                == [
+                    ("client".to_string(), "publisher".to_string()),
+                    (
+                        "connection_type".to_string(),
+                        "messaging_system".to_string(),
+                    ),
+                    ("server".to_string(), "worker".to_string()),
+                ]
+        );
+        assert!(
+            (histogram_sum(
+                &out,
+                "traces_service_graph_request_messaging_system_seconds"
+            ) - 0.005)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (histogram_count(
+                &out,
+                "traces_service_graph_request_messaging_system_seconds"
+            ) - 1.0)
+                .abs()
+                < 1e-9
         );
     }
 }
