@@ -61,6 +61,18 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
         return Ok(format!("SELECT * FROM ({spanset_sql}) AS q"));
     }
 
+    let normalized_pipeline;
+    let pipeline = if pipeline.iter().any(is_inert_pipeline_stage) {
+        normalized_pipeline = pipeline
+            .iter()
+            .filter(|stage| !is_inert_pipeline_stage(stage))
+            .cloned()
+            .collect::<Vec<_>>();
+        normalized_pipeline.as_slice()
+    } else {
+        pipeline
+    };
+
     match pipeline {
         [] => Ok(format!("SELECT * FROM ({spanset_sql}) AS q")),
         [
@@ -102,6 +114,13 @@ fn is_search_preserving_pipeline_stage(stage: &Pipeline) -> bool {
                     | Aggregate::Min(_)
                     | Aggregate::Max(_)
             )
+    )
+}
+
+fn is_inert_pipeline_stage(stage: &Pipeline) -> bool {
+    matches!(
+        stage,
+        Pipeline::Select(_) | Pipeline::Coalesce | Pipeline::With(_)
     )
 }
 
@@ -776,6 +795,29 @@ mod tests {
         let out = planned("{ .svc != nil } | count() | by(span.svc) > 1", &store)
             .await
             .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn preserving_stage_before_count_filter_is_ignored_for_search() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc = \"api\" } | select(span:duration, span.svc) | count() > 1",
+            &store,
+        )
+        .await
+        .unwrap();
         assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
