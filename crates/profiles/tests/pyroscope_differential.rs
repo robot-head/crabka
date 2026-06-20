@@ -99,6 +99,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     assert!(flame_ticks(&crabka_render).is_some_and(|ticks| ticks > 0));
     assert!(flame_names(&pyroscope_render).contains("runtime/pprof.profileWriter"));
     assert!(flame_names(&crabka_render).contains("runtime/pprof.profileWriter"));
+    assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
     assert_profile_types_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_names_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
@@ -777,6 +778,46 @@ fn flame_ticks(value: &Value) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
+fn assert_flamebearer_equal(expected: &Value, actual: &Value) -> TestResult {
+    let expected = canonical_flamebearer(expected)?;
+    let actual = canonical_flamebearer(actual)?;
+    if expected != actual {
+        return Err(format!("flamebearer mismatch: expected {expected}, got {actual}").into());
+    }
+    Ok(())
+}
+
+fn canonical_flamebearer(value: &Value) -> TestResult<Value> {
+    let flamebearer = value
+        .get("flamebearer")
+        .ok_or_else(|| format!("response missing flamebearer object: {value}"))?;
+    let names = flamebearer
+        .get("names")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("flamebearer missing names array: {value}"))?;
+    let levels = flamebearer
+        .get("levels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("flamebearer missing levels array: {value}"))?;
+    let ticks = flamebearer
+        .get("numTicks")
+        .or_else(|| flamebearer.get("total"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("flamebearer missing numTicks/total: {value}"))?;
+    let max_self = flamebearer
+        .get("maxSelf")
+        .or_else(|| flamebearer.get("max_self"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("flamebearer missing maxSelf: {value}"))?;
+
+    Ok(json!({
+        "names": names,
+        "levels": levels,
+        "numTicks": ticks,
+        "maxSelf": max_self,
+    }))
+}
+
 fn query_end_ms() -> i64 {
     i64::MAX
 }
@@ -787,4 +828,27 @@ fn query_start_ms() -> i64 {
 
 fn json_time_range() -> Value {
     json!({ "start": query_start_ms(), "end": query_end_ms() })
+}
+
+#[test]
+fn flamebearer_differential_rejects_shape_drift() {
+    let expected = json!({
+        "flamebearer": {
+            "names": ["total", "main"],
+            "levels": [[0, 7, 0, 0], [0, 7, 7, 1]],
+            "numTicks": 7,
+            "maxSelf": 7
+        }
+    });
+    let actual = json!({
+        "flamebearer": {
+            "names": ["total", "main"],
+            "levels": [[0, 8, 0, 0], [0, 8, 8, 1]],
+            "numTicks": 8,
+            "maxSelf": 8
+        }
+    });
+
+    let err = assert_flamebearer_equal(&expected, &actual).unwrap_err();
+    assert!(err.to_string().contains("flamebearer mismatch"));
 }
