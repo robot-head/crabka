@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, ListArray, StringArray,
+    StructArray,
 };
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
-    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_INSTRUMENTATION_NAME,
-    SCOL_INSTRUMENTATION_VERSION, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
+    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME,
+    SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
     SummaryColumns, TraceBlockStats, TraceIndex, read_block, span_block_decl, span_block_schema,
 };
 use object_store::ObjectStore;
@@ -120,6 +121,8 @@ fn tag_metadata(batches: &[RecordBatch]) -> Result<TagMetadata, TracesError> {
     let mut tag_values = BTreeMap::new();
     for batch in batches {
         collect_attr_metadata(batch, &mut tag_names, &mut tag_values)?;
+        collect_event_metadata(batch, &mut tag_names, &mut tag_values)?;
+        collect_link_metadata(batch, &mut tag_names, &mut tag_values)?;
         collect_string_column_metadata(
             batch,
             SCOL_INSTRUMENTATION_NAME,
@@ -166,6 +169,151 @@ fn collect_attr_metadata(
         }
     }
     Ok(())
+}
+
+fn collect_event_metadata(
+    batch: &RecordBatch,
+    tag_names: &mut BTreeSet<String>,
+    tag_values: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), TracesError> {
+    let Some(events) = optional_list_column(batch, SCOL_EVENTS)? else {
+        return Ok(());
+    };
+    collect_nested_metadata(events, |event| {
+        let names = struct_string_field(event, 0)?;
+        let times = struct_i64_field(event, 1)?;
+        let keys = struct_list_field(event, 2)?;
+        let values = struct_list_field(event, 3)?;
+        for idx in 0..event.len() {
+            if event.is_null(idx) {
+                continue;
+            }
+            if !names.is_null(idx) {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    "event:name",
+                    names.value(idx).to_string(),
+                );
+            }
+            if !times.is_null(idx) {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    "event:timeSinceStart",
+                    times.value(idx).to_string(),
+                );
+            }
+            collect_nested_attrs(keys, values, idx, tag_names, tag_values)?;
+        }
+        Ok(())
+    })
+}
+
+fn collect_link_metadata(
+    batch: &RecordBatch,
+    tag_names: &mut BTreeSet<String>,
+    tag_values: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), TracesError> {
+    let Some(links) = optional_list_column(batch, SCOL_LINKS)? else {
+        return Ok(());
+    };
+    collect_nested_metadata(links, |link| {
+        let trace_ids = struct_fixed_field(link, 0)?;
+        let span_ids = struct_fixed_field(link, 1)?;
+        let keys = struct_list_field(link, 2)?;
+        let values = struct_list_field(link, 3)?;
+        for idx in 0..link.len() {
+            if link.is_null(idx) {
+                continue;
+            }
+            if !trace_ids.is_null(idx) {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    "link:traceID",
+                    hex::encode(trace_ids.value(idx)),
+                );
+            }
+            if !span_ids.is_null(idx) {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    "link:spanID",
+                    hex::encode(span_ids.value(idx)),
+                );
+            }
+            collect_nested_attrs(keys, values, idx, tag_names, tag_values)?;
+        }
+        Ok(())
+    })
+}
+
+fn collect_nested_metadata(
+    values: &ListArray,
+    mut collect: impl FnMut(&StructArray) -> Result<(), TracesError>,
+) -> Result<(), TracesError> {
+    for row in 0..values.len() {
+        if values.is_null(row) {
+            continue;
+        }
+        let nested = values.value(row);
+        let nested = nested
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or_else(|| TracesError::Block("nested metadata row is not a struct".into()))?;
+        collect(nested)?;
+    }
+    Ok(())
+}
+
+fn collect_nested_attrs(
+    keys: &ListArray,
+    values: &ListArray,
+    idx: usize,
+    tag_names: &mut BTreeSet<String>,
+    tag_values: &mut BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), TracesError> {
+    if keys.is_null(idx) {
+        return Ok(());
+    }
+    let attr_keys = keys.value(idx);
+    let attr_keys = attr_keys
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TracesError::Block("nested attr keys are not Utf8".into()))?;
+    let attr_values = if values.is_null(idx) {
+        None
+    } else {
+        Some(values.value(idx))
+    };
+    let attr_values = attr_values
+        .as_ref()
+        .and_then(|array| array.as_any().downcast_ref::<ListArray>());
+
+    for attr_idx in 0..attr_keys.len() {
+        if attr_keys.is_null(attr_idx) {
+            continue;
+        }
+        let key = attr_keys.value(attr_idx);
+        if let Some(value) = attr_values.and_then(|values| string_list_value(values, attr_idx)) {
+            insert_tag_value(tag_names, tag_values, key, value);
+        } else {
+            tag_names.insert(key.to_string());
+        }
+    }
+    Ok(())
+}
+
+fn string_list_value(values: &ListArray, idx: usize) -> Option<String> {
+    if idx >= values.len() || values.is_null(idx) {
+        return None;
+    }
+    let values = values.value(idx);
+    let values = values.as_any().downcast_ref::<StringArray>()?;
+    (0..values.len())
+        .find(|value_idx| !values.is_null(*value_idx))
+        .map(|value_idx| values.value(value_idx).to_string())
 }
 
 fn collect_string_column_metadata(
@@ -280,6 +428,54 @@ fn list_column<'a>(batch: &'a RecordBatch, column: &str) -> Result<&'a ListArray
         .ok_or_else(|| TracesError::Block(format!("{column} is not a list")))
 }
 
+fn optional_list_column<'a>(
+    batch: &'a RecordBatch,
+    column: &str,
+) -> Result<Option<&'a ListArray>, TracesError> {
+    let Some(col) = batch.column_by_name(column) else {
+        return Ok(None);
+    };
+    col.as_any()
+        .downcast_ref::<ListArray>()
+        .map(Some)
+        .ok_or_else(|| TracesError::Block(format!("{column} is not a list")))
+}
+
+fn struct_string_field(array: &StructArray, idx: usize) -> Result<&StringArray, TracesError> {
+    array
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TracesError::Block(format!("struct field {idx} is not Utf8")))
+}
+
+fn struct_i64_field(array: &StructArray, idx: usize) -> Result<&Int64Array, TracesError> {
+    array
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| TracesError::Block(format!("struct field {idx} is not Int64")))
+}
+
+fn struct_fixed_field(
+    array: &StructArray,
+    idx: usize,
+) -> Result<&FixedSizeBinaryArray, TracesError> {
+    array
+        .column(idx)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .ok_or_else(|| TracesError::Block(format!("struct field {idx} is not FixedSizeBinary")))
+}
+
+fn struct_list_field(array: &StructArray, idx: usize) -> Result<&ListArray, TracesError> {
+    array
+        .column(idx)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| TracesError::Block(format!("struct field {idx} is not a list")))
+}
+
 fn insert_tag_value(
     tag_names: &mut BTreeSet<String>,
     tag_values: &mut BTreeMap<String, BTreeSet<String>>,
@@ -295,7 +491,9 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
-    use crate::span::{AttrValue, KeyValue, Span, SpanKind, StatusCode, batch::span_batch};
+    use crate::span::{
+        AttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind, StatusCode, batch::span_batch,
+    };
 
     fn span() -> Span {
         Span {
@@ -316,8 +514,22 @@ mod tests {
                 key: "env".into(),
                 value: AttrValue::Str("prod".into()),
             }],
-            events: Vec::new(),
-            links: Vec::new(),
+            events: vec![EventRecord {
+                time_unix_nano: 1_050,
+                name: "exception".into(),
+                attrs: vec![KeyValue {
+                    key: "cache.key".into(),
+                    value: AttrValue::Str("users".into()),
+                }],
+            }],
+            links: vec![LinkRecord {
+                trace_id: [9; 16],
+                span_id: [8; 8],
+                attrs: vec![KeyValue {
+                    key: "link.kind".into(),
+                    value: AttrValue::Str("retry".into()),
+                }],
+            }],
             instrumentation_scope: "otel-rust".into(),
             instrumentation_version: "1.2.3".into(),
         }
@@ -370,11 +582,33 @@ mod tests {
         assert!(names.contains(&"service.name".to_string()));
         assert!(names.contains(&"env".to_string()));
         assert!(names.contains(&"instrumentation:name".to_string()));
+        assert!(names.contains(&"event:name".to_string()));
+        assert!(names.contains(&"event:timeSinceStart".to_string()));
+        assert!(names.contains(&"cache.key".to_string()));
+        assert!(names.contains(&"link:traceID".to_string()));
+        assert!(names.contains(&"link:spanID".to_string()));
+        assert!(names.contains(&"link.kind".to_string()));
         assert!(index.tag_values("tenant", "service.name", 0, 2_000) == vec!["api".to_string()]);
         assert!(index.tag_values("tenant", "env", 0, 2_000) == vec!["prod".to_string()]);
         assert!(
             index.tag_values("tenant", "instrumentation:name", 0, 2_000)
                 == vec!["otel-rust".to_string()]
         );
+        assert!(
+            index.tag_values("tenant", "event:name", 0, 2_000) == vec!["exception".to_string()]
+        );
+        assert!(
+            index.tag_values("tenant", "event:timeSinceStart", 0, 2_000) == vec!["50".to_string()]
+        );
+        assert!(index.tag_values("tenant", "cache.key", 0, 2_000) == vec!["users".to_string()]);
+        assert!(
+            index.tag_values("tenant", "link:traceID", 0, 2_000)
+                == vec!["09090909090909090909090909090909".to_string()]
+        );
+        assert!(
+            index.tag_values("tenant", "link:spanID", 0, 2_000)
+                == vec!["0808080808080808".to_string()]
+        );
+        assert!(index.tag_values("tenant", "link.kind", 0, 2_000) == vec!["retry".to_string()]);
     }
 }
