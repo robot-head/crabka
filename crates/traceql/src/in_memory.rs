@@ -18,6 +18,10 @@ use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_w
 use crate::store::{ScanResult, SpanMatcher, SpanStore};
 
 const INTRINSIC_TAGS: &[&str] = &[
+    "event:name",
+    "event:timeSinceStart",
+    "link:spanID",
+    "link:traceID",
     "span:childCount",
     "span:duration",
     "span:id",
@@ -35,6 +39,8 @@ const INTRINSIC_TAGS: &[&str] = &[
     "trace:rootName",
     "trace:rootService",
 ];
+const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
+const LINK_TAGS: &[&str] = &["link:spanID", "link:traceID"];
 
 struct StoredTrace {
     trace_id: [u8; 16],
@@ -317,12 +323,26 @@ impl SpanStore for InMemorySpanStore {
     ) -> Result<Vec<ScopedTag>> {
         let mut resource = BTreeSet::new();
         let mut span = BTreeSet::new();
+        let mut event = BTreeSet::new();
+        let mut link = BTreeSet::new();
         let mut instrumentation = BTreeSet::new();
         let traces = self.traces_in_range(tenant, start_ns, end_ns);
         for trace in &traces {
             resource.insert("service.name".to_string());
             for input in &trace.spans {
                 span.extend(input.attrs.iter().map(|(key, _)| key.clone()));
+                if !input.events.is_empty() {
+                    event.extend(EVENT_TAGS.iter().map(|tag| (*tag).to_string()));
+                }
+                if !input.links.is_empty() {
+                    link.extend(LINK_TAGS.iter().map(|tag| (*tag).to_string()));
+                }
+                for event_ref in &input.events {
+                    event.extend(event_ref.attributes.iter().map(|(key, _)| key.clone()));
+                }
+                for link_ref in &input.links {
+                    link.extend(link_ref.attributes.iter().map(|(key, _)| key.clone()));
+                }
                 if !input.instrumentation_name.is_empty() {
                     instrumentation.insert("instrumentation:name".to_string());
                 }
@@ -354,6 +374,18 @@ impl SpanStore for InMemorySpanStore {
                     .collect(),
             });
         }
+        if matches!(scope, None | Some(TagScope::Event)) && !event.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Event,
+                tags: event.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(TagScope::Link)) && !link.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Link,
+                tags: link.into_iter().collect(),
+            });
+        }
         if matches!(scope, None | Some(TagScope::Instrumentation)) && !instrumentation.is_empty() {
             out.push(ScopedTag {
                 scope: TagScope::Instrumentation,
@@ -379,6 +411,8 @@ impl SpanStore for InMemorySpanStore {
             }
             for (idx, input) in trace.spans.iter().enumerate() {
                 collect_span_intrinsic_values(input, &trace.nested, idx, tag, &mut values);
+                collect_event_values(input, tag, &mut values);
+                collect_link_values(input, tag, &mut values);
                 values.extend(
                     input
                         .attrs
@@ -501,6 +535,50 @@ fn collect_span_intrinsic_values(
     }
 }
 
+fn collect_event_values(span: &InputSpan, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for event in &span.events {
+        match tag {
+            "event:name" => {
+                values.insert(("string".to_string(), event.name.clone()));
+            }
+            "event:timeSinceStart" => {
+                values.insert((
+                    "duration".to_string(),
+                    event.time_since_start_nano.to_string(),
+                ));
+            }
+            _ => {}
+        }
+        values.extend(
+            event
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == tag)
+                .map(|(_, value)| typed_value_parts(value)),
+        );
+    }
+}
+
+fn collect_link_values(span: &InputSpan, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for link in &span.links {
+        match tag {
+            "link:traceID" => {
+                values.insert(("string".to_string(), bytes_to_hex(&link.trace_id)));
+            }
+            "link:spanID" => {
+                values.insert(("string".to_string(), bytes_to_hex(&link.span_id)));
+            }
+            _ => {}
+        }
+        values.extend(
+            link.attributes
+                .iter()
+                .filter(|(key, _)| key == tag)
+                .map(|(_, value)| typed_value_parts(value)),
+        );
+    }
+}
+
 fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -539,7 +617,7 @@ mod tests {
     use assert2::assert;
     use datafusion::arrow::array::AsArray;
 
-    use crate::result::AttrValue;
+    use crate::result::{AttrValue, EventRef, LinkRef};
     use crate::span_columns::{COL_NS_LEFT, COL_PARENT_ID, InputSpan};
 
     fn span(id: u8, parent: Option<u8>, name: &str, attrs: Vec<(&str, AttrValue)>) -> InputSpan {
@@ -669,6 +747,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tag_names_and_values_return_event_and_link_metadata() {
+        let mut input = span(1, None, "root", vec![]);
+        input.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "exception".into(),
+            attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
+        }];
+        input.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "svc", "op", vec![input]);
+
+        let event_names = s
+            .tag_names("t", Some(TagScope::Event), 0, 10_000)
+            .await
+            .unwrap();
+        assert!(event_names.len() == 1);
+        assert!(event_names[0].scope == TagScope::Event);
+        assert!(event_names[0].tags == vec!["cache.key", "event:name", "event:timeSinceStart"]);
+
+        let link_names = s
+            .tag_names("t", Some(TagScope::Link), 0, 10_000)
+            .await
+            .unwrap();
+        assert!(link_names.len() == 1);
+        assert!(link_names[0].scope == TagScope::Link);
+        assert!(link_names[0].tags == vec!["link.kind", "link:spanID", "link:traceID"]);
+
+        assert!(
+            s.tag_values("t", "event:name", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "exception".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "event:timeSinceStart", 0, 10_000)
+                .await
+                .unwrap()
+                == vec![TypedValue {
+                    type_: "duration".into(),
+                    value: "50".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "cache.key", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "users".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "link:traceID", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "09090909090909090909090909090909".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "link:spanID", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "0808080808080808".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "link.kind", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "retry".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
     async fn tag_names_return_intrinsic_scope() {
         let mut s = InMemorySpanStore::new();
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
@@ -682,6 +838,10 @@ mod tests {
         assert!(
             got[0].tags
                 == vec![
+                    "event:name",
+                    "event:timeSinceStart",
+                    "link:spanID",
+                    "link:traceID",
                     "span:childCount",
                     "span:duration",
                     "span:id",
