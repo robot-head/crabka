@@ -28,6 +28,7 @@ pub struct RawProfile {
     pub labels: Labels,
     pub profile: PprofProfile,
     pub delta: bool,
+    pub sample_timestamps_ns: Vec<Vec<i64>>,
 }
 
 /// One series after the multi-value split: a single `__profile_type__`.

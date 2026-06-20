@@ -23,6 +23,7 @@ pub fn decode_otlp(
         let service_name = resolve_service_name(resource_profiles);
         for scope_profiles in &resource_profiles.scope_profiles {
             for profile in &scope_profiles.profiles {
+                let sample_timestamps_ns = otlp_sample_timestamps(profile)?;
                 let profile = otlp_profile_to_pprof(profile, dict)?;
                 let mut labels = Labels::new();
                 labels.insert("service_name", service_name.clone());
@@ -33,6 +34,7 @@ pub fn decode_otlp(
                     labels,
                     profile,
                     delta: false,
+                    sample_timestamps_ns,
                 });
             }
         }
@@ -134,6 +136,26 @@ fn otlp_profile_to_pprof(
     Ok(PprofProfile::from(pprof))
 }
 
+fn otlp_sample_timestamps(
+    profile: &pb::otlp_profiles::Profile,
+) -> Result<Vec<Vec<i64>>, ProfilesError> {
+    profile
+        .samples
+        .iter()
+        .map(|sample| {
+            sample
+                .timestamps_unix_nano
+                .iter()
+                .map(|timestamp| {
+                    i64::try_from(*timestamp).map_err(|_| {
+                        ProfilesError::Invalid("OTLP sample timestamp overflows i64".to_string())
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn value_type(value: &pb::otlp_profiles::ValueType) -> crabka_pprof::proto::ValueType {
     crabka_pprof::proto::ValueType {
         r#type: i64::from(value.type_strindex),
@@ -223,12 +245,17 @@ mod tests {
                 type_strindex: 1,
                 unit_strindex: 2,
             }),
+            period_type: Some(ValueType {
+                type_strindex: 1,
+                unit_strindex: 2,
+            }),
             samples: vec![Sample {
                 stack_index: 0,
                 values: vec![7],
-                timestamps_unix_nano: vec![1_700_000_000_000_000_000],
+                timestamps_unix_nano: vec![1_700_000_000_000_000_123],
                 ..Default::default()
             }],
+            time_unix_nano: 1_700_000_000_000_000_000,
             ..Default::default()
         };
         let req = pb::otlp_profiles::ExportProfilesServiceRequest {
@@ -247,5 +274,7 @@ mod tests {
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__name__") == Some("samples"));
         assert!(!out[0].profile.sample_types().is_empty());
+        let split = crate::ingest::split_sample_types(&out[0]).unwrap();
+        assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
     }
 }

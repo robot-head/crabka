@@ -90,6 +90,7 @@ pub(crate) mod test_fixtures {
             labels,
             profile: cpu_profile(),
             delta: false,
+            sample_timestamps_ns: Vec::new(),
         }
     }
 
@@ -138,6 +139,7 @@ pub(crate) mod test_fixtures {
                 ..Default::default()
             }),
             delta: false,
+            sample_timestamps_ns: Vec::new(),
         }
     }
 

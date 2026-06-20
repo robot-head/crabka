@@ -68,12 +68,18 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
         }
 
         let mut groups = BTreeMap::<Vec<(String, String)>, (Labels, Vec<DecodedSample>)>::new();
-        for sample in raw.profile.samples() {
+        for (sample_idx, sample) in raw.profile.samples().iter().enumerate() {
             let value = sample
                 .value
                 .get(idx)
                 .copied()
                 .ok_or_else(|| ProfilesError::Decode(format!("sample value[{idx}] missing")))?;
+            let timestamp_ns = raw
+                .sample_timestamps_ns
+                .get(sample_idx)
+                .and_then(|timestamps| timestamps.get(idx))
+                .copied()
+                .unwrap_or(timestamp_ns);
             let stacktrace_location_refs = sample
                 .location_id
                 .iter()
@@ -195,6 +201,7 @@ mod tests {
             labels,
             profile: two_type_profile(),
             delta: false,
+            sample_timestamps_ns: Vec::new(),
         };
 
         let out = split_sample_types(&raw).unwrap();
@@ -272,6 +279,7 @@ mod tests {
             labels,
             profile: PprofProfile::from(profile),
             delta: false,
+            sample_timestamps_ns: Vec::new(),
         })
         .unwrap();
 
@@ -328,6 +336,7 @@ mod tests {
             labels,
             profile: PprofProfile::from(profile),
             delta: false,
+            sample_timestamps_ns: Vec::new(),
         })
         .unwrap();
 

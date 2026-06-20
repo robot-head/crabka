@@ -740,6 +740,7 @@ mod tests {
                 labels,
                 profile,
                 delta: false,
+                sample_timestamps_ns: Vec::new(),
             }],
         )
         .await

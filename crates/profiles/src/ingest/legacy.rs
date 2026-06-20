@@ -158,6 +158,7 @@ pub async fn decode_ingest_multipart(
         labels,
         profile,
         delta,
+        sample_timestamps_ns: Vec::new(),
     })
 }
 
