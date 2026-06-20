@@ -160,6 +160,11 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::Compare)
             }
+            "coalesce" => {
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::Coalesce)
+            }
             "select" => {
                 self.expect(&Token::LParen)?;
                 let fields = self.parse_field_list()?;

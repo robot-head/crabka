@@ -129,6 +129,7 @@ pub enum Pipeline {
     BottomK(usize),
     Compare,
     Select(Vec<Field>),
+    Coalesce,
 }
 
 #[derive(Clone, Debug, PartialEq)]
