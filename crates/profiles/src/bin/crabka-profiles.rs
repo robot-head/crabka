@@ -13,6 +13,7 @@ use crabka_profiles::compactor::{DownsamplePolicy, compact_once_with_policy};
 use crabka_profiles::distributor::{DistributorState, KafkaSink, serve};
 use crabka_profiles::hot_store::{WalTailProfileStore, run_wal_tail};
 use crabka_profiles::ingest::{RelabelConfig, TenantLimitConfig};
+use crabka_profiles::limits::OverridesProvider;
 use crabka_profiles::query::{QuerierState, serve as serve_querier};
 use crabka_profiles::query_frontend::FrontendConfig;
 use object_store::ObjectStore;
@@ -32,6 +33,8 @@ struct Cli {
     query_frontend_shard_ms: i64,
     #[arg(long)]
     tenant_limits_config: Option<std::path::PathBuf>,
+    #[arg(long)]
+    profiles_limits_overrides_config: Option<std::path::PathBuf>,
     #[arg(long, default_value = "crabka-profiles-query-wal-tail")]
     query_wal_tail_group_id: String,
     #[arg(long, default_value_t = 8)]
@@ -95,6 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Target::Querier => {
+            let overrides = load_profiles_limits_overrides_config(
+                cli.profiles_limits_overrides_config.as_deref(),
+            )?;
             let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
             let store: Arc<dyn ObjectStore> = Arc::new(store);
             let index = ProfileIndex::load(&store, "index/profiles.json")
@@ -108,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(QuerierState::new(union));
+            let state = Arc::new(QuerierState::new_with_overrides(union, overrides));
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
@@ -117,6 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         }
         Target::QueryFrontend => {
+            let overrides = load_profiles_limits_overrides_config(
+                cli.profiles_limits_overrides_config.as_deref(),
+            )?;
             let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
             let store: Arc<dyn ObjectStore> = Arc::new(store);
             let index = ProfileIndex::load(&store, "index/profiles.json")
@@ -130,11 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(QuerierState::new_frontend(
+            let state = Arc::new(QuerierState::new_frontend_with_overrides(
                 union,
                 FrontendConfig {
                     shard_width_ms: cli.query_frontend_shard_ms,
                 },
+                overrides,
             ));
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
@@ -186,6 +196,16 @@ fn load_tenant_limits_config(
     };
     let bytes = std::fs::read(path)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn load_profiles_limits_overrides_config(
+    path: Option<&Path>,
+) -> Result<OverridesProvider, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(OverridesProvider::new(Default::default()));
+    };
+    let text = std::fs::read_to_string(path)?;
+    Ok(OverridesProvider::from_yaml(&text)?)
 }
 
 fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
@@ -253,6 +273,22 @@ mod tests {
         .unwrap();
 
         assert!(cli.query_wal_tail_group_id == "profiles-tail-a");
+    }
+
+    #[test]
+    fn parses_profiles_limits_overrides_config() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "query-frontend",
+            "--profiles-limits-overrides-config",
+            "overrides.yaml",
+        ])
+        .unwrap();
+
+        assert!(
+            cli.profiles_limits_overrides_config.as_deref() == Some(Path::new("overrides.yaml"))
+        );
     }
 
     #[test]
@@ -331,6 +367,28 @@ mod tests {
 
         assert!(config.default.max_label_names_per_series == 10);
         assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
+    }
+
+    #[test]
+    fn loads_profiles_limits_overrides_config_from_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overrides.yaml");
+        std::fs::write(
+            &path,
+            r#"
+overrides:
+  tenant-a:
+    max_query_length_secs: 30
+    max_flamegraph_nodes_max: 512
+"#,
+        )
+        .unwrap();
+
+        let overrides = load_profiles_limits_overrides_config(Some(&path)).unwrap();
+
+        assert!(overrides.for_tenant("tenant-a").max_query_length_secs == 30);
+        assert!(overrides.for_tenant("tenant-a").max_flamegraph_nodes_max == 512);
+        assert!(overrides.for_tenant("tenant-b").max_query_length_secs == 0);
     }
 
     #[test]

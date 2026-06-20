@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::limits::Limits;
+use crate::limits::{Limits, OverridesProvider};
 use crate::query_frontend::{FrontendConfig, split_inclusive_range};
 use crate::wire::pb;
 
@@ -30,7 +30,7 @@ pub struct QuerierState<S: ProfileStore = DefaultStore> {
     store: Arc<S>,
     engine: FlameEngine<S>,
     execution: QueryExecution,
-    limits: Limits,
+    overrides: OverridesProvider,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +54,12 @@ impl<S: ProfileStore> QuerierState<S> {
 
     #[must_use]
     pub fn new_with_limits(store: Arc<S>, limits: Limits) -> Self {
-        Self::from_parts(store, QueryExecution::Direct, limits)
+        Self::new_with_overrides(store, OverridesProvider::new(limits))
+    }
+
+    #[must_use]
+    pub fn new_with_overrides(store: Arc<S>, overrides: OverridesProvider) -> Self {
+        Self::from_parts(store, QueryExecution::Direct, overrides)
     }
 
     #[must_use]
@@ -64,27 +69,44 @@ impl<S: ProfileStore> QuerierState<S> {
 
     #[must_use]
     pub fn new_frontend_with_limits(store: Arc<S>, config: FrontendConfig, limits: Limits) -> Self {
-        Self::from_parts(store, QueryExecution::Sharded(config), limits)
+        Self::new_frontend_with_overrides(store, config, OverridesProvider::new(limits))
     }
 
-    fn from_parts(store: Arc<S>, execution: QueryExecution, limits: Limits) -> Self {
+    #[must_use]
+    pub fn new_frontend_with_overrides(
+        store: Arc<S>,
+        config: FrontendConfig,
+        overrides: OverridesProvider,
+    ) -> Self {
+        Self::from_parts(store, QueryExecution::Sharded(config), overrides)
+    }
+
+    fn from_parts(store: Arc<S>, execution: QueryExecution, overrides: OverridesProvider) -> Self {
         let engine = FlameEngine::new(Arc::clone(&store), EngineOpts::default());
         Self {
             store,
             engine,
             execution,
-            limits,
+            overrides,
         }
     }
 
-    fn validate_query_range(&self, start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
-        self.limits
+    fn validate_query_range(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<(), ProfileError> {
+        self.overrides
+            .for_tenant(tenant)
             .validate_query_range_ms(start_ms, end_ms)
             .map_err(|err| ProfileError::Plan(err.message()))
     }
 
-    fn effective_max_nodes(&self, requested: i64) -> i64 {
-        self.limits.effective_max_nodes(requested)
+    fn effective_max_nodes(&self, tenant: &str, requested: i64) -> i64 {
+        self.overrides
+            .for_tenant(tenant)
+            .effective_max_nodes(requested)
     }
 
     async fn select_merge_stacktraces(
@@ -96,8 +118,8 @@ impl<S: ProfileStore> QuerierState<S> {
         end_ms: i64,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
-        self.validate_query_range(start_ms, end_ms)?;
-        let max_nodes = self.effective_max_nodes(max_nodes);
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -138,7 +160,7 @@ impl<S: ProfileStore> QuerierState<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Series>, ProfileError> {
-        self.validate_query_range(start_ms, end_ms)?;
+        self.validate_query_range(tenant, start_ms, end_ms)?;
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -182,8 +204,8 @@ impl<S: ProfileStore> QuerierState<S> {
         end_ms: i64,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
-        self.validate_query_range(start_ms, end_ms)?;
-        let max_nodes = self.effective_max_nodes(max_nodes);
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -278,7 +300,7 @@ where
         (req.start, req.end)
     };
     state
-        .validate_query_range(start, end)
+        .validate_query_range(&tenant, start, end)
         .map_err(connect_error)?;
     let types = state
         .store
@@ -316,7 +338,7 @@ where
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
-        .validate_query_range(req.0.start, req.0.end)
+        .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
     let names = state
         .store
@@ -339,7 +361,7 @@ where
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
-        .validate_query_range(req.0.start, req.0.end)
+        .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
     let names = state
         .store
@@ -362,7 +384,7 @@ where
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
-        .validate_query_range(req.0.start, req.0.end)
+        .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
     let labels_set = state
         .store
@@ -515,7 +537,7 @@ where
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
     state
-        .validate_query_range(req.start, req.end)
+        .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
     let profile = state
         .engine
@@ -544,7 +566,7 @@ where
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
     state
-        .validate_query_range(req.start, req.end)
+        .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
     let heatmap = state
         .engine
@@ -584,12 +606,12 @@ where
         .right
         .ok_or_else(|| connect_error(ProfileError::Plan("missing right query".to_string())))?;
     state
-        .validate_query_range(left.start, left.end)
+        .validate_query_range(&tenant, left.start, left.end)
         .map_err(connect_error)?;
     state
-        .validate_query_range(right.start, right.end)
+        .validate_query_range(&tenant, right.start, right.end)
         .map_err(connect_error)?;
-    let max_nodes = state.effective_max_nodes(left.max_nodes.max(right.max_nodes));
+    let max_nodes = state.effective_max_nodes(&tenant, left.max_nodes.max(right.max_nodes));
     let flamegraph = state
         .engine
         .diff(
@@ -625,7 +647,7 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     state
-        .validate_query_range(req.0.start, req.0.end)
+        .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
     let stats = state
         .store
@@ -750,7 +772,7 @@ where
     };
     let start = query_param_i64(&params, "from").unwrap_or(0);
     let end = query_param_i64(&params, "until").unwrap_or(i64::MAX);
-    if let Err(err) = state.validate_query_range(start, end) {
+    if let Err(err) = state.validate_query_range(&tenant, start, end) {
         return profile_error_response(err);
     }
     match state
@@ -759,7 +781,7 @@ where
             &tenant,
             (&left_type, &left_selector, start, end),
             (&right_type, &right_selector, start, end),
-            state.effective_max_nodes(query_param_i64(&params, "maxNodes").unwrap_or(0)),
+            state.effective_max_nodes(&tenant, query_param_i64(&params, "maxNodes").unwrap_or(0)),
         )
         .await
     {
@@ -1054,7 +1076,7 @@ mod tests {
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
     use super::*;
-    use crate::Limits;
+    use crate::{Limits, OverridesProvider};
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 
@@ -1145,6 +1167,54 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("query length exceeded"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn select_series_uses_tenant_specific_query_overrides() {
+        let state = QuerierState::new_with_overrides(
+            Arc::new(store_with_frame("main.work")),
+            OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    max_query_length_secs: 1
+"#,
+            )
+            .unwrap(),
+        );
+
+        let tenant_a_err = state
+            .select_series(
+                "tenant-a",
+                PT,
+                r#"{service_name="api"}"#,
+                &[],
+                1.0,
+                SeriesAgg::Sum,
+                0,
+                2_000,
+            )
+            .await
+            .unwrap_err();
+        let tenant_b_series = state
+            .select_series(
+                "tenant-b",
+                PT,
+                r#"{service_name="api"}"#,
+                &[],
+                1.0,
+                SeriesAgg::Sum,
+                0,
+                2_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            tenant_a_err.to_string().contains("query length exceeded"),
+            "{tenant_a_err}"
+        );
+        assert!(tenant_b_series.is_empty());
     }
 
     #[tokio::test]
