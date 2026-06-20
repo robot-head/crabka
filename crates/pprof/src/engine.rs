@@ -73,6 +73,61 @@ impl<S: ProfileStore> FlameEngine<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_stacktraces_grouped(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        group_by: &[String],
+    ) -> Result<FlameGraph, ProfileError> {
+        if group_by.is_empty() {
+            return self
+                .select_merge_stacktraces(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    start_ms,
+                    end_ms,
+                    max_nodes,
+                )
+                .await;
+        }
+        let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
+        let groups = self
+            .store
+            .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+            .await?;
+        let mut tree = Tree::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let prefix = vec![Frame {
+                function: group_frame_name(&labels),
+                file: String::new(),
+                line: 0,
+            }];
+            merge_scan_to_tree(&scan, &mut tree, &prefix, None, &[]).await?;
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_flamegraph(max_nodes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn select_merge_stacktraces_with_stack_trace_selector(
         &self,
         tenant: &str,
@@ -282,32 +337,8 @@ impl<S: ProfileStore> FlameEngine<S> {
             table = scan.samples_table,
             span_where = span_where,
         );
-        let batches = scan
-            .ctx
-            .sql(&sql)
-            .await
-            .map_err(|err| ProfileError::Plan(err.to_string()))?
-            .collect()
-            .await
-            .map_err(|err| ProfileError::Exec(err.to_string()))?;
-
         let mut tree = Tree::new();
-        for batch in batches {
-            let partitions = batch.column(0).as_primitive::<UInt64Type>();
-            let stacktrace_ids = batch.column(1).as_primitive::<UInt64Type>();
-            let values = batch.column(2).as_primitive::<Int64Type>();
-            for row in 0..batch.num_rows() {
-                let partition = partitions.value(row);
-                let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
-                    ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
-                })?;
-                let value = values.value(row);
-                let frames = scan.symbols.resolve(partition, stacktrace_id);
-                if call_sites.is_empty() || stack_matches_call_sites(&frames, call_sites) {
-                    tree.add_stack(&frames, value);
-                }
-            }
-        }
+        merge_sql_to_tree(&scan, &sql, &mut tree, &[], call_sites).await?;
         Ok(tree)
     }
 
@@ -857,6 +888,79 @@ async fn heatmap_points_from_totals(
         }
     }
     Ok(points)
+}
+
+async fn merge_scan_to_tree(
+    scan: &crate::ProfileScan,
+    tree: &mut Tree,
+    prefix_frames: &[Frame],
+    span_ids: Option<&[u64]>,
+    call_sites: &[String],
+) -> Result<(), ProfileError> {
+    let span_where = span_ids.map_or_else(String::new, |ids| {
+        format!(
+            " WHERE {span} IN ({ids})",
+            span = PCOL_SPAN_ID,
+            ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+        )
+    });
+    let sql = format!(
+        "SELECT {partition}, {stacktrace}, SUM({value}) AS v \
+         FROM {table}{span_where} GROUP BY {partition}, {stacktrace} \
+         ORDER BY {partition}, {stacktrace}",
+        partition = PCOL_STACKTRACE_PARTITION,
+        stacktrace = PCOL_STACKTRACE_ID,
+        value = PCOL_VALUE,
+        table = scan.samples_table,
+        span_where = span_where,
+    );
+    merge_sql_to_tree(scan, &sql, tree, prefix_frames, call_sites).await
+}
+
+async fn merge_sql_to_tree(
+    scan: &crate::ProfileScan,
+    sql: &str,
+    tree: &mut Tree,
+    prefix_frames: &[Frame],
+    call_sites: &[String],
+) -> Result<(), ProfileError> {
+    let batches = scan
+        .ctx
+        .sql(sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    for batch in batches {
+        let partitions = batch.column(0).as_primitive::<UInt64Type>();
+        let stacktrace_ids = batch.column(1).as_primitive::<UInt64Type>();
+        let values = batch.column(2).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            let partition = partitions.value(row);
+            let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
+                ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
+            })?;
+            let mut frames = scan.symbols.resolve(partition, stacktrace_id);
+            if call_sites.is_empty() || stack_matches_call_sites(&frames, call_sites) {
+                frames.extend_from_slice(prefix_frames);
+                tree.add_stack(&frames, values.value(row));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn group_frame_name(labels: &[(String, String)]) -> String {
+    if labels.len() == 1 {
+        labels[0].1.clone()
+    } else {
+        labels
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 async fn series_buckets_from_totals(

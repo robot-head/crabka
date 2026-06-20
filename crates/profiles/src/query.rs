@@ -20,7 +20,7 @@ use crabka_pprof::{
     parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -140,6 +140,44 @@ impl<S: ProfileStore> QuerierState<S> {
             &[],
         )
         .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_merge_stacktraces_grouped(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        group_by: &[String],
+    ) -> Result<FlameGraph, ProfileError> {
+        if group_by.is_empty() {
+            return self
+                .select_merge_stacktraces(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    start_ms,
+                    end_ms,
+                    max_nodes,
+                )
+                .await;
+        }
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(tenant, max_nodes);
+        self.engine
+            .select_merge_stacktraces_grouped(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                max_nodes,
+                group_by,
+            )
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1663,7 +1701,39 @@ struct RenderQuery {
     until: Option<String>,
     #[serde(rename = "maxNodes")]
     max_nodes: Option<i64>,
+    #[serde(default, rename = "groupBy", deserialize_with = "deserialize_group_by")]
+    group_by: Vec<String>,
     format: Option<String>,
+}
+
+fn deserialize_group_by<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+
+    let value = Option::<OneOrMany>::deserialize(deserializer)?;
+    let values = match value {
+        Some(OneOrMany::One(value)) => vec![value],
+        Some(OneOrMany::Many(values)) => values,
+        None => Vec::new(),
+    };
+    Ok(values
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect())
 }
 
 async fn render_handler<S>(
@@ -1689,13 +1759,14 @@ where
         Err(err) => return profile_error_response(err),
     };
     match state
-        .select_merge_stacktraces(
+        .select_merge_stacktraces_grouped(
             &tenant,
             &profile_type,
             &selector,
             start,
             end,
             query.max_nodes.unwrap_or(0),
+            &query.group_by,
         )
         .await
     {
@@ -2477,6 +2548,41 @@ mod tests {
         store
     }
 
+    fn store_with_services(samples: &[(&str, &str, i64)]) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        for (service, env, value) in samples {
+            store.push_sample(
+                "tenant-a",
+                PT,
+                vec![
+                    ("service_name".to_string(), (*service).to_string()),
+                    ("env".to_string(), (*env).to_string()),
+                ],
+                0,
+                stacktrace,
+                *value,
+                10,
+            );
+        }
+        store
+    }
+
     fn store_with_leaf_frames(frames: &[(&str, i64)]) -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         for (name, value) in frames {
@@ -2719,6 +2825,56 @@ overrides:
 
         assert!(body.starts_with("digraph flamegraph"));
         assert!(body.contains("main.work"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn render_group_by_adds_group_frames_to_flamebearer() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_services(&[
+            ("api", "prod", 5),
+            ("worker", "prod", 7),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", &format!(r#"{PT}{{env="prod"}}"#))
+            .append_pair("from", "0")
+            .append_pair("until", "100")
+            .append_pair("groupBy", "service_name")
+            .finish();
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{bound}/pyroscope/render?{query}"))
+            .header("x-scope-orgid", "tenant-a")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let names = body
+            .pointer("/flamebearer/names")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert!(
+            names.iter().any(|name| name.as_str() == Some("api")),
+            "{body}"
+        );
+        assert!(
+            names.iter().any(|name| name.as_str() == Some("worker")),
+            "{body}"
+        );
+        assert!(
+            body.pointer("/flamebearer/numTicks")
+                .and_then(serde_json::Value::as_i64)
+                == Some(12),
+            "{body}"
+        );
     }
 
     #[tokio::test]
