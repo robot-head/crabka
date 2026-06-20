@@ -1,5 +1,6 @@
 +++
 title = "Throughput, CPU & memory over time"
+description = "Interactive per-run and averaged time series from the six-broker matrix: producer throughput, broker CPU, and working-set memory, Crabka against Strimzi."
 weight = 30
 template = "docs/page.html"
 

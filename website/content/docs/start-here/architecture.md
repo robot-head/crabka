@@ -1,5 +1,6 @@
 +++
 title = "Architecture"
+description = "How Crabka is built: a Kafka wire-protocol broker core over Kafka-compatible log segments and KRaft metadata, with operator, registry, gateway, and rebalancer."
 weight = 20
 template = "docs/page.html"
 

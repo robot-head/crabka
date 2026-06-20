@@ -1,5 +1,6 @@
 +++
 title = "Documentation"
+description = "Crabka documentation: a Rust reimplementation of Apache Kafka. Learn the architecture, run the quickstart, deploy on Kubernetes, and look up config reference."
 sort_by = "weight"
 weight = 10
 template = "docs/section.html"

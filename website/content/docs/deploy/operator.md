@@ -1,5 +1,6 @@
 +++
 title = "Operator Deployment"
+description = "Run a Crabka cluster on Kubernetes with the operator: declarative Kafka and KafkaNodePool resources manage broker config, StatefulSets, certificates, and rolls."
 weight = 10
 template = "docs/page.html"
 

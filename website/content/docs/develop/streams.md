@@ -1,5 +1,6 @@
 +++
 title = "Streams and Data Formats"
+description = "Build Rust stream-processing apps with crabka-client-streams: join a KIP-1071 Streams group, run a topology, and read and write Kafka topics with pluggable serdes."
 weight = 10
 template = "docs/page.html"
 +++

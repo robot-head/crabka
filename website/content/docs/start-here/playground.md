@@ -1,5 +1,6 @@
 +++
 title = "Playground"
+description = "Simulate KRaft consensus in your browser. Crabka's deterministic Rust consensus core compiles to WebAssembly so you can drive elections and replication live."
 weight = 30
 template = "docs/page.html"
 
