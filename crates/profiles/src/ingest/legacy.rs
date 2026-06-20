@@ -23,6 +23,8 @@ pub struct IngestQuery {
     pub format: IngestFormat,
     pub sample_rate: u32,
     pub units: String,
+    pub from_ms: Option<i64>,
+    pub until_ms: Option<i64>,
 }
 
 pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
@@ -31,6 +33,8 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
     let mut format = IngestFormat::Groups;
     let mut sample_rate = 100;
     let mut units = "count".to_string();
+    let mut from_ms = None;
+    let mut until_ms = None;
 
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -54,6 +58,12 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
                     units = value;
                 }
             }
+            "from" => {
+                from_ms = Some(parse_unix_time_ms(&value)?);
+            }
+            "until" => {
+                until_ms = Some(parse_unix_time_ms(&value)?);
+            }
             _ => {}
         }
     }
@@ -68,6 +78,8 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
         format,
         sample_rate,
         units,
+        from_ms,
+        until_ms,
     })
 }
 
@@ -145,6 +157,7 @@ pub async fn decode_ingest_multipart(
             jfr_to_pprof(&query.name, &raw)?
         }
     };
+    let profile = apply_query_time(profile, query)?;
     let mut labels = Labels::new();
     labels.insert("__name__", query.name.clone());
     for (name, value) in &query.labels {
@@ -162,6 +175,38 @@ pub async fn decode_ingest_multipart(
         sample_span_ids: Vec::new(),
         sample_trace_ids: Vec::new(),
     })
+}
+
+fn parse_unix_time_ms(value: &str) -> Result<i64, ProfilesError> {
+    let value = value.trim();
+    let numeric = value
+        .parse::<i64>()
+        .map_err(|err| ProfilesError::Invalid(format!("invalid ingest time {value:?}: {err}")))?;
+    Ok(if numeric.abs() < 10_000_000_000 {
+        numeric.saturating_mul(1000)
+    } else {
+        numeric
+    })
+}
+
+fn apply_query_time(
+    profile: PprofProfile,
+    query: &IngestQuery,
+) -> Result<PprofProfile, ProfilesError> {
+    if profile.inner().time_nanos != 0 {
+        return Ok(profile);
+    }
+    let Some(timestamp_ms) = query.until_ms.or(query.from_ms) else {
+        return Ok(profile);
+    };
+    let time_nanos = timestamp_ms.checked_mul(1_000_000).ok_or_else(|| {
+        ProfilesError::Invalid(format!(
+            "ingest timestamp overflows nanoseconds: {timestamp_ms}"
+        ))
+    })?;
+    let mut profile = profile.into_inner();
+    profile.time_nanos = time_nanos;
+    Ok(PprofProfile::from(profile))
 }
 
 #[derive(Debug, Deserialize)]
@@ -623,6 +668,31 @@ mod tests {
         .unwrap();
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string()));
+    }
+
+    #[tokio::test]
+    async fn decode_multipart_folded_groups_uses_until_as_profile_time() {
+        let query =
+            parse_ingest_query("name=myapp&from=1699999999000&until=1700000000000").unwrap();
+        let boundary = "test-boundary";
+        let folded = "main;work 7\n";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"profile\"\r\n");
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(folded.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let raw = decode_ingest_multipart(
+            &query,
+            &format!("multipart/form-data; boundary={boundary}"),
+            bytes::Bytes::from(body),
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+        assert!(raw.profile.inner().time_nanos == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
