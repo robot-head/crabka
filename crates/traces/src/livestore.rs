@@ -33,6 +33,8 @@ const INTRINSIC_TAGS: &[&str] = &[
     "trace:rootName",
     "trace:rootService",
 ];
+const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
+const LINK_TAGS: &[&str] = &["link:traceID", "link:spanID"];
 
 /// In-memory recent span store keyed by tenant and trace id.
 #[derive(Debug)]
@@ -196,6 +198,8 @@ impl LiveSource for LiveStore {
     ) -> LiveResult<Vec<crabka_traceql::ScopedTag>> {
         let mut resource = BTreeSet::new();
         let mut span = BTreeSet::new();
+        let mut event = BTreeSet::new();
+        let mut link = BTreeSet::new();
         let mut instrumentation = BTreeSet::new();
         let mut has_spans = false;
         if let Some(traces) = self.by_tenant.get(tenant) {
@@ -207,6 +211,14 @@ impl LiveSource for LiveStore {
                 has_spans = true;
                 resource.extend(item.resource_attrs.iter().map(|attr| attr.key.clone()));
                 span.extend(item.span_attrs.iter().map(|attr| attr.key.clone()));
+                for event_record in &item.events {
+                    event.extend(EVENT_TAGS.iter().map(|tag| (*tag).to_string()));
+                    event.extend(event_record.attrs.iter().map(|attr| attr.key.clone()));
+                }
+                for link_record in &item.links {
+                    link.extend(LINK_TAGS.iter().map(|tag| (*tag).to_string()));
+                    link.extend(link_record.attrs.iter().map(|attr| attr.key.clone()));
+                }
                 if !item.instrumentation_scope.is_empty() {
                     instrumentation.insert("instrumentation:name".to_string());
                 }
@@ -225,6 +237,18 @@ impl LiveSource for LiveStore {
             out.push(crabka_traceql::ScopedTag {
                 scope: crabka_traceql::TagScope::Span,
                 tags: span.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(crabka_traceql::TagScope::Event)) && !event.is_empty() {
+            out.push(crabka_traceql::ScopedTag {
+                scope: crabka_traceql::TagScope::Event,
+                tags: event.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(crabka_traceql::TagScope::Link)) && !link.is_empty() {
+            out.push(crabka_traceql::ScopedTag {
+                scope: crabka_traceql::TagScope::Link,
+                tags: link.into_iter().collect(),
             });
         }
         if matches!(scope, None | Some(crabka_traceql::TagScope::Intrinsic)) && has_spans {
@@ -279,6 +303,8 @@ impl LiveSource for LiveStore {
                         .map(|attr| typed_value_parts(&attr.value)),
                 );
                 collect_span_intrinsic_value(span, tag, &mut values);
+                collect_event_values(span, tag, &mut values);
+                collect_link_values(span, tag, &mut values);
                 if tag == "instrumentation:name" && !span.instrumentation_scope.is_empty() {
                     values.insert(("string".into(), span.instrumentation_scope.clone()));
                 }
@@ -444,6 +470,55 @@ fn collect_trace_intrinsic_values(
             }
         }
         _ => {}
+    }
+}
+
+fn collect_event_values(span: &Span, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for event in &span.events {
+        match tag {
+            "event:name" => {
+                values.insert(("string".into(), event.name.clone()));
+            }
+            "event:timeSinceStart" => {
+                values.insert((
+                    "duration".into(),
+                    event
+                        .time_unix_nano
+                        .saturating_sub(span.start_ns)
+                        .to_string(),
+                ));
+            }
+            _ => {
+                values.extend(
+                    event
+                        .attrs
+                        .iter()
+                        .filter(|attr| attr.key == tag)
+                        .map(|attr| typed_value_parts(&attr.value)),
+                );
+            }
+        }
+    }
+}
+
+fn collect_link_values(span: &Span, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for link in &span.links {
+        match tag {
+            "link:traceID" => {
+                values.insert(("string".into(), bytes_to_hex(&link.trace_id)));
+            }
+            "link:spanID" => {
+                values.insert(("string".into(), bytes_to_hex(&link.span_id)));
+            }
+            _ => {
+                values.extend(
+                    link.attrs
+                        .iter()
+                        .filter(|attr| attr.key == tag)
+                        .map(|attr| typed_value_parts(&attr.value)),
+                );
+            }
+        }
     }
 }
 

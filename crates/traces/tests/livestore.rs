@@ -2,8 +2,8 @@ use assert2::assert;
 use crabka_blockstore::{SCOL_TRACE_ID, span_block_schema};
 use crabka_traceql::{AttrValue as TraceqlAttrValue, ScopedTag, TagScope, TypedValue};
 use crabka_traces::{
-    AttrValue, KeyValue, LiveStore, Span, SpanKind, SpanRecord, StatusCode,
-    livestore::ingest_wal_payloads, querier::live::LiveSource,
+    AttrValue, EventRecord, KeyValue, LinkRecord, LiveStore, Span, SpanKind, SpanRecord,
+    StatusCode, livestore::ingest_wal_payloads, querier::live::LiveSource,
 };
 use datafusion::catalog::TableProvider;
 
@@ -171,6 +171,81 @@ fn assert_typed_value(values: &[TypedValue], type_: &str, value: &str) {
         values
             .iter()
             .any(|got| got.type_ == type_ && got.value == value)
+    );
+}
+
+#[tokio::test]
+async fn live_source_exposes_event_and_link_tags() {
+    let mut store = LiveStore::new(i64::MAX);
+    let mut span = span([1; 16], 1, 10);
+    span.events.push(EventRecord {
+        time_unix_nano: 17,
+        name: "cache.miss".into(),
+        attrs: vec![KeyValue {
+            key: "cache.key".into(),
+            value: AttrValue::Str("users/7".into()),
+        }],
+    });
+    span.links.push(LinkRecord {
+        trace_id: [2; 16],
+        span_id: [3; 8],
+        attrs: vec![KeyValue {
+            key: "link.kind".into(),
+            value: AttrValue::Str("follows-from".into()),
+        }],
+    });
+    store.ingest(record("tenant-a", span));
+
+    let event_tags = store
+        .tag_names("tenant-a", Some(TagScope::Event), 0, 100)
+        .await
+        .unwrap();
+    assert_tag_scope_contains(
+        &event_tags,
+        TagScope::Event,
+        &["event:name", "event:timeSinceStart", "cache.key"],
+    );
+    let link_tags = store
+        .tag_names("tenant-a", Some(TagScope::Link), 0, 100)
+        .await
+        .unwrap();
+    assert_tag_scope_contains(
+        &link_tags,
+        TagScope::Link,
+        &["link:traceID", "link:spanID", "link.kind"],
+    );
+
+    assert_typed_value(
+        &store
+            .tag_values("tenant-a", "event:name", 0, 100)
+            .await
+            .unwrap(),
+        "string",
+        "cache.miss",
+    );
+    assert_typed_value(
+        &store
+            .tag_values("tenant-a", "event:timeSinceStart", 0, 100)
+            .await
+            .unwrap(),
+        "duration",
+        "7",
+    );
+    assert_typed_value(
+        &store
+            .tag_values("tenant-a", "link:traceID", 0, 100)
+            .await
+            .unwrap(),
+        "string",
+        "02020202020202020202020202020202",
+    );
+    assert_typed_value(
+        &store
+            .tag_values("tenant-a", "link:spanID", 0, 100)
+            .await
+            .unwrap(),
+        "string",
+        "0303030303030303",
     );
 }
 
