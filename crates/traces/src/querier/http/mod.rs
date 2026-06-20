@@ -1035,6 +1035,9 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         obj.insert("parentSpanId".into(), json!(base64(parent_span_id)));
     }
     obj.insert("name".into(), json!(span.name));
+    if let Some(kind) = span_kind_json(span.kind) {
+        obj.insert("kind".into(), json!(kind));
+    }
     obj.insert(
         "startTimeUnixNano".into(),
         json!(span.start_time_unix_nano.to_string()),
@@ -1043,8 +1046,41 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         "endTimeUnixNano".into(),
         json!((span.start_time_unix_nano + span.duration_nanos).to_string()),
     );
+    if let Some(status) = span_status_json(span.status_code, &span.status_message) {
+        obj.insert("status".into(), status);
+    }
     obj.insert("attributes".into(), attrs_json(&span.attributes));
     Value::Object(obj)
+}
+
+fn span_kind_json(kind: i32) -> Option<&'static str> {
+    match kind {
+        1 => Some("SPAN_KIND_INTERNAL"),
+        2 => Some("SPAN_KIND_SERVER"),
+        3 => Some("SPAN_KIND_CLIENT"),
+        4 => Some("SPAN_KIND_PRODUCER"),
+        5 => Some("SPAN_KIND_CONSUMER"),
+        _ => None,
+    }
+}
+
+fn span_status_json(code: i32, message: &str) -> Option<Value> {
+    let code_name = match code {
+        1 => Some("STATUS_CODE_OK"),
+        2 => Some("STATUS_CODE_ERROR"),
+        _ => None,
+    };
+    if code_name.is_none() && message.is_empty() {
+        return None;
+    }
+    let mut status = Map::new();
+    if let Some(code_name) = code_name {
+        status.insert("code".into(), json!(code_name));
+    }
+    if !message.is_empty() {
+        status.insert("message".into(), json!(message));
+    }
+    Some(Value::Object(status))
 }
 
 fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
@@ -1546,6 +1582,42 @@ mod tests {
                 == json!({
                     "name": "tracer",
                     "version": "1.2.3"
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn by_id_projects_span_kind_and_status() {
+        let mut store = InMemorySpanStore::new();
+        let mut span = span_at(9, 1, None, "a", 1_000);
+        span.kind = 2;
+        span.status_code = 2;
+        span.status_message = "boom".into();
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![span]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let span = &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+
+        assert!(status == StatusCode::OK);
+        assert!(span["kind"] == "SPAN_KIND_SERVER");
+        assert!(
+            span["status"]
+                == json!({
+                    "code": "STATUS_CODE_ERROR",
+                    "message": "boom",
                 })
         );
     }
