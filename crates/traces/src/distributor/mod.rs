@@ -252,17 +252,17 @@ fn decode_body(
         .get(CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("identity");
-    let decoded = match encoding {
-        "identity" => body.to_vec(),
-        "gzip" => {
-            let mut out = Vec::new();
-            GzDecoder::new(body)
-                .take(u64::try_from(max_decompressed).unwrap_or(u64::MAX) + 1)
-                .read_to_end(&mut out)
-                .map_err(|err| TracesError::Decode(err.to_string()))?;
-            out
-        }
-        other => return Err(TracesError::UnsupportedContentType(other.to_string())),
+    let decoded = if encoding.eq_ignore_ascii_case("identity") {
+        body.to_vec()
+    } else if encoding.eq_ignore_ascii_case("gzip") {
+        let mut out = Vec::new();
+        GzDecoder::new(body)
+            .take(u64::try_from(max_decompressed).unwrap_or(u64::MAX) + 1)
+            .read_to_end(&mut out)
+            .map_err(|err| TracesError::Decode(err.to_string()))?;
+        out
+    } else {
+        return Err(TracesError::UnsupportedContentType(encoding.to_string()));
     };
     if decoded.len() > max_decompressed {
         return Err(TracesError::TooLarge {
@@ -360,11 +360,14 @@ mod tests {
     use assert2::assert;
     use axum::body::Body;
     use axum::http::Request;
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::trace::v1::{
         ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
     };
     use prost::Message as _;
+    use std::io::Write as _;
     use tonic::Request as GrpcRequest;
     use tower::ServiceExt as _;
 
@@ -433,6 +436,12 @@ mod tests {
         .encode_to_vec()
     }
 
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
     #[tokio::test]
     async fn otlp_push_returns_200_and_appends() {
         let (state, sink) = test_state();
@@ -451,6 +460,25 @@ mod tests {
         assert!(resp.status() == StatusCode::OK);
         assert!(sink.count() == 1);
         assert!(sink.tenant(0) == "tenant-a");
+    }
+
+    #[tokio::test]
+    async fn otlp_push_accepts_case_insensitive_gzip_encoding() {
+        let (state, sink) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-encoding", "GZip")
+                    .body(Body::from(gzip(&otlp_body())))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::OK);
+        assert!(sink.count() == 1);
     }
 
     #[tokio::test]
