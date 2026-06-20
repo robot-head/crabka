@@ -1,6 +1,7 @@
 //! The querier role and Tempo HTTP API.
 
 pub mod http;
+pub mod live;
 
 #[derive(Clone, Debug)]
 pub struct QuerierConfig {

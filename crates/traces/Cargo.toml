@@ -18,6 +18,8 @@ workspace = true
 
 [dependencies]
 crabka-traceql = { path = "../traceql", version = "0.3.7" }
+arrow = { workspace = true }
+async-trait = { workspace = true }
 axum = { workspace = true, features = ["json"] }
 base64 = { workspace = true }
 hex = { workspace = true }

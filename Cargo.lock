@@ -2941,7 +2941,9 @@ dependencies = [
 name = "crabka-traces"
 version = "0.3.7"
 dependencies = [
+ "arrow",
  "assert2",
+ "async-trait",
  "axum",
  "base64",
  "crabka-traceql",
