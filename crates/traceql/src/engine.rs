@@ -172,7 +172,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
         } else {
             options.spss
         };
-        assemble_search_response(&batches, search_limit, effective_spss)
+        assemble_search_response(&batches, search_limit, effective_spss, q.hints.most_recent)
     }
 
     pub async fn query_range(
@@ -983,6 +983,7 @@ pub(crate) fn assemble_search_response(
     batches: &[RecordBatch],
     limit: usize,
     spss: usize,
+    most_recent: bool,
 ) -> Result<SearchResponse> {
     let mut traces: BTreeMap<[u8; 16], TraceAcc> = BTreeMap::new();
     for batch in batches {
@@ -1046,7 +1047,15 @@ pub(crate) fn assemble_search_response(
             }
         })
         .collect();
-    out.sort_by_key(|t| (t.start_time_unix_nano, t.trace_id));
+    if most_recent {
+        out.sort_by(|a, b| {
+            b.start_time_unix_nano
+                .cmp(&a.start_time_unix_nano)
+                .then_with(|| a.trace_id.cmp(&b.trace_id))
+        });
+    } else {
+        out.sort_by_key(|t| (t.start_time_unix_nano, t.trace_id));
+    }
     out.truncate(limit);
     Ok(SearchResponse { traces: out })
 }
@@ -1202,6 +1211,28 @@ mod tests {
         assert!(r.traces[0].root_service_name == "a");
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_most_recent_hint_returns_newest_traces_first() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "old", "root", vec![sp_at(1, 1, None, "match", 1_000)]);
+        s.push_trace("t", "new", "root", vec![sp_at(2, 1, None, "match", 10_000)]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ .svc = \"match\" } with (most_recent=true)",
+                0,
+                100_000,
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [2; 16]);
     }
 
     #[tokio::test]
