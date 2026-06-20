@@ -104,6 +104,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
     assert_label_values_match(&client, &pyroscope_base, &crabka.querier_base, "env").await?;
     assert_select_merge_stacktraces_match(&client, &pyroscope_base, &crabka.querier_base).await?;
+    assert_select_series_match(&client, &pyroscope_base, &crabka.querier_base).await?;
 
     assert_profile_types_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_names_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
@@ -600,6 +601,34 @@ async fn assert_select_series_has_points(
     Ok(())
 }
 
+async fn assert_select_series_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+) -> TestResult {
+    let body = select_series_body();
+    let pyroscope = connect_json_until(
+        client,
+        pyroscope_base,
+        None,
+        "SelectSeries",
+        body.clone(),
+        select_series_has_positive_point,
+    )
+    .await?;
+    let crabka = connect_json_until(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "SelectSeries",
+        body,
+        select_series_has_positive_point,
+    )
+    .await?;
+
+    assert_select_series_equal(&pyroscope, &crabka)
+}
+
 async fn assert_select_heatmap_has_slots(
     client: &reqwest::Client,
     base: &str,
@@ -765,6 +794,19 @@ fn select_merge_stacktraces_body() -> Value {
     })
 }
 
+fn select_series_body() -> Value {
+    json!({
+        "profileTypeID": PROFILE_TYPE,
+        "labelSelector": SELECTOR,
+        "start": query_start_ms(),
+        "end": query_end_ms(),
+        "groupBy": ["env"],
+        "step": 10.0,
+        "aggregation": "TIME_SERIES_AGGREGATION_TYPE_SUM",
+        "limit": 10,
+    })
+}
+
 async fn connect_json_until(
     client: &reqwest::Client,
     base: &str,
@@ -820,6 +862,20 @@ fn string_array<'a>(value: &'a Value, key: &str) -> TestResult<BTreeSet<&'a str>
         .iter()
         .filter_map(Value::as_str)
         .collect())
+}
+
+fn select_series_has_positive_point(value: &Value) -> bool {
+    value
+        .get("series")
+        .and_then(Value::as_array)
+        .is_some_and(|series| {
+            series.iter().any(|series| {
+                series
+                    .get("points")
+                    .and_then(Value::as_array)
+                    .is_some_and(|points| points.iter().any(|point| point_value(point) > 0.0))
+            })
+        })
 }
 
 fn canonical_profile_type(value: &Value, expected_id: &str) -> TestResult<Value> {
@@ -948,6 +1004,59 @@ fn assert_connect_flamegraph_equal(method: &str, expected: &Value, actual: &Valu
         canonical_connect_flamegraph(expected)?,
         canonical_connect_flamegraph(actual)?,
     )
+}
+
+fn assert_select_series_equal(expected: &Value, actual: &Value) -> TestResult {
+    assert_canonical_json_equal(
+        "SelectSeries",
+        canonical_select_series(expected)?,
+        canonical_select_series(actual)?,
+    )
+}
+
+fn canonical_select_series(value: &Value) -> TestResult<Value> {
+    let series = value
+        .get("series")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("SelectSeries response missing series array: {value}"))?;
+    let canonical = series
+        .iter()
+        .map(|series| {
+            let labels = series
+                .get("labels")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("SelectSeries series missing labels array: {value}"))?
+                .iter()
+                .map(|label| {
+                    Ok(json!({
+                        "name": label.get("name").and_then(Value::as_str),
+                        "value": label.get("value").and_then(Value::as_str),
+                    }))
+                })
+                .collect::<TestResult<Vec<_>>>()?;
+            let points = series
+                .get("points")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("SelectSeries series missing points array: {value}"))?
+                .iter()
+                .map(|point| {
+                    Ok(json!({
+                        "timestamp": point
+                            .get("timestamp")
+                            .and_then(json_i64)
+                            .ok_or_else(|| format!("SelectSeries point missing timestamp: {value}"))?,
+                        "value": point_value(point),
+                    }))
+                })
+                .collect::<TestResult<Vec<_>>>()?;
+            Ok(json!({
+                "labels": labels,
+                "points": points,
+            }))
+        })
+        .collect::<TestResult<Vec<_>>>()?;
+
+    Ok(json!({ "series": canonical }))
 }
 
 fn canonical_connect_flamegraph(value: &Value) -> TestResult<Value> {
@@ -1113,4 +1222,23 @@ fn connect_flamegraph_differential_rejects_tick_drift() {
     let err =
         assert_connect_flamegraph_equal("SelectMergeStacktraces", &expected, &actual).unwrap_err();
     assert!(err.to_string().contains("SelectMergeStacktraces mismatch"));
+}
+
+#[test]
+fn connect_series_differential_rejects_point_drift() {
+    let expected = json!({
+        "series": [{
+            "labels": [{ "name": "env", "value": PROFILE_ENV }],
+            "points": [{ "timestamp": 10, "value": 7.0 }]
+        }]
+    });
+    let actual = json!({
+        "series": [{
+            "labels": [{ "name": "env", "value": PROFILE_ENV }],
+            "points": [{ "timestamp": 10, "value": 8.0 }]
+        }]
+    });
+
+    let err = assert_select_series_equal(&expected, &actual).unwrap_err();
+    assert!(err.to_string().contains("SelectSeries mismatch"));
 }
