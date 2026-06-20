@@ -1427,6 +1427,34 @@ mod tests {
             }
         }
 
+        #[test]
+        fn message_count_reports_v2_record_total() {
+            // Multi-record batch so the count can't be mistaken for a constant.
+            let batch = RecordBatch {
+                last_offset_delta: 2,
+                records: vec![
+                    Record {
+                        value: Some(Bytes::from_static(b"a")),
+                        ..Default::default()
+                    },
+                    Record {
+                        value: Some(Bytes::from_static(b"b")),
+                        ..Default::default()
+                    },
+                    Record {
+                        value: Some(Bytes::from_static(b"c")),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let wire = encode(&batch);
+            assert!(PartitionPayload::Slice(wire).message_count() == 3);
+            // A null field and a non-v2 (zeroed) slice both contribute zero.
+            assert!(PartitionPayload::Null.message_count() == 0);
+            assert!(PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])).message_count() == 0);
+        }
+
         /// Run the full dispatch over a v≥3 records slice: `prepare_batch`
         /// then `build_produce_data` with the given leader epoch.
         fn dispatch_slice(
