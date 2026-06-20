@@ -40,7 +40,7 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
             status_code: block_status(span.status),
             status_message: Some(span.status_message.clone()),
             instrumentation_name: Some(span.instrumentation_scope.clone()),
-            instrumentation_version: None,
+            instrumentation_version: Some(span.instrumentation_version.clone()),
             attrs: span_attrs(span),
             events: span_events(span),
             links: span_links(span),
@@ -208,6 +208,7 @@ mod tests {
             events: Vec::new(),
             links: Vec::new(),
             instrumentation_scope: String::new(),
+            instrumentation_version: String::new(),
         }
     }
 

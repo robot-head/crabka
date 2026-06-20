@@ -171,6 +171,7 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         events: Vec::new(),
         links: Vec::new(),
         instrumentation_scope: String::new(),
+        instrumentation_version: String::new(),
     }
 }
 

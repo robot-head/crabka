@@ -100,6 +100,11 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
                 .as_ref()
                 .map(|scope| scope.name.clone())
                 .unwrap_or_default();
+            let scope_version = scope_spans
+                .scope
+                .as_ref()
+                .map(|scope| scope.version.clone())
+                .unwrap_or_default();
 
             for span in &scope_spans.spans {
                 let parent_span_id = if span.parent_span_id.is_empty() {
@@ -148,6 +153,7 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
                     events,
                     links,
                     instrumentation_scope: scope_name.clone(),
+                    instrumentation_version: scope_version.clone(),
                 });
             }
         }
@@ -158,7 +164,9 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue as OtlpKv, any_value::Value};
+    use opentelemetry_proto::tonic::common::v1::{
+        AnyValue, InstrumentationScope, KeyValue as OtlpKv, any_value::Value,
+    };
     use opentelemetry_proto::tonic::resource::v1::Resource;
     use opentelemetry_proto::tonic::trace::v1::{
         ResourceSpans, ScopeSpans, Span as OtlpSpan, Status, TracesData, span::SpanKind as OtlpKind,
@@ -226,6 +234,21 @@ mod tests {
             )
         );
         assert!(span.span_attrs.iter().any(|attr| attr.key == "http.method"));
+    }
+
+    #[test]
+    fn decodes_instrumentation_scope_version() {
+        let mut data = data();
+        data.resource_spans[0].scope_spans[0].scope = Some(InstrumentationScope {
+            name: "tracer".into(),
+            version: "1.2.3".into(),
+            ..InstrumentationScope::default()
+        });
+
+        let spans = decode_otlp(&data).unwrap();
+
+        assert!(spans[0].instrumentation_scope == "tracer");
+        assert!(spans[0].instrumentation_version == "1.2.3");
     }
 
     #[test]

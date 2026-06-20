@@ -29,6 +29,7 @@ fn span(trace_id: [u8; 16], span_id: u8, start_ns: i64) -> Span {
         events: Vec::new(),
         links: Vec::new(),
         instrumentation_scope: "test".into(),
+        instrumentation_version: String::new(),
     }
 }
 

@@ -65,6 +65,7 @@ mod tests {
             events: Vec::new(),
             links: Vec::new(),
             instrumentation_scope: "tracer".into(),
+            instrumentation_version: "1.2.3".into(),
         }
     }
 

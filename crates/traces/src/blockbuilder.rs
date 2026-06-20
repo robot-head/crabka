@@ -334,6 +334,7 @@ mod tests {
                 attrs: Vec::new(),
             }],
             instrumentation_scope: String::new(),
+            instrumentation_version: String::new(),
         }
     }
 

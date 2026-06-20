@@ -112,6 +112,7 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
             events,
             links: Vec::new(),
             instrumentation_scope: String::new(),
+            instrumentation_version: String::new(),
         });
     }
 

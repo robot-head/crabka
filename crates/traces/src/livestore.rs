@@ -366,7 +366,7 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
         status_code: span.status.as_i32(),
         status_message: span.status_message.clone(),
         instrumentation_name: span.instrumentation_scope.clone(),
-        instrumentation_version: String::new(),
+        instrumentation_version: span.instrumentation_version.clone(),
         attributes: span
             .resource_attrs
             .iter()

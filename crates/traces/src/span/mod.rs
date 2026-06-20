@@ -109,6 +109,7 @@ pub struct Span {
     pub events: Vec<EventRecord>,
     pub links: Vec<LinkRecord>,
     pub instrumentation_scope: String,
+    pub instrumentation_version: String,
 }
 
 impl Span {
@@ -147,6 +148,7 @@ mod tests {
             events: Vec::new(),
             links: Vec::new(),
             instrumentation_scope: "tracer".into(),
+            instrumentation_version: "1.2.3".into(),
         }
     }
 
