@@ -91,10 +91,10 @@ pub async fn process_raw(
         require_service_name(&mut raw.labels);
         let limits = ingest_limits_for_tenant(state, tenant);
         cap_session_id(&mut raw.labels, limits.session_id_buckets);
-        enforce_limits(&raw.labels, &limits)?;
 
         let symbols = extract_symbols(&raw.profile)?;
         for profile in split_sample_types(&raw)? {
+            enforce_limits(&profile.labels, &limits)?;
             let rec = ProfileRecord {
                 tenant: tenant.to_string(),
                 labels: profile
@@ -813,6 +813,37 @@ mod tests {
         .unwrap();
 
         assert!(err.to_string().contains("value exceeds"));
+    }
+
+    #[tokio::test]
+    async fn label_count_limit_is_enforced_after_profile_type_split() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink: sink.clone(),
+            limits: TenantLimitConfig::default().with_tenant_limits(
+                "tenant-a",
+                TenantLimits {
+                    max_label_names_per_series: 5,
+                    ..Default::default()
+                },
+            ),
+            profile_overrides: OverridesProvider::new(Default::default()),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("too many label names"));
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
