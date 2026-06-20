@@ -1110,7 +1110,46 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         obj.insert("status".into(), status);
     }
     obj.insert("attributes".into(), attrs_json(&span.attributes));
+    if !span.events.is_empty() {
+        obj.insert("events".into(), events_json(span));
+    }
+    if !span.links.is_empty() {
+        obj.insert("links".into(), links_json(&span.links));
+    }
     Value::Object(obj)
+}
+
+fn events_json(span: &SpanRef) -> Value {
+    Value::Array(
+        span.events
+            .iter()
+            .map(|event| {
+                json!({
+                    "timeUnixNano": span
+                        .start_time_unix_nano
+                        .saturating_add(event.time_since_start_nano)
+                        .to_string(),
+                    "name": event.name,
+                    "attributes": attrs_json(&event.attributes),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn links_json(links: &[crabka_traceql::LinkRef]) -> Value {
+    Value::Array(
+        links
+            .iter()
+            .map(|link| {
+                json!({
+                    "traceId": base64(link.trace_id),
+                    "spanId": base64(link.span_id),
+                    "attributes": attrs_json(&link.attributes),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn span_kind_json(kind: i32) -> Option<&'static str> {
@@ -1708,6 +1747,63 @@ mod tests {
                     "code": "STATUS_CODE_ERROR",
                     "message": "boom",
                 })
+        );
+    }
+
+    #[tokio::test]
+    async fn by_id_projects_events_and_links() {
+        let mut store = InMemorySpanStore::new();
+        let mut span = span_at(9, 1, None, "a", 1_000);
+        span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "exception".into(),
+            attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
+        }];
+        span.links = vec![LinkRef {
+            trace_id: [7; 16],
+            span_id: [8; 8],
+            attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
+        }];
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![span]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let span = &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            span["events"]
+                == json!([{
+                    "timeUnixNano": "1050",
+                    "name": "exception",
+                    "attributes": [{
+                        "key": "exception.type",
+                        "value": {"stringValue": "timeout"}
+                    }]
+                }])
+        );
+        assert!(
+            span["links"]
+                == json!([{
+                    "traceId": "BwcHBwcHBwcHBwcHBwcHBw==",
+                    "spanId": "CAgICAgICAg=",
+                    "attributes": [{
+                        "key": "link.kind",
+                        "value": {"stringValue": "retry"}
+                    }]
+                }])
         );
     }
 
