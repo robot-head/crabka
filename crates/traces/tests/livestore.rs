@@ -1,0 +1,146 @@
+use assert2::assert;
+use crabka_blockstore::{SCOL_TRACE_ID, span_block_schema};
+use crabka_traceql::{AttrValue as TraceqlAttrValue, TagScope};
+use crabka_traces::{
+    AttrValue, KeyValue, LiveStore, Span, SpanKind, SpanRecord, StatusCode,
+    livestore::ingest_wal_payloads, querier::live::LiveSource,
+};
+use datafusion::catalog::TableProvider;
+
+fn span(trace_id: [u8; 16], span_id: u8, start_ns: i64) -> Span {
+    Span {
+        trace_id,
+        span_id: [span_id; 8],
+        parent_span_id: None,
+        name: format!("span-{span_id}"),
+        kind: SpanKind::Server,
+        start_ns,
+        duration_ns: 10,
+        status: StatusCode::Ok,
+        status_message: String::new(),
+        resource_attrs: vec![KeyValue {
+            key: "service.name".into(),
+            value: AttrValue::Str("api".into()),
+        }],
+        span_attrs: vec![KeyValue {
+            key: "http.method".into(),
+            value: AttrValue::Str("GET".into()),
+        }],
+        events: Vec::new(),
+        links: Vec::new(),
+        instrumentation_scope: "test".into(),
+    }
+}
+
+fn record(tenant: &str, span: Span) -> SpanRecord {
+    SpanRecord {
+        tenant: tenant.into(),
+        span,
+    }
+}
+
+#[test]
+fn assembles_recent_trace_by_id() {
+    let mut store = LiveStore::new(i64::MAX);
+    store.ingest(record("tenant-a", span([1; 16], 2, 20)));
+    store.ingest(record("tenant-a", span([2; 16], 1, 10)));
+    store.ingest(record("tenant-a", span([1; 16], 1, 10)));
+    store.ingest(record("tenant-b", span([1; 16], 9, 5)));
+
+    let trace = store.trace_by_id("tenant-a", &[1; 16]);
+    assert!(trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[1; 8], [2; 8]]);
+    assert!(store.trace_by_id("tenant-a", &[2; 16]).len() == 1);
+    assert!(store.trace_by_id("tenant-b", &[1; 16]).len() == 1);
+    assert!(store.trace_by_id("missing", &[1; 16]).is_empty());
+}
+
+#[test]
+fn evicts_spans_older_than_retention_window() {
+    let mut store = LiveStore::new(50);
+    store.ingest(record("tenant-a", span([1; 16], 1, 100)));
+    store.ingest(record("tenant-a", span([1; 16], 2, 149)));
+    store.ingest(record("tenant-a", span([1; 16], 3, 151)));
+
+    let trace = store.trace_by_id("tenant-a", &[1; 16]);
+    assert!(trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[2; 8], [3; 8]]);
+}
+
+#[test]
+fn exposes_recent_spans_as_mem_table_over_span_schema() {
+    let mut store = LiveStore::new(i64::MAX);
+    store.ingest(record("tenant-a", span([1; 16], 1, 10)));
+    store.ingest(record("tenant-a", span([2; 16], 1, 20)));
+
+    let table = store.mem_table("tenant-a").unwrap();
+    assert!(table.schema() == span_block_schema());
+    assert!(table.schema().index_of(SCOL_TRACE_ID).is_ok());
+}
+
+#[tokio::test]
+async fn live_source_exposes_trace_spans_and_tags() {
+    let mut store = LiveStore::new(i64::MAX);
+    store.ingest(record("tenant-a", span([1; 16], 1, 10)));
+    store.ingest(record("tenant-a", span([1; 16], 2, 20)));
+
+    let trace = store
+        .trace_spans("tenant-a", &[1; 16])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(trace.root_service_name == "api");
+    assert!(trace.root_trace_name == "span-1");
+    assert!(trace.spans.len() == 2);
+    assert!(
+        trace.spans[0].attributes
+            == vec![
+                ("service.name".into(), TraceqlAttrValue::Str("api".into())),
+                ("http.method".into(), TraceqlAttrValue::Str("GET".into())),
+            ]
+    );
+
+    let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
+    assert!(
+        names
+            .iter()
+            .any(|tags| tags.scope == TagScope::Resource && tags.tags == vec!["service.name"])
+    );
+    assert!(
+        names
+            .iter()
+            .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
+    );
+
+    let values = store
+        .tag_values("tenant-a", ".http.method", 0, 100)
+        .await
+        .unwrap();
+    assert!(
+        values
+            .iter()
+            .any(|value| value.type_ == "string" && value.value == "GET")
+    );
+}
+
+#[tokio::test]
+async fn live_source_batches_filter_by_time_range() {
+    let mut store = LiveStore::new(i64::MAX);
+    store.ingest(record("tenant-a", span([1; 16], 1, 10)));
+    store.ingest(record("tenant-a", span([1; 16], 2, 200)));
+
+    let batches = store.span_batches("tenant-a", 0, 100).await.unwrap();
+    assert!(batches.len() == 1);
+    assert!(batches[0].num_rows() == 1);
+    assert!(store.block_builder_frontier_ns("tenant-a") == 200);
+}
+
+#[test]
+fn ingests_encoded_wal_payloads() {
+    let mut store = LiveStore::new(i64::MAX);
+    let first = record("tenant-a", span([1; 16], 1, 10)).encode().unwrap();
+    let second = record("tenant-a", span([1; 16], 2, 20)).encode().unwrap();
+
+    let count = ingest_wal_payloads(&mut store, [&first[..], &second[..]]).unwrap();
+
+    assert!(count == 2);
+    assert!(store.trace_by_id("tenant-a", &[1; 16]).len() == 2);
+}

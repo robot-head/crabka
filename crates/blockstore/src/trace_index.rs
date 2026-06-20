@@ -48,6 +48,42 @@ impl TraceIndex {
             .push(stats);
     }
 
+    pub fn replace_trace_blocks(
+        &mut self,
+        tenant: &str,
+        old_keys: &[String],
+        mut replacement: TraceBlockStats,
+    ) {
+        let old_keys: BTreeSet<&str> = old_keys.iter().map(String::as_str).collect();
+        let tenant_index = self.tenants.entry(tenant.to_string()).or_default();
+
+        let mut carried_tag_names = BTreeSet::new();
+        let mut carried_tag_values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        tenant_index.blocks.retain(|block| {
+            if !old_keys.contains(block.object_key.as_str()) {
+                return true;
+            }
+            carried_tag_names.extend(block.tag_names.iter().cloned());
+            for (tag, values) in &block.tag_values {
+                carried_tag_values
+                    .entry(tag.clone())
+                    .or_default()
+                    .extend(values.iter().cloned());
+            }
+            false
+        });
+
+        replacement.tag_names.extend(carried_tag_names);
+        for (tag, values) in carried_tag_values {
+            replacement
+                .tag_values
+                .entry(tag)
+                .or_default()
+                .extend(values);
+        }
+        tenant_index.blocks.push(replacement);
+    }
+
     #[must_use]
     pub fn candidate_blocks_for_trace(
         &self,

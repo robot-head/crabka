@@ -60,7 +60,11 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::Aggregate(Aggregate::CountOverTime))
             }
-            "sum_over_time" | "avg_over_time" | "min_over_time" | "max_over_time" => {
+            "sum_over_time"
+            | "avg_over_time"
+            | "min_over_time"
+            | "max_over_time"
+            | "histogram_over_time" => {
                 self.expect(&Token::LParen)?;
                 let field = self.parse_field()?;
                 self.expect(&Token::RParen)?;
@@ -68,7 +72,8 @@ impl Parser {
                     "sum_over_time" => Aggregate::SumOverTime(field),
                     "avg_over_time" => Aggregate::AvgOverTime(field),
                     "min_over_time" => Aggregate::MinOverTime(field),
-                    _ => Aggregate::MaxOverTime(field),
+                    "max_over_time" => Aggregate::MaxOverTime(field),
+                    _ => Aggregate::HistogramOverTime(field),
                 };
                 Ok(Pipeline::Aggregate(agg))
             }
@@ -103,6 +108,23 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::By(fields))
             }
+            "topk" => {
+                self.expect(&Token::LParen)?;
+                let k = self.parse_rank_limit()?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::TopK(k))
+            }
+            "bottomk" => {
+                self.expect(&Token::LParen)?;
+                let k = self.parse_rank_limit()?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::BottomK(k))
+            }
+            "compare" => {
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::Compare)
+            }
             "select" => {
                 self.expect(&Token::LParen)?;
                 let fields = self.parse_field_list()?;
@@ -122,6 +144,16 @@ impl Parser {
         let fields = self.parse_field_list()?;
         self.expect(&Token::RParen)?;
         Ok(Some(Pipeline::By(fields)))
+    }
+
+    fn parse_rank_limit(&mut self) -> Result<usize> {
+        let Token::Int(value) = self.advance() else {
+            return Err(Self::err("expected integer rank limit"));
+        };
+        if value < 0 {
+            return Err(Self::err("rank limit must be non-negative"));
+        }
+        usize::try_from(value).map_err(|e| TraceqlError::Parse(e.to_string()))
     }
 
     fn parse_numeric_filter(&mut self) -> Result<Option<(ComparisonOp, f64)>> {
@@ -585,6 +617,45 @@ mod tests {
         };
         assert!(*quantiles == vec![0.5, 0.9]);
         assert!(by[0].key == "svc");
+
+        let q = parse("{ .a = 1 } | histogram_over_time(span:duration) by(span.svc)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [
+                Pipeline::Aggregate(Aggregate::HistogramOverTime(_)),
+                Pipeline::By(_)
+            ]
+        ));
+
+        let q = parse("{ .a = 1 } | count_over_time() | by(span.svc) | topk(2)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::By(_),
+                Pipeline::TopK(2)
+            ]
+        ));
+
+        let q = parse("{ .a = 1 } | count_over_time() | by(span.svc) | bottomk(1)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::By(_),
+                Pipeline::BottomK(1)
+            ]
+        ));
+
+        let q = parse("{ .a = 1 } | count_over_time() | by(span.svc) | compare()").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::By(_),
+                Pipeline::Compare
+            ]
+        ));
     }
 
     #[test]

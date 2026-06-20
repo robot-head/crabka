@@ -2,6 +2,7 @@
 
 pub mod http;
 pub mod live;
+pub mod store;
 
 #[derive(Clone, Debug)]
 pub struct QuerierConfig {

@@ -16,17 +16,39 @@ const TENANT_HEADER: &str = "x-scope-orgid";
 
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
+    cfg: HttpConfig,
 }
 
 impl<S: SpanStore> Clone for AppState<S> {
     fn clone(&self) -> Self {
         Self {
             engine: Arc::clone(&self.engine),
+            cfg: self.cfg,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpConfig {
+    pub max_trace_spans: usize,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            max_trace_spans: usize::MAX,
         }
     }
 }
 
 pub fn router<S>(engine: Arc<TraceqlEngine<S>>) -> Router
+where
+    S: SpanStore + 'static,
+{
+    router_with_config(engine, HttpConfig::default())
+}
+
+pub fn router_with_config<S>(engine: Arc<TraceqlEngine<S>>, cfg: HttpConfig) -> Router
 where
     S: SpanStore + 'static,
 {
@@ -45,7 +67,7 @@ where
         .route("/api/metrics/query_range", get(query_range::<S>))
         .route("/api/metrics/query", get(query_instant::<S>))
         .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
-        .with_state(AppState { engine })
+        .with_state(AppState { engine, cfg })
 }
 
 async fn echo() -> &'static str {
@@ -231,7 +253,7 @@ where
     let tenant = tenant(&headers);
 
     match state.engine.trace_by_id(&tenant, &trace_id).await {
-        Ok(Some(trace)) => Json(trace_json(&trace)).into_response(),
+        Ok(Some(trace)) => Json(trace_json(&trace, state.cfg.max_trace_spans)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
@@ -431,7 +453,20 @@ fn search_span_json(span: &SpanRef) -> Value {
     })
 }
 
-fn trace_json(trace: &TraceSpans) -> Value {
+fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
+    let total_spans = trace.spans.len();
+    let returned_spans = total_spans.min(max_trace_spans);
+    let status = if returned_spans < total_spans {
+        "PARTIAL"
+    } else {
+        "COMPLETE"
+    };
+    let message = if returned_spans < total_spans {
+        format!("trace truncated after {returned_spans} spans")
+    } else {
+        String::new()
+    };
+
     json!({
         "trace": {
             "resourceSpans": [{
@@ -443,12 +478,15 @@ fn trace_json(trace: &TraceSpans) -> Value {
                 },
                 "scopeSpans": [{
                     "scope": {},
-                    "spans": trace.spans.iter().map(|span| trace_span_json(trace.trace_id, span)).collect::<Vec<_>>(),
+                    "spans": trace.spans.iter()
+                        .take(returned_spans)
+                        .map(|span| trace_span_json(trace.trace_id, span))
+                        .collect::<Vec<_>>(),
                 }],
             }],
         },
-        "status": "COMPLETE",
-        "message": "",
+        "status": status,
+        "message": message,
     })
 }
 
@@ -722,6 +760,43 @@ mod tests {
                 "status": "COMPLETE",
                 "message": ""
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn by_id_marks_trace_partial_when_span_limit_truncates() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router_with_config(engine, HttpConfig { max_trace_spans: 1 });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["status"] == "PARTIAL");
+        assert!(body["message"] == "trace truncated after 1 spans");
+        assert!(
+            body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+                .as_array()
+                .unwrap()
+                .len()
+                == 1
         );
     }
 

@@ -76,6 +76,31 @@ impl BlockStore {
         ctx.register_table(TABLE_NAME, df.into_view())?;
         Ok((ctx, TABLE_NAME.to_string()))
     }
+
+    pub async fn scan_block_keys(
+        &self,
+        keys: &[String],
+        schema: SchemaRef,
+    ) -> Result<(SessionContext, String)> {
+        let ctx = SessionContext::new();
+        ctx.register_object_store(&self.base, self.store.clone());
+
+        if keys.is_empty() {
+            let empty = MemTable::try_new(schema, vec![vec![]])?;
+            ctx.register_table(TABLE_NAME, Arc::new(empty))?;
+            return Ok((ctx, TABLE_NAME.to_string()));
+        }
+
+        let paths: Vec<String> = keys
+            .iter()
+            .map(|key| format!("{}{}", self.base, key.trim_start_matches('/')))
+            .collect();
+        let df = ctx
+            .read_parquet(paths, ParquetReadOptions::default())
+            .await?;
+        ctx.register_table(TABLE_NAME, df.into_view())?;
+        Ok((ctx, TABLE_NAME.to_string()))
+    }
 }
 
 #[cfg(test)]

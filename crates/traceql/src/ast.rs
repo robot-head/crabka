@@ -119,6 +119,9 @@ pub enum Pipeline {
     Aggregate(Aggregate),
     Filter { op: ComparisonOp, value: f64 },
     By(Vec<Field>),
+    TopK(usize),
+    BottomK(usize),
+    Compare,
     Select(Vec<Field>),
 }
 
@@ -131,6 +134,7 @@ pub enum Aggregate {
     AvgOverTime(Field),
     MinOverTime(Field),
     MaxOverTime(Field),
+    HistogramOverTime(Field),
     QuantileOverTime { field: Field, quantiles: Vec<f64> },
     Sum(Field),
     Avg(Field),

@@ -22,6 +22,23 @@ use crate::span_columns::{
 };
 use crate::store::SpanStore;
 
+const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
+    2_000_000.0,
+    4_000_000.0,
+    8_000_000.0,
+    16_000_000.0,
+    32_000_000.0,
+    64_000_000.0,
+    128_000_000.0,
+    256_000_000.0,
+    512_000_000.0,
+    1_024_000_000.0,
+    2_048_000_000.0,
+    4_096_000_000.0,
+    8_192_000_000.0,
+    16_384_000_000.0,
+];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOpts {
     pub default_limit: usize,
@@ -101,6 +118,12 @@ impl<S: SpanStore> TraceqlEngine<S> {
     ) -> Result<TraceMetricsResponse> {
         let q = parse(query)?;
         let metric = metric_plan(&q)?;
+        if metric.compare {
+            return self
+                .query_range_compare(tenant, q, start_ns, end_ns, step_ns, metric)
+                .await;
+        }
+
         let planned = plan_query(
             self.store.as_ref(),
             &PlannerContext {
@@ -114,12 +137,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             },
         )
         .await?;
-        let batches = planned
-            .ctx
-            .execute_logical_plan(planned.plan)
-            .await?
-            .collect()
-            .await?;
+        let batches = collect_planned_batches(planned).await?;
         assemble_metrics_response(
             &batches,
             start_ns,
@@ -127,6 +145,91 @@ impl<S: SpanStore> TraceqlEngine<S> {
             step_ns,
             &metric,
             self.opts.max_exemplars,
+            start_ns,
+        )
+    }
+
+    async fn query_range_compare(
+        &self,
+        tenant: &str,
+        q: Query,
+        start_ns: i64,
+        end_ns: i64,
+        step_ns: i64,
+        metric: MetricPlan,
+    ) -> Result<TraceMetricsResponse> {
+        let width_ns = end_ns
+            .checked_sub(start_ns)
+            .ok_or_else(|| TraceqlError::Plan("metrics end must be >= start".into()))?;
+        let previous_start_ns = start_ns
+            .checked_sub(width_ns)
+            .and_then(|v| v.checked_sub(step_ns))
+            .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
+        let previous_end_ns = start_ns
+            .checked_sub(step_ns)
+            .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
+        let root = q.root;
+        let current = self
+            .metrics_for_range(
+                tenant,
+                root.clone(),
+                MetricsRange {
+                    scan_start: start_ns,
+                    scan_end: end_ns,
+                    output_start: start_ns,
+                    step: step_ns,
+                },
+                &metric,
+            )
+            .await?;
+        let previous = self
+            .metrics_for_range(
+                tenant,
+                root,
+                MetricsRange {
+                    scan_start: previous_start_ns,
+                    scan_end: previous_end_ns,
+                    output_start: start_ns,
+                    step: step_ns,
+                },
+                &metric,
+            )
+            .await?;
+
+        Ok(TraceMetricsResponse {
+            series: label_compared_series(current.series, previous.series),
+        })
+    }
+
+    async fn metrics_for_range(
+        &self,
+        tenant: &str,
+        root: crate::ast::SpansetExpr,
+        range: MetricsRange,
+        metric: &MetricPlan,
+    ) -> Result<TraceMetricsResponse> {
+        let planned = plan_query(
+            self.store.as_ref(),
+            &PlannerContext {
+                tenant: tenant.to_string(),
+                start_ns: range.scan_start,
+                end_ns: range.scan_end,
+            },
+            &Query {
+                root,
+                pipeline: Vec::new(),
+            },
+        )
+        .await?;
+        let batches = collect_planned_batches(planned).await?;
+        assemble_metrics_response(
+            &batches,
+            range.scan_start,
+            range.scan_end,
+            range.step,
+            metric,
+            self.opts.max_exemplars,
+            range.output_start,
         )
     }
 
@@ -167,6 +270,7 @@ enum MetricFunction {
     AvgOverTime,
     MinOverTime,
     MaxOverTime,
+    HistogramOverTime,
     QuantileOverTime,
 }
 
@@ -175,21 +279,86 @@ struct MetricPlan {
     value: Option<Field>,
     quantiles: Vec<f64>,
     by: Vec<Field>,
+    rank: Option<RankLimit>,
+    compare: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RankLimit {
+    direction: RankDirection,
+    k: usize,
+}
+
+#[derive(Clone, Copy)]
+enum RankDirection {
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy)]
+struct MetricsRange {
+    scan_start: i64,
+    scan_end: i64,
+    output_start: i64,
+    step: i64,
 }
 
 fn metric_plan(q: &Query) -> Result<MetricPlan> {
     match q.pipeline.as_slice() {
-        [Pipeline::Aggregate(aggregate)] => metric_plan_for(aggregate, Vec::new()),
+        [Pipeline::Aggregate(aggregate)] => metric_plan_for(aggregate, Vec::new(), None),
         [Pipeline::Aggregate(aggregate), Pipeline::By(by)] => {
-            metric_plan_for(aggregate, by.clone())
+            metric_plan_for(aggregate, by.clone(), None)
         }
+        [
+            Pipeline::Aggregate(aggregate),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] => metric_plan_for(aggregate, Vec::new(), Some(rank_limit(rank)?)),
+        [
+            Pipeline::Aggregate(aggregate),
+            Pipeline::By(by),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] => metric_plan_for(aggregate, by.clone(), Some(rank_limit(rank)?)),
+        [Pipeline::Aggregate(aggregate), Pipeline::Compare] => {
+            metric_plan_with_compare(aggregate, Vec::new(), None)
+        }
+        [
+            Pipeline::Aggregate(aggregate),
+            Pipeline::By(by),
+            Pipeline::Compare,
+        ] => metric_plan_with_compare(aggregate, by.clone(), None),
+        [
+            Pipeline::Aggregate(aggregate),
+            Pipeline::By(by),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Compare,
+        ] => metric_plan_with_compare(aggregate, by.clone(), Some(rank_limit(rank)?)),
         _ => Err(TraceqlError::Unsupported(
             "traceql metrics: expected supported *_over_time() metric".into(),
         )),
     }
 }
 
-fn metric_plan_for(aggregate: &Aggregate, by: Vec<Field>) -> Result<MetricPlan> {
+fn rank_limit(pipeline: &Pipeline) -> Result<RankLimit> {
+    match pipeline {
+        Pipeline::TopK(k) => Ok(RankLimit {
+            direction: RankDirection::Top,
+            k: *k,
+        }),
+        Pipeline::BottomK(k) => Ok(RankLimit {
+            direction: RankDirection::Bottom,
+            k: *k,
+        }),
+        other => Err(TraceqlError::Unsupported(format!(
+            "traceql metrics: expected topk/bottomk, got {other:?}"
+        ))),
+    }
+}
+
+fn metric_plan_for(
+    aggregate: &Aggregate,
+    by: Vec<Field>,
+    rank: Option<RankLimit>,
+) -> Result<MetricPlan> {
     let (function, value, quantiles) = match aggregate {
         Aggregate::Rate => (MetricFunction::Rate, None, Vec::new()),
         Aggregate::CountOverTime => (MetricFunction::CountOverTime, None, Vec::new()),
@@ -205,6 +374,11 @@ fn metric_plan_for(aggregate: &Aggregate, by: Vec<Field>) -> Result<MetricPlan> 
         Aggregate::MaxOverTime(field) => {
             (MetricFunction::MaxOverTime, Some(field.clone()), Vec::new())
         }
+        Aggregate::HistogramOverTime(field) => (
+            MetricFunction::HistogramOverTime,
+            Some(field.clone()),
+            Vec::new(),
+        ),
         Aggregate::QuantileOverTime { field, quantiles } => (
             MetricFunction::QuantileOverTime,
             Some(field.clone()),
@@ -225,7 +399,52 @@ fn metric_plan_for(aggregate: &Aggregate, by: Vec<Field>) -> Result<MetricPlan> 
         value,
         quantiles,
         by,
+        rank,
+        compare: false,
     })
+}
+
+fn metric_plan_with_compare(
+    aggregate: &Aggregate,
+    by: Vec<Field>,
+    rank: Option<RankLimit>,
+) -> Result<MetricPlan> {
+    let mut plan = metric_plan_for(aggregate, by, rank)?;
+    plan.compare = true;
+    Ok(plan)
+}
+
+async fn collect_planned_batches(
+    planned: crate::planner::PlannedSpanset,
+) -> Result<Vec<RecordBatch>> {
+    Ok(planned
+        .ctx
+        .execute_logical_plan(planned.plan)
+        .await?
+        .collect()
+        .await?)
+}
+
+fn label_compared_series(
+    current: Vec<TraceMetricSeries>,
+    previous: Vec<TraceMetricSeries>,
+) -> Vec<TraceMetricSeries> {
+    current
+        .into_iter()
+        .map(|series| label_comparison(series, "current"))
+        .chain(
+            previous
+                .into_iter()
+                .map(|series| label_comparison(series, "previous")),
+        )
+        .collect()
+}
+
+fn label_comparison(mut series: TraceMetricSeries, value: &str) -> TraceMetricSeries {
+    series
+        .labels
+        .insert(0, ("comparison".into(), value.to_string()));
+    series
 }
 
 fn assemble_metrics_response(
@@ -235,6 +454,7 @@ fn assemble_metrics_response(
     step_ns: i64,
     metric: &MetricPlan,
     max_exemplars: usize,
+    output_start_ns: i64,
 ) -> Result<TraceMetricsResponse> {
     if step_ns <= 0 {
         return Err(TraceqlError::Plan("metrics step must be positive".into()));
@@ -285,7 +505,7 @@ fn assemble_metrics_response(
                 labels,
                 buckets,
                 metric,
-                start_ns,
+                output_start_ns,
                 step_ns,
                 step_seconds,
                 max_exemplars,
@@ -295,7 +515,36 @@ fn assemble_metrics_response(
         .into_iter()
         .flatten()
         .collect();
-    Ok(TraceMetricsResponse { series })
+    Ok(TraceMetricsResponse {
+        series: apply_rank(series, metric.rank),
+    })
+}
+
+fn apply_rank(
+    mut series: Vec<TraceMetricSeries>,
+    rank: Option<RankLimit>,
+) -> Vec<TraceMetricSeries> {
+    let Some(rank) = rank else {
+        return series;
+    };
+    series.sort_by(|a, b| {
+        let a_score = series_rank_score(a);
+        let b_score = series_rank_score(b);
+        match rank.direction {
+            RankDirection::Top => b_score
+                .total_cmp(&a_score)
+                .then_with(|| a.labels.cmp(&b.labels)),
+            RankDirection::Bottom => a_score
+                .total_cmp(&b_score)
+                .then_with(|| a.labels.cmp(&b.labels)),
+        }
+    });
+    series.truncate(rank.k);
+    series
+}
+
+fn series_rank_score(series: &TraceMetricSeries) -> f64 {
+    series.points.iter().map(|(_, value)| *value).sum()
 }
 
 fn metric_series_for_group(
@@ -331,6 +580,9 @@ fn metric_series_for_group(
             })
             .collect();
     }
+    if matches!(metric.function, MetricFunction::HistogramOverTime) {
+        return histogram_series_for_group(labels, &buckets, start_ns, step_ns, &exemplars);
+    }
 
     let points = buckets
         .into_iter()
@@ -344,7 +596,9 @@ fn metric_series_for_group(
                 MetricFunction::AvgOverTime => bucket.average()?,
                 MetricFunction::MinOverTime => bucket.min.unwrap_or(0.0),
                 MetricFunction::MaxOverTime => bucket.max.unwrap_or(0.0),
-                MetricFunction::QuantileOverTime => unreachable!("handled above"),
+                MetricFunction::HistogramOverTime | MetricFunction::QuantileOverTime => {
+                    unreachable!("handled above")
+                }
             };
             Ok((ts, value))
         })
@@ -354,6 +608,73 @@ fn metric_series_for_group(
         points,
         exemplars,
     }])
+}
+
+fn histogram_series_for_group(
+    labels: Vec<(String, String)>,
+    buckets: &[MetricBucket],
+    start_ns: i64,
+    step_ns: i64,
+    exemplars: &[TraceMetricExemplar],
+) -> Result<Vec<TraceMetricSeries>> {
+    let mut out = Vec::with_capacity(DEFAULT_HISTOGRAM_BUCKETS_NS.len() + 3);
+    for le in DEFAULT_HISTOGRAM_BUCKETS_NS {
+        let mut labels = labels.clone();
+        labels.insert(0, ("le".into(), quantile_label(*le)));
+        out.push(TraceMetricSeries {
+            labels,
+            points: histogram_points(buckets, start_ns, step_ns, |bucket| {
+                f64_from_usize(bucket.values.iter().filter(|value| **value <= *le).count())
+            })?,
+            exemplars: exemplars.to_owned(),
+        });
+    }
+
+    let mut inf_labels = labels.clone();
+    inf_labels.insert(0, ("le".into(), "+Inf".into()));
+    out.push(TraceMetricSeries {
+        labels: inf_labels,
+        points: histogram_points(buckets, start_ns, step_ns, |bucket| {
+            f64_from_u64(bucket.count)
+        })?,
+        exemplars: exemplars.to_owned(),
+    });
+
+    let mut sum_labels = labels.clone();
+    sum_labels.insert(0, ("__metric__".into(), "sum".into()));
+    out.push(TraceMetricSeries {
+        labels: sum_labels,
+        points: histogram_points(buckets, start_ns, step_ns, |bucket| Ok(bucket.sum))?,
+        exemplars: Vec::new(),
+    });
+
+    let mut count_labels = labels;
+    count_labels.insert(0, ("__metric__".into(), "count".into()));
+    out.push(TraceMetricSeries {
+        labels: count_labels,
+        points: histogram_points(buckets, start_ns, step_ns, |bucket| {
+            f64_from_u64(bucket.count)
+        })?,
+        exemplars: Vec::new(),
+    });
+
+    Ok(out)
+}
+
+fn histogram_points(
+    buckets: &[MetricBucket],
+    start_ns: i64,
+    step_ns: i64,
+    mut value: impl FnMut(&MetricBucket) -> Result<f64>,
+) -> Result<Vec<(i64, f64)>> {
+    buckets
+        .iter()
+        .enumerate()
+        .map(|(idx, bucket)| {
+            let ts = start_ns + i64::try_from(idx).unwrap_or(i64::MAX) * step_ns;
+            Ok((ts, value(bucket)?))
+        })
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -1047,6 +1368,177 @@ mod tests {
         assert!(series[0].points == vec![(0, 300.0), (60_000, 0.0)]);
         assert!(series[1].labels == vec![("p".into(), "0.9".into()), ("svc".into(), "api".into())]);
         assert!(series[1].points == vec![(0, 460.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn histogram_over_time_emits_cumulative_buckets_sum_and_count() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    duration_nanos: 1_000_000,
+                    ..sp_at(1, 1, None, "api", 0)
+                },
+                InputSpan {
+                    duration_nanos: 2_000_000_000,
+                    ..sp_at(1, 2, None, "api", 10_000)
+                },
+                InputSpan {
+                    duration_nanos: 12_000_000_000,
+                    ..sp_at(1, 3, None, "api", 20_000)
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | histogram_over_time(span:duration) | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.iter().any(|s| {
+            s.labels
+                == vec![
+                    ("le".into(), "2000000".into()),
+                    ("svc".into(), "api".into()),
+                ]
+                && s.points == vec![(0, 1.0), (60_000, 0.0)]
+        }));
+        assert!(series.iter().any(|s| {
+            s.labels
+                == vec![
+                    ("le".into(), "2048000000".into()),
+                    ("svc".into(), "api".into()),
+                ]
+                && s.points == vec![(0, 2.0), (60_000, 0.0)]
+        }));
+        assert!(series.iter().any(|s| {
+            s.labels == vec![("le".into(), "+Inf".into()), ("svc".into(), "api".into())]
+                && s.points == vec![(0, 3.0), (60_000, 0.0)]
+        }));
+        assert!(series.iter().any(|s| {
+            s.labels
+                == vec![
+                    ("__metric__".into(), "sum".into()),
+                    ("svc".into(), "api".into()),
+                ]
+                && s.points == vec![(0, 14_001_000_000.0), (60_000, 0.0)]
+        }));
+        assert!(series.iter().any(|s| {
+            s.labels
+                == vec![
+                    ("__metric__".into(), "count".into()),
+                    ("svc".into(), "api".into()),
+                ]
+                && s.points == vec![(0, 3.0), (60_000, 0.0)]
+        }));
+    }
+
+    #[tokio::test]
+    async fn topk_and_bottomk_rank_grouped_metric_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+                sp_at(1, 4, None, "worker", 30_000),
+                sp_at(1, 5, None, "worker", 40_000),
+                sp_at(1, 6, None, "worker", 50_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let mut top = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | by(span.svc) | topk(2)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+        top.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(top.len() == 2);
+        assert!(top[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
+        assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
+
+        let bottom = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | by(span.svc) | bottomk(1)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(bottom.series.len() == 1);
+        assert!(bottom.series[0].labels == vec![("svc".into(), "db".into())]);
+        assert!(bottom.series[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn compare_emits_current_and_previous_range_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(1, 1, None, "api", -120_000)]);
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(2, 1, None, "api", 0),
+                sp_at(2, 2, None, "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(span.svc) | compare()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.len() == 2);
+        assert!(
+            series[0].labels
+                == vec![
+                    ("comparison".into(), "current".into()),
+                    ("svc".into(), "api".into())
+                ]
+        );
+        assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(
+            series[1].labels
+                == vec![
+                    ("comparison".into(), "previous".into()),
+                    ("svc".into(), "api".into())
+                ]
+        );
+        assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
