@@ -236,9 +236,10 @@ where
     let end_ns = query_param(&uri, "end")
         .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(start_ns);
-    let step_ns = query_param(&uri, "step")
-        .and_then(|v| parse_step_to_ns(&v))
-        .unwrap_or(1_000_000_000);
+    let step_ns = match step_param(&uri) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let include_exemplars = include_exemplars(&uri);
 
     match state
@@ -372,6 +373,19 @@ fn parse_seconds_to_ns(value: &str) -> Option<i64> {
 
 fn parse_step_to_ns(value: &str) -> Option<i64> {
     parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
+}
+
+fn step_param(uri: &Uri) -> Result<i64, &'static str> {
+    let Some(step) = query_param(uri, "step") else {
+        return Ok(1_000_000_000);
+    };
+    let Some(step_ns) = parse_step_to_ns(&step) else {
+        return Err("invalid step");
+    };
+    if step_ns <= 0 {
+        return Err("step must be positive");
+    }
+    Ok(step_ns)
 }
 
 fn include_exemplars(uri: &Uri) -> bool {
@@ -884,6 +898,17 @@ mod tests {
             body["series"][0]["points"]
                 == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_rejects_zero_step() {
+        let (status, body) = get_text(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=0",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "step must be positive");
     }
 
     #[tokio::test]
