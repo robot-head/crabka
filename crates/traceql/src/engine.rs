@@ -1021,6 +1021,7 @@ struct TraceAcc {
     root_service_name: String,
     root_trace_name: String,
     start_time_unix_nano: u64,
+    duration_nanos: u64,
     duration_ms: u64,
     spans: Vec<SpanRef>,
 }
@@ -1057,21 +1058,24 @@ pub(crate) fn assemble_search_response(
             };
             traces
                 .entry(trace_id)
-                .or_insert_with(|| TraceAcc {
-                    root_service_name: string_value(batch, COL_ROOT_SERVICE_NAME, row)
+                .or_insert_with(|| {
+                    let duration_nanos =
+                        u64_from_i64(i64_value(batch, COL_TRACE_DURATION, row).unwrap_or_default())
+                            .unwrap_or_default();
+
+                    TraceAcc {
+                        root_service_name: string_value(batch, COL_ROOT_SERVICE_NAME, row)
+                            .unwrap_or_default(),
+                        root_trace_name: string_value(batch, COL_ROOT_SPAN_NAME, row)
+                            .unwrap_or_default(),
+                        start_time_unix_nano: u64_from_i64(
+                            i64_value(batch, COL_TRACE_START, row).unwrap_or_default(),
+                        )
                         .unwrap_or_default(),
-                    root_trace_name: string_value(batch, COL_ROOT_SPAN_NAME, row)
-                        .unwrap_or_default(),
-                    start_time_unix_nano: u64_from_i64(
-                        i64_value(batch, COL_TRACE_START, row).unwrap_or_default(),
-                    )
-                    .unwrap_or_default(),
-                    duration_ms: u64_from_i64(
-                        i64_value(batch, COL_TRACE_DURATION, row).unwrap_or_default(),
-                    )
-                    .unwrap_or_default()
-                        / 1_000_000,
-                    spans: Vec::new(),
+                        duration_nanos,
+                        duration_ms: duration_nanos / 1_000_000,
+                        spans: Vec::new(),
+                    }
                 })
                 .spans
                 .push(span);
@@ -1090,6 +1094,7 @@ pub(crate) fn assemble_search_response(
                 root_service_name: acc.root_service_name,
                 root_trace_name: acc.root_trace_name,
                 start_time_unix_nano: acc.start_time_unix_nano,
+                duration_nanos: acc.duration_nanos,
                 duration_ms: acc.duration_ms,
                 span_sets: vec![SpanSet { spans, matched }],
             }

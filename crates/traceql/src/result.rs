@@ -60,6 +60,7 @@ pub struct TraceResult {
     pub root_service_name: String,
     pub root_trace_name: String,
     pub start_time_unix_nano: u64,
+    pub duration_nanos: u64,
     pub duration_ms: u64,
     pub span_sets: Vec<SpanSet>,
 }
@@ -166,6 +167,7 @@ mod tests {
                 root_service_name: "checkout".into(),
                 root_trace_name: "POST /pay".into(),
                 start_time_unix_nano: 5,
+                duration_nanos: 12_000_000,
                 duration_ms: 12,
                 span_sets: vec![SpanSet {
                     spans: vec![],

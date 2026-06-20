@@ -725,9 +725,8 @@ fn filter_search_duration(
         return resp;
     }
     resp.traces.retain(|trace| {
-        let duration_ns = trace.duration_ms.saturating_mul(1_000_000);
-        min_duration_ns.is_none_or(|min| duration_ns >= min)
-            && max_duration_ns.is_none_or(|max| duration_ns <= max)
+        min_duration_ns.is_none_or(|min| trace.duration_nanos >= min)
+            && max_duration_ns.is_none_or(|max| trace.duration_nanos <= max)
     });
     resp.traces.truncate(limit);
     resp
@@ -1890,6 +1889,38 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
         assert!(body["traces"][0]["rootTraceName"] == "long");
+    }
+
+    #[tokio::test]
+    async fn search_honors_nanosecond_precision_min_duration_parameter() {
+        let mut short = span_at(1, 1, None, "a", 1_000_000_000);
+        short.duration_nanos = 1_000_000;
+        let mut long = span_at(2, 1, None, "b", 1_000_000_000);
+        long.duration_nanos = 1_000_001;
+
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("tenant-a", "svc-a", "short", vec![short]);
+        store.push_trace("tenant-a", "svc-b", "long", vec![long]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=1000001ns&start=0&end=10")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["rootTraceName"] == "long");
+        assert!(body["traces"][0]["durationMs"] == 1);
     }
 
     #[tokio::test]
