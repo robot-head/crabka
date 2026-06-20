@@ -50,14 +50,21 @@ pub struct DecodedSample {
 /// Per-tenant ingest limits for structural validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantLimits {
+    #[serde(default = "default_max_label_name_len")]
+    pub max_label_name_len: usize,
     pub max_label_names_per_series: usize,
     pub max_label_value_len: usize,
     pub session_id_buckets: u64,
 }
 
+const fn default_max_label_name_len() -> usize {
+    1024
+}
+
 impl Default for TenantLimits {
     fn default() -> Self {
         Self {
+            max_label_name_len: default_max_label_name_len(),
             max_label_names_per_series: 30,
             max_label_value_len: 2048,
             session_id_buckets: 1024,
@@ -151,6 +158,12 @@ pub fn enforce_limits(labels: &Labels, limits: &TenantLimits) -> Result<(), Prof
     }
 
     for (name, value) in labels.iter() {
+        if name.len() > limits.max_label_name_len {
+            return Err(ProfilesError::Invalid(format!(
+                "label `{name}` name exceeds {} bytes",
+                limits.max_label_name_len
+            )));
+        }
         if value.len() > limits.max_label_value_len {
             return Err(ProfilesError::Invalid(format!(
                 "label `{name}` value exceeds {} bytes",
@@ -270,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn enforce_limits_rejects_too_long_label_names() {
+        let limits = TenantLimits {
+            max_label_name_len: 3,
+            ..Default::default()
+        };
+        let labels = labels(&[("too_long", "1")]);
+        assert!(enforce_limits(&labels, &limits).is_err());
+    }
+
+    #[test]
     fn tenant_limit_config_uses_override_before_default() {
         let config = TenantLimitConfig::default().with_tenant_limits(
             "tenant-a",
@@ -277,6 +300,7 @@ mod tests {
                 max_label_names_per_series: 2,
                 max_label_value_len: 5,
                 session_id_buckets: 8,
+                ..Default::default()
             },
         );
 

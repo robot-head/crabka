@@ -11,6 +11,7 @@ pub mod distributor;
 pub mod error;
 pub mod hot_store;
 pub mod ingest;
+pub mod limits;
 pub mod query;
 pub mod query_frontend;
 pub mod symbolizer;
@@ -19,6 +20,7 @@ pub mod wire;
 
 pub use blockbuilder::{BuiltSample, build_block, intern_record, object_key, run, samples_batch};
 pub use error::ProfilesError;
+pub use limits::{LimitError, Limits};
 pub use wal::{
     PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
     WalSymbolSet, partition_key,
