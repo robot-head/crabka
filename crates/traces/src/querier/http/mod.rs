@@ -610,7 +610,9 @@ async fn matching_traces<S>(
 where
     S: SpanStore + 'static,
 {
-    let resp = engine.search(tenant, query, start_ns, end_ns, 0).await?;
+    let resp = engine
+        .search(tenant, query, start_ns, end_ns, usize::MAX)
+        .await?;
     let mut seen = BTreeSet::new();
     let mut traces = Vec::new();
     for trace in resp.traces {
@@ -1579,6 +1581,64 @@ mod tests {
                     "type": "string",
                     "value": "kept"
                 }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_scans_past_default_search_limit() {
+        let mut store = InMemorySpanStore::new();
+        for trace in 1..=21 {
+            let target = if trace == 21 { "late" } else { "early" };
+            store.push_trace(
+                "tenant-a",
+                "svc-a",
+                &format!("root-{trace}"),
+                vec![span_at_with_attrs(
+                    trace,
+                    1,
+                    None,
+                    "a",
+                    i64::from(trace),
+                    vec![
+                        ("env".into(), AttrValue::Str("prod".into())),
+                        ("target".into(), AttrValue::Str(target.into())),
+                    ],
+                )],
+            );
+        }
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/.target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "string",
+                        "value": "early"
+                    },
+                    {
+                        "type": "string",
+                        "value": "late"
+                    }
+                ],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
