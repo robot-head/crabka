@@ -1,17 +1,22 @@
 //! Querier role: Pyroscope `querier.v1` Connect API and legacy flamebearer endpoints.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::{Int64Type, UInt64Type};
 use axum::extract::{Query, RawQuery};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json, Router, routing::get};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
+use crabka_blockstore::{LabelMatcher, MatchOp};
 use crabka_pprof::{
-    EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore, ProfileError, ProfileStore,
-    ProfileType, Series, SeriesAgg, parse_label_selector, step_ms_from_secs,
+    COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
+    PCOL_SPAN_ID, PCOL_TOTAL_VALUE, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg,
+    parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
 use serde::Deserialize;
@@ -27,6 +32,8 @@ const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
 const PROFILE_ID_LABEL: &str = "__profile_id__";
 
 pub type DefaultStore = InMemoryProfileStore;
+type SeriesKey = Vec<(String, String)>;
+type SpanExemplarsBySeries = BTreeMap<SeriesKey, BTreeMap<i64, Vec<pb::types::v1::Exemplar>>>;
 
 pub struct QuerierState<S: ProfileStore = DefaultStore> {
     store: Arc<S>,
@@ -267,6 +274,47 @@ impl<S: ProfileStore> QuerierState<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn select_series_span_exemplars(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<SpanExemplarsBySeries, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let step_ms = step_ms_from_secs(step_secs)?;
+        let base_matchers = parse_label_selector(label_selector)?;
+        let groups = if group_by.is_empty() {
+            vec![Vec::new()]
+        } else {
+            self.store
+                .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+                .await?
+        };
+        let mut out = BTreeMap::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let exemplars = span_exemplars_from_scan(&scan, step_ms, &labels).await?;
+            if !exemplars.is_empty() {
+                out.insert(labels, exemplars);
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn select_merge_span_profile(
         &self,
         tenant: &str,
@@ -351,6 +399,54 @@ impl<S: ProfileStore> QuerierState<S> {
             }
         }
     }
+}
+
+async fn span_exemplars_from_scan(
+    scan: &crabka_pprof::ProfileScan,
+    step_ms: i64,
+    labels: &[(String, String)],
+) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, {fingerprint}, {span}, MAX({total}) AS total \
+         FROM {table} WHERE {span} IS NOT NULL \
+         GROUP BY {timestamp}, {fingerprint}, {span} \
+         ORDER BY {timestamp}, {fingerprint}, {span}",
+        timestamp = COL_TIMESTAMP,
+        fingerprint = COL_FINGERPRINT,
+        span = PCOL_SPAN_ID,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let span_ids = batch.column(2).as_primitive::<UInt64Type>();
+        let totals = batch.column(3).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            if span_ids.is_null(row) {
+                continue;
+            }
+            let timestamp = timestamps.value(row);
+            out.entry(step_bucket_ms(timestamp, step_ms))
+                .or_default()
+                .push(pb::types::v1::Exemplar {
+                    timestamp,
+                    profile_id: String::new(),
+                    span_id: format!("{:x}", span_ids.value(row)),
+                    value: totals.value(row),
+                    labels: types_label_pairs(labels.to_vec()),
+                });
+        }
+    }
+    Ok(out)
 }
 
 pub fn router<S>(state: Arc<QuerierState<S>>) -> Router
@@ -620,6 +716,22 @@ where
         SeriesAgg::Sum
     };
     let stack_trace_call_sites = stack_trace_call_sites(req.stack_trace_selector.as_ref());
+    let span_exemplars = if req.exemplar_type == pb::querier::v1::ExemplarType::Span as i32 {
+        state
+            .select_series_span_exemplars(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &req.group_by,
+                req.step,
+                req.start,
+                req.end,
+            )
+            .await
+            .map_err(connect_error)?
+    } else {
+        BTreeMap::new()
+    };
     let series = state
         .select_series(
             &tenant,
@@ -636,18 +748,25 @@ where
         .map_err(connect_error)?
         .into_iter()
         .take(limit(req.limit))
-        .map(|series| pb::querier::v1::ProfileSeries {
-            labels: label_pairs(series.labels),
-            points: series
-                .points
-                .into_iter()
-                .map(|(timestamp, value)| pb::querier::v1::Point {
-                    timestamp,
-                    value,
-                    annotations: Vec::new(),
-                    exemplars: Vec::new(),
-                })
-                .collect(),
+        .map(|series| {
+            let exemplar_points = span_exemplars.get(&series.labels);
+            let labels = label_pairs(series.labels);
+            pb::querier::v1::ProfileSeries {
+                labels,
+                points: series
+                    .points
+                    .into_iter()
+                    .map(|(timestamp, value)| pb::querier::v1::Point {
+                        timestamp,
+                        value,
+                        annotations: Vec::new(),
+                        exemplars: exemplar_points
+                            .and_then(|points| points.get(&timestamp))
+                            .cloned()
+                            .unwrap_or_default(),
+                    })
+                    .collect(),
+            }
         })
         .collect();
     Ok(ConnectResponse::new(
@@ -1413,6 +1532,13 @@ fn label_pairs(labels: Vec<(String, String)>) -> Vec<pb::querier::v1::LabelPair>
     labels
         .into_iter()
         .map(|(name, value)| pb::querier::v1::LabelPair { name, value })
+        .collect()
+}
+
+fn types_label_pairs(labels: Vec<(String, String)>) -> Vec<pb::types::v1::LabelPair> {
+    labels
+        .into_iter()
+        .map(|(name, value)| pb::types::v1::LabelPair { name, value })
         .collect()
 }
 
@@ -2485,6 +2611,51 @@ overrides:
             points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn select_series_span_exemplar_returns_span_metadata() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_span_frame(
+            "span.path",
+            0x2a,
+        ))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectSeries"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "groupBy": ["service_name"],
+                "step": 60.0,
+                "exemplarType": "EXEMPLAR_TYPE_SPAN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let exemplar = response
+            .pointer("/series/0/points/0/exemplars/0")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("missing span exemplar: {response}"));
+
+        assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
+        assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
+        assert!(exemplar.get("value").and_then(json_i64) == Some(7));
     }
 
     #[tokio::test]
