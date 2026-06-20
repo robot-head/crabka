@@ -85,7 +85,7 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
         ] => aggregate_filter_sql_query(spanset_sql, agg, *op, *value),
         [Pipeline::Aggregate(Aggregate::Count), Pipeline::By(by)]
         | [Pipeline::By(by), Pipeline::Aggregate(Aggregate::Count)] => {
-            grouped_count_sql(spanset_sql, by, None)
+            grouped_aggregate_sql(spanset_sql, by, None)
         }
         [
             Pipeline::Aggregate(Aggregate::Count),
@@ -96,19 +96,43 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
             Pipeline::By(by),
             Pipeline::Aggregate(Aggregate::Count),
             Pipeline::Filter { op, value },
-        ] => grouped_count_sql(spanset_sql, by, Some((*op, *value))),
+        ] => grouped_aggregate_sql(spanset_sql, by, Some(("COUNT(*)".to_string(), *op, *value))),
+        [
+            Pipeline::Aggregate(
+                agg @ (Aggregate::Sum(_)
+                | Aggregate::Avg(_)
+                | Aggregate::Min(_)
+                | Aggregate::Max(_)),
+            ),
+            Pipeline::By(by),
+            Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(
+                agg @ (Aggregate::Sum(_)
+                | Aggregate::Avg(_)
+                | Aggregate::Min(_)
+                | Aggregate::Max(_)),
+            ),
+            Pipeline::Filter { op, value },
+        ] => grouped_aggregate_sql(
+            spanset_sql,
+            by,
+            Some((aggregate_expr_sql(agg)?, *op, *value)),
+        ),
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
     }
 }
 
-fn grouped_count_sql(
+fn grouped_aggregate_sql(
     spanset_sql: &str,
     by: &[Field],
-    filter: Option<(ComparisonOp, f64)>,
+    filter: Option<(String, ComparisonOp, f64)>,
 ) -> Result<String> {
-    let Some((op, value)) = filter else {
+    let Some((expr, op, value)) = filter else {
         return Ok(format!("SELECT * FROM ({spanset_sql}) AS q"));
     };
     let group_cols = by
@@ -121,7 +145,7 @@ fn grouped_count_sql(
         .map(|col| format!("matched.{col} = passing.{col}"))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let pred = aggregate_filter_sql("COUNT(*)", op, value)?;
+    let pred = aggregate_filter_sql(&expr, op, value)?;
     Ok(format!(
         "WITH matched AS ({spanset_sql}), \
          passing AS (SELECT {group_exprs} FROM matched GROUP BY {group_exprs} HAVING {pred}) \
@@ -754,5 +778,29 @@ mod tests {
             .await
             .unwrap();
         assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn avg_by_filter_keeps_spans_from_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(4, "db-b", 400, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc != nil } | avg(span:duration) | by(span.svc) > 100",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(names(&out) == vec!["db-a".to_string(), "db-b".to_string()]);
     }
 }
