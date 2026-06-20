@@ -155,12 +155,12 @@ pub(crate) fn comparison_to_sql(field: &Field, op: ComparisonOp, value: &Value) 
         (ComparisonOp::Nre, Value::Str(pattern)) => {
             format!("NOT regexp_like({col}, {})", string_lit(&anchored(pattern)))
         }
-        (ComparisonOp::Eq, v) => format!("{col} = {}", value_sql(v)?),
-        (ComparisonOp::Neq, v) => format!("{col} != {}", value_sql(v)?),
-        (ComparisonOp::Lt, v) => format!("{col} < {}", value_sql(v)?),
-        (ComparisonOp::Lte, v) => format!("{col} <= {}", value_sql(v)?),
-        (ComparisonOp::Gt, v) => format!("{col} > {}", value_sql(v)?),
-        (ComparisonOp::Gte, v) => format!("{col} >= {}", value_sql(v)?),
+        (ComparisonOp::Eq, v) => format!("{col} = {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Neq, v) => format!("{col} != {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Lt, v) => format!("{col} < {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Lte, v) => format!("{col} <= {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Gt, v) => format!("{col} > {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Gte, v) => format!("{col} >= {}", comparison_value_sql(field, v)?),
         (ComparisonOp::Re | ComparisonOp::Nre, _) => {
             return Err(TraceqlError::Plan(
                 "regex comparison requires string value".into(),
@@ -186,12 +186,12 @@ fn comparison_to_sql_qualified(
         (ComparisonOp::Nre, Value::Str(pattern)) => {
             format!("NOT regexp_like({col}, {})", string_lit(&anchored(pattern)))
         }
-        (ComparisonOp::Eq, v) => format!("{col} = {}", value_sql(v)?),
-        (ComparisonOp::Neq, v) => format!("{col} != {}", value_sql(v)?),
-        (ComparisonOp::Lt, v) => format!("{col} < {}", value_sql(v)?),
-        (ComparisonOp::Lte, v) => format!("{col} <= {}", value_sql(v)?),
-        (ComparisonOp::Gt, v) => format!("{col} > {}", value_sql(v)?),
-        (ComparisonOp::Gte, v) => format!("{col} >= {}", value_sql(v)?),
+        (ComparisonOp::Eq, v) => format!("{col} = {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Neq, v) => format!("{col} != {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Lt, v) => format!("{col} < {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Lte, v) => format!("{col} <= {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Gt, v) => format!("{col} > {}", comparison_value_sql(field, v)?),
+        (ComparisonOp::Gte, v) => format!("{col} >= {}", comparison_value_sql(field, v)?),
         (ComparisonOp::Re | ComparisonOp::Nre, _) => {
             return Err(TraceqlError::Plan(
                 "regex comparison requires string value".into(),
@@ -272,6 +272,49 @@ fn value_sql(value: &Value) -> Result<String> {
             "nil only supports equality comparisons".into(),
         )),
     }
+}
+
+fn comparison_value_sql(field: &Field, value: &Value) -> Result<String> {
+    let width = match field.scope {
+        Scope::Intrinsic(Intrinsic::TraceId) => Some(16),
+        Scope::Intrinsic(Intrinsic::Id | Intrinsic::ParentId) => Some(8),
+        _ => None,
+    };
+    if let Some(width) = width {
+        let Value::Str(hex) = value else {
+            return Err(TraceqlError::Plan(format!(
+                "{} comparisons require a hex string value",
+                intrinsic_name(&field.scope)
+            )));
+        };
+        return fixed_hex_lit(hex, width);
+    }
+    value_sql(value)
+}
+
+fn intrinsic_name(scope: &Scope) -> &'static str {
+    match scope {
+        Scope::Intrinsic(Intrinsic::TraceId) => "trace:id",
+        Scope::Intrinsic(Intrinsic::Id) => "span:id",
+        Scope::Intrinsic(Intrinsic::ParentId) => "span:parentID",
+        _ => "intrinsic",
+    }
+}
+
+fn fixed_hex_lit(hex: &str, width: usize) -> Result<String> {
+    let expected_len = width * 2;
+    if hex.len() != expected_len {
+        return Err(TraceqlError::Plan(format!(
+            "expected {expected_len} hex characters, got {}",
+            hex.len()
+        )));
+    }
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(TraceqlError::Plan(
+            "hex string contains non-hex characters".into(),
+        ));
+    }
+    Ok(format!("X'{}'", hex.to_ascii_lowercase()))
 }
 
 pub(crate) fn ident(s: &str) -> String {

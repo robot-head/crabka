@@ -1273,6 +1273,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_matches_trace_id_hex_string() {
+        let e = engine();
+        let r = e
+            .search(
+                "t",
+                "{ trace:id = \"09090909090909090909090909090909\" }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 2);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_span_id_hex_string() {
+        let e = engine();
+        let r = e
+            .search("t", "{ span:id = \"0202020202020202\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_parent_id_hex_string() {
+        let e = engine();
+        let r = e
+            .search(
+                "t",
+                "{ span:parentID = \"0101010101010101\" }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
     async fn bare_service_name_selector_matches_resource_service_name() {
         let e = engine();
         let r = e
