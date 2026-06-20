@@ -690,8 +690,8 @@ where
 #[derive(Debug, Deserialize)]
 struct RenderQuery {
     query: String,
-    from: Option<i64>,
-    until: Option<i64>,
+    from: Option<String>,
+    until: Option<String>,
     #[serde(rename = "maxNodes")]
     max_nodes: Option<i64>,
     format: Option<String>,
@@ -710,8 +710,15 @@ where
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
     };
-    let start = query.from.unwrap_or(0);
-    let end = query.until.unwrap_or(i64::MAX);
+    let now_ms = unix_now_ms();
+    let start = match parse_render_time_param(query.from.as_deref(), now_ms, 0) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    let end = match parse_render_time_param(query.until.as_deref(), now_ms, i64::MAX) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
     match state
         .select_merge_stacktraces(
             &tenant,
@@ -770,8 +777,15 @@ where
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
     };
-    let start = query_param_i64(&params, "from").unwrap_or(0);
-    let end = query_param_i64(&params, "until").unwrap_or(i64::MAX);
+    let now_ms = unix_now_ms();
+    let start = match query_param_render_time(&params, "from", now_ms, 0) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    let end = match query_param_render_time(&params, "until", now_ms, i64::MAX) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
     if let Err(err) = state.validate_query_range(&tenant, start, end) {
         return profile_error_response(err);
     }
@@ -855,6 +869,66 @@ fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
         .iter()
         .find(|(key, _)| key == name)
         .and_then(|(_, value)| value.parse().ok())
+}
+
+fn query_param_render_time(
+    params: &[(String, String)],
+    name: &str,
+    now_ms: i64,
+    default: i64,
+) -> Result<i64, ProfileError> {
+    let value = params
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str());
+    parse_render_time_param(value, now_ms, default)
+}
+
+fn parse_render_time_param(
+    value: Option<&str>,
+    now_ms: i64,
+    default: i64,
+) -> Result<i64, ProfileError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(default);
+    };
+    if value == "now" {
+        return Ok(now_ms);
+    }
+    if let Some(offset) = value.strip_prefix("now-") {
+        return Ok(now_ms - parse_render_duration_ms(offset)?);
+    }
+    value
+        .parse::<i64>()
+        .map_err(|err| ProfileError::Plan(format!("invalid render time {value:?}: {err}")))
+}
+
+fn parse_render_duration_ms(value: &str) -> Result<i64, ProfileError> {
+    let (number, unit) = value.split_at(value.len().saturating_sub(1));
+    let amount = number.parse::<i64>().map_err(|err| {
+        ProfileError::Plan(format!("invalid render relative duration {value:?}: {err}"))
+    })?;
+    let multiplier = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        _ => {
+            return Err(ProfileError::Plan(format!(
+                "invalid render relative duration unit {unit:?}"
+            )));
+        }
+    };
+    amount
+        .checked_mul(multiplier)
+        .ok_or_else(|| ProfileError::Plan(format!("render relative duration overflows: {value}")))
+}
+
+fn unix_now_ms() -> i64 {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph, profile_type: &str) -> serde_json::Value {
@@ -1503,6 +1577,19 @@ overrides:
     fn limit_zero_means_unlimited() {
         assert!(limit(0) == usize::MAX);
         assert!(limit(2) == 2);
+    }
+
+    #[test]
+    fn render_time_params_accept_now_offsets() {
+        let now_ms = 1_700_000_000_000;
+
+        assert!(parse_render_time_param(None, now_ms, 0).unwrap() == 0);
+        assert!(parse_render_time_param(Some("123"), now_ms, 0).unwrap() == 123);
+        assert!(parse_render_time_param(Some("now"), now_ms, 0).unwrap() == now_ms);
+        assert!(parse_render_time_param(Some("now-1h"), now_ms, 0).unwrap() == now_ms - 3_600_000);
+        assert!(
+            parse_render_time_param(Some("now-15m"), now_ms, 0).unwrap() == now_ms - 15 * 60_000
+        );
     }
 
     #[test]
