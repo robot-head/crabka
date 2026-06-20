@@ -1,6 +1,6 @@
 base_url = "https://robot-head.github.io/crabka"
 title = "Crabka"
-description = "A Rust reimplementation of Apache Kafka."
+description = "Crabka is a native-Rust, Kafka-compatible broker and toolkit. Byte-for-byte Kafka wire protocol, KRaft without a JVM, and a fraction of the memory. Apache 2.0."
 theme = "adidoks"
 compile_sass = true
 build_search_index = true

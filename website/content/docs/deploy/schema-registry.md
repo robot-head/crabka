@@ -1,5 +1,6 @@
 +++
 title = "Schema Registry Deployment"
+description = "Deploy Crabka's Confluent-compatible Schema Registry: a REST service that stores schemas in the compacted _schemas topic and enforces compatibility checks."
 weight = 20
 template = "docs/page.html"
 

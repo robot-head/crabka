@@ -34,8 +34,8 @@
   is_page=false,
   page_images="",
   page_section="",
-  created_time="2021-05-01T08:08:00+08:00",
-  updated_time="2021-05-01T08:08:08+08:00"
+  created_time="",
+  updated_time=""
   )
 %}
 
@@ -75,9 +75,9 @@
   {% endif %}
   <meta name="twitter:title" content="{{ title }}">
   <meta name="twitter:description" content="{{ description }}">
-  <meta name="twitter:site" content="@{{ config.extra.open.twitter_site }}">
-  <meta name="twitter:creator" content="@{{ config.extra.open.twitter_creator }}">
-  
+  {% if config.extra.open.twitter_site %}<meta name="twitter:site" content="@{{ config.extra.open.twitter_site }}">{% endif %}
+  {% if config.extra.open.twitter_creator %}<meta name="twitter:creator" content="@{{ config.extra.open.twitter_creator }}">{% endif %}
+
   <meta property="og:title" content="{{ title }}">
   <meta property="og:description" content="{{ description }}">
   <meta property="og:type" content="{{ type }}">
@@ -93,10 +93,13 @@
     {% endfor %}
   {% elif config.extra.open.image %}
     <meta property="og:image" content="{{ config.base_url | safe }}/{{ config.extra.open.image }}">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="{{ config.title }} — {{ config.extra.title_addition | default(value=description) }}">
   {% endif %}
 
-  <meta property="og:updated_time" content="{{ updated_time }}">
-  <meta property="og:site_name" content="{{ title }}">
+  {% if updated_time %}<meta property="og:updated_time" content="{{ updated_time }}">{% endif %}
+  <meta property="og:site_name" content="{{ config.title }}">
 
   {% if config.extra.open.audio %}
     <meta property="og:audio" content="{{ config.extra.open.audio }}">
@@ -111,8 +114,8 @@
       <meta property="og:video" content="{{ get_url(path=video) }}">
     {% endfor %}
   {% endif %}
-  <meta property="article:publisher" content="https://www.facebook.com/{{ config.extra.open.facebook_publisher }}">
-  <meta property="article:author" content="https://www.facebook.com/{{ config.extra.open.facebook_author }}">
+  {% if config.extra.open.facebook_publisher %}<meta property="article:publisher" content="https://www.facebook.com/{{ config.extra.open.facebook_publisher }}">{% endif %}
+  {% if config.extra.open.facebook_author %}<meta property="article:author" content="https://www.facebook.com/{{ config.extra.open.facebook_author }}">{% endif %}
   <meta property="og:locale" content="{{ config.extra.open.og_locale }}">
 {% endif %}
 
@@ -122,9 +125,10 @@
     {
       "@context": "https://schema.org",
       "@type": "Organization",
-      "url": "{{ page_path | safe }}",
+      "url": "{{ config.base_url | safe }}",
       "name": "{{ title }}",
-      "logo": "{{ page_path | safe }}{{ config.extra.schema.logo }}",
+      "description": "{{ config.description }}",
+      "logo": "{{ config.base_url | safe }}/{{ config.extra.schema.logo }}",
       "sameAs": [
         {% if config.extra.schema.twitter %}"{{ config.extra.schema.twitter | safe }}",{% endif %}
         {% if config.extra.schema.linked_in %}"{{ config.extra.schema.linked_in | safe }}",{% endif %}
@@ -138,7 +142,7 @@
     {
       "@context": "https://schema.org",
       "@type": "Person",
-      "url": "{{ page_path | safe }}",
+      "url": "{{ config.base_url | safe }}",
       "name": "{{ title }}",
       "sameAs": [
         {% if config.extra.schema.twitter %}"{{ config.extra.schema.twitter | safe }}",{% endif %}
@@ -153,10 +157,10 @@
     {
       "@context": "https://schema.org",
       "@type": "WebSite",
-      "url": "{{ page_path | safe }}",
+      "url": "{{ config.base_url | safe }}",
       "potentialAction": {
         "@type": "SearchAction",
-        "target": "{{ page_path | safe }}?q={search_term_string}",
+        "target": "{{ config.base_url | safe }}/?q={search_term_string}",
         "query-input": "required name=search_term_string"
       }
     }
@@ -164,91 +168,73 @@
   {% endif %}
 {% endif %}
 
-{% if is_page and config.extra.schema.section %}
-  {% if config.extra.schema.section == page_section %}
+{% if is_page %}
     <script type="application/ld+json">
     {
       "@context": "https://schema.org",
-      "@type": "Article",
+      "@type": "TechArticle",
       "mainEntityOfPage": {
         "@type": "WebPage",
-        "@id": "{{ page_path | safe }}"
+        "@id": "{{ page_url | safe }}"
       },
       "headline": "{{ title }}",
-      "image": {{ page_images }},
-      "datePublished": "{{ created_time }}",
-      "dateModified": "{{ updated_time }}",
+      "image": "{{ config.base_url | safe }}/{{ config.extra.open.image }}",
+      {% if created_time %}"datePublished": "{{ created_time }}",{% endif %}
+      {% if updated_time %}"dateModified": "{{ updated_time }}",{% endif %}
       "author": {
         "@type": "{{ config.extra.schema.type }}",
-        "name": "{{ title }}"
+        "name": "{{ config.extra.author | default(value=config.title) }}",
+        "url": "{{ config.base_url | safe }}"
       },
       "publisher": {
         "@type": "{{ config.extra.schema.type }}",
-        "name": "{{ title }}",
+        "name": "{{ config.title }}",
         {% if config.extra.schema.type == "Organization" %}
         "logo": {
           "@type": "ImageObject",
-          "url": "{{ get_url(path=config.extra.schema.logo) | replace(from=config.base_url, to="") | safe }}"
+          "url": "{{ config.base_url | safe }}/{{ config.extra.schema.logo }}"
         }
         {% endif %}
       },
       "description": "{{ description }}"
     }
     </script>
-  {% endif %}
 {% endif %}
 
-{% set url_prefix = get_url(path="/") | split(pat="://") | first %}
-{% set url_main = get_url(path="/") | split(pat="://") | last %}
-{% set url_item = url_prefix ~ "://" ~ url_main ~ "/" %}
+{% set site_root = get_url(path="/") | trim_end_matches(pat="/") %}
+{% set_global url_item = site_root ~ "/" %}
 <script type="application/ld+json">
   {
-    "@context": "http://schema.org",
+    "@context": "https://schema.org",
     "@type": "BreadcrumbList",
-    {% if page_path == "/" %}
-    {
-      "@type": "ListItem",
-      "position":  1 ,
-      "name": "Home",
-      "item": "{{ url_item | safe }}"
-    },
-    {% else %}
-      {% set paths = page_path | trim_start_matches(pat="/") | trim_end_matches(pat="/") | split(pat="/") %}
-      {% for val in paths %}
-        {% set name_array = val | split(pat="-") %}
-        {% set_global str = "" %}
-        {% for val in name_array %}
-        {% set cap_val = val | capitalize %}
-        {% set_global str = str ~ cap_val ~ " " %}
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "Home",
+        "item": "{{ url_item | safe }}"
+      }
+      {% if page_path and page_path != "/" %}
+        {% set paths = page_path | trim_start_matches(pat="/") | trim_end_matches(pat="/") | split(pat="/") %}
+        {% for val in paths %}
+          {% set name_array = val | split(pat="-") %}
+          {% set_global str = "" %}
+          {% for word in name_array %}
+            {% set cap_val = word | capitalize %}
+            {% set_global str = str ~ cap_val ~ " " %}
+          {% endfor %}
+          {% set name = str | trim_end_matches(pat=" ") | title %}
+          {% set_global url_item = url_item ~ val ~ "/" %}
+          ,
+          {
+            "@type": "ListItem",
+            "position": {{ loop.index + 1 }},
+            "name": "{{ name }}",
+            "item": "{{ url_item | safe }}"
+          }
         {% endfor %}
-        {% set name = str | trim_end_matches(pat=" ") | title %}
-        {% if not index %}
-          {
-            "@type": "ListItem",
-            "position":  1 ,
-            "name": "Home",
-            "item": "{{ url_item | safe }}"
-          },
-          {% set_global index = 2 %}
-          {% set_global url_item = url_item ~ val ~ "/" %}
-          {
-            "@type": "ListItem",
-            "position":  {{ index }} ,
-            "name": "{{ name }}",
-            "item": "{{ url_item | safe }}"
-          },
-        {% else %}
-          {% set_global index = index + 1 %}
-          {% set_global url_item = url_item ~ val ~ "/" %}
-          {
-            "@type": "ListItem",
-            "position":  {{ index }} ,
-            "name": "{{ name }}",
-            "item": "{{ url_item | safe }}"
-          },
-        {% endif %}
-      {% endfor %}
-    {% endif %}
+      {% endif %}
+    ]
   }
 </script>
 

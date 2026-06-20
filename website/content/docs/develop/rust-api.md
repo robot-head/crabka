@@ -1,5 +1,6 @@
 +++
 title = "Rust API"
+description = "Generated rustdoc for the Crabka workspace. Build directly against crates like crabka-broker, crabka-protocol, and crabka-client-core instead of the CLI tools."
 weight = 20
 template = "docs/page.html"
 +++
