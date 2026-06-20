@@ -34,6 +34,8 @@ const PROFILE_ID_LABEL: &str = "__profile_id__";
 pub type DefaultStore = InMemoryProfileStore;
 type SeriesKey = Vec<(String, String)>;
 type SpanExemplarsBySeries = BTreeMap<SeriesKey, BTreeMap<i64, Vec<pb::types::v1::Exemplar>>>;
+type HeatmapSpanExemplarsBySeries =
+    BTreeMap<SeriesKey, BTreeMap<i64, Vec<pb::querier::v1::Exemplar>>>;
 
 pub struct QuerierState<S: ProfileStore = DefaultStore> {
     store: Arc<S>,
@@ -315,6 +317,48 @@ impl<S: ProfileStore> QuerierState<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn select_heatmap_span_exemplars(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        start_ms: i64,
+        end_ms: i64,
+        time_buckets: usize,
+    ) -> Result<HeatmapSpanExemplarsBySeries, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let base_matchers = parse_label_selector(label_selector)?;
+        let groups = if group_by.is_empty() {
+            vec![Vec::new()]
+        } else {
+            self.store
+                .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+                .await?
+        };
+        let mut out = BTreeMap::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let exemplars =
+                heatmap_span_exemplars_from_scan(&scan, start_ms, end_ms, time_buckets, &labels)
+                    .await?;
+            if !exemplars.is_empty() {
+                out.insert(labels, exemplars);
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn select_merge_span_profile(
         &self,
         tenant: &str,
@@ -447,6 +491,78 @@ async fn span_exemplars_from_scan(
         }
     }
     Ok(out)
+}
+
+async fn heatmap_span_exemplars_from_scan(
+    scan: &crabka_pprof::ProfileScan,
+    start_ms: i64,
+    end_ms: i64,
+    time_buckets: usize,
+    labels: &[(String, String)],
+) -> Result<BTreeMap<i64, Vec<pb::querier::v1::Exemplar>>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, {fingerprint}, {span}, MAX({total}) AS total \
+         FROM {table} WHERE {span} IS NOT NULL \
+         GROUP BY {timestamp}, {fingerprint}, {span} \
+         ORDER BY {timestamp}, {fingerprint}, {span}",
+        timestamp = COL_TIMESTAMP,
+        fingerprint = COL_FINGERPRINT,
+        span = PCOL_SPAN_ID,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut out: BTreeMap<i64, Vec<pb::querier::v1::Exemplar>> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let span_ids = batch.column(2).as_primitive::<UInt64Type>();
+        let totals = batch.column(3).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            if span_ids.is_null(row) {
+                continue;
+            }
+            let timestamp = timestamps.value(row);
+            let Some(slot_timestamp) =
+                heatmap_slot_timestamp(start_ms, end_ms, time_buckets, timestamp)
+            else {
+                continue;
+            };
+            out.entry(slot_timestamp)
+                .or_default()
+                .push(pb::querier::v1::Exemplar {
+                    timestamp,
+                    profile_id: String::new(),
+                    span_id: format!("{:x}", span_ids.value(row)),
+                    value: totals.value(row),
+                    labels: label_pairs(labels.to_vec()),
+                });
+        }
+    }
+    Ok(out)
+}
+
+fn heatmap_slot_timestamp(
+    start_ms: i64,
+    end_ms: i64,
+    time_buckets: usize,
+    timestamp: i64,
+) -> Option<i64> {
+    if timestamp < start_ms || timestamp >= end_ms || start_ms >= end_ms || time_buckets == 0 {
+        return None;
+    }
+    let time_span = i128::from(end_ms - start_ms);
+    let raw = i128::from(timestamp - start_ms) * i128::try_from(time_buckets).ok()? / time_span;
+    let bucket = raw.clamp(0, i128::try_from(time_buckets - 1).ok()?);
+    let bucket = i64::try_from(bucket).ok()?;
+    let step_ms = (end_ms - start_ms) / i64::try_from(time_buckets).ok()?;
+    Some(start_ms + (bucket + 1) * step_ms)
 }
 
 pub fn router<S>(state: Arc<QuerierState<S>>) -> Router
@@ -872,6 +988,22 @@ where
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
     let time_buckets = heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?;
+    let span_exemplars = if req.exemplar_type == pb::querier::v1::ExemplarType::Span as i32 {
+        state
+            .select_heatmap_span_exemplars(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &req.group_by,
+                req.start,
+                req.end,
+                time_buckets,
+            )
+            .await
+            .map_err(connect_error)?
+    } else {
+        BTreeMap::new()
+    };
     let series = state
         .engine
         .select_heatmaps(
@@ -888,7 +1020,19 @@ where
         .map_err(connect_error)?
         .into_iter()
         .take(limit(req.limit))
-        .map(pb::querier::v1::HeatmapSeries::from)
+        .map(|heatmap| {
+            let exemplar_slots = span_exemplars.get(&heatmap.labels);
+            let mut series = pb::querier::v1::HeatmapSeries::from(heatmap);
+            if let Some(exemplar_slots) = exemplar_slots {
+                for slot in &mut series.slots {
+                    slot.exemplars = exemplar_slots
+                        .get(&slot.timestamp)
+                        .cloned()
+                        .unwrap_or_default();
+                }
+            }
+            series
+        })
         .collect();
     Ok(ConnectResponse::new(
         pb::querier::v1::SelectHeatmapResponse { series },
@@ -2739,6 +2883,52 @@ overrides:
             }),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn select_heatmap_span_exemplar_returns_span_metadata() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_span_frame(
+            "span.path",
+            0x2a,
+        ))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectHeatmap"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "step": 60.0,
+                "groupBy": ["service_name"],
+                "queryType": "HEATMAP_QUERY_TYPE_SPAN",
+                "exemplarType": "EXEMPLAR_TYPE_SPAN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let exemplar = response
+            .pointer("/series/0/slots/0/exemplars/0")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| panic!("missing heatmap span exemplar: {response}"));
+
+        assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
+        assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
+        assert!(exemplar.get("value").and_then(json_i64) == Some(7));
     }
 
     #[tokio::test]
