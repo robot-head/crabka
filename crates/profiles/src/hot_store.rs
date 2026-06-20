@@ -33,29 +33,18 @@ impl WalTailProfileStore {
         let total_value = record.samples.iter().map(|sample| sample.value).sum();
         for (sample, stack_id) in record.samples.iter().zip(stack_ids) {
             let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
-            match sample.span_id {
-                Some(span_id) => guard.push_sample_with_total_and_span(
-                    &record.tenant,
-                    &record.profile_type,
-                    record.labels.clone(),
-                    crate::blockbuilder::STACKTRACE_PARTITION,
-                    stack_id,
-                    sample.value,
-                    total_value,
-                    timestamp_ms,
-                    span_id,
-                ),
-                None => guard.push_sample_with_total(
-                    &record.tenant,
-                    &record.profile_type,
-                    record.labels.clone(),
-                    crate::blockbuilder::STACKTRACE_PARTITION,
-                    stack_id,
-                    sample.value,
-                    total_value,
-                    timestamp_ms,
-                ),
-            }
+            guard.push_sample_with_total_and_associations(
+                &record.tenant,
+                &record.profile_type,
+                record.labels.clone(),
+                crate::blockbuilder::STACKTRACE_PARTITION,
+                stack_id,
+                sample.value,
+                total_value,
+                timestamp_ms,
+                sample.span_id,
+                sample.trace_id.clone(),
+            );
         }
         Ok(())
     }
@@ -178,8 +167,10 @@ pub async fn run_wal_tail(
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{Array, BinaryArray};
     use assert2::assert;
-    use crabka_pprof::{EngineOpts, FlameEngine, SeriesAgg};
+    use crabka_blockstore::{LabelMatcher, MatchOp};
+    use crabka_pprof::{EngineOpts, FlameEngine, PCOL_TRACE_ID, ProfileStore, SeriesAgg};
 
     use crate::wal::{ProfileRecord, WalFunction, WalLocation, WalSample, WalSymbolSet};
 
@@ -256,5 +247,45 @@ mod tests {
 
         assert!(series.len() == 1);
         assert!(series[0].points == vec![(1_700_000, 9.0)]);
+    }
+
+    #[tokio::test]
+    async fn appended_wal_records_preserve_trace_ids_in_hot_samples() {
+        let store = super::WalTailProfileStore::new();
+        store.append_record(record()).unwrap();
+
+        let scan = store
+            .select(
+                "tenant-a",
+                PT,
+                &[LabelMatcher::new(
+                    "service_name".to_string(),
+                    MatchOp::Eq,
+                    "api".to_string(),
+                )],
+                0,
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+        let batches = scan
+            .ctx
+            .sql(&format!(
+                "SELECT {PCOL_TRACE_ID} FROM {}",
+                scan.samples_table
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+
+        let trace_ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert!(!trace_ids.is_null(0));
+        assert!(trace_ids.value(0) == &[0xaa; 16]);
     }
 }

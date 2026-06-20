@@ -85,22 +85,18 @@ impl InMemoryProfileStore {
         total_value: i64,
         timestamp_ms: i64,
     ) {
-        let fingerprint = fingerprint_labels(&labels);
-        self.samples
-            .entry(tenant.to_string())
-            .or_default()
-            .push(SampleRow {
-                profile_type: profile_type.to_string(),
-                fingerprint,
-                labels,
-                partition,
-                stacktrace_id,
-                value,
-                total_value,
-                span_id: None,
-                trace_id: None,
-                timestamp_ms,
-            });
+        self.push_sample_with_total_and_associations(
+            tenant,
+            profile_type,
+            labels,
+            partition,
+            stacktrace_id,
+            value,
+            total_value,
+            timestamp_ms,
+            None,
+            None,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,6 +112,34 @@ impl InMemoryProfileStore {
         timestamp_ms: i64,
         span_id: u64,
     ) {
+        self.push_sample_with_total_and_associations(
+            tenant,
+            profile_type,
+            labels,
+            partition,
+            stacktrace_id,
+            value,
+            total_value,
+            timestamp_ms,
+            Some(span_id),
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_sample_with_total_and_associations(
+        &mut self,
+        tenant: &str,
+        profile_type: &str,
+        labels: Vec<(String, String)>,
+        partition: u64,
+        stacktrace_id: u32,
+        value: i64,
+        total_value: i64,
+        timestamp_ms: i64,
+        span_id: Option<u64>,
+        trace_id: Option<Vec<u8>>,
+    ) {
         let fingerprint = fingerprint_labels(&labels);
         self.samples
             .entry(tenant.to_string())
@@ -128,8 +152,8 @@ impl InMemoryProfileStore {
                 stacktrace_id,
                 value,
                 total_value,
-                span_id: Some(span_id),
-                trace_id: None,
+                span_id,
+                trace_id,
                 timestamp_ms,
             });
     }
