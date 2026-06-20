@@ -60,7 +60,8 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
     match pipeline {
         []
         | [
-            Pipeline::Aggregate(
+            Pipeline::Select(_)
+            | Pipeline::Aggregate(
                 Aggregate::Count
                 | Aggregate::Sum(_)
                 | Aggregate::Avg(_)
@@ -816,6 +817,28 @@ mod tests {
             .await
             .unwrap();
         assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn select_preserves_matched_spans_for_search_projection() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "db-a", 40, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc = \"api\" } | select(span:duration, span.svc)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string()]);
     }
 
     #[tokio::test]
