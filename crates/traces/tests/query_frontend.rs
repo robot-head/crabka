@@ -60,6 +60,7 @@ async fn frontend_proxies_by_id_route_with_tenant_and_query() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v2/traces/0123456789abcdef0123456789abcdef?start=1&end=2")
+                .header("accept", "application/protobuf")
                 .header("x-scope-orgid", "tenant-a")
                 .body(axum::body::Body::empty())
                 .unwrap(),
@@ -72,6 +73,7 @@ async fn frontend_proxies_by_id_route_with_tenant_and_query() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert!(json["path"] == "/api/v2/traces/0123456789abcdef0123456789abcdef");
     assert!(json["query"] == "start=1&end=2");
+    assert!(json["accept"] == "application/protobuf");
     assert!(json["tenant"] == "tenant-a");
 }
 
@@ -152,6 +154,10 @@ async fn record_request(State(()): State<()>, headers: HeaderMap, uri: Uri) -> a
     axum::Json(json!({
         "path": uri.path(),
         "query": uri.query().unwrap_or_default(),
+        "accept": headers
+            .get("accept")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default(),
         "tenant": headers
             .get("x-scope-orgid")
             .and_then(|value| value.to_str().ok())

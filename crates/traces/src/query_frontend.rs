@@ -308,6 +308,7 @@ fn build_querier_request(
     if let Some(tenant) = headers.get("x-scope-orgid") {
         req = req.header("x-scope-orgid", tenant.clone());
     }
+    req = forward_accept(req, headers);
     req.header(
         "x-crabka-query-tier",
         match shard.tier {
@@ -330,7 +331,7 @@ fn build_plain_querier_request(
     if let Some(tenant) = headers.get("x-scope-orgid") {
         req = req.header("x-scope-orgid", tenant.clone());
     }
-    req
+    forward_accept(req, headers)
 }
 
 fn merge_metrics(metrics: &mut Value, next: Option<&Value>) {
@@ -344,6 +345,14 @@ fn merge_metrics(metrics: &mut Value, next: Option<&Value>) {
         let lhs = current.get(key).and_then(Value::as_u64).unwrap_or(0);
         let rhs = next.get(key).and_then(Value::as_u64).unwrap_or(0);
         current.insert(key.to_string(), json!(lhs + rhs));
+    }
+}
+
+fn forward_accept(req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest::RequestBuilder {
+    if let Some(accept) = headers.get(header::ACCEPT) {
+        req.header(header::ACCEPT, accept.clone())
+    } else {
+        req
     }
 }
 
