@@ -151,9 +151,10 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
-        self.index
-            .label_names_for_time(tenant, matchers, start_ms, end_ms)
-            .map_err(|err| ProfileError::Store(err.to_string()))
+        let active = self
+            .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
+            .await?;
+        Ok(self.index.label_names_for_fingerprints(tenant, &active))
     }
 
     async fn label_values(
@@ -598,6 +599,32 @@ mod tests {
         let names = cold.label_names("t", &[], 2_000, 3_000).await.unwrap();
 
         assert!(names.is_empty(), "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn cold_store_label_names_do_not_leak_series_outside_time_range_in_same_block() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let api = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let mut worker = record_at("t", "worker", vec![0], 7, 3_000_000_000);
+        worker
+            .labels
+            .push(("pod".to_string(), "worker-0".to_string()));
+        let records = vec![api.clone(), worker.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in &records {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let names = cold.label_names("t", &[], 1_000, 1_000).await.unwrap();
+
+        assert!(!names.contains(&"pod".to_string()), "{names:?}");
     }
 
     #[tokio::test]

@@ -163,6 +163,14 @@ impl ProfileIndex {
         Ok(self.series.label_names_for_fingerprints(tenant, &active))
     }
 
+    pub fn label_names_for_fingerprints(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+    ) -> Vec<String> {
+        self.series.label_names_for_fingerprints(tenant, fps)
+    }
+
     pub fn series_for_time(
         &self,
         tenant: &str,
