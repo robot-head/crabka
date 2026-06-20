@@ -879,9 +879,12 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
         Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
+        Scope::Intrinsic(Intrinsic::Id) => Ok(COL_SPAN_ID.to_string()),
+        Scope::Intrinsic(Intrinsic::ParentId) => Ok(COL_PARENT_SPAN_ID.to_string()),
         Scope::Intrinsic(Intrinsic::Kind) => Ok(COL_KIND.to_string()),
         Scope::Intrinsic(Intrinsic::Status) => Ok(COL_STATUS_CODE.to_string()),
         Scope::Intrinsic(Intrinsic::StatusMessage) => Ok(COL_STATUS_MESSAGE.to_string()),
+        Scope::Intrinsic(Intrinsic::TraceId) => Ok(COL_TRACE_ID.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootService) => Ok(COL_ROOT_SERVICE_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootName) => Ok(COL_ROOT_SPAN_NAME.to_string()),
         _ => Err(TraceqlError::Unsupported(format!(
@@ -912,6 +915,7 @@ fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<S
             .as_primitive::<arrow::datatypes::Int32Type>()
             .value(row)
             .to_string()),
+        DataType::FixedSizeBinary(_) => Ok(bytes_to_hex(array.as_fixed_size_binary().value(row))),
         other => Err(TraceqlError::Exec(format!(
             "unsupported metrics label column type {other:?}"
         ))),
@@ -1676,6 +1680,32 @@ mod tests {
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("statusMessage".into(), "timeout".into())]);
         assert!(got[1].points == vec![(0, 2.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_trace_id_intrinsic_uses_hex_label() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(0x11, 1, None, "api", 0)]);
+        s.push_trace("t", "b", "root", vec![sp_at(0x22, 1, None, "api", 10_000)]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(trace:id)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("id".into(), "11111111111111111111111111111111".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("id".into(), "22222222222222222222222222222222".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
