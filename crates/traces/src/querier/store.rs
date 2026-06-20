@@ -239,6 +239,9 @@ fn trace_from_batches(
                 parent_span_id: nullable_fixed_value::<8>(&batch, COL_PARENT_SPAN_ID, row)?,
                 name: string_value(&batch, COL_NAME, row)?,
                 kind: int32_value(&batch, COL_KIND, row)?,
+                nested_set_left: int32_value(&batch, COL_NS_LEFT, row)?,
+                nested_set_right: int32_value(&batch, COL_NS_RIGHT, row)?,
+                nested_set_parent: int32_value(&batch, COL_PARENT_ID, row)?,
                 start_time_unix_nano: u64::try_from(int64_value(&batch, COL_START, row)?)
                     .unwrap_or(0),
                 duration_nanos: u64::try_from(int64_value(&batch, COL_DURATION, row)?).unwrap_or(0),

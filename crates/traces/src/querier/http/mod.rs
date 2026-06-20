@@ -815,6 +815,15 @@ fn collect_span_intrinsic_values(
                 values.insert(("string".to_string(), hex::encode(parent_id)));
             }
         }
+        "span:nestedSetLeft" => {
+            values.insert(("int".to_string(), span.nested_set_left.to_string()));
+        }
+        "span:nestedSetParent" => {
+            values.insert(("int".to_string(), span.nested_set_parent.to_string()));
+        }
+        "span:nestedSetRight" => {
+            values.insert(("int".to_string(), span.nested_set_right.to_string()));
+        }
         "span:status" => {
             values.insert(("int".to_string(), span.status_code.to_string()));
         }
@@ -1901,6 +1910,7 @@ mod tests {
         );
 
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(
@@ -1923,6 +1933,41 @@ mod tests {
                     "type": "int",
                     "value": "0"
                 }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/span:nestedSetLeft/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "int",
+                        "value": "1"
+                    },
+                    {
+                        "type": "int",
+                        "value": "2"
+                    }
+                ],
                 "metrics": {
                     "inspectedBytes": "0"
                 }

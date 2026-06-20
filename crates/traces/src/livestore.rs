@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::TracesError;
 use crate::querier::live::{LiveSource, Result as LiveResult};
-use crate::span::{AttrValue, KeyValue, Span, batch::span_batch};
+use crate::span::{AttrValue, KeyValue, Span, batch::span_batch, nested_set};
 use crate::wal::SpanRecord;
 
 /// In-memory recent span store keyed by tenant and trace id.
@@ -263,16 +263,23 @@ fn trace_spans(trace_id: &[u8; 16], spans: &[Span]) -> crabka_traceql::TraceSpan
             .and_then(|span| attr_string(&span.resource_attrs, "service.name"))
             .unwrap_or_default(),
         root_trace_name: root.map(|span| span.name.clone()).unwrap_or_default(),
-        spans: spans.iter().map(span_ref).collect(),
+        spans: spans
+            .iter()
+            .zip(nested_set::assign_nested_set(spans))
+            .map(|(span, nested)| span_ref(span, nested))
+            .collect(),
     }
 }
 
-fn span_ref(span: &Span) -> crabka_traceql::SpanRef {
+fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanRef {
     crabka_traceql::SpanRef {
         span_id: span.span_id,
         parent_span_id: span.parent_span_id,
         name: span.name.clone(),
         kind: span.kind.as_i32(),
+        nested_set_left: nested.left,
+        nested_set_right: nested.right,
+        nested_set_parent: nested.parent_id,
         start_time_unix_nano: non_negative_u64(span.start_ns),
         duration_nanos: non_negative_u64(span.duration_ns),
         status_code: span.status.as_i32(),

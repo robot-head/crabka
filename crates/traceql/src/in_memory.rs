@@ -87,12 +87,15 @@ impl InMemorySpanStore {
     }
 }
 
-fn span_ref(span: &InputSpan) -> SpanRef {
+fn span_ref(span: &InputSpan, nested: &NestedSet) -> SpanRef {
     SpanRef {
         span_id: span.span_id,
         parent_span_id: span.parent_span_id,
         name: span.name.clone(),
         kind: span.kind,
+        nested_set_left: nested.left,
+        nested_set_right: nested.right,
+        nested_set_parent: nested.parent_id,
         start_time_unix_nano: u64::try_from(span.start_unix_nano).unwrap_or(0),
         duration_nanos: u64::try_from(span.duration_nanos).unwrap_or(0),
         status_code: span.status_code,
@@ -263,7 +266,12 @@ impl SpanStore for InMemorySpanStore {
             trace_id: trace.trace_id,
             root_service_name: trace.root_service_name.clone(),
             root_trace_name: trace.root_span_name.clone(),
-            spans: trace.spans.iter().map(span_ref).collect(),
+            spans: trace
+                .spans
+                .iter()
+                .zip(&trace.nested)
+                .map(|(span, nested)| span_ref(span, nested))
+                .collect(),
         }))
     }
 
