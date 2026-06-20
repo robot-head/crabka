@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+publish = false
 description = "Language-less continuous-profiling engine (Grafana-Pyroscope-equivalent) for Crabka"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"

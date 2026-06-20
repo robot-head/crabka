@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+publish = false
 description = "Crabka profiles ingest service (distributor + block-builder) - Grafana-Pyroscope replacement"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"

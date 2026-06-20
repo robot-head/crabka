@@ -1,3 +1,9 @@
+#![allow(
+    clippy::default_trait_access,
+    clippy::needless_raw_string_hashes,
+    clippy::too_many_lines
+)]
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;

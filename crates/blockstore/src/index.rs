@@ -128,6 +128,7 @@ impl SeriesIndex {
         Ok(names.into_iter().collect())
     }
 
+    #[must_use]
     pub fn label_names_for_fingerprints(
         &self,
         tenant: &str,
@@ -166,6 +167,7 @@ impl SeriesIndex {
         Ok(values.into_iter().collect())
     }
 
+    #[must_use]
     pub fn label_values_for_fingerprints(
         &self,
         tenant: &str,
@@ -216,6 +218,7 @@ impl SeriesIndex {
         Ok(out.into_iter().collect())
     }
 
+    #[must_use]
     pub fn series_for_fingerprints(
         &self,
         tenant: &str,

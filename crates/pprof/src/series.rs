@@ -76,7 +76,7 @@ mod tests {
     fn step_secs_rejects_sub_millisecond_values() {
         assert!(step_ms_from_secs(0.0001).is_err());
         assert!(step_ms_from_secs(0.0005).is_err());
-        assert!(step_ms_from_secs(0.0009999).is_err());
+        assert!(step_ms_from_secs(0.000_999_9).is_err());
         assert!(step_ms_from_secs(0.001).unwrap() == 1);
     }
 

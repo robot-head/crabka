@@ -187,7 +187,7 @@ fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbo
         let location = frame.location;
         let function = frame
             .function
-            .and_then(|function| function.demangle().ok().map(|name| name.into_owned()))
+            .and_then(|function| function.demangle().ok().map(std::borrow::Cow::into_owned))
             .or_else(|| loader.find_symbol(address).map(ToString::to_string))
             .unwrap_or_default();
         let file = location
@@ -238,7 +238,7 @@ fn nearest_symbol_name(object: &object::File<'_>, address: u64) -> Option<String
             let size = symbol.size();
             size == 0 || address < symbol.address().saturating_add(size)
         })
-        .max_by_key(|symbol| symbol.address())
+        .max_by_key(object::ObjectSymbol::address)
         .and_then(|symbol| symbol.name().ok())
         .map(ToString::to_string)
 }
@@ -490,7 +490,7 @@ mod tests {
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let served = Arc::new(AtomicUsize::new(0));
         let served_clone = Arc::clone(&served);
-        let server = std::thread::spawn(move || {
+        let server_thread = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let read = std::io::Read::read(&mut stream, &mut request).unwrap();
@@ -521,7 +521,7 @@ mod tests {
             })
             .unwrap();
 
-        server.join().unwrap();
+        server_thread.join().unwrap();
         assert!(served.load(Ordering::Relaxed) == 1);
         assert!(first == second);
         assert!(

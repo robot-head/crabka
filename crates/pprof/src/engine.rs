@@ -300,6 +300,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(merged.to_pyroscope_tree_bytes(max_nodes))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn merge_to_tree(
         &self,
         tenant: &str,
@@ -810,8 +811,10 @@ impl<S: ProfileStore> FlameEngine<S> {
             .await?
             .into_iter()
             .next()
-            .map(|item| item.heatmap)
-            .unwrap_or_else(|| bin_heatmap(&[], start_ms, end_ms, time_buckets, value_buckets)))
+            .map_or_else(
+                || bin_heatmap(&[], start_ms, end_ms, time_buckets, value_buckets),
+                |item| item.heatmap,
+            ))
     }
 
     #[allow(clippy::too_many_arguments)]

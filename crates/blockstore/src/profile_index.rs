@@ -142,6 +142,7 @@ impl ProfileIndex {
             .label_values_for_fingerprints(tenant, name, &active))
     }
 
+    #[must_use]
     pub fn label_values_for_fingerprints(
         &self,
         tenant: &str,
@@ -151,6 +152,7 @@ impl ProfileIndex {
         self.series.label_values_for_fingerprints(tenant, name, fps)
     }
 
+    #[must_use]
     pub fn profile_types_for_fingerprints(
         &self,
         tenant: &str,
@@ -181,6 +183,7 @@ impl ProfileIndex {
         Ok(self.series.label_names_for_fingerprints(tenant, &active))
     }
 
+    #[must_use]
     pub fn label_names_for_fingerprints(
         &self,
         tenant: &str,
@@ -204,6 +207,7 @@ impl ProfileIndex {
             .series_for_fingerprints(tenant, &active, label_names))
     }
 
+    #[must_use]
     pub fn series_for_fingerprints(
         &self,
         tenant: &str,

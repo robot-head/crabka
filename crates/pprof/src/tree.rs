@@ -411,15 +411,16 @@ fn sorted_child_position(children: &[usize], nodes: &[Node], name: &str) -> usiz
 fn write_pyroscope_tree_node(out: &mut Vec<u8>, name: &str, self_: i64) {
     write_uvarint(out, name.len() as u64);
     out.extend_from_slice(name.as_bytes());
-    write_uvarint(out, self_ as u64);
+    write_uvarint(out, self_.cast_unsigned());
 }
 
 fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
-        out.push((value as u8) | 0x80);
+        let low_bits = u8::try_from(value & 0x7f).expect("masked uvarint byte fits in u8");
+        out.push(low_bits | 0x80);
         value >>= 7;
     }
-    out.push(value as u8);
+    out.push(u8::try_from(value).expect("terminal uvarint byte fits in u8"));
 }
 
 #[cfg(test)]

@@ -5,6 +5,8 @@
 //!
 //! `cargo test -p crabka-profiles --test pyroscope_differential -- --ignored`
 
+#![allow(clippy::default_trait_access)]
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
