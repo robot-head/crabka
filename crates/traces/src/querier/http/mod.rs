@@ -14,6 +14,29 @@ use crabka_traceql::{
 use serde_json::{Map, Value, json};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
+const INTRINSIC_TAGS: &[&str] = &[
+    "event:name",
+    "event:timeSinceStart",
+    "instrumentation:name",
+    "instrumentation:version",
+    "link:spanID",
+    "link:traceID",
+    "span:childCount",
+    "span:duration",
+    "span:id",
+    "span:kind",
+    "span:name",
+    "span:nestedSetLeft",
+    "span:nestedSetParent",
+    "span:nestedSetRight",
+    "span:parentID",
+    "span:status",
+    "span:statusMessage",
+    "trace:duration",
+    "trace:id",
+    "trace:rootName",
+    "trace:rootService",
+];
 
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
@@ -176,8 +199,9 @@ where
     };
     if let Some(query) = query_param(&uri, "q") {
         match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
-            Ok(traces) => Json(search_tags_v2_json(&scoped_tags_from_traces(
-                &traces, scope,
+            Ok(traces) => Json(search_tags_v2_json(&add_intrinsic_tags(
+                scoped_tags_from_traces(&traces, scope),
+                scope,
             )))
             .into_response(),
             Err(err) => traceql_query_error_response(&err),
@@ -188,7 +212,7 @@ where
             .tag_names(&tenant, scope, start_ns, end_ns)
             .await
         {
-            Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
+            Ok(tags) => Json(search_tags_v2_json(&add_intrinsic_tags(tags, scope))).into_response(),
             Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
         }
     }
@@ -627,6 +651,19 @@ fn traceql_query_error_response(err: &TraceqlError) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, err.to_string()).into_response()
+}
+
+fn add_intrinsic_tags(mut tags: Vec<ScopedTag>, scope: Option<TagScope>) -> Vec<ScopedTag> {
+    if matches!(scope, None | Some(TagScope::Intrinsic)) {
+        tags.push(ScopedTag {
+            scope: TagScope::Intrinsic,
+            tags: INTRINSIC_TAGS
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect(),
+        });
+    }
+    tags
 }
 
 async fn matching_traces<S>(
@@ -1379,6 +1416,10 @@ mod tests {
                     {
                         "name": "span",
                         "tags": ["svc"]
+                    },
+                    {
+                        "name": "intrinsic",
+                        "tags": INTRINSIC_TAGS
                     }
                 ],
                 "metrics": {
@@ -1397,6 +1438,23 @@ mod tests {
                 "scopes": [{
                     "name": "span",
                     "tags": ["svc"]
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_returns_intrinsic_scope() {
+        let (status, body) = get_json("/api/v2/search/tags?scope=intrinsic").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "intrinsic",
+                    "tags": INTRINSIC_TAGS
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
