@@ -9,7 +9,7 @@ use axum::{Json, Router};
 use base64::Engine;
 use crabka_traceql::{
     AttrValue, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore, TagScope,
-    TraceMetricsResponse, TraceSpans, TraceqlEngine, TypedValue,
+    TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
 };
 use serde_json::{Map, Value, json};
 
@@ -171,19 +171,23 @@ where
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
     let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
-    let tags = if let Some(query) = query_param(&uri, "q") {
-        matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns)
-            .await
-            .map(|traces| scoped_tags_from_traces(&traces, scope))
+    if let Some(query) = query_param(&uri, "q") {
+        match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
+            Ok(traces) => Json(search_tags_v2_json(&scoped_tags_from_traces(
+                &traces, scope,
+            )))
+            .into_response(),
+            Err(err) => traceql_query_error_response(&err),
+        }
     } else {
-        state
+        match state
             .engine
             .tag_names(&tenant, scope, start_ns, end_ns)
             .await
-    };
-    match tags {
-        Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        {
+            Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
+            Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        }
     }
 }
 
@@ -219,19 +223,23 @@ where
 {
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
-    let values = if let Some(query) = query_param(&uri, "q") {
-        matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns)
-            .await
-            .map(|traces| tag_values_from_traces(&traces, &tag))
+    if let Some(query) = query_param(&uri, "q") {
+        match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
+            Ok(traces) => Json(search_tag_values_v2_json(&tag_values_from_traces(
+                &traces, &tag,
+            )))
+            .into_response(),
+            Err(err) => traceql_query_error_response(&err),
+        }
     } else {
-        state
+        match state
             .engine
             .tag_values(&tenant, &tag, start_ns, end_ns)
             .await
-    };
-    match values {
-        Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        {
+            Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
+            Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        }
     }
 }
 
@@ -600,13 +608,25 @@ fn search_tag_values_v2_json(values: &[TypedValue]) -> Value {
     })
 }
 
+fn traceql_query_error_response(err: &TraceqlError) -> Response {
+    let status = if matches!(
+        &err,
+        TraceqlError::Parse(_) | TraceqlError::Plan(_) | TraceqlError::Unsupported(_)
+    ) {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, err.to_string()).into_response()
+}
+
 async fn matching_traces<S>(
     engine: &TraceqlEngine<S>,
     tenant: &str,
     query: &str,
     start_ns: i64,
     end_ns: i64,
-) -> Result<Vec<TraceSpans>, crabka_traceql::TraceqlError>
+) -> Result<Vec<TraceSpans>, TraceqlError>
 where
     S: SpanStore + 'static,
 {
@@ -1449,6 +1469,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tags_v2_rejects_invalid_query_filter_as_bad_request() {
+        let (status, body) = get_text("/api/v2/search/tags?q=%7B").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body.contains("parse error"));
+    }
+
+    #[tokio::test]
     async fn search_tag_values_returns_legacy_tempo_shape() {
         let (status, body) = get_json("/api/search/tag/service.name/values").await;
         assert!(status == StatusCode::OK);
@@ -1483,6 +1511,14 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_rejects_invalid_query_filter_as_bad_request() {
+        let (status, body) = get_text("/api/v2/search/tag/.svc/values?q=%7B").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body.contains("parse error"));
     }
 
     #[tokio::test]
