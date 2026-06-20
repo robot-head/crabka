@@ -79,6 +79,16 @@ fn heartbeat_rpc_timeout(interval: Duration) -> Duration {
         .min(Duration::from_secs(1))
 }
 
+fn heartbeat_connection_options(broker_id: i32, interval: Duration) -> ConnectionOptions {
+    let timeout = heartbeat_rpc_timeout(interval);
+    ConnectionOptions {
+        client_id: format!("crabka-broker-{broker_id}-heartbeat"),
+        connect_timeout: timeout,
+        request_timeout: timeout,
+        ..ConnectionOptions::default()
+    }
+}
+
 /// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
 /// the supervisor. Called from every early-exit path so the check is not
 /// accidentally skipped when the controller is temporarily unreachable.
@@ -128,12 +138,7 @@ pub(crate) async fn run(mut cfg: Config) {
                 || (broker_rec.host.clone(), broker_rec.port),
                 |e| (e.host.clone(), e.port),
             );
-        let opts = ConnectionOptions {
-            client_id: format!("crabka-broker-{}-heartbeat", cfg.broker_id),
-            connect_timeout: heartbeat_rpc_timeout(cfg.interval),
-            request_timeout: heartbeat_rpc_timeout(cfg.interval),
-            ..ConnectionOptions::default()
-        };
+        let opts = heartbeat_connection_options(cfg.broker_id, cfg.interval);
         let rpc_timeout = heartbeat_rpc_timeout(cfg.interval);
         let client_res = tokio::time::timeout(
             rpc_timeout,
@@ -256,5 +261,14 @@ mod tests {
         assert!(heartbeat_rpc_timeout(Duration::from_millis(50)) == Duration::from_millis(500));
         assert!(heartbeat_rpc_timeout(Duration::from_millis(500)) == Duration::from_secs(1));
         assert!(heartbeat_rpc_timeout(Duration::from_secs(5)) == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn heartbeat_connection_options_use_bounded_rpc_timeout() {
+        let opts = heartbeat_connection_options(9, Duration::from_millis(500));
+
+        assert!(opts.client_id == "crabka-broker-9-heartbeat");
+        assert!(opts.connect_timeout == Duration::from_secs(1));
+        assert!(opts.request_timeout == Duration::from_secs(1));
     }
 }

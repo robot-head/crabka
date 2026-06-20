@@ -671,6 +671,34 @@ mod offset_advance_tests {
     }
 
     #[test]
+    fn transient_transport_error_classification_is_narrow() {
+        use std::io;
+        use std::time::Duration;
+
+        use crabka_client_core::ClientError;
+
+        assert!(is_transient_transport_error(&ClientError::Disconnected));
+        assert!(is_transient_transport_error(&ClientError::Timeout(
+            Duration::from_millis(10)
+        )));
+        assert!(is_transient_transport_error(&ClientError::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "reset")
+        )));
+        assert!(!is_transient_transport_error(&ClientError::Server {
+            error_code: 6
+        }));
+        assert!(!is_transient_transport_error(
+            &ClientError::IncompatibleVersion {
+                api_key: 1,
+                broker_min: 0,
+                broker_max: 1,
+                client_min: 2,
+                client_max: 3,
+            }
+        ));
+    }
+
+    #[test]
     fn build_fetch_request_preserves_topic_partition_and_limits() {
         let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)]);
         assert!(topic.topic == "topic-a");

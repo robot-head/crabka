@@ -483,8 +483,11 @@ async fn topic_partition_count(cfg: &SenderConfig, topic: &str) -> Option<i32> {
         .lock()
         .await
         .get(topic)
-        .map(|meta| meta.num_partitions)
-        .filter(|count| *count > 0)
+        .and_then(|meta| positive_partition_count(meta.num_partitions))
+}
+
+fn positive_partition_count(count: i32) -> Option<i32> {
+    (count > 0).then_some(count)
 }
 
 /// Build the v2 `RecordBatch` for a drained partition batch, allocating its
@@ -1135,6 +1138,14 @@ mod tests {
         let d = Duration::from_millis(100);
         assert!(backoff_deadline(now, d) == now + d);
         assert!(backoff_deadline(now, d) > now);
+    }
+
+    #[test]
+    fn positive_partition_count_filters_boundary_values() {
+        assert!(positive_partition_count(-1).is_none());
+        assert!(positive_partition_count(0).is_none());
+        assert!(positive_partition_count(1) == Some(1));
+        assert!(positive_partition_count(2) == Some(2));
     }
 }
 

@@ -271,6 +271,7 @@ fn alter_partition_targets(
     out
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum AlterPartitionSendError {
     NotController,
     Rejected { global_err: i16, part_err: i16 },
@@ -299,6 +300,13 @@ async fn send_alter_partition_to(
         .first()
         .and_then(|t| t.partitions.first())
         .map_or(0, |p| p.error_code);
+    classify_alter_partition_response(global_err, part_err)
+}
+
+fn classify_alter_partition_response(
+    global_err: i16,
+    part_err: i16,
+) -> Result<(), AlterPartitionSendError> {
     if is_not_controller_response(global_err, part_err) {
         return Err(AlterPartitionSendError::NotController);
     }
@@ -371,5 +379,41 @@ mod tests {
             crate::codes::UNKNOWN_SERVER_ERROR,
             0
         ));
+    }
+
+    #[test]
+    fn alter_partition_response_classifies_all_error_surfaces() {
+        assert!(classify_alter_partition_response(0, 0).is_ok());
+        assert!(
+            classify_alter_partition_response(crate::codes::NOT_CONTROLLER, 0)
+                == Err(AlterPartitionSendError::NotController)
+        );
+        assert!(
+            classify_alter_partition_response(0, crate::codes::NOT_CONTROLLER)
+                == Err(AlterPartitionSendError::NotController)
+        );
+        assert!(
+            classify_alter_partition_response(crate::codes::UNKNOWN_SERVER_ERROR, 0)
+                == Err(AlterPartitionSendError::Rejected {
+                    global_err: crate::codes::UNKNOWN_SERVER_ERROR,
+                    part_err: 0,
+                })
+        );
+        assert!(
+            classify_alter_partition_response(0, crate::codes::UNKNOWN_SERVER_ERROR)
+                == Err(AlterPartitionSendError::Rejected {
+                    global_err: 0,
+                    part_err: crate::codes::UNKNOWN_SERVER_ERROR,
+                })
+        );
+        assert!(
+            classify_alter_partition_response(
+                crate::codes::UNKNOWN_SERVER_ERROR,
+                crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
+            ) == Err(AlterPartitionSendError::Rejected {
+                global_err: crate::codes::UNKNOWN_SERVER_ERROR,
+                part_err: crate::codes::UNKNOWN_TOPIC_OR_PARTITION,
+            })
+        );
     }
 }
