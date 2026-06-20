@@ -170,7 +170,10 @@ where
 {
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
-    let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
+    let scope = match scope_param(&uri) {
+        Ok(scope) => scope,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     if let Some(query) = query_param(&uri, "q") {
         match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
             Ok(traces) => Json(search_tags_v2_json(&scoped_tags_from_traces(
@@ -510,6 +513,12 @@ fn parse_tag_scope(scope: &str) -> Option<TagScope> {
         "instrumentation" => Some(TagScope::Instrumentation),
         _ => None,
     }
+}
+
+fn scope_param(uri: &Uri) -> Result<Option<TagScope>, &'static str> {
+    query_param(uri, "scope")
+        .map(|scope| parse_tag_scope(&scope).ok_or("invalid scope"))
+        .transpose()
 }
 
 fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
@@ -1394,6 +1403,14 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_rejects_invalid_scope_parameter() {
+        let (status, body) = get_text("/api/v2/search/tags?scope=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid scope");
     }
 
     #[tokio::test]
