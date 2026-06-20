@@ -15,8 +15,8 @@ use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectRespon
 use crabka_blockstore::{LabelMatcher, MatchOp};
 use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
-    PCOL_SPAN_ID, PCOL_TOTAL_VALUE, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg,
-    parse_label_selector, step_bucket_ms, step_ms_from_secs,
+    LabeledHeatmap, PCOL_SPAN_ID, PCOL_TOTAL_VALUE, ProfileError, ProfileStore, ProfileType,
+    Series, SeriesAgg, bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
 use serde::Deserialize;
@@ -359,6 +359,51 @@ impl<S: ProfileStore> QuerierState<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn select_span_heatmaps(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        start_ms: i64,
+        end_ms: i64,
+        time_buckets: usize,
+        value_buckets: usize,
+    ) -> Result<Vec<LabeledHeatmap>, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let base_matchers = parse_label_selector(label_selector)?;
+        let groups = if group_by.is_empty() {
+            vec![Vec::new()]
+        } else {
+            self.store
+                .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+                .await?
+        };
+        let mut out = Vec::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let points = span_heatmap_points_from_scan(&scan).await?;
+            if points.is_empty() && !group_by.is_empty() {
+                continue;
+            }
+            out.push(LabeledHeatmap {
+                labels,
+                heatmap: bin_heatmap(&points, start_ms, end_ms, time_buckets, value_buckets),
+            });
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn select_merge_span_profile(
         &self,
         tenant: &str,
@@ -546,6 +591,38 @@ async fn heatmap_span_exemplars_from_scan(
         }
     }
     Ok(out)
+}
+
+async fn span_heatmap_points_from_scan(
+    scan: &crabka_pprof::ProfileScan,
+) -> Result<Vec<(i64, i64)>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, MAX({total}) AS total \
+         FROM {table} WHERE {span} IS NOT NULL \
+         GROUP BY {timestamp}, {fingerprint}",
+        timestamp = COL_TIMESTAMP,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+        span = PCOL_SPAN_ID,
+        fingerprint = COL_FINGERPRINT,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut points = Vec::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let totals = batch.column(1).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            points.push((timestamps.value(row), totals.value(row)));
+        }
+    }
+    Ok(points)
 }
 
 fn heatmap_slot_timestamp(
@@ -1004,20 +1081,36 @@ where
     } else {
         BTreeMap::new()
     };
-    let series = state
-        .engine
-        .select_heatmaps(
-            &tenant,
-            &req.profile_type_id,
-            &req.label_selector,
-            &req.group_by,
-            req.start,
-            req.end,
-            time_buckets,
-            DEFAULT_HEATMAP_VALUE_BUCKETS,
-        )
-        .await
-        .map_err(connect_error)?
+    let heatmaps = if req.query_type == pb::querier::v1::HeatmapQueryType::Span as i32 {
+        state
+            .select_span_heatmaps(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &req.group_by,
+                req.start,
+                req.end,
+                time_buckets,
+                DEFAULT_HEATMAP_VALUE_BUCKETS,
+            )
+            .await
+    } else {
+        state
+            .engine
+            .select_heatmaps(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &req.group_by,
+                req.start,
+                req.end,
+                time_buckets,
+                DEFAULT_HEATMAP_VALUE_BUCKETS,
+            )
+            .await
+    }
+    .map_err(connect_error)?;
+    let series = heatmaps
         .into_iter()
         .take(limit(req.limit))
         .map(|heatmap| {
@@ -2929,6 +3022,71 @@ overrides:
         assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
         assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
         assert!(exemplar.get("value").and_then(json_i64) == Some(7));
+    }
+
+    #[tokio::test]
+    async fn select_heatmap_span_query_type_counts_only_span_profiles() {
+        let mut store = InMemoryProfileStore::new();
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            1,
+            7,
+            7,
+            10,
+            0x2a,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            2,
+            11,
+            11,
+            20,
+        );
+        let state = Arc::new(QuerierState::new(Arc::new(store)));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectHeatmap"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "step": 100.0,
+                "groupBy": ["service_name"],
+                "queryType": "HEATMAP_QUERY_TYPE_SPAN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let count: i64 = response
+            .pointer("/series/0/slots/0/counts")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(json_i64)
+            .sum();
+
+        assert!(count == 1, "{response}");
     }
 
     #[tokio::test]
