@@ -209,7 +209,10 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let (start_ns, end_ns) = time_bounds(&uri);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let scope = match scope_param(&uri) {
         Ok(scope) => scope,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -266,7 +269,10 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let (start_ns, end_ns) = time_bounds(&uri);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     if let Some(query) = query_param(&uri, "q") {
         match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
             Ok(traces) => Json(search_tag_values_v2_json(&tag_values_from_traces(
@@ -2491,6 +2497,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tags_v2_rejects_invalid_time_bounds() {
+        let (status, body) = get_text("/api/v2/search/tags?start=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter start");
+    }
+
+    #[tokio::test]
     async fn search_tags_v2_respects_query_filter() {
         let mut store = InMemorySpanStore::new();
         store.push_trace(
@@ -2644,6 +2658,14 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body.contains("parse error"));
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_rejects_invalid_time_bounds() {
+        let (status, body) = get_text("/api/v2/search/tag/.svc/values?end=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
