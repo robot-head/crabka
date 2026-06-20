@@ -17,6 +17,23 @@ use crate::result::{AttrValue, ScopedTag, SpanRef, TagScope, TraceSpans, TypedVa
 use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_with_attrs};
 use crate::store::{ScanResult, SpanMatcher, SpanStore};
 
+const INTRINSIC_TAGS: &[&str] = &[
+    "span:childCount",
+    "span:duration",
+    "span:id",
+    "span:kind",
+    "span:name",
+    "span:Parent",
+    "span:nestedSetLeft",
+    "span:nestedSetParent",
+    "span:nestedSetRight",
+    "span:status",
+    "trace:duration",
+    "trace:id",
+    "trace:rootName",
+    "trace:rootService",
+];
+
 struct StoredTrace {
     trace_id: [u8; 16],
     root_service_name: String,
@@ -297,7 +314,8 @@ impl SpanStore for InMemorySpanStore {
         let mut resource = BTreeSet::new();
         let mut span = BTreeSet::new();
         let mut instrumentation = BTreeSet::new();
-        for trace in self.traces_in_range(tenant, start_ns, end_ns) {
+        let traces = self.traces_in_range(tenant, start_ns, end_ns);
+        for trace in &traces {
             resource.insert("service.name".to_string());
             for input in &trace.spans {
                 span.extend(input.attrs.iter().map(|(key, _)| key.clone()));
@@ -321,6 +339,15 @@ impl SpanStore for InMemorySpanStore {
             out.push(ScopedTag {
                 scope: TagScope::Span,
                 tags: span.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(TagScope::Intrinsic)) && !traces.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Intrinsic,
+                tags: INTRINSIC_TAGS
+                    .iter()
+                    .map(|tag| (*tag).to_string())
+                    .collect(),
             });
         }
         if matches!(scope, None | Some(TagScope::Instrumentation)) && !instrumentation.is_empty() {
@@ -588,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tag_names_return_resource_and_span_scopes() {
+    async fn tag_names_return_default_scopes() {
         let mut s = InMemorySpanStore::new();
         s.push_trace(
             "t",
@@ -603,11 +630,13 @@ mod tests {
         );
 
         let got = s.tag_names("t", None, 0, 10_000).await.unwrap();
-        assert!(got.len() == 2);
+        assert!(got.len() == 3);
         assert!(got[0].scope == TagScope::Resource);
         assert!(got[0].tags == vec!["service.name"]);
         assert!(got[1].scope == TagScope::Span);
         assert!(got[1].tags == vec!["svc"]);
+        assert!(got[2].scope == TagScope::Intrinsic);
+        assert!(got[2].tags == INTRINSIC_TAGS);
     }
 
     #[tokio::test]
@@ -631,6 +660,38 @@ mod tests {
         assert!(got.len() == 1);
         assert!(got[0].scope == TagScope::Instrumentation);
         assert!(got[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+    }
+
+    #[tokio::test]
+    async fn tag_names_return_intrinsic_scope() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
+
+        let got = s
+            .tag_names("t", Some(TagScope::Intrinsic), 0, 10_000)
+            .await
+            .unwrap();
+        assert!(got.len() == 1);
+        assert!(got[0].scope == TagScope::Intrinsic);
+        assert!(
+            got[0].tags
+                == vec![
+                    "span:childCount",
+                    "span:duration",
+                    "span:id",
+                    "span:kind",
+                    "span:name",
+                    "span:Parent",
+                    "span:nestedSetLeft",
+                    "span:nestedSetParent",
+                    "span:nestedSetRight",
+                    "span:status",
+                    "trace:duration",
+                    "trace:id",
+                    "trace:rootName",
+                    "trace:rootService",
+                ]
+        );
     }
 
     #[tokio::test]
