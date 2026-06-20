@@ -297,14 +297,17 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
-    let (start, end) = if req.start == 0 && req.end == 0 {
+    let range_omitted = req.start == 0 && req.end == 0;
+    let (start, end) = if range_omitted {
         (0, i64::MAX)
     } else {
         (req.start, req.end)
     };
-    state
-        .validate_query_range(&tenant, start, end)
-        .map_err(connect_error)?;
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     let types = state
         .store
         .profile_types(&tenant, start, end)
@@ -1632,6 +1635,45 @@ overrides:
                     .and_then(serde_json::Value::as_str)
                     == Some(PT)
             }),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_types_health_probe_ignores_query_range_limit_when_range_omitted() {
+        let state = Arc::new(QuerierState::new_with_limits(
+            Arc::new(store_with_frame("main.work")),
+            Limits {
+                max_query_length_secs: 1,
+                ..Limits::default()
+            },
+        ));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/ProfileTypes"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .get("profileTypes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|profile_types| !profile_types.is_empty()),
             "{response}"
         );
     }
