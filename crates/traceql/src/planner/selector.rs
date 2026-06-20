@@ -18,11 +18,21 @@ pub(crate) async fn plan_selector<S: SpanStore>(
     let scan = store
         .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
         .await?;
-    let predicate = field_expr_to_sql(fe)?;
-    let sql = format!(
-        "SELECT * FROM {} WHERE {predicate}",
-        ident(&scan.span_table)
-    );
+    let table = ident(&scan.span_table);
+    let sql = if has_parent_scope(fe) {
+        let predicate = field_expr_to_sql_qualified(fe, "s", "p")?;
+        let trace = ident(COL_TRACE_ID);
+        let parent = ident(COL_PARENT_ID);
+        let left = ident(COL_NS_LEFT);
+        format!(
+            "SELECT s.* FROM {table} AS s JOIN {table} AS p \
+             ON s.{trace} = p.{trace} AND s.{parent} = p.{left} \
+             WHERE {predicate}"
+        )
+    } else {
+        let predicate = field_expr_to_sql(fe)?;
+        format!("SELECT * FROM {table} WHERE {predicate}")
+    };
     let df = scan.ctx.sql(&sql).await?;
     let plan = df.into_unoptimized_plan();
     Ok(PlannedSpanset {
@@ -90,6 +100,46 @@ pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
     }
 }
 
+fn has_parent_scope(fe: &FieldExpr) -> bool {
+    match fe {
+        FieldExpr::Comparison { lhs, .. } | FieldExpr::Field(lhs) => {
+            matches!(lhs.scope, Scope::Parent)
+        }
+        FieldExpr::And(a, b) | FieldExpr::Or(a, b) => has_parent_scope(a) || has_parent_scope(b),
+        FieldExpr::Not(inner) => has_parent_scope(inner),
+    }
+}
+
+fn field_expr_to_sql_qualified(
+    fe: &FieldExpr,
+    span_alias: &str,
+    parent_alias: &str,
+) -> Result<String> {
+    match fe {
+        FieldExpr::Comparison { lhs, op, rhs } => {
+            comparison_to_sql_qualified(lhs, *op, rhs, span_alias, parent_alias)
+        }
+        FieldExpr::And(a, b) => Ok(format!(
+            "({} AND {})",
+            field_expr_to_sql_qualified(a, span_alias, parent_alias)?,
+            field_expr_to_sql_qualified(b, span_alias, parent_alias)?
+        )),
+        FieldExpr::Or(a, b) => Ok(format!(
+            "({} OR {})",
+            field_expr_to_sql_qualified(a, span_alias, parent_alias)?,
+            field_expr_to_sql_qualified(b, span_alias, parent_alias)?
+        )),
+        FieldExpr::Not(inner) => Ok(format!(
+            "(NOT {})",
+            field_expr_to_sql_qualified(inner, span_alias, parent_alias)?
+        )),
+        FieldExpr::Field(field) => Ok(format!(
+            "{} IS NOT NULL",
+            qualified_field_ident(field, span_alias, parent_alias)?
+        )),
+    }
+}
+
 pub(crate) fn comparison_to_sql(field: &Field, op: ComparisonOp, value: &Value) -> Result<String> {
     let col = ident(&field_to_column(field)?);
     Ok(match (op, value) {
@@ -113,6 +163,46 @@ pub(crate) fn comparison_to_sql(field: &Field, op: ComparisonOp, value: &Value) 
             ));
         }
     })
+}
+
+fn comparison_to_sql_qualified(
+    field: &Field,
+    op: ComparisonOp,
+    value: &Value,
+    span_alias: &str,
+    parent_alias: &str,
+) -> Result<String> {
+    let col = qualified_field_ident(field, span_alias, parent_alias)?;
+    Ok(match (op, value) {
+        (ComparisonOp::Eq, Value::Nil) => format!("{col} IS NULL"),
+        (ComparisonOp::Neq, Value::Nil) => format!("{col} IS NOT NULL"),
+        (ComparisonOp::Re, Value::Str(pattern)) => {
+            format!("regexp_like({col}, {})", string_lit(&anchored(pattern)))
+        }
+        (ComparisonOp::Nre, Value::Str(pattern)) => {
+            format!("NOT regexp_like({col}, {})", string_lit(&anchored(pattern)))
+        }
+        (ComparisonOp::Eq, v) => format!("{col} = {}", value_sql(v)?),
+        (ComparisonOp::Neq, v) => format!("{col} != {}", value_sql(v)?),
+        (ComparisonOp::Lt, v) => format!("{col} < {}", value_sql(v)?),
+        (ComparisonOp::Lte, v) => format!("{col} <= {}", value_sql(v)?),
+        (ComparisonOp::Gt, v) => format!("{col} > {}", value_sql(v)?),
+        (ComparisonOp::Gte, v) => format!("{col} >= {}", value_sql(v)?),
+        (ComparisonOp::Re | ComparisonOp::Nre, _) => {
+            return Err(TraceqlError::Plan(
+                "regex comparison requires string value".into(),
+            ));
+        }
+    })
+}
+
+fn qualified_field_ident(field: &Field, span_alias: &str, parent_alias: &str) -> Result<String> {
+    let alias = if matches!(field.scope, Scope::Parent) {
+        parent_alias
+    } else {
+        span_alias
+    };
+    Ok(format!("{alias}.{}", ident(&field_to_column(field)?)))
 }
 
 pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
