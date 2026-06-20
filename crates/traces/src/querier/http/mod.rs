@@ -355,7 +355,10 @@ where
         return (StatusCode::BAD_REQUEST, "trace id must be 32 hex chars").into_response();
     };
     let tenant = tenant(&headers);
-    let (start_ns, end_ns) = time_bounds(&uri);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     match state.engine.trace_by_id(&tenant, &trace_id).await {
         Ok(Some(trace)) => Json(trace_json(
@@ -422,6 +425,12 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
     (start_ns, end_ns)
 }
 
+fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
+    let start_ns = optional_seconds_param(uri, "start")?.unwrap_or(0);
+    let end_ns = optional_seconds_param(uri, "end")?.unwrap_or(i64::MAX);
+    Ok((start_ns, end_ns))
+}
+
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
 }
@@ -431,6 +440,14 @@ fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
         return Err(format!("missing query parameter {key}"));
     };
     parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
+}
+
+fn optional_seconds_param(uri: &Uri, key: &'static str) -> Result<Option<i64>, String> {
+    query_param(uri, key)
+        .map(|value| {
+            parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
+        })
+        .transpose()
 }
 
 fn parse_step_to_ns(value: &str) -> Option<i64> {
@@ -1672,6 +1689,19 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(spans.len() == 1);
         assert!(spans[0]["spanId"] == "AgICAgICAgI=");
+    }
+
+    #[tokio::test]
+    async fn by_id_rejects_invalid_start_and_end() {
+        let (status, body) =
+            get_text("/api/v2/traces/09090909090909090909090909090909?start=bogus").await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter start");
+
+        let (status, body) =
+            get_text("/api/v2/traces/09090909090909090909090909090909?end=bogus").await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
