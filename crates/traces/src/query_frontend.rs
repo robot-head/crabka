@@ -59,7 +59,7 @@ pub fn router(cfg: QueryFrontendConfig) -> Router {
         .route("/api/v2/search/tags", get(proxy))
         .route("/api/search/tag/{tag}/values", get(proxy))
         .route("/api/v2/search/tag/{tag}/values", get(proxy))
-        .route("/api/metrics/query_range", get(proxy))
+        .route("/api/metrics/query_range", get(query_range))
         .route("/api/metrics/query", get(proxy))
         .route("/api/v2/traces/{trace_id}", get(proxy))
         .with_state(AppState {
@@ -177,6 +177,49 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
     .into_response()
 }
 
+async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    };
+
+    let start_ns = match required_seconds_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end_ns = match required_seconds_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let mut merged_series = Vec::new();
+
+    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+            .send()
+            .await
+        else {
+            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
+        };
+        let status = resp.status();
+        let Ok(bytes) = resp.bytes().await else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if !status.is_success() {
+            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            return (status, bytes).into_response();
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if let Some(series) = body.get("series").and_then(Value::as_array) {
+            for next in series {
+                merge_metric_series(&mut merged_series, next.clone());
+            }
+        }
+    }
+
+    axum::Json(json!({ "series": merged_series })).into_response()
+}
+
 async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
@@ -201,6 +244,32 @@ async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> R
             .insert(header::CONTENT_TYPE, content_type);
     }
     response
+}
+
+fn merge_metric_series(series: &mut Vec<Value>, next: Value) {
+    let Some(labels) = next.get("labels") else {
+        series.push(next);
+        return;
+    };
+    let Some(existing) = series
+        .iter_mut()
+        .find(|existing| existing.get("labels") == Some(labels))
+    else {
+        series.push(next);
+        return;
+    };
+
+    if let Some(next_points) = next.get("points").and_then(Value::as_array)
+        && let Some(existing_points) = existing.get_mut("points").and_then(Value::as_array_mut)
+    {
+        existing_points.extend(next_points.iter().cloned());
+    }
+    if let Some(next_exemplars) = next.get("exemplars").and_then(Value::as_array)
+        && let Some(existing_exemplars) =
+            existing.get_mut("exemplars").and_then(Value::as_array_mut)
+    {
+        existing_exemplars.extend(next_exemplars.iter().cloned());
+    }
 }
 
 fn merge_trace(traces: &mut Vec<Value>, trace: Value) {

@@ -140,6 +140,42 @@ async fn frontend_deduplicates_spans_across_shards() {
 }
 
 #[tokio::test]
+async fn frontend_shards_metrics_query_range_across_live_frontier() {
+    let upstream_url = spawn_sharded_metrics_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3&step=1",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["series"].as_array().unwrap().len() == 1);
+    assert!(
+        json["series"][0]["points"]
+            == json!([
+                ["1000000000", 1.0],
+                ["1999999999", 2.0],
+                ["2000000000", 3.0],
+                ["3000000000", 4.0],
+            ])
+    );
+    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 2);
+}
+
+#[tokio::test]
 async fn frontend_search_requires_valid_start_and_end() {
     let upstream_url = spawn_sharded_search_querier().await;
     let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -246,6 +282,18 @@ async fn spawn_overlapping_search_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_sharded_metrics_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(sharded_metrics_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_text_error_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(text_error_response))
@@ -307,6 +355,40 @@ async fn overlapping_search_response() -> axum::Json<Value> {
             "inspectedTraces": 1,
             "inspectedBytes": 0
         }
+    }))
+}
+
+async fn sharded_metrics_response(State(()): State<()>, headers: HeaderMap) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let (points, exemplar) = match tier {
+        "backend" => (
+            json!([["1000000000", 1.0], ["1999999999", 2.0]]),
+            json!({
+                "labels": { "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                "timestamp": "1000000000",
+                "value": 1.0
+            }),
+        ),
+        "live" => (
+            json!([["2000000000", 3.0], ["3000000000", 4.0]]),
+            json!({
+                "labels": { "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+                "timestamp": "2000000000",
+                "value": 3.0
+            }),
+        ),
+        other => panic!("unexpected query tier {other}"),
+    };
+
+    axum::Json(json!({
+        "series": [{
+            "labels": { "svc": "api" },
+            "points": points,
+            "exemplars": [exemplar],
+        }]
     }))
 }
 
