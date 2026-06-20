@@ -119,30 +119,55 @@ impl<S: ProfileStore> QuerierState<S> {
         end_ms: i64,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
+        self.select_merge_stacktraces_with_stack_trace_selector(
+            tenant,
+            profile_type,
+            label_selector,
+            start_ms,
+            end_ms,
+            max_nodes,
+            &[],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_merge_stacktraces_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        stack_trace_call_sites: &[String],
+    ) -> Result<FlameGraph, ProfileError> {
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let max_nodes = self.effective_max_nodes(tenant, max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
-                    .select_merge_stacktraces(
+                    .select_merge_stacktraces_with_stack_trace_selector(
                         tenant,
                         profile_type,
                         label_selector,
                         start_ms,
                         end_ms,
                         max_nodes,
+                        stack_trace_call_sites,
                     )
                     .await
             }
             QueryExecution::Sharded(config) => {
                 let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
                 self.engine
-                    .select_merge_stacktraces_sharded(
+                    .select_merge_stacktraces_with_stack_trace_selector_sharded(
                         tenant,
                         profile_type,
                         label_selector,
                         &shards,
                         max_nodes,
+                        stack_trace_call_sites,
                     )
                     .await
             }
@@ -426,14 +451,17 @@ where
     let req = req.0;
     let label_selector = merge_profile_id_selector(&req.label_selector, &req.profile_id_selector)
         .map_err(connect_error)?;
+    let stack_trace_call_sites =
+        stack_trace_call_sites_from_json(&req.stack_trace_selector).map_err(connect_error)?;
     let flamegraph = state
-        .select_merge_stacktraces(
+        .select_merge_stacktraces_with_stack_trace_selector(
             &tenant,
             &req.profile_type_id,
             &label_selector,
             req.start,
             req.end,
             req.max_nodes,
+            &stack_trace_call_sites,
         )
         .await
         .map_err(connect_error)?;
@@ -905,6 +933,32 @@ fn stack_trace_call_sites(selector: Option<&pb::types::v1::StackTraceSelector>) 
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize)]
+struct StackTraceSelectorJson {
+    #[serde(default, rename = "callSite")]
+    call_site: Vec<StackTraceLocationJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StackTraceLocationJson {
+    name: String,
+}
+
+fn stack_trace_call_sites_from_json(selector: &str) -> Result<Vec<String>, ProfileError> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Ok(Vec::new());
+    }
+    let selector: StackTraceSelectorJson = serde_json::from_str(selector)
+        .map_err(|err| ProfileError::Plan(format!("invalid stack_trace_selector: {err}")))?;
+    Ok(selector
+        .call_site
+        .into_iter()
+        .map(|location| location.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect())
 }
 
 fn heatmap_time_buckets(start_ms: i64, end_ms: i64, step_secs: f64) -> Result<usize, ProfileError> {
@@ -1743,6 +1797,46 @@ overrides:
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
         assert!(total == Some(5), "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_stacktraces_stack_trace_selector_filters_call_sites() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("hot.path", 7),
+            ("cold.path", 10),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeStacktraces"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "stackTraceSelector": r#"{"callSite":[{"name":"hot.path"}]}"#,
+                "start": 0,
+                "end": 100,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let total = response
+            .get("flamegraph")
+            .and_then(|flamegraph| flamegraph.get("total"))
+            .and_then(json_i64);
+        assert!(total == Some(7), "{response}");
     }
 
     #[tokio::test]

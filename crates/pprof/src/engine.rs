@@ -54,7 +54,45 @@ impl<S: ProfileStore> FlameEngine<S> {
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
         let tree = self
-            .merge_to_tree(tenant, profile_type, label_selector, start_ms, end_ms, None)
+            .merge_to_tree(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                None,
+                &[],
+            )
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_flamegraph(max_nodes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_stacktraces_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        call_sites: &[String],
+    ) -> Result<FlameGraph, ProfileError> {
+        let tree = self
+            .merge_to_tree(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                None,
+                call_sites,
+            )
             .await?;
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -88,6 +126,45 @@ impl<S: ProfileStore> FlameEngine<S> {
                     *start_ms,
                     *end_ms,
                     None,
+                    &[],
+                )
+                .await?;
+            merged.merge(tree);
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(merged.to_flamegraph(max_nodes))
+    }
+
+    pub async fn select_merge_stacktraces_with_stack_trace_selector_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        ranges: &[(i64, i64)],
+        max_nodes: i64,
+        call_sites: &[String],
+    ) -> Result<FlameGraph, ProfileError> {
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded stacktrace query requires at least one time range".to_string(),
+            ));
+        }
+        let mut merged = Tree::new();
+        for (start_ms, end_ms) in ranges {
+            validate_range(*start_ms, *end_ms)?;
+            let tree = self
+                .merge_to_tree(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    *start_ms,
+                    *end_ms,
+                    None,
+                    call_sites,
                 )
                 .await?;
             merged.merge(tree);
@@ -108,6 +185,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         start_ms: i64,
         end_ms: i64,
         span_ids: Option<&[u64]>,
+        call_sites: &[String],
     ) -> Result<Tree, ProfileError> {
         if matches!(span_ids, Some(ids) if ids.is_empty()) {
             return Err(ProfileError::Plan(
@@ -157,7 +235,9 @@ impl<S: ProfileStore> FlameEngine<S> {
                 })?;
                 let value = values.value(row);
                 let frames = scan.symbols.resolve(partition, stacktrace_id);
-                tree.add_stack(&frames, value);
+                if call_sites.is_empty() || stack_matches_call_sites(&frames, call_sites) {
+                    tree.add_stack(&frames, value);
+                }
             }
         }
         Ok(tree)
@@ -341,10 +421,10 @@ impl<S: ProfileStore> FlameEngine<S> {
         max_nodes: i64,
     ) -> Result<FlameGraphDiff, ProfileError> {
         let left_tree = self
-            .merge_to_tree(tenant, left.0, left.1, left.2, left.3, None)
+            .merge_to_tree(tenant, left.0, left.1, left.2, left.3, None, &[])
             .await?;
         let right_tree = self
-            .merge_to_tree(tenant, right.0, right.1, right.2, right.3, None)
+            .merge_to_tree(tenant, right.0, right.1, right.2, right.3, None, &[])
             .await?;
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -371,6 +451,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 start_ms,
                 end_ms,
                 None,
+                &[],
             )
             .await?;
         Ok(tree_to_pprof(&tree, &profile_type).encode())
@@ -395,6 +476,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 start_ms,
                 end_ms,
                 Some(span_selector),
+                &[],
             )
             .await?;
         let max_nodes = if max_nodes > 0 {
@@ -436,6 +518,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                     *start_ms,
                     *end_ms,
                     Some(span_selector),
+                    &[],
                 )
                 .await?;
             merged.merge(tree);
@@ -1025,6 +1108,26 @@ mod tests {
         assert!(fg.total == 15);
         assert!(fg.names[0] == "total");
         assert!(self_value_for(&fg, "work") == 15);
+        assert!(!fg.names.iter().any(|name| name == "other"));
+    }
+
+    #[tokio::test]
+    async fn merge_stack_trace_selector_filters_call_sites() {
+        let fg = merge_fixture()
+            .select_merge_stacktraces_with_stack_trace_selector(
+                "tenant-a",
+                PT,
+                "{}",
+                0,
+                200,
+                0,
+                &["work".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert!(fg.total == 15);
+        assert!(fg.names.iter().any(|name| name == "work"));
         assert!(!fg.names.iter().any(|name| name == "other"));
     }
 
