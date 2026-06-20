@@ -132,6 +132,7 @@ mod tests {
             start_ns: 0,
             duration_ns: 5_000_000,
             status: StatusCode::Ok,
+            status_message: String::new(),
             service_name: "svc".into(),
             attributes: vec![],
             size_bytes: 10,

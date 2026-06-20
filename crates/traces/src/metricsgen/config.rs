@@ -35,6 +35,7 @@ pub struct MetricsGenConfig {
     pub edge_ttl: Duration,
     pub edge_store_max_items: usize,
     pub enable_target_info: bool,
+    pub enable_status_message: bool,
     pub enable_messaging_system_latency: bool,
     pub remote_write_url: String,
 }
@@ -49,6 +50,7 @@ impl Default for MetricsGenConfig {
             edge_ttl: Duration::from_secs(10),
             edge_store_max_items: 10_000,
             enable_target_info: false,
+            enable_status_message: false,
             enable_messaging_system_latency: false,
             remote_write_url: "http://localhost:9009/api/v1/push".to_string(),
         }
@@ -85,6 +87,7 @@ mod tests {
         assert!(c.edge_ttl == Duration::from_secs(10));
         assert!(c.edge_store_max_items == 10_000);
         assert!(!c.enable_target_info);
+        assert!(!c.enable_status_message);
         assert!(c.max_exemplars_per_series == 0);
         assert!(!c.histogram_buckets_ns.is_empty());
     }

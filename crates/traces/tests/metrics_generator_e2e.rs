@@ -26,6 +26,7 @@ fn span(
         start_ns: 0,
         duration_ns,
         status,
+        status_message: String::new(),
         service_name: service.into(),
         attributes: Vec::new(),
         size_bytes: 200,

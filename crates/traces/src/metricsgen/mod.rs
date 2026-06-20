@@ -31,6 +31,7 @@ pub mod contract {
         pub start_ns: i64,
         pub duration_ns: i64,
         pub status: StatusCode,
+        pub status_message: String,
         pub service_name: String,
         pub attributes: Vec<(String, String)>,
         pub size_bytes: u64,

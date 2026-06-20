@@ -15,6 +15,7 @@ fn metricsgen_contract_exposes_wal_projection() {
         start_ns: 10,
         duration_ns: 250_000,
         status: StatusCode::Ok,
+        status_message: String::new(),
         service_name: "checkout".into(),
         attributes: vec![("http.method".into(), "GET".into())],
         size_bytes: 128,

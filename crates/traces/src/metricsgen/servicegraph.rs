@@ -399,6 +399,7 @@ mod tests {
             start_ns: 0,
             duration_ns: dur_ns,
             status,
+            status_message: String::new(),
             service_name: service.into(),
             attributes: vec![],
             size_bytes: 0,

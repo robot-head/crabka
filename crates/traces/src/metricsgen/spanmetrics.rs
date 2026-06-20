@@ -8,7 +8,7 @@ use crate::metricsgen::series::{Exemplar, Series, SeriesSample, sorted_labels};
 
 const NS_PER_SEC: f64 = 1_000_000_000.0;
 
-type DimKey = (String, String, String, String);
+type DimKey = (String, String, String, String, Option<String>);
 
 #[derive(Clone, Debug)]
 struct LatencyHistogram {
@@ -73,6 +73,7 @@ pub struct SpanMetricsRegistry {
     bucket_edges_ns: Vec<f64>,
     max_exemplars: usize,
     enable_target_info: bool,
+    enable_status_message: bool,
     entries: HashMap<DimKey, DimEntry>,
     services: HashSet<String>,
 }
@@ -84,13 +85,14 @@ impl SpanMetricsRegistry {
             bucket_edges_ns: cfg.histogram_buckets_ns.clone(),
             max_exemplars: cfg.max_exemplars_per_series,
             enable_target_info: cfg.enable_target_info,
+            enable_status_message: cfg.enable_status_message,
             entries: HashMap::new(),
             services: HashSet::new(),
         }
     }
 
     pub fn record_span(&mut self, span: &SpanRecord) {
-        let key = dim_key(span);
+        let key = dim_key(span, self.enable_status_message);
         self.services.insert(span.service_name.clone());
         let bucket_edges_ns = self.bucket_edges_ns.clone();
         let entry = self.entries.entry(key).or_insert_with(|| DimEntry {
@@ -123,13 +125,17 @@ impl SpanMetricsRegistry {
         let services = std::mem::take(&mut self.services);
         let mut series = Vec::with_capacity(entries.len() * 3 + services.len());
 
-        for ((service, span_name, span_kind, status_code), entry) in entries {
-            let labels = sorted_labels(vec![
+        for ((service, span_name, span_kind, status_code, status_message), entry) in entries {
+            let mut labels = vec![
                 ("service".to_string(), service),
                 ("span_name".to_string(), span_name),
                 ("span_kind".to_string(), span_kind),
                 ("status_code".to_string(), status_code),
-            ]);
+            ];
+            if let Some(status_message) = status_message {
+                labels.push(("status_message".to_string(), status_message));
+            }
+            let labels = sorted_labels(labels);
             series.push(Series {
                 name: "traces_spanmetrics_calls_total".to_string(),
                 labels: labels.clone(),
@@ -190,12 +196,13 @@ pub fn dimension_labels(span: &SpanRecord) -> Vec<(String, String)> {
     ])
 }
 
-fn dim_key(span: &SpanRecord) -> DimKey {
+fn dim_key(span: &SpanRecord, include_status_message: bool) -> DimKey {
     (
         span.service_name.clone(),
         span.name.clone(),
         span_kind_dim(span.kind).to_string(),
         status_dim(span.status).to_string(),
+        include_status_message.then(|| span.status_message.clone()),
     )
 }
 
@@ -261,9 +268,24 @@ mod tests {
             start_ns: 0,
             duration_ns: dur_ns,
             status,
+            status_message: String::new(),
             service_name: service.into(),
             attributes: vec![],
             size_bytes: size,
+        }
+    }
+
+    fn span_with_status_message(message: &str) -> SpanRecord {
+        SpanRecord {
+            status_message: message.into(),
+            ..span(
+                "api",
+                "GET /x",
+                SpanKind::Server,
+                StatusCode::Error,
+                5_000_000,
+                1,
+            )
         }
     }
 
@@ -329,6 +351,26 @@ mod tests {
 
         let calls_y = find(&out, "traces_spanmetrics_calls_total", "GET /y");
         assert!(matches!(calls_y.sample, SeriesSample::Counter(c) if (c - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn status_message_dimension_is_opt_in() {
+        let cfg = MetricsGenConfig {
+            enable_status_message: true,
+            ..MetricsGenConfig::default()
+        };
+        let mut reg = SpanMetricsRegistry::new(&cfg);
+        reg.record_span(&span_with_status_message("deadline exceeded"));
+
+        let out = reg.drain(1_000);
+        let calls = find(&out, "traces_spanmetrics_calls_total", "GET /x");
+
+        assert!(
+            calls
+                .labels
+                .iter()
+                .any(|(k, v)| k == "status_message" && v == "deadline exceeded")
+        );
     }
 
     #[test]
