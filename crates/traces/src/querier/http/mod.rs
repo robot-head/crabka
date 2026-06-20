@@ -894,6 +894,40 @@ fn scoped_tags_from_traces(traces: &[TraceSpans], scope: Option<TagScope>) -> Ve
         }
     }
 
+    if matches!(scope, None | Some(TagScope::Event)) {
+        let mut tags = BTreeSet::new();
+        for trace in traces {
+            for span in &trace.spans {
+                for event in &span.events {
+                    tags.extend(event.attributes.iter().map(|(key, _)| key.clone()));
+                }
+            }
+        }
+        if !tags.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Event,
+                tags: tags.into_iter().collect(),
+            });
+        }
+    }
+
+    if matches!(scope, None | Some(TagScope::Link)) {
+        let mut tags = BTreeSet::new();
+        for trace in traces {
+            for span in &trace.spans {
+                for link in &span.links {
+                    tags.extend(link.attributes.iter().map(|(key, _)| key.clone()));
+                }
+            }
+        }
+        if !tags.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Link,
+                tags: tags.into_iter().collect(),
+            });
+        }
+    }
+
     out
 }
 
@@ -2569,6 +2603,118 @@ mod tests {
                     "name": "span",
                     "tags": ["env", "svc", "target"]
                 }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn search_tags_v2_query_filter_returns_event_and_link_scopes() {
+        let mut store = InMemorySpanStore::new();
+        let mut root = span_at_with_attrs(
+            1,
+            1,
+            None,
+            "root-svc",
+            1_000,
+            vec![("env".into(), AttrValue::Str("prod".into()))],
+        );
+        root.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "exception".into(),
+            attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
+        }];
+        root.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
+        }];
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![root]);
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "c",
+                3_000,
+                vec![("env".into(), AttrValue::Str("dev".into()))],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tags?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [
+                    {
+                        "name": "resource",
+                        "tags": ["service.name"]
+                    },
+                    {
+                        "name": "span",
+                        "tags": ["env", "svc"]
+                    },
+                    {
+                        "name": "intrinsic",
+                        "tags": [
+                            "event:name",
+                            "event:timeSinceStart",
+                            "instrumentation:name",
+                            "instrumentation:version",
+                            "link:spanID",
+                            "link:traceID",
+                            "span:childCount",
+                            "span:duration",
+                            "span:id",
+                            "span:kind",
+                            "span:name",
+                            "span:Parent",
+                            "span:nestedSetLeft",
+                            "span:nestedSetParent",
+                            "span:nestedSetRight",
+                            "span:parentID",
+                            "span:status",
+                            "span:statusMessage",
+                            "trace:duration",
+                            "trace:id",
+                            "trace:rootName",
+                            "trace:rootService"
+                        ]
+                    },
+                    {
+                        "name": "event",
+                        "tags": ["event:name", "event:timeSinceStart", "exception.type"]
+                    },
+                    {
+                        "name": "link",
+                        "tags": ["link:spanID", "link:traceID", "link.kind"]
+                    },
+                    {
+                        "name": "instrumentation",
+                        "tags": ["instrumentation:name", "instrumentation:version"]
+                    }
+                ],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
