@@ -535,7 +535,27 @@ fn instant_metric_bounds(uri: &Uri) -> Result<(i64, i64, i64, i64), String> {
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
-    value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+    let (negative, value) = value
+        .strip_prefix('-')
+        .map_or((false, value), |rest| (true, rest));
+    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return None;
+    }
+
+    let whole_ns = whole.parse::<i64>().ok()?.checked_mul(1_000_000_000)?;
+    let fraction_ns = if fraction.is_empty() {
+        0
+    } else {
+        let padded = format!("{fraction:0<9}");
+        padded.parse::<i64>().ok()?
+    };
+    let ns = whole_ns.checked_add(fraction_ns)?;
+    if negative { ns.checked_neg() } else { Some(ns) }
 }
 
 fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
@@ -1848,6 +1868,46 @@ mod tests {
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_accepts_fractional_epoch_seconds() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "inside",
+            vec![span_at(1, 1, None, "a", 1_500_000_000)],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "outside",
+            vec![span_at(2, 1, None, "b", 2_000_000_000)],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1.4&end=1.6")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+
+        assert!(
+            status == StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["rootTraceName"] == "inside");
     }
 
     #[tokio::test]
