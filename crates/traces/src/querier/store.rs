@@ -22,6 +22,42 @@ use datafusion::prelude::SessionContext;
 
 use crate::querier::live::LiveTier;
 
+const INTRINSIC_TAGS: &[&str] = &[
+    "event:name",
+    "event:timeSinceStart",
+    "instrumentation:name",
+    "instrumentation:version",
+    "link:spanID",
+    "link:traceID",
+    "span:childCount",
+    "span:duration",
+    "span:id",
+    "span:kind",
+    "span:name",
+    "span:Parent",
+    "span:nestedSetLeft",
+    "span:nestedSetParent",
+    "span:nestedSetRight",
+    "span:parentID",
+    "span:status",
+    "span:statusMessage",
+    "trace:duration",
+    "trace:id",
+    "trace:rootName",
+    "trace:rootService",
+];
+const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
+const LINK_TAGS: &[&str] = &["link:spanID", "link:traceID"];
+const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation:version"];
+const SCOPE_ORDER: &[TagScope] = &[
+    TagScope::Resource,
+    TagScope::Span,
+    TagScope::Intrinsic,
+    TagScope::Event,
+    TagScope::Link,
+    TagScope::Instrumentation,
+];
+
 /// Query-side span store that merges sealed blocks with an optional live tier.
 pub struct CrabkaSpanStore {
     blocks: Arc<BlockStore>,
@@ -147,11 +183,26 @@ impl SpanStore for CrabkaSpanStore {
         end_ns: i64,
     ) -> Result<Vec<ScopedTag>, TraceqlError> {
         let mut by_scope: BTreeMap<&'static str, (TagScope, BTreeSet<String>)> = BTreeMap::new();
+        let has_cold_blocks = !self
+            .trace_index
+            .candidate_blocks(tenant, start_ns, end_ns)
+            .is_empty();
         if matches!(scope, None | Some(TagScope::Span)) {
             by_scope.insert("span", (TagScope::Span, BTreeSet::new()));
             for tag in self.trace_index.tag_names(tenant, start_ns, end_ns) {
                 by_scope.get_mut("span").expect("span scope").1.insert(tag);
             }
+        }
+        if has_cold_blocks {
+            merge_static_scope(&mut by_scope, scope, TagScope::Intrinsic, INTRINSIC_TAGS);
+            merge_static_scope(&mut by_scope, scope, TagScope::Event, EVENT_TAGS);
+            merge_static_scope(&mut by_scope, scope, TagScope::Link, LINK_TAGS);
+            merge_static_scope(
+                &mut by_scope,
+                scope,
+                TagScope::Instrumentation,
+                INSTRUMENTATION_TAGS,
+            );
         }
         if let Some(live) = &self.live {
             for scoped in live.tag_names(tenant, scope, start_ns, end_ns).await? {
@@ -162,8 +213,9 @@ impl SpanStore for CrabkaSpanStore {
                 tags.extend(scoped.tags);
             }
         }
-        Ok(by_scope
-            .into_values()
+        Ok(SCOPE_ORDER
+            .iter()
+            .filter_map(|scope| by_scope.remove(tag_scope_key(*scope)))
             .filter_map(|(scope, tags)| {
                 (!tags.is_empty()).then_some(ScopedTag {
                     scope,
@@ -205,6 +257,21 @@ impl SpanStore for CrabkaSpanStore {
             .map(|(type_, value)| TypedValue { type_, value })
             .collect())
     }
+}
+
+fn merge_static_scope(
+    by_scope: &mut BTreeMap<&'static str, (TagScope, BTreeSet<String>)>,
+    requested: Option<TagScope>,
+    scope: TagScope,
+    tags: &[&str],
+) {
+    if requested.is_some_and(|requested| requested != scope) {
+        return;
+    }
+    let (_, out) = by_scope
+        .entry(tag_scope_key(scope))
+        .or_insert((scope, BTreeSet::new()));
+    out.extend(tags.iter().map(|tag| (*tag).to_string()));
 }
 
 async fn collect_table(
@@ -715,6 +782,58 @@ mod tests {
                 .value
                 == "api"
         );
+    }
+
+    #[tokio::test]
+    async fn cold_tag_discovery_exposes_static_traceql_scopes() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: "blocks/none.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::new(1, 8, 0.01),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let intrinsic = store
+            .tag_names("tenant", Some(TagScope::Intrinsic), 0, 10)
+            .await
+            .unwrap();
+        assert!(intrinsic.len() == 1);
+        assert!(intrinsic[0].scope == TagScope::Intrinsic);
+        assert!(intrinsic[0].tags.contains(&"span:duration".to_string()));
+        assert!(intrinsic[0].tags.contains(&"trace:id".to_string()));
+
+        let event = store
+            .tag_names("tenant", Some(TagScope::Event), 0, 10)
+            .await
+            .unwrap();
+        assert!(event.len() == 1);
+        assert!(event[0].tags == vec!["event:name", "event:timeSinceStart"]);
+
+        let link = store
+            .tag_names("tenant", Some(TagScope::Link), 0, 10)
+            .await
+            .unwrap();
+        assert!(link.len() == 1);
+        assert!(link[0].tags == vec!["link:spanID", "link:traceID"]);
+
+        let instrumentation = store
+            .tag_names("tenant", Some(TagScope::Instrumentation), 0, 10)
+            .await
+            .unwrap();
+        assert!(instrumentation.len() == 1);
+        assert!(instrumentation[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
     }
 
     #[tokio::test]
