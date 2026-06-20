@@ -8,7 +8,7 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
 
-use crate::ast::{Aggregate, Field, Intrinsic, Pipeline, Query, Scope};
+use crate::ast::{Aggregate, Field, Intrinsic, Pipeline, Query, QueryHints, Scope};
 use crate::error::{Result, TraceqlError};
 use crate::parser::parse;
 use crate::planner::{PlannerContext, plan_query};
@@ -201,6 +201,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             &Query {
                 root: q.root,
                 pipeline: Vec::new(),
+                hints: QueryHints::default(),
             },
         )
         .await?;
@@ -285,6 +286,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             &Query {
                 root,
                 pipeline: Vec::new(),
+                hints: QueryHints::default(),
             },
         )
         .await?;

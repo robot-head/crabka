@@ -4,6 +4,12 @@
 pub struct Query {
     pub root: SpansetExpr,
     pub pipeline: Vec<Pipeline>,
+    pub hints: QueryHints,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct QueryHints {
+    pub most_recent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,6 +165,7 @@ mod tests {
                 rhs: Value::Int(1),
             })),
             pipeline: vec![Pipeline::Aggregate(Aggregate::Count)],
+            hints: QueryHints::default(),
         };
         assert!(matches!(q.root, SpansetExpr::Selector(_)));
         assert!(q.pipeline == vec![Pipeline::Aggregate(Aggregate::Count)]);

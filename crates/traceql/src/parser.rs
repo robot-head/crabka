@@ -1,8 +1,8 @@
 //! Recursive-descent `TraceQL` parser.
 
 use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
-    StructuralOp, Value,
+    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
+    SpansetExpr, StructuralOp, Value,
 };
 use crate::error::{Result, TraceqlError};
 use crate::lexer::{Token, lex};
@@ -24,8 +24,43 @@ impl Parser {
     fn parse_query(&mut self) -> Result<Query> {
         let root = self.parse_spanset_or()?;
         let pipeline = self.parse_pipeline()?;
+        let hints = self.parse_query_hints()?;
         self.expect(&Token::Eof)?;
-        Ok(Query { root, pipeline })
+        Ok(Query {
+            root,
+            pipeline,
+            hints,
+        })
+    }
+
+    fn parse_query_hints(&mut self) -> Result<QueryHints> {
+        if !matches!(self.peek(), Token::Ident(name) if name == "with") {
+            return Ok(QueryHints::default());
+        }
+        self.pos += 1;
+        self.expect(&Token::LParen)?;
+        let mut hints = QueryHints::default();
+        loop {
+            let name = self.expect_ident()?;
+            self.expect(&Token::Eq)?;
+            let value = match self.advance() {
+                Token::Bool(value) => value,
+                other => {
+                    return Err(Self::err(format!(
+                        "expected boolean query hint value, got {other:?}"
+                    )));
+                }
+            };
+            match name.as_str() {
+                "most_recent" => hints.most_recent = value,
+                other => return Err(Self::err(format!("unsupported query hint {other:?}"))),
+            }
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(hints)
     }
 
     fn parse_pipeline(&mut self) -> Result<Vec<Pipeline>> {
@@ -656,6 +691,13 @@ mod tests {
                 Pipeline::Compare
             ]
         ));
+    }
+
+    #[test]
+    fn most_recent_query_hint_parses() {
+        let q = parse("{ .a = 1 } with (most_recent=true)").unwrap();
+        assert!(q.hints.most_recent);
+        assert!(parse("{ .a = 1 } with (unknown=true)").is_err());
     }
 
     #[test]
