@@ -234,7 +234,9 @@ impl SpanStore for CrabkaSpanStore {
     ) -> Result<Vec<TypedValue>, TraceqlError> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
         if is_nested_intrinsic_tag(tag) {
-            return self.live_tag_values(tenant, tag, start_ns, end_ns).await;
+            return self
+                .nested_intrinsic_tag_values(tenant, tag, start_ns, end_ns)
+                .await;
         }
         if is_intrinsic_tag(tag) {
             let scan = self.scan(tenant, &[], start_ns, end_ns).await?;
@@ -263,14 +265,19 @@ impl SpanStore for CrabkaSpanStore {
 }
 
 impl CrabkaSpanStore {
-    async fn live_tag_values(
+    async fn nested_intrinsic_tag_values(
         &self,
         tenant: &str,
         tag: &str,
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
-        let mut values = BTreeSet::new();
+        let mut values: BTreeSet<(String, String)> = self
+            .trace_index
+            .tag_values(tenant, tag, start_ns, end_ns)
+            .into_iter()
+            .map(|value| ("string".to_string(), value))
+            .collect();
         if let Some(live) = &self.live {
             values.extend(
                 live.tag_values(tenant, tag, start_ns, end_ns)
@@ -947,6 +954,43 @@ mod tests {
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "cache.miss".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_nested_intrinsic_values_are_returned_from_trace_index() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: "blocks/none.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::new(1, 8, 0.01),
+                tag_names: BTreeSet::from(["event:name".to_string()]),
+                tag_values: BTreeMap::from([(
+                    "event:name".to_string(),
+                    BTreeSet::from(["exception".to_string()]),
+                )]),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let values = store
+            .tag_values("tenant", "event:name", 0, 10)
+            .await
+            .unwrap();
+
+        assert!(
+            values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "exception".into(),
                 }]
         );
     }
