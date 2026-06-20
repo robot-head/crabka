@@ -273,6 +273,22 @@ fn collect_tags(
                 hex::encode(link.span_id),
             );
         }
+        if !span.instrumentation_scope.is_empty() {
+            insert_tag_value(
+                tag_names,
+                tag_values,
+                "instrumentation:name",
+                span.instrumentation_scope.clone(),
+            );
+        }
+        if !span.instrumentation_version.is_empty() {
+            insert_tag_value(
+                tag_names,
+                tag_values,
+                "instrumentation:version",
+                span.instrumentation_version.clone(),
+            );
+        }
     }
 }
 
@@ -353,5 +369,21 @@ mod tests {
         assert!(tag_values["event:timeSinceStart"].contains("50"));
         assert!(tag_values["link:traceID"].contains("09090909090909090909090909090909"));
         assert!(tag_values["link:spanID"].contains("0808080808080808"));
+    }
+
+    #[test]
+    fn collect_tags_indexes_instrumentation_intrinsics() {
+        let mut span = span();
+        span.instrumentation_scope = "otel-rust".into();
+        span.instrumentation_version = "1.2.3".into();
+        let mut tag_names = BTreeSet::new();
+        let mut tag_values = BTreeMap::new();
+
+        collect_tags(&[span], &mut tag_names, &mut tag_values);
+
+        assert!(tag_names.contains("instrumentation:name"));
+        assert!(tag_names.contains("instrumentation:version"));
+        assert!(tag_values["instrumentation:name"].contains("otel-rust"));
+        assert!(tag_values["instrumentation:version"].contains("1.2.3"));
     }
 }
