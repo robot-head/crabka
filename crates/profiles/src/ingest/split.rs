@@ -101,8 +101,8 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
                     stacktrace_location_refs,
                     value,
                     timestamp_ns,
-                    span_id: None,
-                    trace_id: None,
+                    span_id: raw.sample_span_ids.get(sample_idx).copied().flatten(),
+                    trace_id: raw.sample_trace_ids.get(sample_idx).cloned().flatten(),
                 });
         }
 
@@ -202,6 +202,8 @@ mod tests {
             profile: two_type_profile(),
             delta: false,
             sample_timestamps_ns: Vec::new(),
+            sample_span_ids: Vec::new(),
+            sample_trace_ids: Vec::new(),
         };
 
         let out = split_sample_types(&raw).unwrap();
@@ -280,6 +282,8 @@ mod tests {
             profile: PprofProfile::from(profile),
             delta: false,
             sample_timestamps_ns: Vec::new(),
+            sample_span_ids: Vec::new(),
+            sample_trace_ids: Vec::new(),
         })
         .unwrap();
 
@@ -337,6 +341,8 @@ mod tests {
             profile: PprofProfile::from(profile),
             delta: false,
             sample_timestamps_ns: Vec::new(),
+            sample_span_ids: Vec::new(),
+            sample_trace_ids: Vec::new(),
         })
         .unwrap();
 

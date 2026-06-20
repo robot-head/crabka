@@ -91,6 +91,8 @@ pub(crate) mod test_fixtures {
             profile: cpu_profile(),
             delta: false,
             sample_timestamps_ns: Vec::new(),
+            sample_span_ids: Vec::new(),
+            sample_trace_ids: Vec::new(),
         }
     }
 
@@ -140,6 +142,8 @@ pub(crate) mod test_fixtures {
             }),
             delta: false,
             sample_timestamps_ns: Vec::new(),
+            sample_span_ids: Vec::new(),
+            sample_trace_ids: Vec::new(),
         }
     }
 

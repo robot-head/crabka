@@ -24,6 +24,7 @@ pub fn decode_otlp(
         for scope_profiles in &resource_profiles.scope_profiles {
             for profile in &scope_profiles.profiles {
                 let sample_timestamps_ns = otlp_sample_timestamps(profile)?;
+                let (sample_span_ids, sample_trace_ids) = otlp_sample_links(profile, dict)?;
                 let profile = otlp_profile_to_pprof(profile, dict)?;
                 let mut labels = Labels::new();
                 labels.insert("service_name", service_name.clone());
@@ -35,6 +36,8 @@ pub fn decode_otlp(
                     profile,
                     delta: false,
                     sample_timestamps_ns,
+                    sample_span_ids,
+                    sample_trace_ids,
                 });
             }
         }
@@ -156,6 +159,37 @@ fn otlp_sample_timestamps(
         .collect()
 }
 
+fn otlp_sample_links(
+    profile: &pb::otlp_profiles::Profile,
+    dict: &pb::otlp_profiles::ProfilesDictionary,
+) -> Result<(Vec<Option<u64>>, Vec<Option<Vec<u8>>>), ProfilesError> {
+    let mut span_ids = Vec::with_capacity(profile.samples.len());
+    let mut trace_ids = Vec::with_capacity(profile.samples.len());
+    for sample in &profile.samples {
+        if dict.link_table.is_empty() {
+            span_ids.push(None);
+            trace_ids.push(None);
+            continue;
+        }
+        let link = usize::try_from(sample.link_index)
+            .ok()
+            .and_then(|idx| dict.link_table.get(idx))
+            .ok_or_else(|| ProfilesError::Invalid("OTLP sample references missing link".into()))?;
+        let span_id = if link.span_id.is_empty() {
+            None
+        } else {
+            let bytes: [u8; 8] = link.span_id.as_slice().try_into().map_err(|_| {
+                ProfilesError::Invalid("OTLP link span_id must be 8 bytes".to_string())
+            })?;
+            Some(u64::from_be_bytes(bytes))
+        };
+        let trace_id = (!link.trace_id.is_empty()).then(|| link.trace_id.clone());
+        span_ids.push(span_id);
+        trace_ids.push(trace_id);
+    }
+    Ok((span_ids, trace_ids))
+}
+
 fn value_type(value: &pb::otlp_profiles::ValueType) -> crabka_pprof::proto::ValueType {
     crabka_pprof::proto::ValueType {
         r#type: i64::from(value.type_strindex),
@@ -211,7 +245,7 @@ mod tests {
     #[test]
     fn otlp_resolves_dictionary_into_rawprofile() {
         use pb::otlp_profiles::{
-            Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
+            Function, Line, Link, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
             ScopeProfiles, Stack, ValueType,
         };
 
@@ -225,6 +259,10 @@ mod tests {
             function_table: vec![Function {
                 name_strindex: 3,
                 ..Default::default()
+            }],
+            link_table: vec![Link {
+                trace_id: vec![0xaa; 16],
+                span_id: 42_u64.to_be_bytes().to_vec(),
             }],
             location_table: vec![Location {
                 address: 0x40,
@@ -251,6 +289,7 @@ mod tests {
             }),
             samples: vec![Sample {
                 stack_index: 0,
+                link_index: 0,
                 values: vec![7],
                 timestamps_unix_nano: vec![1_700_000_000_000_000_123],
                 ..Default::default()
@@ -276,5 +315,7 @@ mod tests {
         assert!(!out[0].profile.sample_types().is_empty());
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
         assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
+        assert!(split[0].samples[0].span_id == Some(42));
+        assert!(split[0].samples[0].trace_id == Some(vec![0xaa; 16]));
     }
 }

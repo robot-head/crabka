@@ -52,6 +52,8 @@ pub fn decode_push(
                 profile,
                 delta: false,
                 sample_timestamps_ns: Vec::new(),
+                sample_span_ids: Vec::new(),
+                sample_trace_ids: Vec::new(),
             });
         }
     }
