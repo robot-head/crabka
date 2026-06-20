@@ -1,6 +1,6 @@
 //! Object-store backed cold-block `ProfileStore`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, AsArray, UInt64Array};
@@ -164,9 +164,12 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
-        self.index
-            .label_values_for_time(tenant, name, matchers, start_ms, end_ms)
-            .map_err(|err| ProfileError::Store(err.to_string()))
+        let active = self
+            .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
+            .await?;
+        Ok(self
+            .index
+            .label_values_for_fingerprints(tenant, name, &active))
     }
 
     async fn profile_types(
@@ -207,6 +210,69 @@ impl ProfileStore for ColdProfileStore {
 }
 
 impl ColdProfileStore {
+    async fn active_fingerprints_for_rows(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<BTreeSet<SeriesFingerprint>, ProfileError> {
+        let fps = self
+            .index
+            .matching_fingerprints(tenant, matchers)
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        if fps.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let blocks = self
+            .index
+            .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
+        let mut active = BTreeSet::new();
+        for block_key in blocks {
+            for batch in self
+                .load_block_batches_for_fingerprints(&block_key, &fps)
+                .await?
+            {
+                let fingerprints = batch.column(0).as_primitive::<UInt64Type>();
+                let timestamps = batch.column(1).as_primitive::<Int64Type>();
+                for row in 0..batch.num_rows() {
+                    let fp = fingerprints.value(row);
+                    if timestamps.value(row) >= start_ms && timestamps.value(row) <= end_ms {
+                        active.insert(fp);
+                    }
+                }
+            }
+        }
+        Ok(active)
+    }
+
+    async fn load_block_batches_for_fingerprints(
+        &self,
+        block_key: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+    ) -> Result<Vec<RecordBatch>, ProfileError> {
+        let bytes = self
+            .store
+            .get(&Path::from(block_key))
+            .await
+            .map_err(|err| ProfileError::Store(err.to_string()))?
+            .bytes()
+            .await
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+            .map_err(|err| ProfileError::Store(err.to_string()))?
+            .build()
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        let mut out = Vec::new();
+        for batch in reader {
+            let batch = batch.map_err(|err| ProfileError::Store(err.to_string()))?;
+            if batch_fingerprints_overlap(&batch, fps) {
+                out.push(batch);
+            }
+        }
+        Ok(out)
+    }
+
     async fn load_symdb(&self, block_key: &str) -> Result<SymbolDb, ProfileError> {
         let key = format!("{block_key}.symdb");
         let bytes = self
@@ -258,6 +324,11 @@ impl ColdProfileStore {
         }
         Ok(out)
     }
+}
+
+fn batch_fingerprints_overlap(batch: &RecordBatch, fps: &BTreeSet<SeriesFingerprint>) -> bool {
+    let fingerprints = batch.column(0).as_primitive::<UInt64Type>();
+    (0..batch.num_rows()).any(|row| fps.contains(&fingerprints.value(row)))
 }
 
 #[derive(Default)]
@@ -482,6 +553,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_store_label_values_do_not_leak_series_outside_time_range_in_same_block() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let api = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let worker = record_at("t", "worker", vec![0], 7, 3_000_000_000);
+        let records = vec![api.clone(), worker.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in &records {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let values = cold
+            .label_values("t", "service_name", &[], 1_000, 1_000)
+            .await
+            .unwrap();
+
+        assert!(values == vec!["api".to_string()], "{values:?}");
+    }
+
+    #[tokio::test]
     async fn cold_store_label_names_honor_query_time_range() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rec = record("t", "api", vec![0], 5);
@@ -538,6 +635,16 @@ mod tests {
     }
 
     fn record(tenant: &str, service: &str, stack: Vec<u32>, value: i64) -> ProfileRecord {
+        record_at(tenant, service, stack, value, 1_000_000_000)
+    }
+
+    fn record_at(
+        tenant: &str,
+        service: &str,
+        stack: Vec<u32>,
+        value: i64,
+        timestamp_ns: i64,
+    ) -> ProfileRecord {
         ProfileRecord {
             tenant: tenant.to_string(),
             labels: vec![
@@ -549,7 +656,7 @@ mod tests {
             samples: vec![WalSample {
                 stacktrace_location_refs: stack,
                 value,
-                timestamp_ns: 1_000_000_000,
+                timestamp_ns,
                 span_id: None,
                 trace_id: None,
             }],
