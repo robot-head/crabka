@@ -275,6 +275,13 @@ fn value_sql(value: &Value) -> Result<String> {
 }
 
 fn comparison_value_sql(field: &Field, value: &Value) -> Result<String> {
+    if matches!(
+        field.scope,
+        Scope::Intrinsic(Intrinsic::Kind | Intrinsic::Status)
+    ) && let Value::Str(name) = value
+    {
+        return enum_value_sql(&field.scope, name);
+    }
     let width = match field.scope {
         Scope::Intrinsic(Intrinsic::TraceId) => Some(16),
         Scope::Intrinsic(Intrinsic::Id | Intrinsic::ParentId) => Some(8),
@@ -292,11 +299,54 @@ fn comparison_value_sql(field: &Field, value: &Value) -> Result<String> {
     value_sql(value)
 }
 
+fn enum_value_sql(scope: &Scope, name: &str) -> Result<String> {
+    let normalized = name.to_ascii_lowercase();
+    let value = match scope {
+        Scope::Intrinsic(Intrinsic::Status) => status_enum_value(&normalized),
+        Scope::Intrinsic(Intrinsic::Kind) => kind_enum_value(&normalized),
+        _ => {
+            return Err(TraceqlError::Plan(format!(
+                "unknown {} enum value {name:?}",
+                intrinsic_name(scope)
+            )));
+        }
+    };
+    value.map(|v| v.to_string()).ok_or_else(|| {
+        TraceqlError::Plan(format!(
+            "unknown {} enum value {name:?}",
+            intrinsic_name(scope)
+        ))
+    })
+}
+
+fn status_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unset" => Some(0),
+        "ok" => Some(1),
+        "error" => Some(2),
+        _ => None,
+    }
+}
+
+fn kind_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unspecified" => Some(0),
+        "internal" => Some(1),
+        "server" => Some(2),
+        "client" => Some(3),
+        "producer" => Some(4),
+        "consumer" => Some(5),
+        _ => None,
+    }
+}
+
 fn intrinsic_name(scope: &Scope) -> &'static str {
     match scope {
         Scope::Intrinsic(Intrinsic::TraceId) => "trace:id",
         Scope::Intrinsic(Intrinsic::Id) => "span:id",
         Scope::Intrinsic(Intrinsic::ParentId) => "span:parentID",
+        Scope::Intrinsic(Intrinsic::Kind) => "span:kind",
+        Scope::Intrinsic(Intrinsic::Status) => "span:status",
         _ => "intrinsic",
     }
 }

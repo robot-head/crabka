@@ -1326,6 +1326,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_matches_status_enum_value() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    status_code: 2,
+                    ..sp(9, 1, None, "a")
+                },
+                sp(9, 2, Some(1), "b"),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let r = e
+            .search("t", "{ span:status = error }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_kind_enum_value() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    kind: 2,
+                    ..sp(9, 1, None, "a")
+                },
+                sp(9, 2, Some(1), "b"),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let r = e
+            .search("t", "{ span:kind = server }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
     async fn bare_service_name_selector_matches_resource_service_name() {
         let e = engine();
         let r = e
