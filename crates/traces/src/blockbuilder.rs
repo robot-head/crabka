@@ -258,6 +258,14 @@ fn collect_tags(
                     .saturating_sub(span.start_ns)
                     .to_string(),
             );
+            for attr in &event.attrs {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    &attr.key,
+                    attr_value_string(&attr.value),
+                );
+            }
         }
         for link in &span.links {
             insert_tag_value(
@@ -272,6 +280,14 @@ fn collect_tags(
                 "link:spanID",
                 hex::encode(link.span_id),
             );
+            for attr in &link.attrs {
+                insert_tag_value(
+                    tag_names,
+                    tag_values,
+                    &attr.key,
+                    attr_value_string(&attr.value),
+                );
+            }
         }
         if !span.instrumentation_scope.is_empty() {
             insert_tag_value(
@@ -369,6 +385,28 @@ mod tests {
         assert!(tag_values["event:timeSinceStart"].contains("50"));
         assert!(tag_values["link:traceID"].contains("09090909090909090909090909090909"));
         assert!(tag_values["link:spanID"].contains("0808080808080808"));
+    }
+
+    #[test]
+    fn collect_tags_indexes_event_and_link_attributes() {
+        let mut span = span();
+        span.events[0].attrs = vec![KeyValue {
+            key: "cache.key".into(),
+            value: AttrValue::Str("users".into()),
+        }];
+        span.links[0].attrs = vec![KeyValue {
+            key: "link.kind".into(),
+            value: AttrValue::Str("retry".into()),
+        }];
+        let mut tag_names = BTreeSet::new();
+        let mut tag_values = BTreeMap::new();
+
+        collect_tags(&[span], &mut tag_names, &mut tag_values);
+
+        assert!(tag_names.contains("cache.key"));
+        assert!(tag_names.contains("link.kind"));
+        assert!(tag_values["cache.key"].contains("users"));
+        assert!(tag_values["link.kind"].contains("retry"));
     }
 
     #[test]
