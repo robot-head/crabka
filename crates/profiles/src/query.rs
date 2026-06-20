@@ -415,6 +415,68 @@ impl<S: ProfileStore> QuerierState<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn select_heatmap_individual_exemplars(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        start_ms: i64,
+        end_ms: i64,
+        time_buckets: usize,
+    ) -> Result<HeatmapSpanExemplarsBySeries, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let base_matchers = parse_label_selector(label_selector)?;
+        let mut profile_group_by = group_by.to_vec();
+        if !profile_group_by.iter().any(|name| name == PROFILE_ID_LABEL) {
+            profile_group_by.push(PROFILE_ID_LABEL.to_string());
+        }
+        let groups = self
+            .store
+            .series(tenant, &base_matchers, &profile_group_by, start_ms, end_ms)
+            .await?;
+        let mut out: HeatmapSpanExemplarsBySeries = BTreeMap::new();
+        for labels in groups {
+            let Some(profile_id) = labels
+                .iter()
+                .find(|(name, _)| name == PROFILE_ID_LABEL)
+                .map(|(_, value)| value.clone())
+            else {
+                continue;
+            };
+            let series_labels: Vec<_> = labels
+                .iter()
+                .filter(|(name, _)| name != PROFILE_ID_LABEL)
+                .cloned()
+                .collect();
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let exemplars = heatmap_individual_exemplars_from_scan(
+                &scan,
+                start_ms,
+                end_ms,
+                time_buckets,
+                &series_labels,
+                &profile_id,
+            )
+            .await?;
+            let slots = out.entry(series_labels).or_default();
+            for (timestamp, mut exemplars) in exemplars {
+                slots.entry(timestamp).or_default().append(&mut exemplars);
+            }
+        }
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn select_span_heatmaps(
         &self,
         tenant: &str,
@@ -684,6 +746,56 @@ async fn heatmap_span_exemplars_from_scan(
                     timestamp,
                     profile_id: String::new(),
                     span_id: format!("{:x}", span_ids.value(row)),
+                    value: totals.value(row),
+                    labels: label_pairs(labels.to_vec()),
+                });
+        }
+    }
+    Ok(out)
+}
+
+async fn heatmap_individual_exemplars_from_scan(
+    scan: &crabka_pprof::ProfileScan,
+    start_ms: i64,
+    end_ms: i64,
+    time_buckets: usize,
+    labels: &[(String, String)],
+    profile_id: &str,
+) -> Result<BTreeMap<i64, Vec<pb::querier::v1::Exemplar>>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, MAX({total}) AS total \
+         FROM {table} GROUP BY {timestamp}, {fingerprint} \
+         ORDER BY {timestamp}, {fingerprint}",
+        timestamp = COL_TIMESTAMP,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+        fingerprint = COL_FINGERPRINT,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut out: BTreeMap<i64, Vec<pb::querier::v1::Exemplar>> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let totals = batch.column(1).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            let timestamp = timestamps.value(row);
+            let Some(slot_timestamp) =
+                heatmap_slot_timestamp(start_ms, end_ms, time_buckets, timestamp)
+            else {
+                continue;
+            };
+            out.entry(slot_timestamp)
+                .or_default()
+                .push(pb::querier::v1::Exemplar {
+                    timestamp,
+                    profile_id: profile_id.to_string(),
+                    span_id: String::new(),
                     value: totals.value(row),
                     labels: label_pairs(labels.to_vec()),
                 });
@@ -1175,8 +1287,8 @@ where
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
     let time_buckets = heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?;
-    let span_exemplars = if req.exemplar_type == pb::querier::v1::ExemplarType::Span as i32 {
-        state
+    let span_exemplars = match req.exemplar_type {
+        exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_heatmap_span_exemplars(
                 &tenant,
                 &req.profile_type_id,
@@ -1187,9 +1299,20 @@ where
                 time_buckets,
             )
             .await
-            .map_err(connect_error)?
-    } else {
-        BTreeMap::new()
+            .map_err(connect_error)?,
+        exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Individual as i32 => state
+            .select_heatmap_individual_exemplars(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &req.group_by,
+                req.start,
+                req.end,
+                time_buckets,
+            )
+            .await
+            .map_err(connect_error)?,
+        _ => BTreeMap::new(),
     };
     let heatmaps = if req.query_type == pb::querier::v1::HeatmapQueryType::Span as i32 {
         state
@@ -3181,6 +3304,55 @@ overrides:
         assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
         assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
         assert!(exemplar.get("value").and_then(json_i64) == Some(7));
+    }
+
+    #[tokio::test]
+    async fn select_heatmap_individual_exemplar_returns_profile_ids() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_profile_ids())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectHeatmap"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "step": 60.0,
+                "groupBy": ["service_name"],
+                "exemplarType": "EXEMPLAR_TYPE_INDIVIDUAL"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let exemplars = response
+            .pointer("/series/0/slots/0/exemplars")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("missing heatmap individual exemplars: {response}"));
+        let profile_ids: Vec<_> = exemplars
+            .iter()
+            .filter_map(|exemplar| {
+                exemplar
+                    .get("profileId")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+
+        assert!(profile_ids.contains(&"profile-a"), "{response}");
+        assert!(profile_ids.contains(&"profile-b"), "{response}");
     }
 
     #[tokio::test]
