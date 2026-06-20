@@ -11,6 +11,12 @@ pub struct Heatmap {
     pub counts: Vec<Vec<u64>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabeledHeatmap {
+    pub labels: Vec<(String, String)>,
+    pub heatmap: Heatmap,
+}
+
 #[must_use]
 pub fn bin_heatmap(
     points: &[(i64, i64)],

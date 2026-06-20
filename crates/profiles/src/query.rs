@@ -573,23 +573,27 @@ where
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
-    let heatmap = state
+    let time_buckets = heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?;
+    let series = state
         .engine
-        .select_heatmap(
+        .select_heatmaps(
             &tenant,
             &req.profile_type_id,
             &req.label_selector,
+            &req.group_by,
             req.start,
             req.end,
-            heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?,
+            time_buckets,
             DEFAULT_HEATMAP_VALUE_BUCKETS,
         )
         .await
-        .map_err(connect_error)?;
+        .map_err(connect_error)?
+        .into_iter()
+        .take(limit(req.limit))
+        .map(pb::querier::v1::HeatmapSeries::from)
+        .collect();
     Ok(ConnectResponse::new(
-        pb::querier::v1::SelectHeatmapResponse {
-            series: vec![heatmap.into()],
-        },
+        pb::querier::v1::SelectHeatmapResponse { series },
     ))
 }
 
@@ -1192,6 +1196,14 @@ impl From<crabka_pprof::Heatmap> for pb::querier::v1::HeatmapSeries {
     }
 }
 
+impl From<crabka_pprof::LabeledHeatmap> for pb::querier::v1::HeatmapSeries {
+    fn from(value: crabka_pprof::LabeledHeatmap) -> Self {
+        let mut series = Self::from(value.heatmap);
+        series.labels = label_pairs(value.labels);
+        series
+    }
+}
+
 fn heatmap_y_mins(min_value: i64, max_value: i64, value_buckets: usize) -> Vec<f64> {
     if value_buckets == 0 {
         return Vec::new();
@@ -1668,6 +1680,89 @@ overrides:
         assert!(points.len() == 1, "{response}");
         assert!(
             points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_heatmap_group_by_returns_labeled_series() {
+        let mut store = InMemoryProfileStore::new();
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            1,
+            4,
+            4,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "worker".to_string())],
+            0,
+            2,
+            9,
+            9,
+            0,
+        );
+        let state = Arc::new(QuerierState::new(Arc::new(store)));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectHeatmap"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": "{}",
+                "start": 0,
+                "end": 100,
+                "step": 100.0,
+                "groupBy": ["service_name"],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let series = response
+            .get("series")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(series.len() == 2, "{response}");
+        assert!(
+            series.iter().any(|item| {
+                item.pointer("/labels/0/name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("service_name")
+                    && item
+                        .pointer("/labels/0/value")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("api")
+            }),
+            "{response}"
+        );
+        assert!(
+            series.iter().any(|item| {
+                item.pointer("/labels/0/name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("service_name")
+                    && item
+                        .pointer("/labels/0/value")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("worker")
+            }),
             "{response}"
         );
     }

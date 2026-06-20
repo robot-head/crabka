@@ -8,8 +8,8 @@ use arrow::datatypes::{Int64Type, UInt64Type};
 use crabka_blockstore::{LabelMatcher, MatchOp};
 
 use crate::{
-    FlameGraph, FlameGraphDiff, Frame, Heatmap, ProfileError, ProfileStore, ProfileType, Series,
-    SeriesAgg, Tree, bin_heatmap, diff_trees,
+    FlameGraph, FlameGraphDiff, Frame, Heatmap, LabeledHeatmap, ProfileError, ProfileStore,
+    ProfileType, Series, SeriesAgg, Tree, bin_heatmap, diff_trees,
     samples::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
         PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
@@ -459,43 +459,98 @@ impl<S: ProfileStore> FlameEngine<S> {
         time_buckets: usize,
         value_buckets: usize,
     ) -> Result<Heatmap, ProfileError> {
-        let matchers = crate::matcher::parse_label_selector(label_selector)?;
-        let scan = self
-            .store
-            .select(tenant, profile_type, &matchers, start_ms, end_ms)
-            .await?;
-        let sql = format!(
-            "SELECT {timestamp}, MAX({total}) AS total \
-             FROM {table} GROUP BY {timestamp}, {fingerprint}",
-            timestamp = COL_TIMESTAMP,
-            total = PCOL_TOTAL_VALUE,
-            table = scan.samples_table,
-            fingerprint = COL_FINGERPRINT,
-        );
-        let batches = scan
-            .ctx
-            .sql(&sql)
-            .await
-            .map_err(|err| ProfileError::Plan(err.to_string()))?
-            .collect()
-            .await
-            .map_err(|err| ProfileError::Exec(err.to_string()))?;
-        let mut points = Vec::new();
-        for batch in batches {
-            let timestamps = batch.column(0).as_primitive::<Int64Type>();
-            let totals = batch.column(1).as_primitive::<Int64Type>();
-            for row in 0..batch.num_rows() {
-                points.push((timestamps.value(row), totals.value(row)));
-            }
-        }
-        Ok(bin_heatmap(
-            &points,
-            start_ms,
-            end_ms,
-            time_buckets,
-            value_buckets,
-        ))
+        Ok(self
+            .select_heatmaps(
+                tenant,
+                profile_type,
+                label_selector,
+                &[],
+                start_ms,
+                end_ms,
+                time_buckets,
+                value_buckets,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|item| item.heatmap)
+            .unwrap_or_else(|| bin_heatmap(&[], start_ms, end_ms, time_buckets, value_buckets)))
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_heatmaps(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        start_ms: i64,
+        end_ms: i64,
+        time_buckets: usize,
+        value_buckets: usize,
+    ) -> Result<Vec<LabeledHeatmap>, ProfileError> {
+        let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
+        let groups = if group_by.is_empty() {
+            vec![Vec::new()]
+        } else {
+            self.store
+                .series(tenant, &base_matchers, group_by, start_ms, end_ms)
+                .await?
+        };
+
+        let mut out = Vec::new();
+        for labels in groups {
+            let mut matchers = base_matchers.clone();
+            matchers.extend(
+                labels.iter().map(|(name, value)| {
+                    LabelMatcher::new(name.clone(), MatchOp::Eq, value.clone())
+                }),
+            );
+            let scan = self
+                .store
+                .select(tenant, profile_type, &matchers, start_ms, end_ms)
+                .await?;
+            let points = heatmap_points_from_totals(&scan).await?;
+            if points.is_empty() && !group_by.is_empty() {
+                continue;
+            }
+            out.push(LabeledHeatmap {
+                labels,
+                heatmap: bin_heatmap(&points, start_ms, end_ms, time_buckets, value_buckets),
+            });
+        }
+        Ok(out)
+    }
+}
+
+async fn heatmap_points_from_totals(
+    scan: &crate::ProfileScan,
+) -> Result<Vec<(i64, i64)>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, MAX({total}) AS total \
+         FROM {table} GROUP BY {timestamp}, {fingerprint}",
+        timestamp = COL_TIMESTAMP,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+        fingerprint = COL_FINGERPRINT,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut points = Vec::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let totals = batch.column(1).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            points.push((timestamps.value(row), totals.value(row)));
+        }
+    }
+    Ok(points)
 }
 
 async fn series_buckets_from_totals(
