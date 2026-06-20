@@ -1768,6 +1768,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn histogram_over_time_without_field_defaults_to_span_duration() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![InputSpan {
+                duration_nanos: 1_000_000,
+                ..sp_at(1, 1, None, "api", 0)
+            }],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | histogram_over_time() | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        assert!(series.iter().any(|s| {
+            s.labels
+                == vec![
+                    ("le".into(), "2000000".into()),
+                    ("svc".into(), "api".into()),
+                ]
+                && s.points == vec![(0, 1.0), (60_000, 0.0)]
+        }));
+    }
+
+    #[tokio::test]
     async fn topk_and_bottomk_rank_grouped_metric_series() {
         let mut s = InMemorySpanStore::new();
         s.push_trace(

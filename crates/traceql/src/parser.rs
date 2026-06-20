@@ -95,23 +95,10 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::Aggregate(Aggregate::CountOverTime))
             }
-            "sum_over_time"
-            | "avg_over_time"
-            | "min_over_time"
-            | "max_over_time"
-            | "histogram_over_time" => {
-                self.expect(&Token::LParen)?;
-                let field = self.parse_field()?;
-                self.expect(&Token::RParen)?;
-                let agg = match name.as_str() {
-                    "sum_over_time" => Aggregate::SumOverTime(field),
-                    "avg_over_time" => Aggregate::AvgOverTime(field),
-                    "min_over_time" => Aggregate::MinOverTime(field),
-                    "max_over_time" => Aggregate::MaxOverTime(field),
-                    _ => Aggregate::HistogramOverTime(field),
-                };
-                Ok(Pipeline::Aggregate(agg))
+            "sum_over_time" | "avg_over_time" | "min_over_time" | "max_over_time" => {
+                self.parse_field_over_time(&name)
             }
+            "histogram_over_time" => self.parse_histogram_over_time(),
             "quantile_over_time" => {
                 self.expect(&Token::LParen)?;
                 let field = self.parse_field()?;
@@ -173,6 +160,34 @@ impl Parser {
             }
             other => Err(Self::err(format!("unsupported pipeline stage {other:?}"))),
         }
+    }
+
+    fn parse_field_over_time(&mut self, name: &str) -> Result<Pipeline> {
+        self.expect(&Token::LParen)?;
+        let field = self.parse_field()?;
+        self.expect(&Token::RParen)?;
+        let aggregate = match name {
+            "sum_over_time" => Aggregate::SumOverTime(field),
+            "avg_over_time" => Aggregate::AvgOverTime(field),
+            "min_over_time" => Aggregate::MinOverTime(field),
+            "max_over_time" => Aggregate::MaxOverTime(field),
+            _ => unreachable!("matched aggregate is exhaustive"),
+        };
+        Ok(Pipeline::Aggregate(aggregate))
+    }
+
+    fn parse_histogram_over_time(&mut self) -> Result<Pipeline> {
+        self.expect(&Token::LParen)?;
+        let field = if self.peek() == &Token::RParen {
+            Field {
+                scope: Scope::Intrinsic(Intrinsic::Duration),
+                key: "duration".into(),
+            }
+        } else {
+            self.parse_field()?
+        };
+        self.expect(&Token::RParen)?;
+        Ok(Pipeline::Aggregate(Aggregate::HistogramOverTime(field)))
     }
 
     fn parse_adjacent_by(&mut self) -> Result<Option<Pipeline>> {
