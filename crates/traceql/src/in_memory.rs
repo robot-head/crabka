@@ -100,6 +100,8 @@ fn span_ref(span: &InputSpan, nested: &NestedSet) -> SpanRef {
         duration_nanos: u64::try_from(span.duration_nanos).unwrap_or(0),
         status_code: span.status_code,
         status_message: span.status_message.clone(),
+        instrumentation_name: span.instrumentation_name.clone(),
+        instrumentation_version: span.instrumentation_version.clone(),
         attributes: span.attrs.clone(),
     }
 }
@@ -445,6 +447,12 @@ fn collect_span_intrinsic_values(
                 values.insert(("int".to_string(), nested.right.to_string()));
             }
         }
+        "instrumentation:name" if !span.instrumentation_name.is_empty() => {
+            values.insert(("string".to_string(), span.instrumentation_name.clone()));
+        }
+        "instrumentation:version" if !span.instrumentation_version.is_empty() => {
+            values.insert(("string".to_string(), span.instrumentation_version.clone()));
+        }
         _ => {}
     }
 }
@@ -598,12 +606,15 @@ mod tests {
             "op",
             vec![
                 span(1, None, "root", vec![("svc", AttrValue::Str("a".into()))]),
-                span(
-                    2,
-                    Some(1),
-                    "child",
-                    vec![("svc", AttrValue::Str("a".into()))],
-                ),
+                InputSpan {
+                    instrumentation_name: "tracer".into(),
+                    ..span(
+                        2,
+                        Some(1),
+                        "child",
+                        vec![("svc", AttrValue::Str("a".into()))],
+                    )
+                },
                 span(
                     3,
                     Some(1),
@@ -634,6 +645,18 @@ mod tests {
                     value: "b".into(),
                 },
             ]
+        );
+
+        let instrumentation = s
+            .tag_values("t", "instrumentation:name", 0, 10_000)
+            .await
+            .unwrap();
+        assert!(
+            instrumentation
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "tracer".into(),
+                }]
         );
 
         let child_count = s

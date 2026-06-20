@@ -11,11 +11,11 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{BlockIndex, BlockStore, TraceIndex, span_block_schema};
 use crabka_traceql::{
-    ATTR_PREFIX, AttrValue, COL_DURATION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT,
-    COL_PARENT_ID, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID,
-    COL_START, COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult,
-    ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue,
-    span_schema,
+    ATTR_PREFIX, AttrValue, COL_DURATION, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION,
+    COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
+    COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
+    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult, ScopedTag, SpanMatcher,
+    SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -247,6 +247,8 @@ fn trace_from_batches(
                 duration_nanos: u64::try_from(int64_value(&batch, COL_DURATION, row)?).unwrap_or(0),
                 status_code: int32_value(&batch, COL_STATUS_CODE, row)?,
                 status_message: string_value(&batch, COL_STATUS_MESSAGE, row)?,
+                instrumentation_name: string_value(&batch, COL_INSTRUMENTATION_NAME, row)?,
+                instrumentation_version: string_value(&batch, COL_INSTRUMENTATION_VERSION, row)?,
                 attributes: attr_values(&batch, row)?,
             });
         }

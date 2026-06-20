@@ -284,6 +284,8 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
         duration_nanos: non_negative_u64(span.duration_ns),
         status_code: span.status.as_i32(),
         status_message: span.status_message.clone(),
+        instrumentation_name: span.instrumentation_scope.clone(),
+        instrumentation_version: String::new(),
         attributes: span
             .resource_attrs
             .iter()

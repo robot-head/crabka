@@ -23,6 +23,8 @@ pub struct SpanRef {
     pub duration_nanos: u64,
     pub status_code: i32,
     pub status_message: String,
+    pub instrumentation_name: String,
+    pub instrumentation_version: String,
     pub attributes: Vec<(String, AttrValue)>,
 }
 
@@ -125,6 +127,8 @@ mod tests {
             duration_nanos: 42,
             status_code: 0,
             status_message: String::new(),
+            instrumentation_name: String::new(),
+            instrumentation_version: String::new(),
             attributes: vec![
                 ("http.status_code".into(), AttrValue::Int(200)),
                 ("ok".into(), AttrValue::Bool(true)),

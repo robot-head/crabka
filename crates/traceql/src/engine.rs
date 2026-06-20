@@ -17,9 +17,10 @@ use crate::result::{
     TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 use crate::span_columns::{
-    ATTR_PREFIX, COL_DURATION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
-    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
-    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
+    ATTR_PREFIX, COL_DURATION, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND,
+    COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
+    COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE, COL_STATUS_MESSAGE,
+    COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
 use crate::store::SpanStore;
 
@@ -997,6 +998,10 @@ pub(crate) fn assemble_search_response(
                 duration_nanos: u64_from_i64(i64_value(batch, COL_DURATION, row)?)?,
                 status_code: i32_value(batch, COL_STATUS_CODE, row)?,
                 status_message: string_value(batch, COL_STATUS_MESSAGE, row).unwrap_or_default(),
+                instrumentation_name: string_value(batch, COL_INSTRUMENTATION_NAME, row)
+                    .unwrap_or_default(),
+                instrumentation_version: string_value(batch, COL_INSTRUMENTATION_VERSION, row)
+                    .unwrap_or_default(),
                 attributes: row_attrs(batch, row)?,
             };
             traces
