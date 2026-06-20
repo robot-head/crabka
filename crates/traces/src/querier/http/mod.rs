@@ -428,7 +428,7 @@ fn parse_step_to_ns(value: &str) -> Option<i64> {
 
 fn step_param(uri: &Uri) -> Result<i64, &'static str> {
     let Some(step) = query_param(uri, "step") else {
-        return Ok(1_000_000_000);
+        return Err("missing query parameter step");
     };
     let Some(step_ns) = parse_step_to_ns(&step) else {
         return Err("invalid step");
@@ -1218,6 +1218,17 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "step must be positive");
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_requires_step() {
+        let (status, body) = get_text(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "missing query parameter step");
     }
 
     #[tokio::test]
