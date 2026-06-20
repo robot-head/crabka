@@ -1,6 +1,7 @@
 //! Traces WAL topic record shared by distributor, block-builder, and live-store.
 
 use bytes::Bytes;
+use crabka_blockstore::fnv1_32;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TracesError;
@@ -30,13 +31,10 @@ impl SpanRecord {
     }
 }
 
-/// The Kafka produce key for traces: raw `trace_id` bytes.
-///
-/// The producer owns partition hashing; using the raw trace id keeps every span
-/// of a trace on one partition while avoiding a second private hash layer.
+/// The Kafka produce key for traces: `hash(trace_id)`.
 #[must_use]
 pub fn partition_key(trace_id: &[u8; 16]) -> Bytes {
-    Bytes::copy_from_slice(trace_id)
+    Bytes::copy_from_slice(&fnv1_32(trace_id).to_be_bytes())
 }
 
 #[cfg(test)]
@@ -88,6 +86,15 @@ mod tests {
         let k3 = partition_key(&[10; 16]);
         assert!(k1 == k2);
         assert!(k1 != k3);
+    }
+
+    #[test]
+    fn partition_key_is_trace_id_hash() {
+        let trace_id = [9; 16];
+        let key = partition_key(&trace_id);
+        let expected = crabka_blockstore::fnv1_32(&trace_id).to_be_bytes();
+
+        assert!(key.as_ref() == expected);
     }
 
     #[test]
