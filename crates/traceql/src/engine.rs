@@ -1438,6 +1438,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_matches_event_intrinsic_presence() {
+        let mut event_span = sp(9, 1, None, "a");
+        event_span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let peer = sp(9, 2, Some(1), "b");
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![event_span, peer]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ event:name != nil }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
     async fn search_selector_not_event_intrinsic_excludes_matching_spans() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {

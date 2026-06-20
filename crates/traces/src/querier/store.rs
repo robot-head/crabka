@@ -459,22 +459,50 @@ fn intrinsic_matches(
             matcher.op,
             &matcher.value,
         ),
-        "event:name" => event_values(batch, row)?
-            .iter()
-            .any(|event| string_matches(&event.name, matcher.op, &matcher.value)),
-        "event:timeSinceStart" => event_values(batch, row)?.iter().any(|event| {
-            int_matches(
-                i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
-                matcher.op,
-                &matcher.value,
+        "event:name" => {
+            let events = event_values(batch, row)?;
+            nested_presence_matches(!events.is_empty(), matcher.op, &matcher.value).unwrap_or_else(
+                || {
+                    events
+                        .iter()
+                        .any(|event| string_matches(&event.name, matcher.op, &matcher.value))
+                },
             )
-        }),
-        "link:traceID" => link_values(batch, row)?
-            .iter()
-            .any(|link| string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)),
-        "link:spanID" => link_values(batch, row)?
-            .iter()
-            .any(|link| string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)),
+        }
+        "event:timeSinceStart" => {
+            let events = event_values(batch, row)?;
+            nested_presence_matches(!events.is_empty(), matcher.op, &matcher.value).unwrap_or_else(
+                || {
+                    events.iter().any(|event| {
+                        int_matches(
+                            i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                            matcher.op,
+                            &matcher.value,
+                        )
+                    })
+                },
+            )
+        }
+        "link:traceID" => {
+            let links = link_values(batch, row)?;
+            nested_presence_matches(!links.is_empty(), matcher.op, &matcher.value).unwrap_or_else(
+                || {
+                    links.iter().any(|link| {
+                        string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)
+                    })
+                },
+            )
+        }
+        "link:spanID" => {
+            let links = link_values(batch, row)?;
+            nested_presence_matches(!links.is_empty(), matcher.op, &matcher.value).unwrap_or_else(
+                || {
+                    links.iter().any(|link| {
+                        string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)
+                    })
+                },
+            )
+        }
         "trace:id" => string_matches(
             &bytes_to_hex(&fixed_value::<16>(batch, COL_TRACE_ID, row)?),
             matcher.op,
@@ -569,6 +597,14 @@ fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool 
         AttrValue::Int(value) => int_matches(*value, op, expected),
         AttrValue::Float(value) => float_matches(*value, op, expected),
         AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn nested_presence_matches(has_values: bool, op: MatchCmp, expected: &MatchValue) -> Option<bool> {
+    match (op, expected) {
+        (MatchCmp::Eq, MatchValue::Nil) => Some(!has_values),
+        (MatchCmp::Neq, MatchValue::Nil) => Some(has_values),
+        _ => None,
     }
 }
 
@@ -1900,7 +1936,11 @@ mod tests {
         other.trace_id = [3; 16];
         other.span_id = [4; 8];
         other.events[0].name = "cache.hit".into();
-        let batch = span_batch(&[matching.clone(), other.clone()]).unwrap();
+        let mut no_event = span_with_nested_refs();
+        no_event.trace_id = [5; 16];
+        no_event.span_id = [6; 8];
+        no_event.events.clear();
+        let batch = span_batch(&[matching.clone(), other.clone(), no_event.clone()]).unwrap();
         let meta = writer
             .write_block_with_decl(
                 "tenant",
@@ -1915,6 +1955,7 @@ mod tests {
         let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
         bloom.insert(&matching.trace_id);
         bloom.insert(&other.trace_id);
+        bloom.insert(&no_event.trace_id);
         let mut index = TraceIndex::new();
         index.add_trace_block(
             "tenant",
@@ -1937,6 +1978,29 @@ mod tests {
 
         assert!(resp.traces.len() == 1);
         assert!(resp.traces[0].trace_id == matching.trace_id);
+
+        let resp = engine
+            .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 2);
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == matching.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == other.trace_id)
+        );
+        assert!(
+            !resp
+                .traces
+                .iter()
+                .any(|trace| trace.trace_id == no_event.trace_id)
+        );
     }
 
     #[tokio::test]

@@ -522,25 +522,42 @@ fn intrinsic_matches(
 ) -> bool {
     match matcher.key.as_str() {
         "name" | "span:name" => string_matches(&span.name, matcher.op, &matcher.value),
-        "event:name" => span
-            .events
-            .iter()
-            .any(|event| string_matches(&event.name, matcher.op, &matcher.value)),
-        "event:timeSinceStart" => span.events.iter().any(|event| {
-            int_matches(
-                i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
-                matcher.op,
-                &matcher.value,
-            )
-        }),
-        "link:traceID" => span
-            .links
-            .iter()
-            .any(|link| string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)),
-        "link:spanID" => span
-            .links
-            .iter()
-            .any(|link| string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)),
+        "event:name" => {
+            nested_presence_matches(!span.events.is_empty(), matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    span.events
+                        .iter()
+                        .any(|event| string_matches(&event.name, matcher.op, &matcher.value))
+                })
+        }
+        "event:timeSinceStart" => {
+            nested_presence_matches(!span.events.is_empty(), matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    span.events.iter().any(|event| {
+                        int_matches(
+                            i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                            matcher.op,
+                            &matcher.value,
+                        )
+                    })
+                })
+        }
+        "link:traceID" => {
+            nested_presence_matches(!span.links.is_empty(), matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    span.links.iter().any(|link| {
+                        string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)
+                    })
+                })
+        }
+        "link:spanID" => {
+            nested_presence_matches(!span.links.is_empty(), matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    span.links.iter().any(|link| {
+                        string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)
+                    })
+                })
+        }
         "trace:id" => string_matches(&bytes_to_hex(&trace.trace_id), matcher.op, &matcher.value),
         "trace:rootService" => string_matches(&trace.root_service_name, matcher.op, &matcher.value),
         "trace:rootName" => string_matches(&trace.root_span_name, matcher.op, &matcher.value),
@@ -601,6 +618,14 @@ fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool 
         AttrValue::Int(value) => int_matches(*value, op, expected),
         AttrValue::Float(value) => float_matches(*value, op, expected),
         AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn nested_presence_matches(has_values: bool, op: MatchCmp, expected: &MatchValue) -> Option<bool> {
+    match (op, expected) {
+        (MatchCmp::Eq, MatchValue::Nil) => Some(!has_values),
+        (MatchCmp::Neq, MatchValue::Nil) => Some(has_values),
+        _ => None,
     }
 }
 
