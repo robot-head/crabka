@@ -225,7 +225,6 @@ async fn send_alter_partition(
             }
             Err(AlterPartitionSendError::NotController) => {
                 last_err = format!("target {target_id} is not controller");
-                continue;
             }
             Err(AlterPartitionSendError::Rejected {
                 global_err,
@@ -324,7 +323,7 @@ mod tests {
     fn reg(id: NodeId) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: id,
-            broker_epoch: id as i64,
+            broker_epoch: i64::try_from(id).unwrap(),
             incarnation_id: uuid::Uuid::nil(),
             host: format!("b{id}"),
             port: 9092,

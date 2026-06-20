@@ -41,6 +41,10 @@ const SAMPLE_INTERVAL_MS: u64 = 2000;
 const PRODUCER_FINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const CONSUMER_BUILD_ATTEMPTS: u32 = 6;
 
+type AckResult =
+    Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
+type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
+
 fn producer_request_timeout() -> Duration {
     Duration::from_secs(2)
 }
@@ -606,9 +610,6 @@ async fn run_producer(
     // measured the driver, not the cluster. A bounded window lets throughput
     // track the cluster while keeping memory in hand.
     let max_inflight: usize = 512;
-    type AckResult =
-        Result<Result<RecordMetadata, ProducerError>, tokio::sync::oneshot::error::RecvError>;
-    type AckFuture = Pin<Box<dyn Future<Output = (AckResult, Instant)> + Send>>;
     let mut inflight: FuturesUnordered<AckFuture> = FuturesUnordered::new();
 
     // Record one *settled* send (`Ok` = ack, `Err` = producer error). A macro,

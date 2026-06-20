@@ -63,7 +63,7 @@ pub struct FileConfig {
     /// Maps to `BrokerConfig::replica_selector`.
     #[serde(default)]
     pub replica_selector: Option<String>,
-    /// How often this broker sends BrokerHeartbeat to the controller leader.
+    /// How often this broker sends `BrokerHeartbeat` to the controller leader.
     /// Absent leaves the `BrokerConfig` default intact.
     #[serde(default)]
     pub heartbeat_interval_ms: Option<u64>,
@@ -1908,13 +1908,13 @@ controller_quorum_voters = ["foo@127.0.0.1:9093"]
     fn apply_to_fills_heartbeat_and_lag_tunables() {
         use crate::config::BrokerConfig;
 
-        let src = r#"
+        let src = r"
 heartbeat_interval_ms = 500
 heartbeat_timeout_ms = 1500
 replica_lag_time_max_ms = 2000
 controller_election_timeout_ms = 500
 controller_heartbeat_interval_ms = 100
-"#;
+";
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = BrokerConfig::default();
 

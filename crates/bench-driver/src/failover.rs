@@ -4,7 +4,7 @@
 //! and is only mounted when a failover scenario actually requests it.
 //!
 //! `partition0_leader` resolves the topic metadata first and then maps the
-//! partition leader's broker id back to the matching StatefulSet pod. If that
+//! partition leader's broker id back to the matching `StatefulSet` pod. If that
 //! metadata probe fails, the caller can fall back to the first broker pod by
 //! name-sort for backwards-compatible smoke runs.
 

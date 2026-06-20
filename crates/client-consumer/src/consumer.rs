@@ -741,9 +741,9 @@ mod security_arg_tests {
 
         mock.stop();
 
-        let err = match res.expect("consumer build should not retain the 30s connect timeout") {
-            Ok(_) => panic!("silent broker must time out during build"),
-            Err(err) => err,
+        let Err(err) = res.expect("consumer build should not retain the 30s connect timeout")
+        else {
+            panic!("silent broker must time out during build")
         };
         assert!(
             matches!(

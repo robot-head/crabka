@@ -357,8 +357,7 @@ fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[
         "slower than"
     };
     out.push_str(&format!(
-        "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {:.0} ms, kafka {:.0} ms).\n\n",
-        c_recovery, k_recovery
+        "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {c_recovery:.0} ms, kafka {k_recovery:.0} ms).\n\n",
     ));
 
     let c_producer_rate = mean_rate_recovery(crabka, producer_sample_rate);
@@ -427,8 +426,7 @@ fn failover_gate_violations_for_runs(runs: &[RunOutput]) -> Vec<String> {
         };
         if c_recovery > k_recovery {
             violations.push(format!(
-                "{label}: Crabka recovery {:.0} ms is slower than kafka {:.0} ms",
-                c_recovery, k_recovery
+                "{label}: Crabka recovery {c_recovery:.0} ms is slower than kafka {k_recovery:.0} ms"
             ));
         }
         compare_failover_smoothness(&mut violations, &label, &crabka, &kafka);
@@ -464,24 +462,20 @@ fn compare_failover_smoothness(
 ) {
     if let (Some(c_drops), Some(k_drops)) =
         (mean_failover_dropped(crabka), mean_failover_dropped(kafka))
+        && c_drops > k_drops
     {
-        if c_drops > k_drops {
-            violations.push(format!(
-                "{label}: Crabka dropped {:.0} messages vs kafka {:.0}",
-                c_drops, k_drops
-            ));
-        }
+        violations.push(format!(
+            "{label}: Crabka dropped {c_drops:.0} messages vs kafka {k_drops:.0}"
+        ));
     }
     if let (Some(c_spike), Some(k_spike)) = (
         mean_failover_latency_spike(crabka),
         mean_failover_latency_spike(kafka),
-    ) {
-        if c_spike > k_spike {
-            violations.push(format!(
-                "{label}: Crabka latency spike {:.1} ms is higher than kafka {:.1} ms",
-                c_spike, k_spike
-            ));
-        }
+    ) && c_spike > k_spike
+    {
+        violations.push(format!(
+            "{label}: Crabka latency spike {c_spike:.1} ms is higher than kafka {k_spike:.1} ms"
+        ));
     }
 }
 
@@ -648,24 +642,20 @@ fn render_rate_recovery_row(
 ) {
     match (producer_rate, consumer_rate) {
         (Some(producer_rate), Some(consumer_rate)) => out.push_str(&format!(
-            "| {stack} | {:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
-            failover_recovery_ms,
+            "| {stack} | {failover_recovery_ms:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
             producer_rate.baseline_mps,
             producer_rate.min_after_kill_mps,
             producer_rate
                 .recovery_ms
-                .map(|ms| ms.to_string())
-                .unwrap_or_else(|| "unrecovered".into()),
+                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string()),
             consumer_rate.baseline_mps,
             consumer_rate.min_after_kill_mps,
             consumer_rate
                 .recovery_ms
-                .map(|ms| ms.to_string())
-                .unwrap_or_else(|| "unrecovered".into())
+                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string())
         )),
         _ => out.push_str(&format!(
-            "| {stack} | {:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n",
-            failover_recovery_ms
+            "| {stack} | {failover_recovery_ms:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n"
         )),
     }
 }
