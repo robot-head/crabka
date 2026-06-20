@@ -173,6 +173,11 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             Pipeline::By(by),
             Pipeline::Aggregate(agg),
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
         ] if is_search_preserving_aggregate(agg) => grouped_rank_sql(
             spanset_sql,
             by,
@@ -1193,5 +1198,50 @@ mod tests {
         .await
         .unwrap();
         assert!(names(&bottom) == vec!["db-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn count_topk_by_keeps_spans_from_ranked_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let top = planned("{ .svc != nil } | count() | topk(1) | by(span.svc)", &store)
+            .await
+            .unwrap();
+        assert!(
+            names(&top)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
     }
 }

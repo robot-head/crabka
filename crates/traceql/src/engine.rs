@@ -399,6 +399,11 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
             Pipeline::Aggregate(aggregate),
             Pipeline::By(by),
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::Aggregate(aggregate),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
         ] => metric_plan_for(aggregate, by.clone(), Some(rank_limit(rank)?)),
         [Pipeline::Aggregate(aggregate), Pipeline::Compare] => {
             metric_plan_with_compare(aggregate, Vec::new(), None)
@@ -417,6 +422,12 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
             Pipeline::Aggregate(aggregate),
             Pipeline::By(by),
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Compare,
+        ]
+        | [
+            Pipeline::Aggregate(aggregate),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
             Pipeline::Compare,
         ] => metric_plan_with_compare(aggregate, by.clone(), Some(rank_limit(rank)?)),
         _ => Err(TraceqlError::Unsupported(
@@ -2541,6 +2552,43 @@ mod tests {
         assert!(bottom.series.len() == 1);
         assert!(bottom.series[0].labels == vec![("svc".into(), "db".into())]);
         assert!(bottom.series[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn topk_by_ranks_grouped_metric_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+                sp_at(1, 4, None, "worker", 30_000),
+                sp_at(1, 5, None, "worker", 40_000),
+                sp_at(1, 6, None, "worker", 50_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let mut top = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | topk(2) | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+        top.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(top.len() == 2);
+        assert!(top[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
+        assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
