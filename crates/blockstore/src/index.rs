@@ -216,6 +216,35 @@ impl SeriesIndex {
         Ok(out.into_iter().collect())
     }
 
+    pub fn series_for_fingerprints(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+        label_names: &[String],
+    ) -> Vec<Vec<(String, String)>> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Vec::new();
+        };
+        let mut out = BTreeSet::new();
+        for fp in fps {
+            let Some(labels) = index.series.get(fp) else {
+                continue;
+            };
+            let projected = label_names
+                .iter()
+                .filter_map(|name| {
+                    labels
+                        .get(name)
+                        .map(|value| (name.clone(), value.to_string()))
+                })
+                .collect::<Vec<_>>();
+            if !projected.is_empty() || label_names.is_empty() {
+                out.insert(projected);
+            }
+        }
+        out.into_iter().collect()
+    }
+
     #[must_use]
     pub fn candidate_blocks_for_series(
         &self,
