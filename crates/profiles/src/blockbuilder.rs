@@ -1,18 +1,23 @@
 //! Block-builder helpers for WAL records -> profile sample blocks.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
-use crabka_blockstore::{BlockMeta, ProfileSampleRow, encode_profile_samples};
+use crabka_blockstore::{
+    BlockIndex, BlockMeta, Labels, ProfileIndex, ProfileSampleRow, encode_profile_samples,
+};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, SymbolDb};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use parquet::arrow::ArrowWriter;
 
 use crate::error::ProfilesError;
-use crate::wal::{ProfileRecord, WalMapping, WalSymbolSet};
+use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet};
 
 pub const STACKTRACE_PARTITION: u64 = 0;
 
@@ -27,6 +32,30 @@ pub struct BuiltSample {
     pub total_value: i64,
     pub span_id: Option<u64>,
     pub trace_id: Option<Vec<u8>>,
+}
+
+#[derive(Clone)]
+pub struct BlockBuilderConfig {
+    pub bootstrap: String,
+    pub group_id: String,
+    pub store: Arc<dyn ObjectStore>,
+    pub index_key: String,
+    pub flush_records: usize,
+    pub poll_timeout: Duration,
+}
+
+impl BlockBuilderConfig {
+    #[must_use]
+    pub fn new(bootstrap: String, store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            bootstrap,
+            group_id: "crabka-profiles-block-builder".to_string(),
+            store,
+            index_key: "index/profiles.json".to_string(),
+            flush_records: 1024,
+            poll_timeout: Duration::from_millis(500),
+        }
+    }
 }
 
 #[must_use]
@@ -161,10 +190,107 @@ pub async fn build_block(
     }])
 }
 
+pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
+    let mut index = match ProfileIndex::load(&config.store, &config.index_key).await {
+        Ok(index) => index,
+        Err(_) => ProfileIndex::new(),
+    };
+    let mut consumer = Consumer::builder()
+        .bootstrap(config.bootstrap)
+        .group_id(config.group_id)
+        .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .build()
+        .await
+        .map_err(|err| ProfilesError::Block(format!("consumer build failed: {err}")))?;
+
+    loop {
+        let records = consumer
+            .poll(config.poll_timeout)
+            .await
+            .map_err(|err| ProfilesError::Block(format!("consumer poll failed: {err}")))?;
+        if records.is_empty() {
+            continue;
+        }
+        flush_consumer_records_with_index(
+            &config.store,
+            &mut index,
+            &records,
+            config.flush_records,
+        )
+        .await?;
+        index
+            .save(&config.store, &config.index_key)
+            .await
+            .map_err(|err| ProfilesError::Block(err.to_string()))?;
+        consumer
+            .commit_sync()
+            .await
+            .map_err(|err| ProfilesError::Block(format!("consumer commit failed: {err}")))?;
+    }
+}
+
 pub async fn run() -> Result<(), ProfilesError> {
-    Err(ProfilesError::Block(
-        "block-builder consumer wiring waits for the role binary".to_string(),
-    ))
+    let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    run_with_config(BlockBuilderConfig::new("127.0.0.1:9092".to_string(), store)).await
+}
+
+pub async fn flush_consumer_records(
+    store: &Arc<dyn ObjectStore>,
+    records: &[ConsumerRecord],
+    flush_records: usize,
+) -> Result<Vec<BlockMeta>, ProfilesError> {
+    let mut index = ProfileIndex::new();
+    flush_consumer_records_with_index(store, &mut index, records, flush_records).await
+}
+
+pub async fn flush_consumer_records_with_index(
+    store: &Arc<dyn ObjectStore>,
+    index: &mut ProfileIndex,
+    records: &[ConsumerRecord],
+    flush_records: usize,
+) -> Result<Vec<BlockMeta>, ProfilesError> {
+    let mut batches: BTreeMap<(String, i32), Vec<(i64, ProfileRecord)>> = BTreeMap::new();
+    for record in records {
+        let value = record
+            .value
+            .as_deref()
+            .ok_or_else(|| ProfilesError::Wal("profiles WAL record has no value".to_string()))?;
+        let decoded = ProfileRecord::decode(value)?;
+        let labels = Labels::from_pairs(decoded.labels.iter().cloned());
+        index.add_series(&decoded.tenant, labels.fingerprint(), &labels);
+        batches
+            .entry((decoded.tenant.clone(), record.partition))
+            .or_default()
+            .push((record.offset, decoded));
+    }
+
+    let mut metas = Vec::new();
+    for ((tenant, partition), mut records) in batches {
+        records.sort_by_key(|(offset, _)| *offset);
+        for chunk in records.chunks(flush_records.max(1)) {
+            let min_offset = chunk.first().map(|(offset, _)| *offset).unwrap_or_default();
+            let max_offset = chunk.last().map(|(offset, _)| *offset).unwrap_or_default();
+            let profile_records = chunk
+                .iter()
+                .map(|(_, record)| record.clone())
+                .collect::<Vec<_>>();
+            let built = build_block(
+                store,
+                &tenant,
+                partition,
+                &profile_records,
+                (min_offset, max_offset),
+            )
+            .await?;
+            for meta in &built {
+                index.add_block(meta);
+                index.add_profile_block(&meta.tenant, &meta.object_key, vec![STACKTRACE_PARTITION]);
+            }
+            metas.extend(built);
+        }
+    }
+    Ok(metas)
 }
 
 struct SymbolRefs {
@@ -261,6 +387,8 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
+    use bytes::Bytes;
+    use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
     use object_store::memory::InMemory;
     use object_store::{ObjectStore, ObjectStoreExt};
@@ -355,5 +483,58 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn flush_consumer_records_groups_by_tenant_and_partition() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut index = ProfileIndex::new();
+        let mut tenant_b = rec("cpu", 11);
+        tenant_b.tenant = "u".to_string();
+        let records = vec![
+            consumer_record(0, 10, rec("cpu", 5)),
+            consumer_record(0, 11, rec("cpu", 7)),
+            consumer_record(1, 3, tenant_b),
+        ];
+
+        let metas = flush_consumer_records_with_index(&store, &mut index, &records, 100)
+            .await
+            .unwrap();
+
+        assert!(metas.len() == 2);
+        assert!(
+            metas
+                .iter()
+                .any(|meta| meta.tenant == "t" && meta.row_count == 2)
+        );
+        assert!(
+            metas
+                .iter()
+                .any(|meta| meta.tenant == "u" && meta.row_count == 1)
+        );
+        for meta in metas {
+            assert!(
+                store
+                    .head(&object_store::path::Path::from(meta.object_key))
+                    .await
+                    .is_ok()
+            );
+        }
+        assert!(index.profile_types("t") == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]);
+        assert!(BlockIndex::block_count(&index, "t") == 1);
+        assert!(BlockIndex::block_count(&index, "u") == 1);
+    }
+
+    fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {
+        ConsumerRecord {
+            topic: PROFILES_WAL_TOPIC.to_string(),
+            partition,
+            offset,
+            leader_epoch: -1,
+            timestamp: 0,
+            key: None,
+            value: Some(Bytes::from(record.encode().unwrap())),
+            headers: Vec::new(),
+        }
     }
 }

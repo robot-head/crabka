@@ -48,6 +48,14 @@ pub struct MappingRec {
     pub has_inline_frames: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawLocation {
+    pub address: u64,
+    pub mapping: MappingRec,
+    pub filename: String,
+    pub build_id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct TreeNode {
     parent: i32,
@@ -173,6 +181,106 @@ impl SymbolDb {
         u32::try_from(parent.max(0)).expect("leaf node index")
     }
 
+    pub fn copy_partition_from(
+        &mut self,
+        source: &SymbolDb,
+        source_partition: u64,
+        dest_partition: u64,
+    ) -> Result<(), ProfileError> {
+        let Some(partition) = source.partitions.get(&source_partition) else {
+            return Ok(());
+        };
+        if self
+            .partitions
+            .get(&dest_partition)
+            .is_some_and(|partition| !partition.nodes.is_empty())
+        {
+            return Err(ProfileError::Store(format!(
+                "destination symbol partition {dest_partition} is not empty"
+            )));
+        }
+
+        let strings = source
+            .strings
+            .iter()
+            .map(|value| self.intern_string(value))
+            .collect::<Vec<_>>();
+        let mappings = source
+            .mappings
+            .iter()
+            .map(|mapping| {
+                self.intern_mapping(MappingRec {
+                    memory_start: mapping.memory_start,
+                    memory_limit: mapping.memory_limit,
+                    file_offset: mapping.file_offset,
+                    filename: remap_index(mapping.filename, &strings),
+                    build_id: remap_index(mapping.build_id, &strings),
+                    has_functions: mapping.has_functions,
+                    has_filenames: mapping.has_filenames,
+                    has_line_numbers: mapping.has_line_numbers,
+                    has_inline_frames: mapping.has_inline_frames,
+                })
+            })
+            .collect::<Vec<_>>();
+        let functions = source
+            .functions
+            .iter()
+            .map(|function| {
+                self.intern_function(FunctionRec {
+                    name: remap_index(function.name, &strings),
+                    system_name: remap_index(function.system_name, &strings),
+                    filename: remap_index(function.filename, &strings),
+                    start_line: function.start_line,
+                })
+            })
+            .collect::<Vec<_>>();
+        let locations = source
+            .locations
+            .iter()
+            .map(|location| {
+                self.intern_location(LocationRec {
+                    address: location.address,
+                    mapping_id: remap_index(location.mapping_id, &mappings),
+                    lines: location
+                        .lines
+                        .iter()
+                        .map(|line| LineRec {
+                            function_id: remap_index(line.function_id, &functions),
+                            line: line.line,
+                        })
+                        .collect(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let nodes = partition
+            .nodes
+            .iter()
+            .map(|node| {
+                let location_ref = if node.location_ref >= 0 {
+                    i32::try_from(remap_index(
+                        u32::try_from(node.location_ref).expect("non-negative"),
+                        &locations,
+                    ))
+                    .expect("location index fits i32")
+                } else {
+                    node.location_ref
+                };
+                TreeNode {
+                    parent: node.parent,
+                    location_ref,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut copied = Partition {
+            nodes,
+            children: HashMap::new(),
+        };
+        copied.rebuild_children();
+        self.partitions.insert(dest_partition, copied);
+        Ok(())
+    }
+
     #[must_use]
     pub fn resolve(&self, partition: u64, stacktrace_id: u32) -> Vec<Frame> {
         let Some(part) = self.partitions.get(&partition) else {
@@ -209,6 +317,39 @@ impl SymbolDb {
             current = node.parent;
         }
         frames
+    }
+
+    #[must_use]
+    pub fn raw_locations(&self, partition: u64, stacktrace_id: u32) -> Vec<RawLocation> {
+        let Some(part) = self.partitions.get(&partition) else {
+            return Vec::new();
+        };
+        let mut locations = Vec::new();
+        let mut current = i32::try_from(stacktrace_id).unwrap_or(-1);
+        while current >= 0 {
+            let Some(node) = part
+                .nodes
+                .get(usize::try_from(current).expect("non-negative"))
+            else {
+                break;
+            };
+            if let Some(location) = self
+                .locations
+                .get(usize::try_from(node.location_ref).expect("non-negative"))
+                && let Some(mapping) = self
+                    .mappings
+                    .get(usize::try_from(location.mapping_id).expect("u32 fits usize"))
+            {
+                locations.push(RawLocation {
+                    address: location.address,
+                    mapping: *mapping,
+                    filename: self.string(mapping.filename).to_string(),
+                    build_id: self.string(mapping.build_id).to_string(),
+                });
+            }
+            current = node.parent;
+        }
+        locations
     }
 
     #[must_use]
@@ -252,6 +393,13 @@ impl SymbolDb {
             partition.rebuild_children();
         }
     }
+}
+
+fn remap_index(index: u32, remapped: &[u32]) -> u32 {
+    remapped
+        .get(usize::try_from(index).expect("u32 fits usize"))
+        .copied()
+        .unwrap_or(index)
 }
 
 impl SymbolSource for SymbolDb {
@@ -377,5 +525,16 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let source: &dyn SymbolSource = &db;
         assert!(source.resolve(0, id) == db.resolve(0, id));
+    }
+
+    #[test]
+    fn copy_partition_preserves_stacktrace_ids_with_remapped_symbols() {
+        let (mut source, [a, b, _]) = db_with_abc();
+        let id = source.intern_stacktrace(0, &[a, b]);
+        let mut dest = SymbolDb::new();
+
+        dest.copy_partition_from(&source, 0, 17).unwrap();
+
+        assert!(dest.resolve(17, id) == source.resolve(0, id));
     }
 }

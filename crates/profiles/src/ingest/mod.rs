@@ -9,8 +9,11 @@ pub mod otlp;
 pub mod push_v1;
 pub mod split;
 
+use std::collections::BTreeMap;
+
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ProfilesError;
 
@@ -45,7 +48,7 @@ pub struct DecodedSample {
 }
 
 /// Per-tenant ingest limits for structural validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantLimits {
     pub max_label_names_per_series: usize,
     pub max_label_value_len: usize,
@@ -59,6 +62,36 @@ impl Default for TenantLimits {
             max_label_value_len: 2048,
             session_id_buckets: 1024,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenantLimitConfig {
+    #[serde(default)]
+    pub default: TenantLimits,
+    #[serde(default)]
+    pub tenants: BTreeMap<String, TenantLimits>,
+}
+
+impl Default for TenantLimitConfig {
+    fn default() -> Self {
+        Self {
+            default: TenantLimits::default(),
+            tenants: BTreeMap::new(),
+        }
+    }
+}
+
+impl TenantLimitConfig {
+    #[must_use]
+    pub fn with_tenant_limits(mut self, tenant: impl Into<String>, limits: TenantLimits) -> Self {
+        self.tenants.insert(tenant.into(), limits);
+        self
+    }
+
+    #[must_use]
+    pub fn for_tenant(&self, tenant: &str) -> &TenantLimits {
+        self.tenants.get(tenant).unwrap_or(&self.default)
     }
 }
 
@@ -234,6 +267,21 @@ mod tests {
         };
         let labels = labels(&[("a", "1"), ("b", "2")]);
         assert!(enforce_limits(&labels, &limits).is_err());
+    }
+
+    #[test]
+    fn tenant_limit_config_uses_override_before_default() {
+        let config = TenantLimitConfig::default().with_tenant_limits(
+            "tenant-a",
+            TenantLimits {
+                max_label_names_per_series: 2,
+                max_label_value_len: 5,
+                session_id_buckets: 8,
+            },
+        );
+
+        assert!(config.for_tenant("tenant-a").max_label_value_len == 5);
+        assert!(config.for_tenant("tenant-b") == &TenantLimits::default());
     }
 
     #[test]

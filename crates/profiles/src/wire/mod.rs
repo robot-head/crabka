@@ -17,6 +17,13 @@ pub mod pb {
         }
     }
 
+    /// Pyroscope `querier.v1.QuerierService`.
+    pub mod querier {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/querier.v1.rs"));
+        }
+    }
+
     /// OpenTelemetry packages, nested to match generated cross-package paths.
     pub mod opentelemetry {
         pub mod proto {

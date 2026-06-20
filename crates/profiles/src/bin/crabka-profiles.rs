@@ -1,10 +1,22 @@
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use crabka_blockstore::ProfileIndex;
 use crabka_client_producer::Producer;
+use crabka_pprof::UnionProfileStore;
+use crabka_profiles::blockbuilder::BlockBuilderConfig;
+use crabka_profiles::cold_store::ColdProfileStore;
+use crabka_profiles::compactor::{DownsamplePolicy, compact_once_with_policy};
 use crabka_profiles::distributor::{DistributorState, KafkaSink, serve};
-use crabka_profiles::ingest::{RelabelConfig, TenantLimits};
+use crabka_profiles::hot_store::{WalTailProfileStore, run_wal_tail};
+use crabka_profiles::ingest::{RelabelConfig, TenantLimitConfig};
+use crabka_profiles::query::{QuerierState, serve as serve_querier};
+use crabka_profiles::query_frontend::FrontendConfig;
+use object_store::ObjectStore;
+use object_store::local::LocalFileSystem;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -14,6 +26,24 @@ struct Cli {
     listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
+    #[arg(long, default_value = ".crabka-profiles-blocks")]
+    object_store_dir: std::path::PathBuf,
+    #[arg(long, default_value_t = 15 * 60 * 1000)]
+    query_frontend_shard_ms: i64,
+    #[arg(long)]
+    tenant_limits_config: Option<std::path::PathBuf>,
+    #[arg(long, default_value = "crabka-profiles-query-wal-tail")]
+    query_wal_tail_group_id: String,
+    #[arg(long, default_value_t = 8)]
+    compactor_max_blocks_per_job: usize,
+    #[arg(long)]
+    compactor_downsample_resolution_ns: Option<i64>,
+    #[arg(
+        long = "debuginfod-url",
+        value_delimiter = ',',
+        default_value = "https://debuginfod.elfutils.org/"
+    )]
+    debuginfod_urls: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -37,13 +67,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.target {
         Target::Distributor => {
+            let limits = load_tenant_limits_config(cli.tenant_limits_config.as_deref())?;
             let producer = Producer::builder()
                 .bootstrap(&cli.bootstrap)
                 .build()
                 .await?;
             let state = Arc::new(DistributorState {
                 sink: Arc::new(KafkaSink::new(Arc::new(producer))),
-                limits: TenantLimits::default(),
+                limits,
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: 1 << 24,
             });
@@ -55,15 +86,116 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         }
         Target::BlockBuilder => {
-            crabka_profiles::blockbuilder::run().await?;
+            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
+            let store: Arc<dyn ObjectStore> = Arc::new(store);
+            crabka_profiles::blockbuilder::run_with_config(BlockBuilderConfig::new(
+                cli.bootstrap,
+                store,
+            ))
+            .await?;
         }
-        Target::Querier | Target::QueryFrontend | Target::Compactor | Target::Symbolizer => {
-            eprintln!("target {:?} is not implemented in this slice", cli.target);
-            std::process::exit(2);
+        Target::Querier => {
+            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
+            let store: Arc<dyn ObjectStore> = Arc::new(store);
+            let index = ProfileIndex::load(&store, "index/profiles.json")
+                .await
+                .unwrap_or_else(|_| ProfileIndex::new());
+            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
+                store,
+                Arc::new(index),
+                cli.debuginfod_urls.clone(),
+            )?);
+            let hot = WalTailProfileStore::new();
+            spawn_wal_tail(&cli, hot.clone());
+            let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
+            let state = Arc::new(QuerierState::new(union));
+            let shutdown = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let bound = serve_querier(cli.listen, state, shutdown).await?;
+            tracing::info!(%bound, "profiles querier listening");
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        Target::QueryFrontend => {
+            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
+            let store: Arc<dyn ObjectStore> = Arc::new(store);
+            let index = ProfileIndex::load(&store, "index/profiles.json")
+                .await
+                .unwrap_or_else(|_| ProfileIndex::new());
+            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
+                store,
+                Arc::new(index),
+                cli.debuginfod_urls.clone(),
+            )?);
+            let hot = WalTailProfileStore::new();
+            spawn_wal_tail(&cli, hot.clone());
+            let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
+            let state = Arc::new(QuerierState::new_frontend(
+                union,
+                FrontendConfig {
+                    shard_width_ms: cli.query_frontend_shard_ms,
+                },
+            ));
+            let shutdown = async {
+                let _ = tokio::signal::ctrl_c().await;
+            };
+            let bound = serve_querier(cli.listen, state, shutdown).await?;
+            tracing::info!(
+                %bound,
+                shard_width_ms = cli.query_frontend_shard_ms,
+                "profiles query-frontend listening"
+            );
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        Target::Symbolizer => {
+            crabka_profiles::symbolizer::run(cli.debuginfod_urls).await?;
+        }
+        Target::Compactor => {
+            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
+            let store: Arc<dyn ObjectStore> = Arc::new(store);
+            let mut index = ProfileIndex::load(&store, "index/profiles.json")
+                .await
+                .unwrap_or_else(|_| ProfileIndex::new());
+            let downsample = cli
+                .compactor_downsample_resolution_ns
+                .map(|resolution_ns| DownsamplePolicy { resolution_ns });
+            let metas = compact_once_with_policy(
+                &store,
+                &mut index,
+                cli.compactor_max_blocks_per_job,
+                downsample,
+            )
+            .await?;
+            index.save(&store, "index/profiles.json").await?;
+            tracing::info!(
+                compacted_blocks = metas.len(),
+                downsample_resolution_ns = ?cli.compactor_downsample_resolution_ns,
+                "profiles compactor finished one pass"
+            );
         }
     }
 
     Ok(())
+}
+
+fn load_tenant_limits_config(
+    path: Option<&Path>,
+) -> Result<TenantLimitConfig, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(TenantLimitConfig::default());
+    };
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
+    let bootstrap = cli.bootstrap.clone();
+    let group_id = cli.query_wal_tail_group_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, Duration::from_millis(500)).await {
+            tracing::warn!(%err, "profiles hot WAL-tail stopped");
+        }
+    });
 }
 
 #[cfg(test)]
@@ -85,6 +217,120 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
 
         assert!(matches!(cli.target, Target::BlockBuilder));
+    }
+
+    #[test]
+    fn parses_querier_target() {
+        let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+
+        assert!(matches!(cli.target, Target::Querier));
+    }
+
+    #[test]
+    fn parses_query_frontend_target_and_shard_width() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "query-frontend",
+            "--query-frontend-shard-ms",
+            "30000",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::QueryFrontend));
+        assert!(cli.query_frontend_shard_ms == 30_000);
+    }
+
+    #[test]
+    fn parses_query_wal_tail_group_id() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--query-wal-tail-group-id",
+            "profiles-tail-a",
+        ])
+        .unwrap();
+
+        assert!(cli.query_wal_tail_group_id == "profiles-tail-a");
+    }
+
+    #[test]
+    fn parses_compactor_max_blocks_per_job() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "compactor",
+            "--compactor-max-blocks-per-job",
+            "3",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Compactor));
+        assert!(cli.compactor_max_blocks_per_job == 3);
+    }
+
+    #[test]
+    fn parses_compactor_downsample_resolution() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "compactor",
+            "--compactor-downsample-resolution-ns",
+            "60000000000",
+        ])
+        .unwrap();
+
+        assert!(cli.compactor_downsample_resolution_ns == Some(60_000_000_000));
+    }
+
+    #[test]
+    fn parses_debuginfod_urls() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--debuginfod-url",
+            "http://one.example,http://two.example",
+        ])
+        .unwrap();
+
+        assert!(
+            cli.debuginfod_urls
+                == vec![
+                    "http://one.example".to_string(),
+                    "http://two.example".to_string()
+                ]
+        );
+    }
+
+    #[test]
+    fn loads_tenant_limits_config_from_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("limits.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "default": {
+                "max_label_names_per_series": 10,
+                "max_label_value_len": 100,
+                "session_id_buckets": 32
+              },
+              "tenants": {
+                "tenant-a": {
+                  "max_label_names_per_series": 2,
+                  "max_label_value_len": 3,
+                  "session_id_buckets": 4
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = load_tenant_limits_config(Some(&path)).unwrap();
+
+        assert!(config.default.max_label_names_per_series == 10);
+        assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
     }
 
     #[test]

@@ -64,6 +64,42 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
+    pub async fn select_merge_stacktraces_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        ranges: &[(i64, i64)],
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded stacktrace query requires at least one time range".to_string(),
+            ));
+        }
+        let mut merged = Tree::new();
+        for (start_ms, end_ms) in ranges {
+            validate_range(*start_ms, *end_ms)?;
+            let tree = self
+                .merge_to_tree(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    *start_ms,
+                    *end_ms,
+                    None,
+                )
+                .await?;
+            merged.merge(tree);
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(merged.to_flamegraph(max_nodes))
+    }
+
     pub(crate) async fn merge_to_tree(
         &self,
         tenant: &str,
@@ -199,6 +235,69 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_series_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        agg: SeriesAgg,
+        ranges: &[(i64, i64)],
+    ) -> Result<Vec<Series>, ProfileError> {
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded series query requires at least one time range".to_string(),
+            ));
+        }
+        let (start_ms, end_ms) = covering_range(ranges)?;
+        if agg == SeriesAgg::Average {
+            return self
+                .select_series(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    group_by,
+                    step_secs,
+                    agg,
+                    start_ms,
+                    end_ms,
+                )
+                .await;
+        }
+
+        let mut merged: BTreeMap<Vec<(String, String)>, BTreeMap<i64, f64>> = BTreeMap::new();
+        for (start_ms, end_ms) in ranges {
+            let series = self
+                .select_series(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    group_by,
+                    step_secs,
+                    agg,
+                    *start_ms,
+                    *end_ms,
+                )
+                .await?;
+            for item in series {
+                let points = merged.entry(item.labels).or_default();
+                for (timestamp, value) in item.points {
+                    *points.entry(timestamp).or_default() += value;
+                }
+            }
+        }
+
+        Ok(merged
+            .into_iter()
+            .map(|(labels, points)| Series {
+                labels,
+                points: points.into_iter().collect(),
+            })
+            .collect())
+    }
+
     pub async fn diff(
         &self,
         tenant: &str,
@@ -272,6 +371,49 @@ impl<S: ProfileStore> FlameEngine<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_span_profile_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_selector: &[u64],
+        ranges: &[(i64, i64)],
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        if matches!(span_selector, []) {
+            return Err(ProfileError::Plan(
+                "span selector must contain at least one span id".to_string(),
+            ));
+        }
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded span profile query requires at least one time range".to_string(),
+            ));
+        }
+        let mut merged = Tree::new();
+        for (start_ms, end_ms) in ranges {
+            validate_range(*start_ms, *end_ms)?;
+            let tree = self
+                .merge_to_tree(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    *start_ms,
+                    *end_ms,
+                    Some(span_selector),
+                )
+                .await?;
+            merged.merge(tree);
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(merged.to_flamegraph(max_nodes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn select_heatmap(
         &self,
         tenant: &str,
@@ -319,6 +461,26 @@ impl<S: ProfileStore> FlameEngine<S> {
             value_buckets,
         ))
     }
+}
+
+fn covering_range(ranges: &[(i64, i64)]) -> Result<(i64, i64), ProfileError> {
+    let mut start = i64::MAX;
+    let mut end = i64::MIN;
+    for (range_start, range_end) in ranges {
+        validate_range(*range_start, *range_end)?;
+        start = start.min(*range_start);
+        end = end.max(*range_end);
+    }
+    Ok((start, end))
+}
+
+fn validate_range(start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
+    if start_ms > end_ms {
+        return Err(ProfileError::Plan(format!(
+            "invalid time range: start {start_ms} is after end {end_ms}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -532,6 +694,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sharded_span_profile_matches_whole_range() {
+        let mut store = InMemoryProfileStore::new();
+        let (stack_a, stack_b) = {
+            let db = store.symbols_mut();
+            let a = intern_location(db, "a");
+            let b = intern_location(db, "b");
+            (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
+        };
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_a,
+            6,
+            10,
+            0,
+            111,
+        );
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_b,
+            4,
+            10,
+            30_000,
+            111,
+        );
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+        let whole = engine
+            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .await
+            .unwrap();
+        let sharded = engine
+            .select_merge_span_profile_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[111],
+                &[(0, 10_000), (10_001, 60_000)],
+                0,
+            )
+            .await
+            .unwrap();
+
+        assert!(sharded == whole);
+    }
+
+    #[tokio::test]
     async fn select_heatmap_bins_profile_totals() {
         let mut store = InMemoryProfileStore::new();
         store.push_sample_with_total(
@@ -625,6 +838,21 @@ mod tests {
         assert!(fg.names[0] == "total");
         assert!(self_value_for(&fg, "work") == 15);
         assert!(!fg.names.iter().any(|name| name == "other"));
+    }
+
+    #[tokio::test]
+    async fn sharded_merge_matches_whole_range_merge() {
+        let engine = merge_fixture();
+        let whole = engine
+            .select_merge_stacktraces("tenant-a", PT, "{}", 0, 200, 2048)
+            .await
+            .unwrap();
+        let sharded = engine
+            .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 105), (105, 200)], 2048)
+            .await
+            .unwrap();
+
+        assert!(sharded == whole);
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {
@@ -729,5 +957,27 @@ mod tests {
                 points: vec![(0, 75.0)],
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn sharded_select_series_merges_points_for_same_label_set() {
+        let mut got = series_fixture()
+            .select_series_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &["service".to_string()],
+                15.0,
+                SeriesAgg::Sum,
+                &[(0, 10_000), (10_000, 60_000)],
+            )
+            .await
+            .unwrap();
+        got.sort_by(|left, right| left.labels.cmp(&right.labels));
+
+        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
+        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
+        assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
+        assert!(got[1].points == vec![(0, 7.0)]);
     }
 }

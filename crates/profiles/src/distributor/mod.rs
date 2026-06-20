@@ -16,7 +16,7 @@ use tokio::net::TcpListener;
 
 use crate::error::ProfilesError;
 use crate::ingest::{
-    RelabelConfig, TenantLimits, apply_relabel, cap_session_id, decode_ingest_multipart,
+    RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_multipart,
     decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
     split_sample_types,
 };
@@ -66,7 +66,7 @@ impl WalSink for KafkaSink {
 
 pub struct DistributorState {
     pub sink: Arc<dyn WalSink>,
-    pub limits: TenantLimits,
+    pub limits: TenantLimitConfig,
     pub relabel: Vec<RelabelConfig>,
     pub max_decompressed: usize,
 }
@@ -81,8 +81,9 @@ pub async fn process_raw(
             continue;
         }
         require_service_name(&mut raw.labels);
-        cap_session_id(&mut raw.labels, state.limits.session_id_buckets);
-        enforce_limits(&raw.labels, &state.limits)?;
+        let limits = state.limits.for_tenant(tenant);
+        cap_session_id(&mut raw.labels, limits.session_id_buckets);
+        enforce_limits(&raw.labels, limits)?;
 
         let symbols = extract_symbols(&raw.profile)?;
         for profile in split_sample_types(&raw)? {
@@ -149,12 +150,12 @@ pub async fn serve(
 
 async fn push_handler(
     Extension(state): Extension<Arc<DistributorState>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::push::v1::PushRequest>,
 ) -> Result<ConnectResponse<pb::push::v1::PushResponse>, ConnectError> {
     let raws = decode_push(&req.0, state.max_decompressed).map_err(connect_error)?;
-    // TODO(slice4-tenant-required): this ConnectRequest wrapper does not expose
-    // headers; add middleware to carry X-Scope-OrgID into extensions.
-    process_raw(&state, "anonymous", raws)
+    let tenant = tenant_from_headers(&headers);
+    process_raw(&state, &tenant, raws)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::push::v1::PushResponse {}))
@@ -162,11 +163,12 @@ async fn push_handler(
 
 async fn export_handler(
     Extension(state): Extension<Arc<DistributorState>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::otlp_profiles::ExportProfilesServiceRequest>,
 ) -> Result<ConnectResponse<pb::otlp_profiles::ExportProfilesServiceResponse>, ConnectError> {
     let raws = decode_otlp(&req.0).map_err(connect_error)?;
-    // TODO(slice4-tenant-required): thread X-Scope-OrgID through Connect.
-    process_raw(&state, "anonymous", raws)
+    let tenant = tenant_from_headers(&headers);
+    process_raw(&state, &tenant, raws)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
@@ -293,7 +295,7 @@ mod tests {
 
     use super::*;
     use crate::error::ProfilesError;
-    use crate::ingest::{RelabelAction, RelabelConfig, TenantLimits};
+    use crate::ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits};
     use crate::wal::ProfileRecord;
 
     #[derive(Default)]
@@ -310,7 +312,7 @@ mod tests {
     fn state_with(sink: Arc<RecordingSink>) -> Arc<DistributorState> {
         Arc::new(DistributorState {
             sink,
-            limits: TenantLimits::default(),
+            limits: TenantLimitConfig::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         })
@@ -338,7 +340,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(DistributorState {
             sink: sink.clone(),
-            limits: TenantLimits::default(),
+            limits: TenantLimitConfig::default(),
             relabel: vec![RelabelConfig {
                 source_labels: vec!["__name__".to_string()],
                 regex: "process_cpu".to_string(),
@@ -353,5 +355,39 @@ mod tests {
         process_raw(&state, "t", raws).await.unwrap();
 
         assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tenant_specific_limits_are_enforced() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink,
+            limits: TenantLimitConfig::default().with_tenant_limits(
+                "tenant-a",
+                TenantLimits {
+                    max_label_value_len: 3,
+                    ..Default::default()
+                },
+            ),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap_err();
+        process_raw(
+            &state,
+            "tenant-b",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap();
+
+        assert!(err.to_string().contains("value exceeds"));
     }
 }

@@ -40,6 +40,7 @@ columnar = "0.13"
 bytes = "1"
 thiserror = "2"
 jsonpath-rust = "1.0"
+jfrs = "0.2.5"
 proptest = "1"
 # Expressive test assertions: `assert!(a == b)` / `check!(..)` with
 # captured-expression diagnostics. Used for all test assertions workspace-wide.
@@ -126,6 +127,8 @@ strum = { version = "0.28", features = ["derive"] }
 wincode = "=0.4"
 serde-wincode = "0.1"
 async-trait = "0.1"
+addr2line = "0.25"
+object = { version = "0.38", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # rustls-pemfile retired upstream (RUSTSEC-2025-0134, archived 2025-08).
 # Use the PEM parsers in `rustls-pki-types` (same code; pull explicitly).
@@ -144,6 +147,7 @@ arc-swap = "1"
 pbkdf2 = { version = "=0.13.0-rc.10", default-features = false, features = ["kdf", "hmac"] }
 hmac = "0.13"
 sha2 = "0.11"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 ring = "0.17"
 subtle = "2"
 base64 = "0.22"

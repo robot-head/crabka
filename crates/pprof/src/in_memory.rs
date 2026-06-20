@@ -13,7 +13,7 @@ use regex::Regex;
 
 use crate::error::ProfileError;
 use crate::samples::profile_samples_schema;
-use crate::store::{ProfileScan, ProfileStore};
+use crate::store::{ProfileScan, ProfileStats, ProfileStore};
 use crate::symbol_db::SymbolDb;
 
 #[derive(Clone, Debug)]
@@ -172,12 +172,16 @@ impl ProfileStore for InMemoryProfileStore {
     async fn label_names(
         &self,
         tenant: &str,
-        _matchers: &[LabelMatcher],
+        matchers: &[LabelMatcher],
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
+        let compiled = compile_matchers(matchers)?;
         let mut names = BTreeSet::new();
         for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            if !row_matches(row, &compiled) {
+                continue;
+            }
             names.extend(row.labels.iter().map(|(name, _)| name.clone()));
         }
         Ok(names.into_iter().collect())
@@ -187,12 +191,16 @@ impl ProfileStore for InMemoryProfileStore {
         &self,
         tenant: &str,
         name: &str,
-        _matchers: &[LabelMatcher],
+        matchers: &[LabelMatcher],
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
+        let compiled = compile_matchers(matchers)?;
         let mut values = BTreeSet::new();
         for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            if !row_matches(row, &compiled) {
+                continue;
+            }
             for (label_name, value) in &row.labels {
                 if label_name == name {
                     values.insert(value.clone());
@@ -243,6 +251,27 @@ impl ProfileStore for InMemoryProfileStore {
             }
         }
         Ok(out.into_iter().collect())
+    }
+
+    async fn stats(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<ProfileStats, ProfileError> {
+        let mut oldest = None;
+        let mut newest = None;
+        for row in self.rows_in_range(tenant, start_ms, end_ms) {
+            oldest =
+                Some(oldest.map_or(row.timestamp_ms, |value: i64| value.min(row.timestamp_ms)));
+            newest =
+                Some(newest.map_or(row.timestamp_ms, |value: i64| value.max(row.timestamp_ms)));
+        }
+        Ok(ProfileStats {
+            data_ingested: oldest.is_some(),
+            oldest_profile_time: oldest,
+            newest_profile_time: newest,
+        })
     }
 }
 

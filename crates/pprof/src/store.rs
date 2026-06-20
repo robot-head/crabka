@@ -8,6 +8,13 @@ use datafusion::prelude::SessionContext;
 use crate::error::ProfileError;
 use crate::frame::SymbolSource;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProfileStats {
+    pub data_ingested: bool,
+    pub oldest_profile_time: Option<i64>,
+    pub newest_profile_time: Option<i64>,
+}
+
 /// A selected samples table plus the symbol source that resolves its raw ids.
 pub struct ProfileScan {
     pub ctx: SessionContext,
@@ -59,6 +66,13 @@ pub trait ProfileStore: Send + Sync {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Vec<(String, String)>>, ProfileError>;
+
+    async fn stats(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<ProfileStats, ProfileError>;
 }
 
 #[cfg(test)]
@@ -130,6 +144,15 @@ mod tests {
             _end_ms: i64,
         ) -> Result<Vec<Vec<(String, String)>>, crate::ProfileError> {
             Ok(vec![])
+        }
+
+        async fn stats(
+            &self,
+            _tenant: &str,
+            _start_ms: i64,
+            _end_ms: i64,
+        ) -> Result<ProfileStats, crate::ProfileError> {
+            Ok(ProfileStats::default())
         }
     }
 

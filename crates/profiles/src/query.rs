@@ -1,0 +1,845 @@
+//! Querier role: Pyroscope `querier.v1` Connect API and legacy flamebearer endpoints.
+
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::extract::{Query, RawQuery};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json, Router, routing::get};
+use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
+use crabka_pprof::{
+    EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore, ProfileError, ProfileStore,
+    ProfileType, Series, SeriesAgg, parse_label_selector,
+};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::net::TcpListener;
+
+use crate::query_frontend::{FrontendConfig, split_inclusive_range};
+use crate::wire::pb;
+
+pub type DefaultStore = InMemoryProfileStore;
+
+pub struct QuerierState<S: ProfileStore = DefaultStore> {
+    store: Arc<S>,
+    engine: FlameEngine<S>,
+    execution: QueryExecution,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum QueryExecution {
+    Direct,
+    Sharded(FrontendConfig),
+}
+
+impl QuerierState<DefaultStore> {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::new(Arc::new(InMemoryProfileStore::new()))
+    }
+}
+
+impl<S: ProfileStore> QuerierState<S> {
+    #[must_use]
+    pub fn new(store: Arc<S>) -> Self {
+        let engine = FlameEngine::new(Arc::clone(&store), EngineOpts::default());
+        Self {
+            store,
+            engine,
+            execution: QueryExecution::Direct,
+        }
+    }
+
+    #[must_use]
+    pub fn new_frontend(store: Arc<S>, config: FrontendConfig) -> Self {
+        let engine = FlameEngine::new(Arc::clone(&store), EngineOpts::default());
+        Self {
+            store,
+            engine,
+            execution: QueryExecution::Sharded(config),
+        }
+    }
+
+    async fn select_merge_stacktraces(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        match &self.execution {
+            QueryExecution::Direct => {
+                self.engine
+                    .select_merge_stacktraces(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        start_ms,
+                        end_ms,
+                        max_nodes,
+                    )
+                    .await
+            }
+            QueryExecution::Sharded(config) => {
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                self.engine
+                    .select_merge_stacktraces_sharded(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        &shards,
+                        max_nodes,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_series(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        agg: SeriesAgg,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<Series>, ProfileError> {
+        match &self.execution {
+            QueryExecution::Direct => {
+                self.engine
+                    .select_series(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        group_by,
+                        step_secs,
+                        agg,
+                        start_ms,
+                        end_ms,
+                    )
+                    .await
+            }
+            QueryExecution::Sharded(config) => {
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                self.engine
+                    .select_series_sharded(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        group_by,
+                        step_secs,
+                        agg,
+                        &shards,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_merge_span_profile(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_ids: &[u64],
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        match &self.execution {
+            QueryExecution::Direct => {
+                self.engine
+                    .select_merge_span_profile(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        span_ids,
+                        start_ms,
+                        end_ms,
+                        max_nodes,
+                    )
+                    .await
+            }
+            QueryExecution::Sharded(config) => {
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                self.engine
+                    .select_merge_span_profile_sharded(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        span_ids,
+                        &shards,
+                        max_nodes,
+                    )
+                    .await
+            }
+        }
+    }
+}
+
+pub fn router<S>(state: Arc<QuerierState<S>>) -> Router
+where
+    S: ProfileStore + 'static,
+{
+    let querier = pb::querier::v1::querier_service_connect::QuerierServiceBuilder::<()>::new()
+        .profile_types(profile_types_handler::<S>)
+        .label_names(label_names_handler::<S>)
+        .label_values(label_values_handler::<S>)
+        .series(series_handler::<S>)
+        .select_merge_stacktraces(select_merge_stacktraces_handler::<S>)
+        .select_merge_span_profile(select_merge_span_profile_handler::<S>)
+        .select_merge_profile(select_merge_profile_handler::<S>)
+        .select_series(select_series_handler::<S>)
+        .select_heatmap(select_heatmap_handler::<S>)
+        .diff(diff_handler::<S>)
+        .get_profile_stats(get_profile_stats_handler::<S>)
+        .analyze_query(analyze_query_handler::<S>)
+        .build();
+
+    Router::new()
+        .route("/pyroscope/render", get(render_handler::<S>))
+        .route("/pyroscope/render-diff", get(render_diff_handler::<S>))
+        .merge(querier)
+        .layer(Extension(state))
+}
+
+pub async fn serve<S>(
+    addr: SocketAddr,
+    state: Arc<QuerierState<S>>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<SocketAddr>
+where
+    S: ProfileStore + 'static,
+{
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, router(state))
+            .with_graceful_shutdown(shutdown)
+            .await
+        {
+            tracing::warn!(%err, "profiles querier server stopped with error");
+        }
+    });
+    Ok(bound)
+}
+
+async fn profile_types_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::ProfileTypesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::ProfileTypesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let types = state
+        .store
+        .profile_types(&tenant, req.0.start, req.0.end)
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::ProfileTypesResponse {
+            profile_types: types
+                .into_iter()
+                .map(|id| pb::querier::v1::ProfileType { id })
+                .collect(),
+        },
+    ))
+}
+
+async fn label_names_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelNamesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelNamesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    let names = state
+        .store
+        .label_names(&tenant, &matchers, req.0.start, req.0.end)
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(pb::querier::v1::LabelNamesResponse {
+        names,
+    }))
+}
+
+async fn label_values_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelValuesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelValuesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    let names = state
+        .store
+        .label_values(&tenant, &req.0.name, &matchers, req.0.start, req.0.end)
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
+        names,
+    }))
+}
+
+async fn series_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    let labels_set = state
+        .store
+        .series(
+            &tenant,
+            &matchers,
+            &req.0.label_names,
+            req.0.start,
+            req.0.end,
+        )
+        .await
+        .map_err(connect_error)?
+        .into_iter()
+        .map(|labels| pb::querier::v1::Labels {
+            labels: label_pairs(labels),
+        })
+        .collect();
+    Ok(ConnectResponse::new(pb::querier::v1::SeriesResponse {
+        labels_set,
+    }))
+}
+
+async fn select_merge_stacktraces_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeStacktracesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeStacktracesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let req = req.0;
+    let flamegraph = state
+        .select_merge_stacktraces(
+            &tenant,
+            &req.profile_type_id,
+            &req.label_selector,
+            req.start,
+            req.end,
+            req.max_nodes,
+        )
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::SelectMergeStacktracesResponse {
+            flamegraph: Some(flamegraph.into()),
+            tree: Vec::new(),
+            dot: String::new(),
+        },
+    ))
+}
+
+async fn select_series_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectSeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectSeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let req = req.0;
+    let agg = if req.aggregation == pb::querier::v1::SeriesAggregationType::Average as i32 {
+        SeriesAgg::Average
+    } else {
+        SeriesAgg::Sum
+    };
+    let series = state
+        .select_series(
+            &tenant,
+            &req.profile_type_id,
+            &req.label_selector,
+            &req.group_by,
+            req.step,
+            agg,
+            req.start,
+            req.end,
+        )
+        .await
+        .map_err(connect_error)?
+        .into_iter()
+        .take(limit(req.limit))
+        .map(|series| pb::querier::v1::ProfileSeries {
+            labels: label_pairs(series.labels),
+            points: series
+                .points
+                .into_iter()
+                .map(|(timestamp, value)| pb::querier::v1::Point { timestamp, value })
+                .collect(),
+        })
+        .collect();
+    Ok(ConnectResponse::new(
+        pb::querier::v1::SelectSeriesResponse { series },
+    ))
+}
+
+async fn select_merge_span_profile_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeStacktracesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let req = req.0;
+    let flamegraph = state
+        .select_merge_span_profile(
+            &tenant,
+            &req.profile_type_id,
+            &req.label_selector,
+            &req.span_ids,
+            req.start,
+            req.end,
+            req.max_nodes,
+        )
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::SelectMergeStacktracesResponse {
+            flamegraph: Some(flamegraph.into()),
+            tree: Vec::new(),
+            dot: String::new(),
+        },
+    ))
+}
+
+async fn select_merge_profile_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeProfileResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let req = req.0;
+    let profile = state
+        .engine
+        .select_merge_profile(
+            &tenant,
+            &req.profile_type_id,
+            &req.label_selector,
+            req.start,
+            req.end,
+        )
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::SelectMergeProfileResponse { profile },
+    ))
+}
+
+async fn select_heatmap_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectHeatmapRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectHeatmapResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let req = req.0;
+    let heatmap = state
+        .engine
+        .select_heatmap(
+            &tenant,
+            &req.profile_type_id,
+            &req.label_selector,
+            req.start,
+            req.end,
+            usize::try_from(req.time_buckets).expect("u32 fits usize"),
+            usize::try_from(req.value_buckets).expect("u32 fits usize"),
+        )
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::SelectHeatmapResponse {
+            heatmap: Some(heatmap.into()),
+        },
+    ))
+}
+
+async fn diff_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::DiffRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::DiffResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let left = req
+        .0
+        .left
+        .ok_or_else(|| connect_error(ProfileError::Plan("missing left query".to_string())))?;
+    let right = req
+        .0
+        .right
+        .ok_or_else(|| connect_error(ProfileError::Plan("missing right query".to_string())))?;
+    let max_nodes = left.max_nodes.max(right.max_nodes);
+    let flamegraph = state
+        .engine
+        .diff(
+            &tenant,
+            (
+                &left.profile_type_id,
+                &left.label_selector,
+                left.start,
+                left.end,
+            ),
+            (
+                &right.profile_type_id,
+                &right.label_selector,
+                right.start,
+                right.end,
+            ),
+            max_nodes,
+        )
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(pb::querier::v1::DiffResponse {
+        flamegraph: Some(flamegraph.into()),
+    }))
+}
+
+async fn get_profile_stats_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::GetProfileStatsResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let stats = state
+        .store
+        .stats(&tenant, req.0.start, req.0.end)
+        .await
+        .map_err(connect_error)?;
+    Ok(ConnectResponse::new(
+        pb::querier::v1::GetProfileStatsResponse {
+            data_ingested: stats.data_ingested,
+            oldest_profile_time: stats.oldest_profile_time.unwrap_or_default(),
+            newest_profile_time: stats.newest_profile_time.unwrap_or_default(),
+        },
+    ))
+}
+
+async fn analyze_query_handler<S>(
+    _state: Extension<Arc<QuerierState<S>>>,
+    req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::AnalyzeQueryResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let req = req.0;
+    let result = ProfileType::parse(&req.profile_type_id)
+        .map(|_| ())
+        .and_then(|()| parse_label_selector(&req.label_selector).map(|_| ()));
+    let response = match result {
+        Ok(()) => pb::querier::v1::AnalyzeQueryResponse {
+            valid: true,
+            error: String::new(),
+        },
+        Err(err) => pb::querier::v1::AnalyzeQueryResponse {
+            valid: false,
+            error: err.to_string(),
+        },
+    };
+    Ok(ConnectResponse::new(response))
+}
+
+#[derive(Debug, Deserialize)]
+struct RenderQuery {
+    query: String,
+    from: Option<i64>,
+    until: Option<i64>,
+    #[serde(rename = "maxNodes")]
+    max_nodes: Option<i64>,
+}
+
+async fn render_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    Query(query): Query<RenderQuery>,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let (profile_type, selector) = match parse_render_query(&query.query) {
+        Ok(parsed) => parsed,
+        Err(err) => return profile_error_response(err),
+    };
+    let start = query.from.unwrap_or(0);
+    let end = query.until.unwrap_or(i64::MAX);
+    match state
+        .select_merge_stacktraces(
+            &tenant,
+            &profile_type,
+            &selector,
+            start,
+            end,
+            query.max_nodes.unwrap_or(0),
+        )
+        .await
+    {
+        Ok(flamegraph) => Json(flamebearer_json(flamegraph)).into_response(),
+        Err(err) => profile_error_response(err),
+    }
+}
+
+async fn render_diff_handler<S>(
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    RawQuery(query): RawQuery,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let tenant = tenant_from_headers(&headers);
+    let params = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .into_owned()
+        .collect::<Vec<_>>();
+    let left_query = params
+        .iter()
+        .find(|(name, _)| name == "leftQuery" || name == "query")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or("");
+    let right_query = params
+        .iter()
+        .find(|(name, _)| name == "rightQuery")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or(left_query);
+    let (left_type, left_selector) = match parse_render_query(left_query) {
+        Ok(parsed) => parsed,
+        Err(err) => return profile_error_response(err),
+    };
+    let (right_type, right_selector) = match parse_render_query(right_query) {
+        Ok(parsed) => parsed,
+        Err(err) => return profile_error_response(err),
+    };
+    let start = query_param_i64(&params, "from").unwrap_or(0);
+    let end = query_param_i64(&params, "until").unwrap_or(i64::MAX);
+    match state
+        .engine
+        .diff(
+            &tenant,
+            (&left_type, &left_selector, start, end),
+            (&right_type, &right_selector, start, end),
+            query_param_i64(&params, "maxNodes").unwrap_or(0),
+        )
+        .await
+    {
+        Ok(diff) => Json(json!({
+            "flamebearer": {
+                "names": diff.names,
+                "levels": diff.levels.into_iter().map(|level| level.values).collect::<Vec<_>>(),
+                "leftTicks": diff.left_ticks,
+                "rightTicks": diff.right_ticks,
+            },
+            "metadata": { "format": "double" }
+        }))
+        .into_response(),
+        Err(err) => profile_error_response(err),
+    }
+}
+
+fn tenant_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-scope-orgid")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("anonymous")
+        .to_string()
+}
+
+fn parse_matchers(
+    matchers: &[String],
+) -> Result<Vec<crabka_blockstore::LabelMatcher>, ProfileError> {
+    let mut out = Vec::new();
+    for matcher in matchers {
+        out.extend(parse_label_selector(matcher)?);
+    }
+    Ok(out)
+}
+
+fn parse_render_query(query: &str) -> Result<(String, String), ProfileError> {
+    let trimmed = query.trim();
+    let Some(open) = trimmed.find('{') else {
+        if trimmed.is_empty() {
+            return Err(ProfileError::Plan("missing query".to_string()));
+        }
+        return Ok((trimmed.to_string(), "{}".to_string()));
+    };
+    let profile_type = trimmed[..open].trim();
+    let selector = &trimmed[open..];
+    if profile_type.is_empty() {
+        return Err(ProfileError::Plan("missing profile type".to_string()));
+    }
+    parse_label_selector(selector)?;
+    Ok((profile_type.to_string(), selector.to_string()))
+}
+
+fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
+    params
+        .iter()
+        .find(|(key, _)| key == name)
+        .and_then(|(_, value)| value.parse().ok())
+}
+
+fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph) -> serde_json::Value {
+    json!({
+        "flamebearer": {
+            "names": flamegraph.names,
+            "levels": flamegraph.levels.into_iter().map(|level| level.values).collect::<Vec<_>>(),
+            "numTicks": flamegraph.total,
+            "maxSelf": flamegraph.max_self,
+        },
+        "metadata": { "format": "single" }
+    })
+}
+
+fn profile_error_response(err: ProfileError) -> Response {
+    (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+}
+
+fn connect_error(err: ProfileError) -> ConnectError {
+    let code = match err {
+        ProfileError::Decode(_) | ProfileError::Plan(_) | ProfileError::Unsupported(_) => {
+            Code::InvalidArgument
+        }
+        ProfileError::Exec(_) | ProfileError::Store(_) | ProfileError::Symbolize(_) => {
+            Code::Internal
+        }
+    };
+    ConnectError::new(code, err.to_string())
+}
+
+fn label_pairs(labels: Vec<(String, String)>) -> Vec<pb::querier::v1::LabelPair> {
+    labels
+        .into_iter()
+        .map(|(name, value)| pb::querier::v1::LabelPair { name, value })
+        .collect()
+}
+
+fn limit(limit: i64) -> usize {
+    usize::try_from(limit)
+        .ok()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(usize::MAX)
+}
+
+impl From<crabka_pprof::FlameGraph> for pb::querier::v1::FlameGraph {
+    fn from(value: crabka_pprof::FlameGraph) -> Self {
+        Self {
+            names: value.names,
+            levels: value
+                .levels
+                .into_iter()
+                .map(|level| pb::querier::v1::Level {
+                    values: level.values,
+                })
+                .collect(),
+            total: value.total,
+            max_self: value.max_self,
+        }
+    }
+}
+
+impl From<crabka_pprof::FlameGraphDiff> for pb::querier::v1::FlameGraphDiff {
+    fn from(value: crabka_pprof::FlameGraphDiff) -> Self {
+        Self {
+            names: value.names,
+            levels: value
+                .levels
+                .into_iter()
+                .map(|level| pb::querier::v1::Level {
+                    values: level.values,
+                })
+                .collect(),
+            left_ticks: value.left_ticks,
+            right_ticks: value.right_ticks,
+        }
+    }
+}
+
+impl From<crabka_pprof::Heatmap> for pb::querier::v1::Heatmap {
+    fn from(value: crabka_pprof::Heatmap) -> Self {
+        Self {
+            start: value.start_ms,
+            end: value.end_ms,
+            time_buckets: u32::try_from(value.time_buckets).unwrap_or(u32::MAX),
+            value_buckets: u32::try_from(value.value_buckets).unwrap_or(u32::MAX),
+            min_value: value.min_value,
+            max_value: value.max_value,
+            counts: value
+                .counts
+                .into_iter()
+                .map(|values| pb::querier::v1::HeatmapRow { values })
+                .collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    #[test]
+    fn render_query_splits_profile_type_and_selector() {
+        let (profile_type, selector) = parse_render_query(
+            r#"process_cpu:cpu:nanoseconds:cpu:nanoseconds{service_name="api"}"#,
+        )
+        .unwrap();
+
+        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert!(selector == r#"{service_name="api"}"#);
+    }
+
+    #[test]
+    fn render_query_allows_profile_type_only() {
+        let (profile_type, selector) =
+            parse_render_query("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
+
+        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert!(selector == "{}");
+    }
+
+    #[test]
+    fn limit_zero_means_unlimited() {
+        assert!(limit(0) == usize::MAX);
+        assert!(limit(2) == 2);
+    }
+}

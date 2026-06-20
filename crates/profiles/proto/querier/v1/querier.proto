@@ -1,0 +1,224 @@
+syntax = "proto3";
+package querier.v1;
+// Minimal vendored-compatible subset of Grafana Pyroscope querier.v1.
+// Covers the datasource health/query path: profile types, labels, merge, series, and diff.
+
+service QuerierService {
+  rpc ProfileTypes(ProfileTypesRequest) returns (ProfileTypesResponse) {}
+  rpc LabelNames(LabelNamesRequest) returns (LabelNamesResponse) {}
+  rpc LabelValues(LabelValuesRequest) returns (LabelValuesResponse) {}
+  rpc Series(SeriesRequest) returns (SeriesResponse) {}
+  rpc SelectMergeStacktraces(SelectMergeStacktracesRequest) returns (SelectMergeStacktracesResponse) {}
+  rpc SelectMergeSpanProfile(SelectMergeSpanProfileRequest) returns (SelectMergeStacktracesResponse) {}
+  rpc SelectMergeProfile(SelectMergeProfileRequest) returns (SelectMergeProfileResponse) {}
+  rpc SelectSeries(SelectSeriesRequest) returns (SelectSeriesResponse) {}
+  rpc SelectHeatmap(SelectHeatmapRequest) returns (SelectHeatmapResponse) {}
+  rpc Diff(DiffRequest) returns (DiffResponse) {}
+  rpc GetProfileStats(GetProfileStatsRequest) returns (GetProfileStatsResponse) {}
+  rpc AnalyzeQuery(AnalyzeQueryRequest) returns (AnalyzeQueryResponse) {}
+}
+
+message ProfileTypesRequest {
+  int64 start = 1;
+  int64 end = 2;
+}
+
+message ProfileType {
+  string ID = 1;
+}
+
+message ProfileTypesResponse {
+  repeated ProfileType profile_types = 1;
+}
+
+message LabelNamesRequest {
+  repeated string matchers = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message LabelNamesResponse {
+  repeated string names = 1;
+}
+
+message LabelValuesRequest {
+  string name = 1;
+  repeated string matchers = 2;
+  int64 start = 3;
+  int64 end = 4;
+}
+
+message LabelValuesResponse {
+  repeated string names = 1;
+}
+
+message SeriesRequest {
+  repeated string matchers = 1;
+  repeated string label_names = 2;
+  int64 start = 3;
+  int64 end = 4;
+}
+
+message Labels {
+  repeated LabelPair labels = 1;
+}
+
+message LabelPair {
+  string name = 1;
+  string value = 2;
+}
+
+message SeriesResponse {
+  repeated Labels labels_set = 1;
+}
+
+message SelectMergeStacktracesRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+  int64 max_nodes = 5;
+  Format format = 6;
+  string stack_trace_selector = 7;
+  string profile_id_selector = 8;
+}
+
+enum Format {
+  FORMAT_UNSPECIFIED = 0;
+  FLAMEGRAPH = 1;
+  TREE = 2;
+  DOT = 3;
+}
+
+message SelectMergeStacktracesResponse {
+  FlameGraph flamegraph = 1;
+  bytes tree = 2;
+  string dot = 3;
+}
+
+message SelectMergeSpanProfileRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  repeated uint64 span_ids = 3;
+  int64 start = 4;
+  int64 end = 5;
+  int64 max_nodes = 6;
+}
+
+message SelectMergeProfileRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+}
+
+message SelectMergeProfileResponse {
+  bytes profile = 1;
+}
+
+message FlameGraph {
+  repeated string names = 1;
+  repeated Level levels = 2;
+  int64 total = 3;
+  int64 max_self = 4;
+}
+
+message Level {
+  repeated int64 values = 1;
+}
+
+message SelectSeriesRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+  repeated string group_by = 5;
+  double step = 6;
+  SeriesAggregationType aggregation = 7;
+  int64 limit = 8;
+}
+
+enum SeriesAggregationType {
+  SUM = 0;
+  AVERAGE = 1;
+}
+
+message SelectSeriesResponse {
+  repeated ProfileSeries series = 1;
+}
+
+message ProfileSeries {
+  repeated LabelPair labels = 1;
+  repeated Point points = 2;
+}
+
+message Point {
+  int64 timestamp = 1;
+  double value = 2;
+}
+
+message SelectHeatmapRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+  uint32 time_buckets = 5;
+  uint32 value_buckets = 6;
+}
+
+message SelectHeatmapResponse {
+  Heatmap heatmap = 1;
+}
+
+message Heatmap {
+  int64 start = 1;
+  int64 end = 2;
+  uint32 time_buckets = 3;
+  uint32 value_buckets = 4;
+  int64 min_value = 5;
+  int64 max_value = 6;
+  repeated HeatmapRow counts = 7;
+}
+
+message HeatmapRow {
+  repeated uint64 values = 1;
+}
+
+message DiffRequest {
+  SelectMergeStacktracesRequest left = 1;
+  SelectMergeStacktracesRequest right = 2;
+}
+
+message DiffResponse {
+  FlameGraphDiff flamegraph = 1;
+}
+
+message FlameGraphDiff {
+  repeated string names = 1;
+  repeated Level levels = 2;
+  int64 left_ticks = 3;
+  int64 right_ticks = 4;
+}
+
+message GetProfileStatsRequest {
+  int64 start = 1;
+  int64 end = 2;
+}
+
+message GetProfileStatsResponse {
+  bool data_ingested = 1;
+  int64 oldest_profile_time = 2;
+  int64 newest_profile_time = 3;
+}
+
+message AnalyzeQueryRequest {
+  string profile_typeID = 1;
+  string label_selector = 2;
+  int64 start = 3;
+  int64 end = 4;
+}
+
+message AnalyzeQueryResponse {
+  bool valid = 1;
+  string error = 2;
+}

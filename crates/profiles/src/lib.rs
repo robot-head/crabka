@@ -5,9 +5,15 @@
 #![forbid(unsafe_code)]
 
 pub mod blockbuilder;
+pub mod cold_store;
+pub mod compactor;
 pub mod distributor;
 pub mod error;
+pub mod hot_store;
 pub mod ingest;
+pub mod query;
+pub mod query_frontend;
+pub mod symbolizer;
 pub mod wal;
 pub mod wire;
 

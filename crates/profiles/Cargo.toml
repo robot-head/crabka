@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 arrow = { workspace = true }
+datafusion = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 prost = { workspace = true }
@@ -31,6 +32,7 @@ futures = { workspace = true }
 regex = { workspace = true }
 bytes = { workspace = true }
 flate2 = { workspace = true }
+jfrs = { workspace = true }
 multer = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -55,5 +57,8 @@ assert2 = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+reqwest = { workspace = true, features = ["json"] }
+testcontainers = { workspace = true }
+base64 = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.7", features = ["test-helpers"] }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }

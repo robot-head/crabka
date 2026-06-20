@@ -16,6 +16,8 @@ struct BlockEntry {
     object_key: String,
     min_ts: i64,
     max_ts: i64,
+    #[serde(default)]
+    row_count: usize,
     fingerprints: BTreeSet<SeriesFingerprint>,
 }
 
@@ -65,6 +67,7 @@ impl SeriesIndex {
             object_key: meta.object_key.clone(),
             min_ts: meta.min_ts,
             max_ts: meta.max_ts,
+            row_count: meta.row_count,
             fingerprints: meta.fingerprints.iter().copied().collect(),
         });
     }
@@ -97,6 +100,85 @@ impl SeriesIndex {
         Ok(acc.unwrap_or_default())
     }
 
+    pub fn matching_fingerprints(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+    ) -> Result<BTreeSet<SeriesFingerprint>> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Ok(BTreeSet::new());
+        };
+        if matchers.is_empty() {
+            return Ok(index.series.keys().copied().collect());
+        }
+        self.resolve(tenant, matchers)
+    }
+
+    pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Ok(Vec::new());
+        };
+        let fps = self.matching_fingerprints(tenant, matchers)?;
+        let mut names = BTreeSet::new();
+        for fp in fps {
+            if let Some(labels) = index.series.get(&fp) {
+                names.extend(labels.iter().map(|(name, _)| name.to_string()));
+            }
+        }
+        Ok(names.into_iter().collect())
+    }
+
+    pub fn label_values_for(
+        &self,
+        tenant: &str,
+        name: &str,
+        matchers: &[LabelMatcher],
+    ) -> Result<Vec<String>> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Ok(Vec::new());
+        };
+        let fps = self.matching_fingerprints(tenant, matchers)?;
+        let mut values = BTreeSet::new();
+        for fp in fps {
+            if let Some(labels) = index.series.get(&fp)
+                && let Some(value) = labels.get(name)
+            {
+                values.insert(value.to_string());
+            }
+        }
+        Ok(values.into_iter().collect())
+    }
+
+    pub fn series(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        label_names: &[String],
+    ) -> Result<Vec<Vec<(String, String)>>> {
+        let Some(index) = self.tenants.get(tenant) else {
+            return Ok(Vec::new());
+        };
+        let fps = self.matching_fingerprints(tenant, matchers)?;
+        let mut out = BTreeSet::new();
+        for fp in fps {
+            let Some(labels) = index.series.get(&fp) else {
+                continue;
+            };
+            let projected = label_names
+                .iter()
+                .filter_map(|name| {
+                    labels
+                        .get(name)
+                        .map(|value| (name.clone(), value.to_string()))
+                })
+                .collect::<Vec<_>>();
+            if !projected.is_empty() || label_names.is_empty() {
+                out.insert(projected);
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     #[must_use]
     pub fn candidate_blocks_for_series(
         &self,
@@ -118,6 +200,19 @@ impl SeriesIndex {
     }
 
     #[must_use]
+    pub fn block_time_bounds(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Option<(i64, i64)> {
+        let index = self.tenants.get(tenant)?;
+        index
+            .blocks
+            .iter()
+            .filter(|block| overlaps(block.min_ts, block.max_ts, min_ts, max_ts))
+            .fold(None, |acc, block| match acc {
+                Some((min, max)) => Some((min.min(block.min_ts), max.max(block.max_ts))),
+                None => Some((block.min_ts, block.max_ts)),
+            })
+    }
+
+    #[must_use]
     pub fn label_names(&self, tenant: &str) -> Vec<String> {
         self.tenants
             .get(tenant)
@@ -132,6 +227,40 @@ impl SeriesIndex {
             .and_then(|index| index.values.get(name))
             .map(|values| values.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    pub fn replace_blocks(&mut self, tenant: &str, remove_keys: &[String], add: &[BlockMeta]) {
+        let index = self.tenants.entry(tenant.to_string()).or_default();
+        let remove_keys = remove_keys.iter().collect::<BTreeSet<_>>();
+        index
+            .blocks
+            .retain(|block| !remove_keys.contains(&block.object_key));
+        for meta in add {
+            index.blocks.push(BlockEntry {
+                object_key: meta.object_key.clone(),
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                row_count: meta.row_count,
+                fingerprints: meta.fingerprints.iter().copied().collect(),
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn all_blocks(&self) -> Vec<BlockMeta> {
+        self.tenants
+            .iter()
+            .flat_map(|(tenant, index)| {
+                index.blocks.iter().map(|block| BlockMeta {
+                    tenant: tenant.clone(),
+                    object_key: block.object_key.clone(),
+                    min_ts: block.min_ts,
+                    max_ts: block.max_ts,
+                    row_count: block.row_count,
+                    fingerprints: block.fingerprints.iter().copied().collect(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -351,5 +480,42 @@ mod tests {
         let mut envs = index.label_values("t", "env");
         envs.sort();
         assert!(envs == vec!["dev".to_string(), "prod".to_string()]);
+    }
+
+    #[test]
+    fn replace_blocks_swaps_old_keys_for_new_metadata() {
+        let mut index = seed();
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        index.add_block(&BlockMeta {
+            tenant: "t".to_string(),
+            object_key: "old-a.parquet".to_string(),
+            min_ts: 0,
+            max_ts: 10,
+            row_count: 1,
+            fingerprints: vec![api_prod],
+        });
+        index.add_block(&BlockMeta {
+            tenant: "t".to_string(),
+            object_key: "old-b.parquet".to_string(),
+            min_ts: 20,
+            max_ts: 30,
+            row_count: 1,
+            fingerprints: vec![api_prod],
+        });
+
+        index.replace_blocks(
+            "t",
+            &["old-a.parquet".to_string(), "old-b.parquet".to_string()],
+            &[BlockMeta {
+                tenant: "t".to_string(),
+                object_key: "new.parquet".to_string(),
+                min_ts: 0,
+                max_ts: 30,
+                row_count: 2,
+                fingerprints: vec![api_prod],
+            }],
+        );
+
+        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 30) == vec!["new.parquet"]);
     }
 }

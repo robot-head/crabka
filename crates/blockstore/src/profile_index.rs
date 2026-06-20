@@ -61,6 +61,45 @@ impl ProfileIndex {
         self.series.resolve(tenant, matchers)
     }
 
+    pub fn matching_fingerprints(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+    ) -> Result<BTreeSet<SeriesFingerprint>> {
+        self.series.matching_fingerprints(tenant, matchers)
+    }
+
+    pub fn select_fingerprints(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        matchers: &[LabelMatcher],
+    ) -> Result<BTreeSet<SeriesFingerprint>> {
+        let profile_fps = self.fingerprints_for_profile_type(tenant, profile_type);
+        if matchers.is_empty() {
+            return Ok(profile_fps);
+        }
+        let label_fps = self.matching_fingerprints(tenant, matchers)?;
+        Ok(profile_fps.intersection(&label_fps).copied().collect())
+    }
+
+    #[must_use]
+    pub fn candidate_blocks_for_series(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+        min_ts: i64,
+        max_ts: i64,
+    ) -> Vec<String> {
+        self.series
+            .candidate_blocks_for_series(tenant, fps, min_ts, max_ts)
+    }
+
+    #[must_use]
+    pub fn block_time_bounds(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Option<(i64, i64)> {
+        self.series.block_time_bounds(tenant, min_ts, max_ts)
+    }
+
     #[must_use]
     pub fn profile_types(&self, tenant: &str) -> Vec<String> {
         self.extras
@@ -87,6 +126,22 @@ impl ProfileIndex {
             .insert(object_key.to_string(), partitions);
     }
 
+    pub fn replace_profile_blocks(
+        &mut self,
+        tenant: &str,
+        remove_keys: &[String],
+        add: &[(BlockMeta, Vec<u64>)],
+    ) {
+        for key in remove_keys {
+            self.block_partitions.remove(key);
+        }
+        let metas = add.iter().map(|(meta, _)| meta.clone()).collect::<Vec<_>>();
+        self.series.replace_blocks(tenant, remove_keys, &metas);
+        for (meta, partitions) in add {
+            self.add_profile_block(tenant, &meta.object_key, partitions.clone());
+        }
+    }
+
     #[must_use]
     pub fn stacktrace_partitions(&self, object_key: &str) -> Vec<u64> {
         self.block_partitions
@@ -103,6 +158,33 @@ impl ProfileIndex {
     #[must_use]
     pub fn label_values(&self, tenant: &str, name: &str) -> Vec<String> {
         self.series.label_values(tenant, name)
+    }
+
+    pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
+        self.series.label_names_for(tenant, matchers)
+    }
+
+    pub fn label_values_for(
+        &self,
+        tenant: &str,
+        name: &str,
+        matchers: &[LabelMatcher],
+    ) -> Result<Vec<String>> {
+        self.series.label_values_for(tenant, name, matchers)
+    }
+
+    pub fn series(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        label_names: &[String],
+    ) -> Result<Vec<Vec<(String, String)>>> {
+        self.series.series(tenant, matchers, label_names)
+    }
+
+    #[must_use]
+    pub fn all_blocks(&self) -> Vec<BlockMeta> {
+        self.series.all_blocks()
     }
 
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
@@ -210,6 +292,49 @@ mod tests {
                 .stacktrace_partitions("blocks/absent.parquet")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn replace_profile_blocks_removes_old_partition_maps() {
+        let mut index = seed();
+        let labels = labels(&[
+            ("__name__", "process_cpu"),
+            (
+                "__profile_type__",
+                "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+            ),
+            ("service_name", "checkout"),
+        ]);
+        let fp = labels.fingerprint();
+        index.add_block(&BlockMeta {
+            tenant: "t".to_string(),
+            object_key: "old.parquet".to_string(),
+            min_ts: 0,
+            max_ts: 10,
+            row_count: 1,
+            fingerprints: vec![fp],
+        });
+        index.add_profile_block("t", "old.parquet", vec![0]);
+
+        index.replace_profile_blocks(
+            "t",
+            &["old.parquet".to_string()],
+            &[(
+                BlockMeta {
+                    tenant: "t".to_string(),
+                    object_key: "new.parquet".to_string(),
+                    min_ts: 0,
+                    max_ts: 10,
+                    row_count: 1,
+                    fingerprints: vec![fp],
+                },
+                vec![99],
+            )],
+        );
+
+        assert!(index.stacktrace_partitions("old.parquet").is_empty());
+        assert!(index.stacktrace_partitions("new.parquet") == vec![99]);
+        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
     }
 
     #[tokio::test]

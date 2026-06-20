@@ -8,8 +8,7 @@ use regex::Regex;
 
 use crate::error::ProfileError;
 
-#[allow(dead_code)]
-pub(crate) fn parse_label_selector(input: &str) -> Result<Vec<LabelMatcher>, ProfileError> {
+pub fn parse_label_selector(input: &str) -> Result<Vec<LabelMatcher>, ProfileError> {
     let body = trim_selector(input)?;
     if body.trim().is_empty() {
         return Ok(Vec::new());

@@ -1,10 +1,11 @@
 //! Generates Connect-RPC server stubs + prost message types from the vendored
-//! `push.v1` + OTLP `profiles/v1development` protos. Prefers a system `protoc`;
+//! `push.v1`, `querier.v1`, and OTLP `profiles/v1development` protos. Prefers a system `protoc`;
 //! falls back to a vendored fetch only when none is found.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
         "proto/push/v1/push.proto",
+        "proto/querier/v1/querier.proto",
         "proto/opentelemetry/proto/collector/profiles/v1development/profiles_service.proto",
     ];
     let includes = ["proto"];
@@ -16,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in [
         "proto/types/v1/types.proto",
         "proto/push/v1/push.proto",
+        "proto/querier/v1/querier.proto",
         "proto/opentelemetry/proto/common/v1/common.proto",
         "proto/opentelemetry/proto/resource/v1/resource.proto",
         "proto/opentelemetry/proto/profiles/v1development/profiles.proto",
