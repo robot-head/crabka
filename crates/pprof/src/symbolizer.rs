@@ -159,31 +159,75 @@ impl NativeResolver for DebuginfodResolver {
 impl NativeResolver for ObjectSymbolResolver {
     fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
         let object = object::File::parse(self.bytes.as_slice()).ok()?;
-        let loader = self
+        let frames = self
             .path
             .as_ref()
-            .and_then(|path| addr2line::Loader::new(path).ok());
-        let location = loader
-            .as_ref()
-            .and_then(|loader| loader.find_location(request.address).ok().flatten());
-        let function = loader
-            .as_ref()
-            .and_then(|loader| loader.find_symbol(request.address).map(ToString::to_string))
-            .or_else(|| nearest_symbol_name(&object, request.address))
+            .and_then(|path| loader_frames(path, request.address))
+            .or_else(|| loader_frames_from_bytes(&self.bytes, request.address));
+        if let Some(frames) = frames
+            && !frames.is_empty()
+        {
+            return Some(frames);
+        }
+        let function = nearest_symbol_name(&object, request.address)
             .unwrap_or_else(|| format!("{}+0x{:x}", request.filename, request.address));
         Some(vec![NativeSymbol {
             function,
-            file: location
-                .as_ref()
-                .and_then(|location| location.file)
-                .unwrap_or(&request.filename)
-                .to_string(),
-            line: location
-                .and_then(|location| location.line)
-                .and_then(|line| i32::try_from(line).ok())
-                .unwrap_or_default(),
+            file: request.filename.clone(),
+            line: 0,
         }])
     }
+}
+
+fn loader_frames(path: &std::path::Path, address: u64) -> Option<Vec<NativeSymbol>> {
+    let loader = addr2line::Loader::new(path).ok()?;
+    let mut frames = loader.find_frames(address).ok()?;
+    let mut out = Vec::new();
+    while let Some(frame) = frames.next().ok()? {
+        let location = frame.location;
+        let function = frame
+            .function
+            .and_then(|function| function.demangle().ok().map(|name| name.into_owned()))
+            .or_else(|| loader.find_symbol(address).map(ToString::to_string))
+            .unwrap_or_default();
+        let file = location
+            .as_ref()
+            .and_then(|location| location.file)
+            .unwrap_or_default()
+            .to_string();
+        let line = location
+            .and_then(|location| location.line)
+            .and_then(|line| i32::try_from(line).ok())
+            .unwrap_or_default();
+        if !function.is_empty() || !file.is_empty() || line != 0 {
+            out.push(NativeSymbol {
+                function,
+                file,
+                line,
+            });
+        }
+    }
+    Some(out)
+}
+
+fn loader_frames_from_bytes(bytes: &[u8], address: u64) -> Option<Vec<NativeSymbol>> {
+    let path = temp_object_path();
+    std::fs::write(&path, bytes).ok()?;
+    let frames = loader_frames(&path, address);
+    let _ = std::fs::remove_file(path);
+    frames
+}
+
+fn temp_object_path() -> PathBuf {
+    let tid = format!("{:?}", std::thread::current().id());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "crabka-pprof-symbolizer-{}-{tid}-{nanos}.debug",
+        std::process::id()
+    ))
 }
 
 fn nearest_symbol_name(object: &object::File<'_>, address: u64) -> Option<String> {
@@ -389,6 +433,40 @@ mod tests {
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
         );
+    }
+
+    #[test]
+    fn byte_backed_object_symbol_resolver_reads_dwarf_locations() {
+        let _ = object_symbol_anchor();
+        let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let address = {
+            let object = object::File::parse(bytes.as_slice()).unwrap();
+            object
+                .symbols()
+                .find(|symbol| {
+                    symbol.address() != 0
+                        && symbol
+                            .name()
+                            .is_ok_and(|name| name.contains("object_symbol_anchor"))
+                })
+                .unwrap()
+                .address()
+        };
+        let resolver = ObjectSymbolResolver::from_bytes(bytes).unwrap();
+
+        let frames = resolver
+            .symbolize(&SymbolizeRequest {
+                build_id: "build-a".to_string(),
+                filename: "/missing/on/disk".to_string(),
+                address,
+            })
+            .unwrap();
+
+        assert!(frames.iter().any(|frame| {
+            frame.function.contains("object_symbol_anchor")
+                && frame.file.ends_with("symbolizer.rs")
+                && frame.line > 0
+        }));
     }
 
     #[test]
