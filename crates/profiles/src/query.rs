@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
 
+use crate::limits::Limits;
 use crate::query_frontend::{FrontendConfig, split_inclusive_range};
 use crate::wire::pb;
 
@@ -29,6 +30,7 @@ pub struct QuerierState<S: ProfileStore = DefaultStore> {
     store: Arc<S>,
     engine: FlameEngine<S>,
     execution: QueryExecution,
+    limits: Limits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,22 +49,42 @@ impl QuerierState<DefaultStore> {
 impl<S: ProfileStore> QuerierState<S> {
     #[must_use]
     pub fn new(store: Arc<S>) -> Self {
-        let engine = FlameEngine::new(Arc::clone(&store), EngineOpts::default());
-        Self {
-            store,
-            engine,
-            execution: QueryExecution::Direct,
-        }
+        Self::new_with_limits(store, Limits::default())
+    }
+
+    #[must_use]
+    pub fn new_with_limits(store: Arc<S>, limits: Limits) -> Self {
+        Self::from_parts(store, QueryExecution::Direct, limits)
     }
 
     #[must_use]
     pub fn new_frontend(store: Arc<S>, config: FrontendConfig) -> Self {
+        Self::new_frontend_with_limits(store, config, Limits::default())
+    }
+
+    #[must_use]
+    pub fn new_frontend_with_limits(store: Arc<S>, config: FrontendConfig, limits: Limits) -> Self {
+        Self::from_parts(store, QueryExecution::Sharded(config), limits)
+    }
+
+    fn from_parts(store: Arc<S>, execution: QueryExecution, limits: Limits) -> Self {
         let engine = FlameEngine::new(Arc::clone(&store), EngineOpts::default());
         Self {
             store,
             engine,
-            execution: QueryExecution::Sharded(config),
+            execution,
+            limits,
         }
+    }
+
+    fn validate_query_range(&self, start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
+        self.limits
+            .validate_query_range_ms(start_ms, end_ms)
+            .map_err(|err| ProfileError::Plan(err.message()))
+    }
+
+    fn effective_max_nodes(&self, requested: i64) -> i64 {
+        self.limits.effective_max_nodes(requested)
     }
 
     async fn select_merge_stacktraces(
@@ -74,6 +96,8 @@ impl<S: ProfileStore> QuerierState<S> {
         end_ms: i64,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
+        self.validate_query_range(start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -114,6 +138,7 @@ impl<S: ProfileStore> QuerierState<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Series>, ProfileError> {
+        self.validate_query_range(start_ms, end_ms)?;
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -157,6 +182,8 @@ impl<S: ProfileStore> QuerierState<S> {
         end_ms: i64,
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
+        self.validate_query_range(start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(max_nodes);
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
@@ -250,6 +277,9 @@ where
     } else {
         (req.start, req.end)
     };
+    state
+        .validate_query_range(start, end)
+        .map_err(connect_error)?;
     let types = state
         .store
         .profile_types(&tenant, start, end)
@@ -285,6 +315,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    state
+        .validate_query_range(req.0.start, req.0.end)
+        .map_err(connect_error)?;
     let names = state
         .store
         .label_names(&tenant, &matchers, req.0.start, req.0.end)
@@ -305,6 +338,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    state
+        .validate_query_range(req.0.start, req.0.end)
+        .map_err(connect_error)?;
     let names = state
         .store
         .label_values(&tenant, &req.0.name, &matchers, req.0.start, req.0.end)
@@ -325,6 +361,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
+    state
+        .validate_query_range(req.0.start, req.0.end)
+        .map_err(connect_error)?;
     let labels_set = state
         .store
         .series(
@@ -475,6 +514,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
+    state
+        .validate_query_range(req.start, req.end)
+        .map_err(connect_error)?;
     let profile = state
         .engine
         .select_merge_profile(
@@ -501,6 +543,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
+    state
+        .validate_query_range(req.start, req.end)
+        .map_err(connect_error)?;
     let heatmap = state
         .engine
         .select_heatmap(
@@ -538,7 +583,13 @@ where
         .0
         .right
         .ok_or_else(|| connect_error(ProfileError::Plan("missing right query".to_string())))?;
-    let max_nodes = left.max_nodes.max(right.max_nodes);
+    state
+        .validate_query_range(left.start, left.end)
+        .map_err(connect_error)?;
+    state
+        .validate_query_range(right.start, right.end)
+        .map_err(connect_error)?;
+    let max_nodes = state.effective_max_nodes(left.max_nodes.max(right.max_nodes));
     let flamegraph = state
         .engine
         .diff(
@@ -573,6 +624,9 @@ where
     S: ProfileStore,
 {
     let tenant = tenant_from_headers(&headers);
+    state
+        .validate_query_range(req.0.start, req.0.end)
+        .map_err(connect_error)?;
     let stats = state
         .store
         .stats(&tenant, req.0.start, req.0.end)
@@ -696,13 +750,16 @@ where
     };
     let start = query_param_i64(&params, "from").unwrap_or(0);
     let end = query_param_i64(&params, "until").unwrap_or(i64::MAX);
+    if let Err(err) = state.validate_query_range(start, end) {
+        return profile_error_response(err);
+    }
     match state
         .engine
         .diff(
             &tenant,
             (&left_type, &left_selector, start, end),
             (&right_type, &right_selector, start, end),
-            query_param_i64(&params, "maxNodes").unwrap_or(0),
+            state.effective_max_nodes(query_param_i64(&params, "maxNodes").unwrap_or(0)),
         )
         .await
     {
@@ -997,6 +1054,7 @@ mod tests {
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
     use super::*;
+    use crate::Limits;
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 
@@ -1028,6 +1086,90 @@ mod tests {
             10,
         );
         store
+    }
+
+    fn store_with_leaf_frames(frames: &[(&str, i64)]) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        for (name, value) in frames {
+            let name_ref = store.symbols_mut().intern_string(name);
+            let function_id = store.symbols_mut().intern_function(FunctionRec {
+                name: name_ref,
+                system_name: name_ref,
+                filename: 0,
+                start_line: 0,
+            });
+            let location_id = store.symbols_mut().intern_location(LocationRec {
+                address: 0,
+                mapping_id: 0,
+                lines: vec![LineRec {
+                    function_id,
+                    line: 1,
+                }],
+            });
+            let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+            store.push_sample(
+                "tenant-a",
+                PT,
+                vec![("service_name".to_string(), "api".to_string())],
+                0,
+                stacktrace,
+                *value,
+                10,
+            );
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn select_series_rejects_ranges_above_configured_limit() {
+        let state = QuerierState::new_with_limits(
+            Arc::new(store_with_frame("main.work")),
+            Limits {
+                max_query_length_secs: 1,
+                ..Limits::default()
+            },
+        );
+
+        let err = state
+            .select_series(
+                "tenant-a",
+                PT,
+                r#"{service_name="api"}"#,
+                &[],
+                1.0,
+                SeriesAgg::Sum,
+                0,
+                2_000,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_stacktraces_clamps_requested_nodes_to_configured_max() {
+        let state = QuerierState::new_with_limits(
+            Arc::new(store_with_leaf_frames(&[
+                ("hot.path", 10),
+                ("warm.path", 8),
+                ("cold.path", 6),
+            ])),
+            Limits {
+                max_flamegraph_nodes_default: 2048,
+                max_flamegraph_nodes_max: 2,
+                ..Limits::default()
+            },
+        );
+
+        let flamegraph = state
+            .select_merge_stacktraces("tenant-a", PT, r#"{service_name="api"}"#, 0, 100, 10_000)
+            .await
+            .unwrap();
+
+        assert!(flamegraph.names.iter().any(|name| name == "other"));
+        assert!(!flamegraph.names.iter().any(|name| name == "warm.path"));
+        assert!(!flamegraph.names.iter().any(|name| name == "cold.path"));
     }
 
     #[tokio::test]

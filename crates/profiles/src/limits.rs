@@ -64,7 +64,7 @@ impl Limits {
         if self.max_query_length_secs == 0 || end_ms <= start_ms {
             return Ok(());
         }
-        let observed_ms = end_ms - start_ms;
+        let observed_ms = i128::from(end_ms) - i128::from(start_ms);
         let observed_secs = u64::try_from((observed_ms + 999) / 1000).unwrap_or(u64::MAX);
         if observed_secs > self.max_query_length_secs {
             return Err(LimitError::QueryLengthExceeded {
@@ -221,5 +221,23 @@ mod tests {
                 observed_secs: 120,
             }
         );
+    }
+
+    #[test]
+    fn validate_query_range_rejects_open_ended_ranges_without_overflow() {
+        let limits = Limits {
+            max_query_length_secs: 60,
+            ..Limits::default()
+        };
+
+        let err = limits.validate_query_range_ms(0, i64::MAX).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LimitError::QueryLengthExceeded {
+                limit_secs: 60,
+                observed_secs
+            } if observed_secs > 60
+        ));
     }
 }
