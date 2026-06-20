@@ -605,6 +605,7 @@ struct RenderQuery {
     until: Option<i64>,
     #[serde(rename = "maxNodes")]
     max_nodes: Option<i64>,
+    format: Option<String>,
 }
 
 async fn render_handler<S>(
@@ -633,6 +634,18 @@ where
         )
         .await
     {
+        Ok(flamegraph)
+            if query
+                .format
+                .as_deref()
+                .is_some_and(|format| format.eq_ignore_ascii_case("dot")) =>
+        {
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/vnd.graphviz")],
+                flamegraph_dot(&flamegraph),
+            )
+                .into_response()
+        }
         Ok(flamegraph) => Json(flamebearer_json(flamegraph)).into_response(),
         Err(err) => profile_error_response(err),
     }
@@ -773,6 +786,65 @@ fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph) -> serde_json::Value {
     })
 }
 
+fn flamegraph_dot(flamegraph: &crabka_pprof::FlameGraph) -> String {
+    #[derive(Clone)]
+    struct DotBar {
+        id: usize,
+        x_start: i64,
+        total: i64,
+    }
+
+    let mut dot = String::from("digraph flamegraph {\n  node [shape=box];\n");
+    let mut previous = Vec::<DotBar>::new();
+    let mut next_id = 0_usize;
+    for level in &flamegraph.levels {
+        let mut current = Vec::new();
+        let mut previous_end = 0_i64;
+        for bar in level.values.chunks_exact(4) {
+            let x_start = previous_end + bar[0];
+            let total = bar[1];
+            let self_ = bar[2];
+            let name_idx = usize::try_from(bar[3]).unwrap_or(usize::MAX);
+            let name = flamegraph
+                .names
+                .get(name_idx)
+                .cloned()
+                .unwrap_or_else(|| format!("unknown:{name_idx}"));
+            let id = next_id;
+            next_id += 1;
+            dot.push_str(&format!(
+                "  n{id} [label=\"{}\\ntotal={} self={}\"];\n",
+                dot_escape(&name),
+                total,
+                self_,
+            ));
+            if let Some(parent) = previous
+                .iter()
+                .find(|parent| x_start >= parent.x_start && x_start < parent.x_start + parent.total)
+            {
+                dot.push_str(&format!("  n{} -> n{id};\n", parent.id));
+            }
+            current.push(DotBar { id, x_start, total });
+            previous_end = x_start + total;
+        }
+        previous = current;
+    }
+    dot.push_str("}\n");
+    dot
+}
+
+fn dot_escape(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            _ => vec![ch],
+        })
+        .collect()
+}
+
 fn profile_error_response(err: ProfileError) -> Response {
     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
@@ -887,9 +959,75 @@ fn heatmap_y_mins(min_value: i64, max_value: i64, value_buckets: usize) -> Vec<f
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use assert2::assert;
+    use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
     use super::*;
+
+    const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+
+    fn store_with_frame(name: &str) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string(name);
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            stacktrace,
+            7,
+            10,
+        );
+        store
+    }
+
+    #[tokio::test]
+    async fn render_format_dot_returns_dot_graph() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("query", &format!(r#"{PT}{{service_name="api"}}"#))
+            .append_pair("from", "0")
+            .append_pair("until", "100")
+            .append_pair("format", "dot")
+            .finish();
+        let body = reqwest::Client::new()
+            .get(format!("http://{bound}/pyroscope/render?{query}"))
+            .header("x-scope-orgid", "tenant-a")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert!(body.starts_with("digraph flamegraph"));
+        assert!(body.contains("main.work"), "{body}");
+    }
 
     #[test]
     fn render_query_splits_profile_type_and_selector() {
@@ -909,6 +1047,35 @@ mod tests {
 
         assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
         assert!(selector == "{}");
+    }
+
+    #[test]
+    fn flamegraph_dot_projects_levels_to_graphviz() {
+        let dot = flamegraph_dot(&crabka_pprof::FlameGraph {
+            names: vec![
+                "total".to_string(),
+                "main".to_string(),
+                "main.work".to_string(),
+            ],
+            levels: vec![
+                crabka_pprof::Level {
+                    values: vec![0, 7, 0, 0],
+                },
+                crabka_pprof::Level {
+                    values: vec![0, 7, 0, 1],
+                },
+                crabka_pprof::Level {
+                    values: vec![0, 7, 7, 2],
+                },
+            ],
+            total: 7,
+            max_self: 7,
+        });
+
+        assert!(dot.starts_with("digraph flamegraph"));
+        assert!(dot.contains("main.work"));
+        assert!(dot.contains("n0 -> n1"));
+        assert!(dot.contains("n1 -> n2"));
     }
 
     #[test]
