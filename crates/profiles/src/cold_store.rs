@@ -207,7 +207,9 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ProfileStats, ProfileError> {
-        let bounds = self.index.block_time_bounds(tenant, start_ms, end_ms);
+        let bounds = self
+            .sample_time_bounds_for_rows(tenant, start_ms, end_ms)
+            .await?;
         Ok(ProfileStats {
             data_ingested: bounds.is_some(),
             oldest_profile_time: bounds.map(|(oldest, _)| oldest),
@@ -217,6 +219,45 @@ impl ProfileStore for ColdProfileStore {
 }
 
 impl ColdProfileStore {
+    async fn sample_time_bounds_for_rows(
+        &self,
+        tenant: &str,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Option<(i64, i64)>, ProfileError> {
+        let fps = self
+            .index
+            .matching_fingerprints(tenant, &[])
+            .map_err(|err| ProfileError::Store(err.to_string()))?;
+        if fps.is_empty() {
+            return Ok(None);
+        }
+        let blocks = self
+            .index
+            .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
+        let mut bounds: Option<(i64, i64)> = None;
+        for block_key in blocks {
+            for batch in self
+                .load_block_batches_for_fingerprints(&block_key, &fps)
+                .await?
+            {
+                let fingerprints = batch.column(0).as_primitive::<UInt64Type>();
+                let timestamps = batch.column(1).as_primitive::<Int64Type>();
+                for row in 0..batch.num_rows() {
+                    let fp = fingerprints.value(row);
+                    let ts = timestamps.value(row);
+                    if fps.contains(&fp) && ts >= start_ms && ts <= end_ms {
+                        bounds = Some(match bounds {
+                            Some((oldest, newest)) => (oldest.min(ts), newest.max(ts)),
+                            None => (ts, ts),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(bounds)
+    }
+
     async fn active_fingerprints_for_rows(
         &self,
         tenant: &str,
@@ -516,6 +557,31 @@ mod tests {
         assert!(stats.data_ingested);
         assert!(stats.oldest_profile_time == Some(1000));
         assert!(stats.newest_profile_time == Some(1000));
+    }
+
+    #[tokio::test]
+    async fn cold_store_stats_honor_sample_time_inside_overlapping_block() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let first = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let later = record_at("t", "worker", vec![0], 7, 3_000_000_000);
+        let records = vec![first.clone(), later.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in [&first, &later] {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let stats = cold.stats("t", 1_000, 1_000).await.unwrap();
+
+        assert!(stats.data_ingested);
+        assert!(stats.oldest_profile_time == Some(1000), "{stats:?}");
+        assert!(stats.newest_profile_time == Some(1000), "{stats:?}");
     }
 
     #[tokio::test]
