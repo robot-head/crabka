@@ -1,5 +1,6 @@
 +++
 title = "Crabka vs Strimzi (Kubernetes)"
+description = "Operator-managed, six-broker GKE benchmark: Crabka vs Strimzi (Apache Kafka) under identical pod resources, matching throughput at a fraction of the memory."
 weight = 20
 template = "docs/page.html"
 

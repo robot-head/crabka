@@ -1,5 +1,6 @@
 +++
 title = "Quickstart"
+description = "Run a local Crabka broker in minutes: format a data directory, start the broker, then create a topic and produce and consume a record with standard Kafka tooling."
 weight = 10
 template = "docs/page.html"
 +++
