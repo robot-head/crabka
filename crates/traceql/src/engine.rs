@@ -17,10 +17,10 @@ use crate::result::{
     TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 use crate::span_columns::{
-    ATTR_PREFIX, COL_DURATION, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND,
-    COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
-    COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE, COL_STATUS_MESSAGE,
-    COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
+    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
+    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
+    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
+    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
 use crate::store::SpanStore;
 
@@ -881,6 +881,7 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
         Scope::Intrinsic(Intrinsic::Id) => Ok(COL_SPAN_ID.to_string()),
         Scope::Intrinsic(Intrinsic::ParentId) => Ok(COL_PARENT_SPAN_ID.to_string()),
+        Scope::Intrinsic(Intrinsic::ChildCount) => Ok(COL_CHILD_COUNT.to_string()),
         Scope::Intrinsic(Intrinsic::Kind) => Ok(COL_KIND.to_string()),
         Scope::Intrinsic(Intrinsic::Status) => Ok(COL_STATUS_CODE.to_string()),
         Scope::Intrinsic(Intrinsic::StatusMessage) => Ok(COL_STATUS_MESSAGE.to_string()),
@@ -1705,6 +1706,39 @@ mod tests {
         assert!(got[0].labels == vec![("id".into(), "11111111111111111111111111111111".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("id".into(), "22222222222222222222222222222222".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_child_count_intrinsic() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, Some(1), "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(span:childCount)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("childCount".into(), "0".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("childCount".into(), "1".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
