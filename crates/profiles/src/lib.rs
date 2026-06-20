@@ -47,5 +47,13 @@ mod tests {
     fn status_codes_map() {
         assert!(ProfilesError::UnsupportedFormat("x".into()).status_code() == 415);
         assert!(ProfilesError::Decode("x".into()).status_code() == 400);
+        assert!(
+            ProfilesError::from(LimitError::MaxSeries {
+                limit: 1,
+                observed: 2,
+            })
+            .status_code()
+                == 429
+        );
     }
 }

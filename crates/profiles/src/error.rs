@@ -11,6 +11,8 @@ pub enum ProfilesError {
     Gunzip(String),
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("{0}")]
+    Limit(crate::limits::LimitError),
     #[error("payload exceeds limit {limit} bytes")]
     TooLarge { limit: usize },
     #[error("wal codec: {0}")]
@@ -29,11 +31,9 @@ impl ProfilesError {
     pub fn status_code(&self) -> u16 {
         match self {
             Self::UnsupportedFormat(_) => 415,
-            Self::Decode(_)
-            | Self::Gunzip(_)
-            | Self::Invalid(_)
-            | Self::Pprof(_)
-            | Self::TooLarge { .. } => 400,
+            Self::Decode(_) | Self::Gunzip(_) | Self::Invalid(_) | Self::Pprof(_) => 400,
+            Self::Limit(err) => err.http_status(),
+            Self::TooLarge { .. } => 400,
             Self::Wal(_) | Self::Produce(_) | Self::Block(_) => 500,
         }
     }
@@ -42,5 +42,11 @@ impl ProfilesError {
 impl From<crabka_pprof::ProfileError> for ProfilesError {
     fn from(err: crabka_pprof::ProfileError) -> Self {
         Self::Pprof(err.to_string())
+    }
+}
+
+impl From<crate::limits::LimitError> for ProfilesError {
+    fn from(err: crate::limits::LimitError) -> Self {
+        Self::Limit(err)
     }
 }

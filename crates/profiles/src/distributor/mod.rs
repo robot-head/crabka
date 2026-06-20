@@ -181,13 +181,11 @@ fn enforce_max_series(
         observed.insert(rec.series_fingerprint());
     }
     if u64::try_from(observed.len()).unwrap_or(u64::MAX) > limit {
-        return Err(ProfilesError::Invalid(
-            crate::limits::LimitError::MaxSeries {
-                limit,
-                observed: u64::try_from(observed.len()).unwrap_or(u64::MAX),
-            }
-            .message(),
-        ));
+        return Err(crate::limits::LimitError::MaxSeries {
+            limit,
+            observed: u64::try_from(observed.len()).unwrap_or(u64::MAX),
+        }
+        .into());
     }
     Ok(())
 }
@@ -292,11 +290,7 @@ async fn ingest_handler(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(err) => (
-            StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            err.to_string(),
-        )
-            .into_response(),
+        Err(err) => profiles_error_response(err),
     }
 }
 
@@ -310,11 +304,38 @@ fn tenant_from_headers(headers: &HeaderMap) -> String {
 }
 
 fn connect_error(err: ProfilesError) -> ConnectError {
-    let code = match err.status_code() {
-        400 | 415 => Code::InvalidArgument,
-        _ => Code::Internal,
+    let code = match &err {
+        ProfilesError::Limit(limit) => limit_connect_code(limit),
+        _ => match err.status_code() {
+            400 | 415 => Code::InvalidArgument,
+            _ => Code::Internal,
+        },
     };
     ConnectError::new(code, err.to_string())
+}
+
+fn profiles_error_response(err: ProfilesError) -> Response {
+    let status =
+        StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    match err {
+        ProfilesError::Limit(limit) => (
+            status,
+            axum::Json(serde_json::json!({
+                "code": limit.connect_code(),
+                "message": limit.message(),
+            })),
+        )
+            .into_response(),
+        other => (status, other.to_string()).into_response(),
+    }
+}
+
+fn limit_connect_code(err: &crate::limits::LimitError) -> Code {
+    match err.connect_code() {
+        "resource_exhausted" => Code::ResourceExhausted,
+        "invalid_argument" => Code::InvalidArgument,
+        _ => Code::Internal,
+    }
 }
 
 fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError> {
@@ -678,5 +699,46 @@ overrides:
 
         assert!(err.to_string().contains("max series exceeded"), "{err}");
         assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn limit_errors_map_to_resource_exhausted_connect_code() {
+        let err = connect_error(
+            crate::limits::LimitError::MaxSeries {
+                limit: 1,
+                observed: 2,
+            }
+            .into(),
+        );
+
+        assert!(err.code() == Code::ResourceExhausted);
+        assert!(
+            err.message()
+                .is_some_and(|message| message.contains("max series exceeded"))
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_ingest_limit_errors_return_connect_shaped_json() {
+        let response = profiles_error_response(
+            crate::limits::LimitError::MaxSeries {
+                limit: 1,
+                observed: 2,
+            }
+            .into(),
+        );
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(status == StatusCode::TOO_MANY_REQUESTS);
+        assert!(json.get("code").and_then(serde_json::Value::as_str) == Some("resource_exhausted"));
+        assert!(
+            json.get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("max series exceeded"))
+        );
     }
 }
