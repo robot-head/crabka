@@ -28,6 +28,7 @@ pub fn native_resolver_from_debuginfod_urls(
         let debuginfod = DebuginfodResolver::new(urls).map_err(crate::ProfilesError::Block)?;
         resolvers.push(Arc::new(debuginfod));
     }
+    resolvers.push(Arc::new(AddressFallbackResolver));
     Ok(ChainedResolver::new(resolvers))
 }
 
@@ -74,5 +75,20 @@ mod tests {
     #[test]
     fn symbolizer_builds_local_plus_debuginfod_resolver() {
         native_resolver_from_debuginfod_urls(vec!["http://127.0.0.1:1".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn native_resolver_falls_back_to_address_frame() {
+        let resolver = native_resolver_from_debuginfod_urls(Vec::new()).unwrap();
+        let out = resolver
+            .symbolize(&SymbolizeRequest {
+                build_id: String::new(),
+                filename: "/missing/native".to_string(),
+                address: 0x99,
+            })
+            .unwrap();
+
+        assert!(out[0].function == "/missing/native+0x99");
+        assert!(out[0].file == "/missing/native");
     }
 }

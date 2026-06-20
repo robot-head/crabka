@@ -18,6 +18,7 @@ use object_store::{ObjectStore, ObjectStoreExt};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::blockbuilder::STACKTRACE_PARTITION;
+use crate::symbolizer::AddressFallbackResolver;
 use crabka_pprof::LazySymbolizer;
 
 #[derive(Clone)]
@@ -48,6 +49,7 @@ impl ColdProfileStore {
             let debuginfod = DebuginfodResolver::new(urls).map_err(ProfileError::Store)?;
             resolvers.push(Arc::new(debuginfod));
         }
+        resolvers.push(Arc::new(AddressFallbackResolver));
         Ok(Self {
             store,
             index,
@@ -78,9 +80,10 @@ impl ColdProfileStore {
 }
 
 fn local_native_resolver() -> Arc<ChainedResolver> {
-    Arc::new(ChainedResolver::new(vec![Arc::new(
-        FileSystemResolver::default(),
-    )]))
+    Arc::new(ChainedResolver::new(vec![
+        Arc::new(FileSystemResolver::default()),
+        Arc::new(AddressFallbackResolver),
+    ]))
 }
 
 #[async_trait::async_trait]
@@ -348,7 +351,7 @@ mod tests {
 
     use assert2::assert;
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
-    use crabka_pprof::{EngineOpts, FlameEngine};
+    use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
 
@@ -435,6 +438,21 @@ mod tests {
         assert!(stats.data_ingested);
         assert!(stats.oldest_profile_time == Some(1000));
         assert!(stats.newest_profile_time == Some(1000));
+    }
+
+    #[test]
+    fn cold_store_native_resolver_falls_back_to_address_frame() {
+        let resolver = local_native_resolver();
+        let out = resolver
+            .symbolize(&SymbolizeRequest {
+                build_id: String::new(),
+                filename: "/missing/native".to_string(),
+                address: 0x99,
+            })
+            .unwrap();
+
+        assert!(out[0].function == "/missing/native+0x99");
+        assert!(out[0].file == "/missing/native");
     }
 
     fn record(tenant: &str, service: &str, stack: Vec<u32>, value: i64) -> ProfileRecord {
