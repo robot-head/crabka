@@ -307,7 +307,7 @@ where
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let include_exemplars = include_exemplars(&uri);
+    let exemplar_selection = exemplar_selection(&uri);
 
     match state
         .engine
@@ -316,7 +316,7 @@ where
     {
         Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
             resp,
-            include_exemplars,
+            exemplar_selection,
         )))
         .into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -339,7 +339,7 @@ where
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let include_exemplars = include_exemplars(&uri);
+    let exemplar_selection = exemplar_selection(&uri);
 
     match state
         .engine
@@ -348,7 +348,7 @@ where
     {
         Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
             instant_metrics_response(resp, point_ns),
-            include_exemplars,
+            exemplar_selection,
         )))
         .into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
@@ -564,11 +564,21 @@ fn step_param(uri: &Uri) -> Result<i64, &'static str> {
     Ok(step_ns)
 }
 
-fn include_exemplars(uri: &Uri) -> bool {
-    !matches!(
-        query_param(uri, "exemplars").as_deref(),
-        Some("false" | "0")
-    )
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExemplarSelection {
+    All,
+    Limit(usize),
+    None,
+}
+
+fn exemplar_selection(uri: &Uri) -> ExemplarSelection {
+    match query_param(uri, "exemplars").as_deref() {
+        Some("false" | "0") => ExemplarSelection::None,
+        Some(value) => value
+            .parse::<usize>()
+            .map_or(ExemplarSelection::All, ExemplarSelection::Limit),
+        None => ExemplarSelection::All,
+    }
 }
 
 fn duration_param(uri: &Uri, key: &str) -> Result<Option<u64>, String> {
@@ -1086,11 +1096,19 @@ fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
 
 fn filter_metrics_exemplars(
     mut resp: TraceMetricsResponse,
-    include_exemplars: bool,
+    selection: ExemplarSelection,
 ) -> TraceMetricsResponse {
-    if !include_exemplars {
-        for series in &mut resp.series {
-            series.exemplars.clear();
+    match selection {
+        ExemplarSelection::All => {}
+        ExemplarSelection::Limit(max) => {
+            for series in &mut resp.series {
+                series.exemplars.truncate(max);
+            }
+        }
+        ExemplarSelection::None => {
+            for series in &mut resp.series {
+                series.exemplars.clear();
+            }
         }
     }
     resp
@@ -1634,6 +1652,45 @@ mod tests {
 
         assert!(status == StatusCode::OK);
         assert!(body["series"][0]["exemplars"] == json!([]));
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_limits_exemplars_from_numeric_param() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at(9, 1, None, "a", 0),
+                span_at(9, 2, None, "b", 1_000_000_000),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts {
+                max_exemplars: 2,
+                ..EngineOpts::default()
+            },
+        ));
+        let resp = router(engine)
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1&exemplars=1",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["series"][0]["exemplars"].as_array().unwrap().len() == 1);
     }
 
     #[tokio::test]
