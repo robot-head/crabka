@@ -62,6 +62,7 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
         | [
             Pipeline::Select(_)
             | Pipeline::Coalesce
+            | Pipeline::With(_)
             | Pipeline::Aggregate(
                 Aggregate::Count
                 | Aggregate::Sum(_)

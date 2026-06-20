@@ -130,6 +130,13 @@ pub enum Pipeline {
     Compare,
     Select(Vec<Field>),
     Coalesce,
+    With(Vec<WithBinding>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WithBinding {
+    pub name: String,
+    pub expr: FieldExpr,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -2,7 +2,7 @@
 
 use crate::ast::{
     Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
-    SpansetExpr, StructuralOp, Value,
+    SpansetExpr, StructuralOp, Value, WithBinding,
 };
 use crate::error::{Result, TraceqlError};
 use crate::lexer::{Token, lex};
@@ -158,8 +158,25 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::Select(fields))
             }
+            "with" => self.parse_with_pipeline(),
             other => Err(Self::err(format!("unsupported pipeline stage {other:?}"))),
         }
+    }
+
+    fn parse_with_pipeline(&mut self) -> Result<Pipeline> {
+        self.expect(&Token::LParen)?;
+        let mut bindings = Vec::new();
+        loop {
+            let name = self.expect_ident()?;
+            self.expect(&Token::Eq)?;
+            let expr = self.parse_field_or()?;
+            bindings.push(WithBinding { name, expr });
+            if !self.eat(&Token::Comma) {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Pipeline::With(bindings))
     }
 
     fn parse_field_over_time(&mut self, name: &str) -> Result<Pipeline> {
@@ -800,6 +817,27 @@ mod tests {
         let q = parse("{ .a = 1 } with (most_recent=true)").unwrap();
         assert!(q.hints.most_recent);
         assert!(parse("{ .a = 1 } with (unknown=true)").is_err());
+    }
+
+    #[test]
+    fn pipeline_with_bindings_parse() {
+        let q = parse("{ .a = 1 } | with(error = span:status = error)").unwrap();
+        let [Pipeline::With(bindings)] = q.pipeline.as_slice() else {
+            panic!("with pipeline")
+        };
+        assert!(bindings.len() == 1);
+        assert!(bindings[0].name == "error");
+        assert!(matches!(
+            bindings[0].expr,
+            FieldExpr::Comparison {
+                lhs: Field {
+                    scope: Scope::Intrinsic(Intrinsic::Status),
+                    ..
+                },
+                op: ComparisonOp::Eq,
+                rhs: Value::Str(ref value),
+            } if value == "error"
+        ));
     }
 
     #[test]
