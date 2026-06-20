@@ -888,6 +888,12 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Intrinsic(Intrinsic::TraceId) => Ok(COL_TRACE_ID.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootService) => Ok(COL_ROOT_SERVICE_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootName) => Ok(COL_ROOT_SPAN_NAME.to_string()),
+        Scope::Intrinsic(Intrinsic::InstrumentationName) => {
+            Ok(COL_INSTRUMENTATION_NAME.to_string())
+        }
+        Scope::Intrinsic(Intrinsic::InstrumentationVersion) => {
+            Ok(COL_INSTRUMENTATION_VERSION.to_string())
+        }
         _ => Err(TraceqlError::Unsupported(format!(
             "metrics by() field {field:?} is not supported yet"
         ))),
@@ -1740,6 +1746,28 @@ mod tests {
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("childCount".into(), "1".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_instrumentation_name_intrinsic() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(1, 1, None, "api", 0)]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(instrumentation:name)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        assert!(got.len() == 1);
+        assert!(got[0].labels == vec![("name".into(), "tracer".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
