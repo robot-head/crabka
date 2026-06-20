@@ -8,7 +8,7 @@ use arrow::datatypes::{Int64Type, UInt64Type};
 use crabka_blockstore::{LabelMatcher, MatchOp};
 
 use crate::{
-    FlameGraph, FlameGraphDiff, Heatmap, ProfileError, ProfileStore, ProfileType, Series,
+    FlameGraph, FlameGraphDiff, Frame, Heatmap, ProfileError, ProfileStore, ProfileType, Series,
     SeriesAgg, Tree, bin_heatmap, diff_trees,
     samples::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
@@ -175,6 +175,33 @@ impl<S: ProfileStore> FlameEngine<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Series>, ProfileError> {
+        self.select_series_with_stack_trace_selector(
+            tenant,
+            profile_type,
+            label_selector,
+            group_by,
+            step_secs,
+            agg,
+            start_ms,
+            end_ms,
+            &[],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_series_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        agg: SeriesAgg,
+        start_ms: i64,
+        end_ms: i64,
+        call_sites: &[String],
+    ) -> Result<Vec<Series>, ProfileError> {
         let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
@@ -197,33 +224,11 @@ impl<S: ProfileStore> FlameEngine<S> {
                 .store
                 .select(tenant, profile_type, &matchers, start_ms, end_ms)
                 .await?;
-            let sql = format!(
-                "SELECT {timestamp}, MAX({total}) AS total \
-                 FROM {table} GROUP BY {timestamp}, {fingerprint}",
-                timestamp = COL_TIMESTAMP,
-                total = PCOL_TOTAL_VALUE,
-                table = scan.samples_table,
-                fingerprint = COL_FINGERPRINT,
-            );
-            let batches = scan
-                .ctx
-                .sql(&sql)
-                .await
-                .map_err(|err| ProfileError::Plan(err.to_string()))?
-                .collect()
-                .await
-                .map_err(|err| ProfileError::Exec(err.to_string()))?;
-            let mut buckets: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
-            for batch in batches {
-                let timestamps = batch.column(0).as_primitive::<Int64Type>();
-                let totals = batch.column(1).as_primitive::<Int64Type>();
-                for row in 0..batch.num_rows() {
-                    buckets
-                        .entry(step_bucket_ms(timestamps.value(row), step_ms))
-                        .or_default()
-                        .push(totals.value(row));
-                }
-            }
+            let buckets = if call_sites.is_empty() {
+                series_buckets_from_totals(&scan, step_ms).await?
+            } else {
+                series_buckets_from_stacktrace_selector(&scan, step_ms, call_sites).await?
+            };
             if buckets.is_empty() {
                 continue;
             }
@@ -249,6 +254,31 @@ impl<S: ProfileStore> FlameEngine<S> {
         agg: SeriesAgg,
         ranges: &[(i64, i64)],
     ) -> Result<Vec<Series>, ProfileError> {
+        self.select_series_with_stack_trace_selector_sharded(
+            tenant,
+            profile_type,
+            label_selector,
+            group_by,
+            step_secs,
+            agg,
+            ranges,
+            &[],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_series_with_stack_trace_selector_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        group_by: &[String],
+        step_secs: f64,
+        agg: SeriesAgg,
+        ranges: &[(i64, i64)],
+        call_sites: &[String],
+    ) -> Result<Vec<Series>, ProfileError> {
         if ranges.is_empty() {
             return Err(ProfileError::Plan(
                 "sharded series query requires at least one time range".to_string(),
@@ -257,7 +287,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         let (start_ms, end_ms) = covering_range(ranges)?;
         if agg == SeriesAgg::Average {
             return self
-                .select_series(
+                .select_series_with_stack_trace_selector(
                     tenant,
                     profile_type,
                     label_selector,
@@ -266,6 +296,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                     agg,
                     start_ms,
                     end_ms,
+                    call_sites,
                 )
                 .await;
         }
@@ -273,7 +304,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         let mut merged: BTreeMap<Vec<(String, String)>, BTreeMap<i64, f64>> = BTreeMap::new();
         for (start_ms, end_ms) in ranges {
             let series = self
-                .select_series(
+                .select_series_with_stack_trace_selector(
                     tenant,
                     profile_type,
                     label_selector,
@@ -282,6 +313,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                     agg,
                     *start_ms,
                     *end_ms,
+                    call_sites,
                 )
                 .await?;
             for item in series {
@@ -464,6 +496,104 @@ impl<S: ProfileStore> FlameEngine<S> {
             value_buckets,
         ))
     }
+}
+
+async fn series_buckets_from_totals(
+    scan: &crate::ProfileScan,
+    step_ms: i64,
+) -> Result<BTreeMap<i64, Vec<i64>>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, MAX({total}) AS total \
+         FROM {table} GROUP BY {timestamp}, {fingerprint}",
+        timestamp = COL_TIMESTAMP,
+        total = PCOL_TOTAL_VALUE,
+        table = scan.samples_table,
+        fingerprint = COL_FINGERPRINT,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut buckets: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let totals = batch.column(1).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            buckets
+                .entry(step_bucket_ms(timestamps.value(row), step_ms))
+                .or_default()
+                .push(totals.value(row));
+        }
+    }
+    Ok(buckets)
+}
+
+async fn series_buckets_from_stacktrace_selector(
+    scan: &crate::ProfileScan,
+    step_ms: i64,
+    call_sites: &[String],
+) -> Result<BTreeMap<i64, Vec<i64>>, ProfileError> {
+    let sql = format!(
+        "SELECT {timestamp}, {fingerprint}, {partition}, {stacktrace}, SUM({value}) AS v \
+         FROM {table} GROUP BY {timestamp}, {fingerprint}, {partition}, {stacktrace} \
+         ORDER BY {timestamp}, {fingerprint}, {partition}, {stacktrace}",
+        timestamp = COL_TIMESTAMP,
+        fingerprint = COL_FINGERPRINT,
+        partition = PCOL_STACKTRACE_PARTITION,
+        stacktrace = PCOL_STACKTRACE_ID,
+        value = PCOL_VALUE,
+        table = scan.samples_table,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+
+    let mut per_profile: BTreeMap<(i64, u64), i64> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let fingerprints = batch.column(1).as_primitive::<UInt64Type>();
+        let partitions = batch.column(2).as_primitive::<UInt64Type>();
+        let stacktrace_ids = batch.column(3).as_primitive::<UInt64Type>();
+        let values = batch.column(4).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            let partition = partitions.value(row);
+            let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
+                ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
+            })?;
+            let frames = scan.symbols.resolve(partition, stacktrace_id);
+            if stack_matches_call_sites(&frames, call_sites) {
+                *per_profile
+                    .entry((timestamps.value(row), fingerprints.value(row)))
+                    .or_default() += values.value(row);
+            }
+        }
+    }
+
+    let mut buckets: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for ((timestamp, _fingerprint), value) in per_profile {
+        buckets
+            .entry(step_bucket_ms(timestamp, step_ms))
+            .or_default()
+            .push(value);
+    }
+    Ok(buckets)
+}
+
+fn stack_matches_call_sites(frames: &[Frame], call_sites: &[String]) -> bool {
+    call_sites.iter().all(|site| {
+        frames
+            .iter()
+            .any(|frame| frame.function == *site || frame.file == *site)
+    })
 }
 
 fn covering_range(ranges: &[(i64, i64)]) -> Result<(i64, i64), ProfileError> {

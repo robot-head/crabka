@@ -159,12 +159,13 @@ impl<S: ProfileStore> QuerierState<S> {
         agg: SeriesAgg,
         start_ms: i64,
         end_ms: i64,
+        stack_trace_call_sites: &[String],
     ) -> Result<Vec<Series>, ProfileError> {
         self.validate_query_range(tenant, start_ms, end_ms)?;
         match &self.execution {
             QueryExecution::Direct => {
                 self.engine
-                    .select_series(
+                    .select_series_with_stack_trace_selector(
                         tenant,
                         profile_type,
                         label_selector,
@@ -173,13 +174,14 @@ impl<S: ProfileStore> QuerierState<S> {
                         agg,
                         start_ms,
                         end_ms,
+                        stack_trace_call_sites,
                     )
                     .await
             }
             QueryExecution::Sharded(config) => {
                 let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
                 self.engine
-                    .select_series_sharded(
+                    .select_series_with_stack_trace_selector_sharded(
                         tenant,
                         profile_type,
                         label_selector,
@@ -187,6 +189,7 @@ impl<S: ProfileStore> QuerierState<S> {
                         step_secs,
                         agg,
                         &shards,
+                        stack_trace_call_sites,
                     )
                     .await
             }
@@ -461,6 +464,7 @@ where
     } else {
         SeriesAgg::Sum
     };
+    let stack_trace_call_sites = stack_trace_call_sites(req.stack_trace_selector.as_ref());
     let series = state
         .select_series(
             &tenant,
@@ -471,6 +475,7 @@ where
             agg,
             req.start,
             req.end,
+            &stack_trace_call_sites,
         )
         .await
         .map_err(connect_error)?
@@ -870,6 +875,20 @@ fn parse_span_selectors(selectors: &[String]) -> Result<Vec<u64>, ProfileError> 
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| ProfileError::Plan(format!("invalid span_selector: {err}")))
+}
+
+fn stack_trace_call_sites(selector: Option<&pb::types::v1::StackTraceSelector>) -> Vec<String> {
+    selector
+        .map(|selector| {
+            selector
+                .call_site
+                .iter()
+                .map(|location| location.name.trim())
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn heatmap_time_buckets(start_ms: i64, end_ms: i64, step_secs: f64) -> Result<usize, ProfileError> {
@@ -1309,6 +1328,7 @@ mod tests {
                 SeriesAgg::Sum,
                 0,
                 2_000,
+                &[],
             )
             .await
             .unwrap_err();
@@ -1340,6 +1360,7 @@ overrides:
                 SeriesAgg::Sum,
                 0,
                 2_000,
+                &[],
             )
             .await
             .unwrap_err();
@@ -1353,6 +1374,7 @@ overrides:
                 SeriesAgg::Sum,
                 0,
                 2_000,
+                &[],
             )
             .await
             .unwrap();
@@ -1598,6 +1620,54 @@ overrides:
                     .and_then(serde_json::Value::as_str)
                     == Some(PT)
             }),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn select_series_stack_trace_selector_filters_call_sites() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("hot.path", 7),
+            ("cold.path", 10),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectSeries"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "groupBy": ["service_name"],
+                "step": 60.0,
+                "stackTraceSelector": {
+                    "callSite": [{ "name": "hot.path" }]
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let points = response
+            .pointer("/series/0/points")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        assert!(points.len() == 1, "{response}");
+        assert!(
+            points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
             "{response}"
         );
     }
