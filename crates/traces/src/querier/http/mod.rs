@@ -61,14 +61,14 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = search_query(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let start_ns = query_param(&uri, "start")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(0);
     let end_ns = query_param(&uri, "end")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(i64::MAX);
     let limit = query_param(&uri, "limit")
         .and_then(|v| v.parse().ok())
@@ -251,12 +251,42 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
 }
 
+fn search_query(uri: &Uri) -> Option<String> {
+    query_param(uri, "q")
+        .or_else(|| query_param(uri, "tags").and_then(|tags| tags_to_traceql(&tags)))
+}
+
+fn tags_to_traceql(tags: &str) -> Option<String> {
+    let parts = tags
+        .split_whitespace()
+        .map(|part| {
+            let (key, value) = part.split_once('=')?;
+            (!key.is_empty()).then(|| {
+                format!(
+                    "{} = \"{}\"",
+                    traceql_tag_field(key),
+                    value.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(" && ")))
+}
+
+fn traceql_tag_field(key: &str) -> String {
+    if key.contains(':') {
+        key.to_string()
+    } else {
+        format!(".{}", key.strip_prefix('.').unwrap_or(key))
+    }
+}
+
 fn time_bounds(uri: &Uri) -> (i64, i64) {
     let start_ns = query_param(uri, "start")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(0);
     let end_ns = query_param(uri, "end")
-        .and_then(|v| v.parse().ok())
+        .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(i64::MAX);
     (start_ns, end_ns)
 }
@@ -558,6 +588,22 @@ mod tests {
             get_text("/api/metrics/query?q=%7B%20%7D%20%7C%20rate()&time=60").await;
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "unsupported: traceql metrics: slice 3");
+    }
+
+    #[tokio::test]
+    async fn search_accepts_legacy_tags_parameter() {
+        let (status, body) = get_json("/api/search?tags=svc%3Db").await;
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
+        assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
+    }
+
+    #[tokio::test]
+    async fn search_parses_start_end_as_epoch_seconds() {
+        let (status, body) =
+            get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
     }
 
     #[tokio::test]
