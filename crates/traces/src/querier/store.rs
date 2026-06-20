@@ -348,12 +348,162 @@ fn row_matches(
     row: usize,
     matchers: &[SpanMatcher],
 ) -> Result<bool, TraceqlError> {
+    if !nested_event_matchers_match(batch, row, matchers)?
+        || !nested_link_matchers_match(batch, row, matchers)?
+    {
+        return Ok(false);
+    }
     matchers.iter().try_fold(true, |matched, matcher| {
         if !matched {
             return Ok(false);
         }
+        if is_event_matcher(matcher) || is_link_matcher(matcher) {
+            return Ok(true);
+        }
         row_matcher_matches(batch, row, matcher)
     })
+}
+
+fn nested_event_matchers_match(
+    batch: &RecordBatch,
+    row: usize,
+    matchers: &[SpanMatcher],
+) -> Result<bool, TraceqlError> {
+    let event_matchers = matchers
+        .iter()
+        .filter(|matcher| is_event_matcher(matcher))
+        .collect::<Vec<_>>();
+    if event_matchers.is_empty() {
+        return Ok(true);
+    }
+    let events = event_values(batch, row)?;
+    if events.is_empty() {
+        return Ok(event_matchers
+            .iter()
+            .all(|matcher| event_matcher_matches_absence(matcher)));
+    }
+    Ok(events.iter().any(|event| {
+        event_matchers
+            .iter()
+            .all(|matcher| event_matcher_matches_event(event, matcher))
+    }))
+}
+
+fn nested_link_matchers_match(
+    batch: &RecordBatch,
+    row: usize,
+    matchers: &[SpanMatcher],
+) -> Result<bool, TraceqlError> {
+    let link_matchers = matchers
+        .iter()
+        .filter(|matcher| is_link_matcher(matcher))
+        .collect::<Vec<_>>();
+    if link_matchers.is_empty() {
+        return Ok(true);
+    }
+    let links = link_values(batch, row)?;
+    if links.is_empty() {
+        return Ok(link_matchers
+            .iter()
+            .all(|matcher| link_matcher_matches_absence(matcher)));
+    }
+    Ok(links.iter().any(|link| {
+        link_matchers
+            .iter()
+            .all(|matcher| link_matcher_matches_link(link, matcher))
+    }))
+}
+
+fn is_event_matcher(matcher: &SpanMatcher) -> bool {
+    matcher.scope == MatchScope::Event
+        || (matcher.scope == MatchScope::Intrinsic && matcher.key.starts_with("event:"))
+}
+
+fn is_link_matcher(matcher: &SpanMatcher) -> bool {
+    matcher.scope == MatchScope::Link
+        || (matcher.scope == MatchScope::Intrinsic && matcher.key.starts_with("link:"))
+}
+
+fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Event => event
+            .attributes
+            .iter()
+            .find(|(key, _)| key == &matcher.key)
+            .map_or_else(
+                || nil_matches(matcher.op, &matcher.value),
+                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+            ),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "event:name" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| string_matches(&event.name, matcher.op, &matcher.value)),
+            "event:timeSinceStart" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    int_matches(
+                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                        matcher.op,
+                        &matcher.value,
+                    )
+                }),
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn event_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Event => nil_matches(matcher.op, &matcher.value),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "event:name" | "event:timeSinceStart" => {
+                nested_presence_matches(false, matcher.op, &matcher.value).unwrap_or(false)
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn link_matcher_matches_link(link: &LinkRef, matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Link => link
+            .attributes
+            .iter()
+            .find(|(key, _)| key == &matcher.key)
+            .map_or_else(
+                || nil_matches(matcher.op, &matcher.value),
+                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+            ),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "link:traceID" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)
+                }),
+            "link:spanID" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)
+                }),
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn link_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Link => nil_matches(matcher.op, &matcher.value),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "link:traceID" | "link:spanID" => {
+                nested_presence_matches(false, matcher.op, &matcher.value).unwrap_or(false)
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
 }
 
 fn row_matcher_matches(
@@ -1924,6 +2074,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cold_traceql_search_filters_event_intrinsics() {
         let object_store = Arc::new(InMemory::new());
         let blocks = Arc::new(BlockStore::new(
@@ -1936,11 +2087,38 @@ mod tests {
         other.trace_id = [3; 16];
         other.span_id = [4; 8];
         other.events[0].name = "cache.hit".into();
+        let mut split_events = span_with_nested_refs();
+        split_events.trace_id = [7; 16];
+        split_events.span_id = [8; 8];
+        split_events.events = vec![
+            EventRecord {
+                time_unix_nano: 1_050,
+                name: "exception".into(),
+                attrs: vec![KeyValue {
+                    key: "exception.type".into(),
+                    value: SpanAttrValue::Str("other".into()),
+                }],
+            },
+            EventRecord {
+                time_unix_nano: 1_060,
+                name: "cache.hit".into(),
+                attrs: vec![KeyValue {
+                    key: "exception.type".into(),
+                    value: SpanAttrValue::Str("timeout".into()),
+                }],
+            },
+        ];
         let mut no_event = span_with_nested_refs();
         no_event.trace_id = [5; 16];
         no_event.span_id = [6; 8];
         no_event.events.clear();
-        let batch = span_batch(&[matching.clone(), other.clone(), no_event.clone()]).unwrap();
+        let batch = span_batch(&[
+            matching.clone(),
+            other.clone(),
+            split_events.clone(),
+            no_event.clone(),
+        ])
+        .unwrap();
         let meta = writer
             .write_block_with_decl(
                 "tenant",
@@ -1955,6 +2133,7 @@ mod tests {
         let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
         bloom.insert(&matching.trace_id);
         bloom.insert(&other.trace_id);
+        bloom.insert(&split_events.trace_id);
         bloom.insert(&no_event.trace_id);
         let mut index = TraceIndex::new();
         index.add_trace_block(
@@ -1976,14 +2155,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == matching.trace_id);
-
-        let resp = engine
-            .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
-            .await
-            .unwrap();
-
         assert!(resp.traces.len() == 2);
         assert!(
             resp.traces
@@ -1993,7 +2164,43 @@ mod tests {
         assert!(
             resp.traces
                 .iter()
+                .any(|trace| trace.trace_id == split_events.trace_id)
+        );
+
+        let resp = engine
+            .search(
+                "tenant",
+                "{ event:name = \"exception\" && event.exception.type = \"timeout\" }",
+                0,
+                10_000,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == matching.trace_id);
+
+        let resp = engine
+            .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 3);
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == matching.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
                 .any(|trace| trace.trace_id == other.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == split_events.trace_id)
         );
         assert!(
             !resp

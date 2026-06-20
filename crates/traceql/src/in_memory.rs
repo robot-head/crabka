@@ -13,7 +13,9 @@ use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
 
 use crate::error::{Result, TraceqlError};
-use crate::result::{AttrValue, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue};
+use crate::result::{
+    AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue,
+};
 use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_with_attrs};
 use crate::store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
 
@@ -439,9 +441,145 @@ fn span_matches(
     idx: usize,
     matchers: &[SpanMatcher],
 ) -> bool {
+    if !nested_event_matchers_match(span, matchers) || !nested_link_matchers_match(span, matchers) {
+        return false;
+    }
     matchers
         .iter()
+        .filter(|matcher| !is_event_matcher(matcher) && !is_link_matcher(matcher))
         .all(|matcher| matcher_matches(trace, span, nested_sets, idx, matcher))
+}
+
+fn nested_event_matchers_match(span: &InputSpan, matchers: &[SpanMatcher]) -> bool {
+    let event_matchers = matchers
+        .iter()
+        .filter(|matcher| is_event_matcher(matcher))
+        .collect::<Vec<_>>();
+    if event_matchers.is_empty() {
+        return true;
+    }
+    if span.events.is_empty() {
+        return event_matchers
+            .iter()
+            .all(|matcher| event_matcher_matches_absence(matcher));
+    }
+    span.events.iter().any(|event| {
+        event_matchers
+            .iter()
+            .all(|matcher| event_matcher_matches_event(event, matcher))
+    })
+}
+
+fn nested_link_matchers_match(span: &InputSpan, matchers: &[SpanMatcher]) -> bool {
+    let link_matchers = matchers
+        .iter()
+        .filter(|matcher| is_link_matcher(matcher))
+        .collect::<Vec<_>>();
+    if link_matchers.is_empty() {
+        return true;
+    }
+    if span.links.is_empty() {
+        return link_matchers
+            .iter()
+            .all(|matcher| link_matcher_matches_absence(matcher));
+    }
+    span.links.iter().any(|link| {
+        link_matchers
+            .iter()
+            .all(|matcher| link_matcher_matches_link(link, matcher))
+    })
+}
+
+fn is_event_matcher(matcher: &SpanMatcher) -> bool {
+    matcher.scope == MatchScope::Event
+        || (matcher.scope == MatchScope::Intrinsic && matcher.key.starts_with("event:"))
+}
+
+fn is_link_matcher(matcher: &SpanMatcher) -> bool {
+    matcher.scope == MatchScope::Link
+        || (matcher.scope == MatchScope::Intrinsic && matcher.key.starts_with("link:"))
+}
+
+fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Event => event
+            .attributes
+            .iter()
+            .find(|(key, _)| key == &matcher.key)
+            .map_or_else(
+                || nil_matches(matcher.op, &matcher.value),
+                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+            ),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "event:name" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| string_matches(&event.name, matcher.op, &matcher.value)),
+            "event:timeSinceStart" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    int_matches(
+                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                        matcher.op,
+                        &matcher.value,
+                    )
+                }),
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn event_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Event => nil_matches(matcher.op, &matcher.value),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "event:name" | "event:timeSinceStart" => {
+                nested_presence_matches(false, matcher.op, &matcher.value).unwrap_or(false)
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn link_matcher_matches_link(link: &LinkRef, matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Link => link
+            .attributes
+            .iter()
+            .find(|(key, _)| key == &matcher.key)
+            .map_or_else(
+                || nil_matches(matcher.op, &matcher.value),
+                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+            ),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "link:traceID" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)
+                }),
+            "link:spanID" => nested_presence_matches(true, matcher.op, &matcher.value)
+                .unwrap_or_else(|| {
+                    string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)
+                }),
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
+}
+
+fn link_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
+    let is_match = match matcher.scope {
+        MatchScope::Link => nil_matches(matcher.op, &matcher.value),
+        MatchScope::Intrinsic => match matcher.key.as_str() {
+            "link:traceID" | "link:spanID" => {
+                nested_presence_matches(false, matcher.op, &matcher.value).unwrap_or(false)
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    is_match != matcher.negated
 }
 
 fn matcher_matches(
