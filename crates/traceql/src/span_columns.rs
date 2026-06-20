@@ -13,6 +13,7 @@ pub const COL_PARENT_SPAN_ID: &str = "parent_span_id";
 pub const COL_NS_LEFT: &str = "nested_set_left";
 pub const COL_NS_RIGHT: &str = "nested_set_right";
 pub const COL_PARENT_ID: &str = "parent_id";
+pub const COL_CHILD_COUNT: &str = "child_count";
 pub const COL_ROOT_SERVICE_NAME: &str = "root_service_name";
 pub const COL_ROOT_SPAN_NAME: &str = "root_span_name";
 pub const COL_TRACE_START: &str = "trace_start_unix_nano";
@@ -60,6 +61,7 @@ pub fn span_schema_with_attrs(attr_cols: &[(String, DataType)]) -> SchemaRef {
         Field::new(COL_NS_LEFT, DataType::Int32, false),
         Field::new(COL_NS_RIGHT, DataType::Int32, false),
         Field::new(COL_PARENT_ID, DataType::Int32, false),
+        Field::new(COL_CHILD_COUNT, DataType::Int32, false),
         Field::new(COL_ROOT_SERVICE_NAME, DataType::Utf8, true),
         Field::new(COL_ROOT_SPAN_NAME, DataType::Utf8, true),
         Field::new(COL_TRACE_START, DataType::Int64, false),
@@ -184,6 +186,14 @@ mod tests {
         );
         assert!(schema.column_with_name(COL_NAME).unwrap().1.data_type() == &DataType::Utf8);
         assert!(schema.column_with_name(COL_NS_LEFT).unwrap().1.data_type() == &DataType::Int32);
+        assert!(
+            schema
+                .column_with_name(COL_CHILD_COUNT)
+                .unwrap()
+                .1
+                .data_type()
+                == &DataType::Int32
+        );
         assert!(
             schema
                 .column_with_name(COL_TRACE_DURATION)

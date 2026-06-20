@@ -22,6 +22,7 @@ fn row(trace: u8, span: u8, left: i32) -> SpanRow {
             nested_set_right: left + 1,
             parent_id: 0,
         },
+        child_count: 0,
         root_service_name: Some("svc".into()),
         root_span_name: Some("root".into()),
         trace_start_unix_nano: 100,

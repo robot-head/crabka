@@ -173,6 +173,7 @@ impl SpanStore for InMemorySpanStore {
         let mut ns_left = Int32Builder::new();
         let mut ns_right = Int32Builder::new();
         let mut parent_id = Int32Builder::new();
+        let mut child_count = Int32Builder::new();
         let mut root_service = StringBuilder::new();
         let mut root_span = StringBuilder::new();
         let mut trace_start = Int64Builder::new();
@@ -206,6 +207,7 @@ impl SpanStore for InMemorySpanStore {
                 ns_left.append_value(trace.nested[i].left);
                 ns_right.append_value(trace.nested[i].right);
                 parent_id.append_value(trace.nested[i].parent_id);
+                child_count.append_value(child_count_for(&trace.nested, i));
                 root_service.append_value(&trace.root_service_name);
                 root_span.append_value(&trace.root_span_name);
                 trace_start.append_value(trace.trace_start_unix_nano);
@@ -231,6 +233,7 @@ impl SpanStore for InMemorySpanStore {
             Arc::new(ns_left.finish()),
             Arc::new(ns_right.finish()),
             Arc::new(parent_id.finish()),
+            Arc::new(child_count.finish()),
             Arc::new(root_service.finish()),
             Arc::new(root_span.finish()),
             Arc::new(trace_start.finish()),
@@ -456,6 +459,19 @@ fn typed_value_parts(value: &AttrValue) -> (String, String) {
         AttrValue::Float(v) => ("float".to_string(), v.to_string()),
         AttrValue::Bool(v) => ("bool".to_string(), v.to_string()),
     }
+}
+
+fn child_count_for(nested_sets: &[NestedSet], idx: usize) -> i32 {
+    let Some(nested) = nested_sets.get(idx) else {
+        return 0;
+    };
+    i32::try_from(
+        nested_sets
+            .iter()
+            .filter(|other| other.parent_id == nested.left)
+            .count(),
+    )
+    .unwrap_or(i32::MAX)
 }
 
 #[cfg(test)]

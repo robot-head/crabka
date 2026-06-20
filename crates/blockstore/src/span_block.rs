@@ -55,6 +55,7 @@ pub struct SpanRow {
     pub span_id: [u8; 8],
     pub parent_span_id: Option<[u8; 8]>,
     pub nested_set: NestedSet,
+    pub child_count: i32,
     pub root_service_name: Option<String>,
     pub root_span_name: Option<String>,
     pub trace_start_unix_nano: i64,
@@ -86,6 +87,7 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
     let mut ns_left = Int32Builder::new();
     let mut ns_right = Int32Builder::new();
     let mut parent_id = Int32Builder::new();
+    let mut child_count = Int32Builder::new();
     let mut root_svc = StringBuilder::new();
     let mut root_name = StringBuilder::new();
     let mut trace_start = Int64Builder::new();
@@ -121,6 +123,7 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
         ns_left.append_value(row.nested_set.nested_set_left);
         ns_right.append_value(row.nested_set.nested_set_right);
         parent_id.append_value(row.nested_set.parent_id);
+        child_count.append_value(row.child_count);
         root_svc.append_option(row.root_service_name.as_deref());
         root_name.append_option(row.root_span_name.as_deref());
         trace_start.append_value(row.trace_start_unix_nano);
@@ -152,6 +155,7 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
         Arc::new(ns_left.finish()),
         Arc::new(ns_right.finish()),
         Arc::new(parent_id.finish()),
+        Arc::new(child_count.finish()),
         Arc::new(root_svc.finish()),
         Arc::new(root_name.finish()),
         Arc::new(trace_start.finish()),
@@ -357,6 +361,7 @@ mod tests {
                 nested_set_right: left + 1,
                 parent_id: 0,
             },
+            child_count: 0,
             root_service_name: Some("checkout".into()),
             root_span_name: Some("POST /pay".into()),
             trace_start_unix_nano: 1_000,

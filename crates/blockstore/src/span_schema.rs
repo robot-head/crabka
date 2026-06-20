@@ -12,6 +12,7 @@ pub const SCOL_PARENT_SPAN_ID: &str = "parent_span_id";
 pub const SCOL_NESTED_SET_LEFT: &str = "nested_set_left";
 pub const SCOL_NESTED_SET_RIGHT: &str = "nested_set_right";
 pub const SCOL_PARENT_ID: &str = "parent_id";
+pub const SCOL_CHILD_COUNT: &str = "child_count";
 pub const SCOL_ROOT_SERVICE_NAME: &str = "root_service_name";
 pub const SCOL_ROOT_SPAN_NAME: &str = "root_span_name";
 pub const SCOL_TRACE_START_NANO: &str = "trace_start_unix_nano";
@@ -132,6 +133,7 @@ pub fn span_block_schema() -> SchemaRef {
         Field::new(SCOL_NESTED_SET_LEFT, DataType::Int32, false),
         Field::new(SCOL_NESTED_SET_RIGHT, DataType::Int32, false),
         Field::new(SCOL_PARENT_ID, DataType::Int32, false),
+        Field::new(SCOL_CHILD_COUNT, DataType::Int32, false),
         Field::new(SCOL_ROOT_SERVICE_NAME, DataType::Utf8, true),
         Field::new(SCOL_ROOT_SPAN_NAME, DataType::Utf8, true),
         Field::new(SCOL_TRACE_START_NANO, DataType::Int64, false),
@@ -203,7 +205,12 @@ mod tests {
     #[test]
     fn nested_set_columns_are_int32() {
         let s = span_block_schema();
-        for c in [SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID] {
+        for c in [
+            SCOL_NESTED_SET_LEFT,
+            SCOL_NESTED_SET_RIGHT,
+            SCOL_PARENT_ID,
+            SCOL_CHILD_COUNT,
+        ] {
             assert!(s.column_with_name(c).unwrap().1.data_type() == &DataType::Int32);
         }
     }

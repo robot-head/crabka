@@ -527,7 +527,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use assert2::assert;
     use crabka_blockstore::{ShardedTraceBloom, TraceBlockStats};
-    use crabka_traceql::{EngineOpts, TraceqlEngine};
+    use crabka_traceql::{COL_CHILD_COUNT, EngineOpts, TraceqlEngine};
     use object_store::memory::InMemory;
     use url::Url;
 
@@ -541,6 +541,7 @@ mod tests {
             Field::new("nested_set_left", DataType::Int32, false),
             Field::new("nested_set_right", DataType::Int32, false),
             Field::new("parent_id", DataType::Int32, false),
+            Field::new(COL_CHILD_COUNT, DataType::Int32, false),
             Field::new(COL_ROOT_SERVICE_NAME, DataType::Utf8, true),
             Field::new(COL_ROOT_SPAN_NAME, DataType::Utf8, true),
             Field::new("trace_start_unix_nano", DataType::Int64, false),
@@ -575,6 +576,7 @@ mod tests {
                 Arc::new(parent_id.finish()),
                 Arc::new(Int32Array::from(vec![1, 1])),
                 Arc::new(Int32Array::from(vec![2, 2])),
+                Arc::new(Int32Array::from(vec![0, 0])),
                 Arc::new(Int32Array::from(vec![0, 0])),
                 Arc::new(StringArray::from(vec!["api", "web"])),
                 Arc::new(StringArray::from(vec!["GET /", "GET /x"])),

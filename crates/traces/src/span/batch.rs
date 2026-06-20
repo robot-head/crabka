@@ -13,11 +13,13 @@ use crate::error::TracesError;
 /// Build one span-block `RecordBatch` from spans of one trace.
 pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
     let nested = assign_nested_set(spans);
+    let child_counts = child_counts(&nested);
     let (root_service_name, root_span_name, trace_start, trace_duration) = root_info(spans);
     let rows = spans
         .iter()
         .zip(nested)
-        .map(|(span, nested_set)| SpanRow {
+        .zip(child_counts)
+        .map(|((span, nested_set), child_count)| SpanRow {
             trace_id: span.trace_id,
             span_id: span.span_id,
             parent_span_id: span.parent_span_id,
@@ -26,6 +28,7 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
                 nested_set_right: nested_set.right,
                 parent_id: nested_set.parent_id,
             },
+            child_count,
             root_service_name: Some(root_service_name.clone()),
             root_span_name: Some(root_span_name.clone()),
             trace_start_unix_nano: trace_start,
@@ -43,6 +46,21 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
         .collect::<Vec<_>>();
 
     encode_span_rows(&rows).map_err(|err| TracesError::Block(err.to_string()))
+}
+
+fn child_counts(nested: &[crate::span::nested_set::NestedSet]) -> Vec<i32> {
+    nested
+        .iter()
+        .map(|node| {
+            i32::try_from(
+                nested
+                    .iter()
+                    .filter(|other| other.parent_id == node.left)
+                    .count(),
+            )
+            .unwrap_or(i32::MAX)
+        })
+        .collect()
 }
 
 fn root_info(spans: &[Span]) -> (String, String, i64, i64) {
