@@ -243,6 +243,7 @@ async fn trace_by_id<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(trace_id): Path<String>,
+    uri: Uri,
 ) -> Response
 where
     S: SpanStore + 'static,
@@ -251,9 +252,14 @@ where
         return (StatusCode::BAD_REQUEST, "trace id must be 32 hex chars").into_response();
     };
     let tenant = tenant(&headers);
+    let (start_ns, end_ns) = time_bounds(&uri);
 
     match state.engine.trace_by_id(&tenant, &trace_id).await {
-        Ok(Some(trace)) => Json(trace_json(&trace, state.cfg.max_trace_spans)).into_response(),
+        Ok(Some(trace)) => Json(trace_json(
+            &filter_trace_spans(trace, start_ns, end_ns),
+            state.cfg.max_trace_spans,
+        ))
+        .into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
@@ -490,6 +496,13 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
     })
 }
 
+fn filter_trace_spans(mut trace: TraceSpans, start_ns: i64, end_ns: i64) -> TraceSpans {
+    trace.spans.retain(|span| {
+        i64::try_from(span.start_time_unix_nano).is_ok_and(|ts| ts >= start_ns && ts <= end_ns)
+    });
+    trace
+}
+
 fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
     let mut obj = Map::new();
     obj.insert("traceId".into(), json!(base64(trace_id)));
@@ -552,13 +565,17 @@ mod tests {
     use super::*;
 
     fn span(trace: u8, span: u8, parent: Option<u8>, svc: &str) -> InputSpan {
+        span_at(trace, span, parent, svc, 1_000 + i64::from(span))
+    }
+
+    fn span_at(trace: u8, span: u8, parent: Option<u8>, svc: &str, start_ns: i64) -> InputSpan {
         InputSpan {
             trace_id: [trace; 16],
             span_id: [span; 8],
             parent_span_id: parent.map(|p| [p; 8]),
             name: "span".into(),
             kind: 0,
-            start_unix_nano: 1_000 + i64::from(span),
+            start_unix_nano: start_ns,
             duration_nanos: 200,
             status_code: 0,
             status_message: String::new(),
@@ -761,6 +778,42 @@ mod tests {
                 "message": ""
             })
         );
+    }
+
+    #[tokio::test]
+    async fn by_id_filters_spans_by_start_end_epoch_seconds() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at(9, 1, None, "a", 1_000_000_000),
+                span_at(9, 2, Some(1), "b", 2_000_000_000),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909?start=2&end=2")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let spans = body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(spans.len() == 1);
+        assert!(spans[0]["spanId"] == "AgICAgICAgI=");
     }
 
     #[tokio::test]
