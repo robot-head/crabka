@@ -1,5 +1,6 @@
 //! Distributor role: decode ingress doors, split profiles, and append WAL records.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -226,6 +227,28 @@ fn connect_error(err: ProfilesError) -> ConnectError {
 
 fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError> {
     let inner = profile.inner();
+    let function_refs = inner
+        .function
+        .iter()
+        .enumerate()
+        .map(|(idx, function)| {
+            let idx = u32::try_from(idx).map_err(|err| {
+                ProfilesError::Decode(format!("function index does not fit u32: {err}"))
+            })?;
+            Ok((function.id, idx))
+        })
+        .collect::<Result<HashMap<_, _>, ProfilesError>>()?;
+    let mapping_refs = inner
+        .mapping
+        .iter()
+        .enumerate()
+        .map(|(idx, mapping)| {
+            let idx = u32::try_from(idx).map_err(|err| {
+                ProfilesError::Decode(format!("mapping index does not fit u32: {err}"))
+            })?;
+            Ok((mapping.id, idx))
+        })
+        .collect::<Result<HashMap<_, _>, ProfilesError>>()?;
     Ok(WalSymbolSet {
         strings: inner.string_table.clone(),
         functions: inner
@@ -246,13 +269,21 @@ fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError
             .map(|location| {
                 Ok(WalLocation {
                     address: location.address,
-                    mapping_id: u32_from_u64(location.mapping_id, "location.mapping_id")?,
+                    mapping_id: normalize_optional_pprof_id(
+                        location.mapping_id,
+                        &mapping_refs,
+                        "location.mapping_id",
+                    )?,
                     lines: location
                         .line
                         .iter()
                         .map(|line| {
                             Ok((
-                                u32_from_u64(line.function_id, "line.function_id")?,
+                                normalize_required_pprof_id(
+                                    line.function_id,
+                                    &function_refs,
+                                    "line.function_id",
+                                )?,
                                 line.line,
                             ))
                         })
@@ -277,12 +308,28 @@ fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError
     })
 }
 
-fn u32_from_i64(value: i64, field: &str) -> Result<u32, ProfilesError> {
-    u32::try_from(value)
-        .map_err(|err| ProfilesError::Decode(format!("{field} does not fit u32: {err}")))
+fn normalize_required_pprof_id(
+    id: u64,
+    refs: &HashMap<u64, u32>,
+    field: &str,
+) -> Result<u32, ProfilesError> {
+    refs.get(&id)
+        .copied()
+        .ok_or_else(|| ProfilesError::Decode(format!("{field} references missing id {id}")))
 }
 
-fn u32_from_u64(value: u64, field: &str) -> Result<u32, ProfilesError> {
+fn normalize_optional_pprof_id(
+    id: u64,
+    refs: &HashMap<u64, u32>,
+    field: &str,
+) -> Result<u32, ProfilesError> {
+    if id == 0 {
+        return Ok(0);
+    }
+    normalize_required_pprof_id(id, refs, field)
+}
+
+fn u32_from_i64(value: i64, field: &str) -> Result<u32, ProfilesError> {
     u32::try_from(value)
         .map_err(|err| ProfilesError::Decode(format!("{field} does not fit u32: {err}")))
 }
@@ -333,6 +380,81 @@ mod tests {
             recs.iter()
                 .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
         );
+    }
+
+    #[tokio::test]
+    async fn push_normalizes_pprof_symbol_ids_to_wal_indices() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut labels = crabka_blockstore::Labels::new();
+        labels.insert("__name__", "samples");
+        labels.insert("service_name", "api");
+        let profile = PprofProfile::from(crabka_pprof::proto::Profile {
+            sample_type: vec![crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }],
+            sample: vec![crabka_pprof::proto::Sample {
+                location_id: vec![2],
+                value: vec![5],
+                label: Vec::new(),
+            }],
+            location: vec![
+                crabka_pprof::proto::Location {
+                    id: 1,
+                    line: vec![crabka_pprof::proto::Line {
+                        function_id: 1,
+                        line: 10,
+                        column: 0,
+                    }],
+                    ..Default::default()
+                },
+                crabka_pprof::proto::Location {
+                    id: 2,
+                    line: vec![crabka_pprof::proto::Line {
+                        function_id: 2,
+                        line: 20,
+                        column: 0,
+                    }],
+                    ..Default::default()
+                },
+            ],
+            function: vec![
+                crabka_pprof::proto::Function {
+                    id: 1,
+                    name: 3,
+                    system_name: 3,
+                    filename: 5,
+                    start_line: 1,
+                },
+                crabka_pprof::proto::Function {
+                    id: 2,
+                    name: 4,
+                    system_name: 4,
+                    filename: 5,
+                    start_line: 2,
+                },
+            ],
+            string_table: vec![
+                String::new(),
+                "samples".to_string(),
+                "count".to_string(),
+                "first".to_string(),
+                "second".to_string(),
+                "main.go".to_string(),
+            ],
+            period_type: Some(crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }),
+            ..Default::default()
+        });
+
+        process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::ingest::RawProfile { labels, profile }],
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        assert!(recs[0].samples[0].stacktrace_location_refs == vec![1]);
+        assert!(recs[0].symbols.locations[1].lines[0].0 == 1);
     }
 
     #[tokio::test]

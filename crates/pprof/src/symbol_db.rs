@@ -1,5 +1,6 @@
 //! Deduplicated on-block symbol DB artifact.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -305,8 +306,10 @@ impl SymbolDb {
                         .get(usize::try_from(line.function_id).expect("u32 fits usize"));
                     frames.push(Frame {
                         function: function
-                            .map_or("", |func| self.string(func.name))
-                            .to_string(),
+                            .map_or(Cow::Borrowed(""), |func| {
+                                drop_go_type_parameters(self.string(func.name))
+                            })
+                            .into_owned(),
                         file: function
                             .map_or("", |func| self.string(func.filename))
                             .to_string(),
@@ -406,6 +409,50 @@ impl SymbolSource for SymbolDb {
     fn resolve(&self, partition: u64, id: u32) -> Vec<Frame> {
         SymbolDb::resolve(self, partition, id)
     }
+}
+
+const GO_SHAPE_PREFIX: &str = "[go.shape.";
+
+fn drop_go_type_parameters(input: &str) -> Cow<'_, str> {
+    if !input.contains(GO_SHAPE_PREFIX) {
+        return Cow::Borrowed(input);
+    }
+
+    let mut result = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let Some(start) = input[i..].find(GO_SHAPE_PREFIX) else {
+            result.push_str(&input[i..]);
+            break;
+        };
+        result.push_str(&input[i..i + start]);
+
+        let mut depth = 0_i32;
+        let mut j = i + start;
+        let mut found = false;
+        while j < input.len() {
+            match input.as_bytes()[j] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i = j + 1;
+                        found = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+
+        if !found {
+            result.push_str(&input[i..]);
+            break;
+        }
+    }
+
+    Cow::Owned(result)
 }
 
 #[cfg(test)]
@@ -508,6 +555,34 @@ mod tests {
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
         assert!(names == vec!["inner", "outer"]);
+    }
+
+    #[test]
+    fn resolve_drops_go_shape_type_parameters_like_pyroscope() {
+        let mut db = SymbolDb::new();
+        let name = db.intern_string(
+            "github.com/dgraph-io/ristretto/v2.(*Cache[go.shape.string,go.shape.bool]).processItems",
+        );
+        let file = db.intern_string("cache.go");
+        let function = db.intern_function(FunctionRec {
+            name,
+            system_name: name,
+            filename: file,
+            start_line: 1,
+        });
+        let location = db.intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id: function,
+                line: 42,
+            }],
+        });
+        let id = db.intern_stacktrace(0, &[location]);
+
+        let frames = db.resolve(0, id);
+
+        assert!(frames[0].function == "github.com/dgraph-io/ristretto/v2.(*Cache).processItems");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Symbolized profile tree and flamegraph encoding.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::Frame;
 
@@ -37,7 +37,8 @@ struct Node {
     name: String,
     total: i64,
     self_: i64,
-    children: BTreeMap<String, usize>,
+    children: Vec<usize>,
+    child_by_name: HashMap<String, usize>,
 }
 
 /// Symbolized profile tree. Root is the synthetic `"total"` node.
@@ -63,7 +64,8 @@ impl Tree {
                 name: ROOT_NAME.to_string(),
                 total: 0,
                 self_: 0,
-                children: BTreeMap::new(),
+                children: Vec::new(),
+                child_by_name: HashMap::new(),
             }],
             root: 0,
         }
@@ -74,7 +76,7 @@ impl Tree {
         self.nodes[current].total += value;
         for frame in frames.iter().rev() {
             let name = frame.function.clone();
-            let child = if let Some(child) = self.nodes[current].children.get(&name) {
+            let child = if let Some(child) = self.nodes[current].child_by_name.get(&name) {
                 *child
             } else {
                 let idx = self.nodes.len();
@@ -82,9 +84,12 @@ impl Tree {
                     name: name.clone(),
                     total: 0,
                     self_: 0,
-                    children: BTreeMap::new(),
+                    children: Vec::new(),
+                    child_by_name: HashMap::new(),
                 });
-                self.nodes[current].children.insert(name, idx);
+                let pos = sorted_child_position(&self.nodes[current].children, &self.nodes, &name);
+                self.nodes[current].children.insert(pos, idx);
+                self.nodes[current].child_by_name.insert(name, idx);
                 idx
             };
             current = child;
@@ -103,8 +108,9 @@ impl Tree {
     fn merge_node(&mut self, target: usize, other: &Tree, source: usize) {
         self.nodes[target].total += other.nodes[source].total;
         self.nodes[target].self_ += other.nodes[source].self_;
-        for (name, source_child) in &other.nodes[source].children {
-            let target_child = if let Some(child) = self.nodes[target].children.get(name) {
+        for source_child in &other.nodes[source].children {
+            let name = &other.nodes[*source_child].name;
+            let target_child = if let Some(child) = self.nodes[target].child_by_name.get(name) {
                 *child
             } else {
                 let idx = self.nodes.len();
@@ -112,9 +118,12 @@ impl Tree {
                     name: name.clone(),
                     total: 0,
                     self_: 0,
-                    children: BTreeMap::new(),
+                    children: Vec::new(),
+                    child_by_name: HashMap::new(),
                 });
-                self.nodes[target].children.insert(name.clone(), idx);
+                let pos = sorted_child_position(&self.nodes[target].children, &self.nodes, name);
+                self.nodes[target].children.insert(pos, idx);
+                self.nodes[target].child_by_name.insert(name.clone(), idx);
                 idx
             };
             self.merge_node(target_child, other, *source_child);
@@ -126,31 +135,44 @@ impl Tree {
         let keep = self.keep_set(max_nodes);
         let mut names = vec![ROOT_NAME.to_string()];
         let mut name_index = HashMap::from([(ROOT_NAME.to_string(), 0_i64)]);
-        let mut levels = Vec::new();
-        let mut current = vec![Bar {
+        let mut level_bars: Vec<Vec<[i64; 4]>> = Vec::new();
+        let mut stack = vec![Bar {
             node: Some(self.root),
             name: ROOT_NAME.to_string(),
             total: self.nodes[self.root].total,
             self_: self.nodes[self.root].self_,
             x_start: 0,
+            level: 0,
         }];
         let mut max_self = 0;
 
-        while !current.is_empty() {
-            let mut values = Vec::with_capacity(current.len() * 4);
-            let mut next = Vec::new();
-            let mut previous_end = 0;
-            for bar in &current {
-                let name_idx = name_slot(&mut names, &mut name_index, &bar.name);
-                let delta = bar.x_start - previous_end;
-                values.extend([delta, bar.total, bar.self_, name_idx]);
-                previous_end = bar.x_start + bar.total;
-                max_self = max_self.max(bar.self_);
-                append_children(&self, &keep, bar, &mut next);
+        while let Some(bar) = stack.pop() {
+            let name_idx = name_slot(&mut names, &mut name_index, &bar.name);
+            if bar.level == level_bars.len() {
+                level_bars.push(Vec::new());
             }
-            levels.push(Level { values });
-            current = next;
+            level_bars[bar.level].push([bar.x_start, bar.total, bar.self_, name_idx]);
+            max_self = max_self.max(bar.self_);
+
+            let mut children = Vec::new();
+            append_children(&self, &keep, &bar, &mut children);
+            stack.extend(children);
         }
+
+        let levels = level_bars
+            .into_iter()
+            .map(|mut bars| {
+                bars.reverse();
+                let mut values = Vec::with_capacity(bars.len() * 4);
+                let mut previous_end = 0;
+                for [x_start, total, self_, name_idx] in bars {
+                    let delta = x_start - previous_end;
+                    values.extend([delta, total, self_, name_idx]);
+                    previous_end = x_start + total;
+                }
+                Level { values }
+            })
+            .collect();
 
         FlameGraph {
             total: self.nodes[self.root].total,
@@ -197,7 +219,7 @@ impl Tree {
     fn parents(&self) -> Vec<Option<usize>> {
         let mut parents = vec![None; self.nodes.len()];
         for (parent, node) in self.nodes.iter().enumerate() {
-            for child in node.children.values() {
+            for child in &node.children {
                 parents[*child] = Some(parent);
             }
         }
@@ -213,7 +235,7 @@ impl Tree {
                     name: node.name.clone(),
                     total: node.total,
                     self_: node.self_,
-                    children: node.children.values().copied().collect(),
+                    children: node.children.clone(),
                 })
                 .collect(),
         )
@@ -235,7 +257,10 @@ impl Tree {
         assert!(path[0] == ROOT_NAME);
         let mut idx = self.root;
         for name in &path[1..] {
-            idx = *self.nodes[idx].children.get(*name).expect("path exists");
+            idx = *self.nodes[idx]
+                .child_by_name
+                .get(*name)
+                .expect("path exists");
         }
         &self.nodes[idx]
     }
@@ -254,16 +279,17 @@ struct Bar {
     total: i64,
     self_: i64,
     x_start: i64,
+    level: usize,
 }
 
 fn append_children(tree: &Tree, keep: &HashSet<usize>, parent: &Bar, next: &mut Vec<Bar>) {
     let Some(parent_node) = parent.node else {
         return;
     };
-    let mut x = parent.x_start;
+    let mut x = parent.x_start + parent.self_;
     let mut other_total = 0;
     let mut other_self = 0;
-    for child in tree.nodes[parent_node].children.values() {
+    for child in &tree.nodes[parent_node].children {
         let node = &tree.nodes[*child];
         if keep.contains(child) {
             next.push(Bar {
@@ -272,6 +298,7 @@ fn append_children(tree: &Tree, keep: &HashSet<usize>, parent: &Bar, next: &mut 
                 total: node.total,
                 self_: node.self_,
                 x_start: x,
+                level: parent.level + 1,
             });
         } else {
             other_total += node.total;
@@ -286,6 +313,7 @@ fn append_children(tree: &Tree, keep: &HashSet<usize>, parent: &Bar, next: &mut 
             total: other_total,
             self_: other_self,
             x_start: parent.x_start + parent.total - other_total,
+            level: parent.level + 1,
         });
     }
 }
@@ -294,7 +322,7 @@ fn subtree_self(tree: &Tree, node: usize) -> i64 {
     tree.nodes[node].self_
         + tree.nodes[node]
             .children
-            .values()
+            .iter()
             .map(|child| subtree_self(tree, *child))
             .sum::<i64>()
 }
@@ -307,6 +335,12 @@ fn name_slot(names: &mut Vec<String>, index: &mut HashMap<String, i64>, name: &s
     names.push(name.to_string());
     index.insert(name.to_string(), slot);
     slot
+}
+
+fn sorted_child_position(children: &[usize], nodes: &[Node], name: &str) -> usize {
+    children
+        .binary_search_by(|candidate| nodes[*candidate].name.as_str().cmp(name))
+        .unwrap_or_else(|pos| pos)
 }
 
 #[cfg(test)]
@@ -378,6 +412,30 @@ mod tests {
         assert!(a[0] == 0 && a[1] == 6 && a[2] == 6);
         let b = &fg.levels[2].values[4..8];
         assert!(b[0] == 0 && b[1] == 4 && b[2] == 4);
+    }
+
+    #[test]
+    fn to_flamegraph_sorts_siblings_like_pyroscope_function_tree() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["z_leaf", "main"]), 6);
+        tree.add_stack(&stack(&["a_leaf", "main"]), 4);
+
+        let fg = tree.to_flamegraph(2048);
+
+        assert!(fg.names == vec!["total", "main", "z_leaf", "a_leaf"]);
+        assert!(
+            fg.levels[2].values
+                == vec![
+                    0,
+                    4,
+                    4,
+                    names_index(&fg, "a_leaf"),
+                    0,
+                    6,
+                    6,
+                    names_index(&fg, "z_leaf"),
+                ]
+        );
     }
 
     #[test]

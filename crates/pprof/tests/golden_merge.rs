@@ -95,15 +95,15 @@ async fn merge(label_selector: &str, max_nodes: i64) -> FlameGraph {
 async fn full_merge_pins_four_int_levels_and_fold_before_symbolize() {
     let fg = merge("{}", 2_048).await;
 
-    assert!(fg.names == vec!["total", "main", "other", "work", "inline_helper", "alloc"]);
+    assert!(fg.names == vec!["total", "main", "work", "inline_helper", "alloc", "other"]);
     assert!(fg.total == 21);
     assert!(fg.max_self == 17);
     assert!(fg.levels.len() == 5);
     assert!(fg.levels[0].values == vec![0, 21, 0, 0]);
     assert!(fg.levels[1].values == vec![0, 21, 0, 1]);
-    assert!(fg.levels[2].values == vec![0, 4, 4, 2, 0, 17, 0, 3]);
-    assert!(fg.levels[3].values == vec![4, 17, 0, 4]);
-    assert!(fg.levels[4].values == vec![4, 17, 17, 5]);
+    assert!(fg.levels[2].values == vec![0, 4, 4, 5, 0, 17, 0, 2]);
+    assert!(fg.levels[3].values == vec![4, 17, 0, 3]);
+    assert!(fg.levels[4].values == vec![4, 17, 17, 4]);
 }
 
 #[tokio::test]
@@ -120,13 +120,13 @@ async fn label_selector_filters_series_before_merge() {
 async fn max_nodes_truncates_to_synthetic_other_and_conserves_total() {
     let fg = merge("{}", 3).await;
 
-    assert!(fg.names == vec!["total", "main", "work", "other"]);
+    assert!(fg.names == vec!["total", "main", "other", "work"]);
     assert!(fg.total == 21);
     assert!(fg.max_self == 17);
     assert!(fg.levels[0].values == vec![0, 21, 0, 0]);
     assert!(fg.levels[1].values == vec![0, 21, 0, 1]);
-    assert!(fg.levels[2].values == vec![4, 17, 0, 2, -4, 4, 4, 3]);
-    assert!(fg.levels[3].values == vec![4, 17, 17, 3]);
+    assert!(fg.levels[2].values == vec![4, 17, 0, 3, -4, 4, 4, 2]);
+    assert!(fg.levels[3].values == vec![4, 17, 17, 2]);
 }
 
 #[test]

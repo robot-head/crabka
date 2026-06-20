@@ -7,7 +7,7 @@ use crabka_blockstore::LabelMatcher;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_pprof::{InMemoryProfileStore, ProfileError, ProfileScan, ProfileStats, ProfileStore};
 
-use crate::blockbuilder::intern_record;
+use crate::blockbuilder::{intern_record, profile_timestamp_ms};
 use crate::error::ProfilesError;
 use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord};
 
@@ -32,6 +32,7 @@ impl WalTailProfileStore {
         let stack_ids = intern_record(guard.symbols_mut(), &record)?;
         let total_value = record.samples.iter().map(|sample| sample.value).sum();
         for (sample, stack_id) in record.samples.iter().zip(stack_ids) {
+            let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
             match sample.span_id {
                 Some(span_id) => guard.push_sample_with_total_and_span(
                     &record.tenant,
@@ -41,7 +42,7 @@ impl WalTailProfileStore {
                     stack_id,
                     sample.value,
                     total_value,
-                    sample.timestamp_ns,
+                    timestamp_ms,
                     span_id,
                 ),
                 None => guard.push_sample_with_total(
@@ -52,7 +53,7 @@ impl WalTailProfileStore {
                     stack_id,
                     sample.value,
                     total_value,
-                    sample.timestamp_ns,
+                    timestamp_ms,
                 ),
             }
         }
@@ -178,7 +179,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_pprof::{EngineOpts, FlameEngine};
+    use crabka_pprof::{EngineOpts, FlameEngine, SeriesAgg};
 
     use crate::wal::{ProfileRecord, WalFunction, WalLocation, WalSample, WalSymbolSet};
 
@@ -231,5 +232,29 @@ mod tests {
 
         assert!(flamegraph.total == 9);
         assert!(flamegraph.names.iter().any(|name| name == "hot_fn"));
+    }
+
+    #[tokio::test]
+    async fn appended_wal_records_are_queryable_with_millisecond_timestamps() {
+        let store = super::WalTailProfileStore::new();
+        store.append_record(record()).unwrap();
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+
+        let series = engine
+            .select_series(
+                "tenant-a",
+                PT,
+                r#"{service_name="api"}"#,
+                &[],
+                1.0,
+                SeriesAgg::Sum,
+                0,
+                i64::MAX,
+            )
+            .await
+            .unwrap();
+
+        assert!(series.len() == 1);
+        assert!(series[0].points == vec![(1_700_000, 9.0)]);
     }
 }

@@ -1,5 +1,9 @@
 //! Multi-value split: one pprof with N `sample_type[]` becomes N profile series.
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+
+use crabka_blockstore::Labels;
 use crabka_pprof::ProfileType;
 
 use crate::error::ProfilesError;
@@ -21,6 +25,20 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
     }
 
     let sample_types = raw.profile.sample_types();
+    let timestamp_ns = raw.profile.inner().time_nanos;
+    let location_refs = raw
+        .profile
+        .inner()
+        .location
+        .iter()
+        .enumerate()
+        .map(|(idx, location)| {
+            let idx = u32::try_from(idx).map_err(|err| {
+                ProfilesError::Decode(format!("location index does not fit u32: {err}"))
+            })?;
+            Ok((location.id, idx))
+        })
+        .collect::<Result<HashMap<_, _>, ProfilesError>>()?;
     let mut out = Vec::with_capacity(sample_types.len());
     for (idx, (sample_type, sample_unit)) in sample_types.into_iter().enumerate() {
         if sample_type.is_empty() || sample_unit.is_empty() {
@@ -31,8 +49,8 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
 
         let profile_type = ProfileType {
             name: name.clone(),
-            sample_type,
-            sample_unit,
+            sample_type: sample_type.clone(),
+            sample_unit: sample_unit.clone(),
             period_type: period_type.clone(),
             period_unit: period_unit.clone(),
         }
@@ -42,8 +60,13 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
         labels.insert("__profile_type__", profile_type.clone());
         labels.insert("__period_type__", period_type.clone());
         labels.insert("__period_unit__", period_unit.clone());
+        labels.insert("__type__", sample_type.clone());
+        labels.insert("__unit__", sample_unit.clone());
+        if let Some(service_name) = raw.labels.get("service_name") {
+            labels.insert("__service_name__", service_name.to_string());
+        }
 
-        let mut samples = Vec::with_capacity(raw.profile.samples().len());
+        let mut groups = BTreeMap::<Vec<(String, String)>, (Labels, Vec<DecodedSample>)>::new();
         for sample in raw.profile.samples() {
             let value = sample
                 .value
@@ -54,30 +77,70 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
                 .location_id
                 .iter()
                 .map(|location| {
-                    u32::try_from(*location).map_err(|err| {
+                    location_refs.get(location).copied().ok_or_else(|| {
                         ProfilesError::Decode(format!(
-                            "location id {location} does not fit u32: {err}"
+                            "sample references missing location id {location}"
                         ))
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            samples.push(DecodedSample {
-                stacktrace_location_refs,
-                value,
-                timestamp_ns: 0,
-                span_id: None,
-                trace_id: None,
-            });
+            let sample_labels = labels_with_sample_labels(&labels, &raw.profile, sample);
+            let key = labels_key(&sample_labels);
+            groups
+                .entry(key)
+                .or_insert((sample_labels, Vec::new()))
+                .1
+                .push(DecodedSample {
+                    stacktrace_location_refs,
+                    value,
+                    timestamp_ns,
+                    span_id: None,
+                    trace_id: None,
+                });
         }
 
-        out.push(DecodedProfile {
-            labels,
-            profile_type,
-            samples,
-        });
+        out.extend(
+            groups
+                .into_values()
+                .map(|(labels, samples)| DecodedProfile {
+                    labels,
+                    profile_type: profile_type.clone(),
+                    samples,
+                }),
+        );
     }
 
     Ok(out)
+}
+
+fn labels_with_sample_labels(
+    base: &Labels,
+    profile: &crabka_pprof::PprofProfile,
+    sample: &crabka_pprof::proto::Sample,
+) -> Labels {
+    let mut labels = base.clone();
+    for label in &sample.label {
+        if label.str <= 0 {
+            continue;
+        }
+        let Some(name) = profile.string(label.key) else {
+            continue;
+        };
+        if labels.get(name).is_some() {
+            continue;
+        }
+        if let Some(value) = profile.string(label.str) {
+            labels.insert(name.to_string(), value.to_string());
+        }
+    }
+    labels
+}
+
+fn labels_key(labels: &Labels) -> Vec<(String, String)> {
+    labels
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -101,6 +164,12 @@ mod tests {
                 value: vec![3, 4096],
                 label: Vec::new(),
             }],
+            location: (1..=7)
+                .map(|id| crabka_pprof::proto::Location {
+                    id,
+                    ..Default::default()
+                })
+                .collect(),
             string_table: vec![
                 String::new(),
                 "alloc_objects".to_string(),
@@ -110,6 +179,7 @@ mod tests {
                 "space".to_string(),
             ],
             period_type: Some(crabka_pprof::proto::ValueType { r#type: 5, unit: 4 }),
+            time_nanos: 123_000_000,
             ..Default::default()
         };
         PprofProfile::from(profile)
@@ -154,9 +224,117 @@ mod tests {
 
         assert!(objects.samples[0].value == 3);
         assert!(space.samples[0].value == 4096);
-        assert!(objects.samples[0].stacktrace_location_refs == vec![7]);
+        assert!(objects.samples[0].timestamp_ns == 123_000_000);
+        assert!(objects.samples[0].stacktrace_location_refs == vec![6]);
         assert!(objects.labels.get("__profile_type__") == Some(objects.profile_type.as_str()));
         assert!(objects.labels.get("__period_type__") == Some("space"));
         assert!(objects.labels.get("__period_unit__") == Some("bytes"));
+        assert!(objects.labels.get("__type__") == Some("alloc_objects"));
+        assert!(objects.labels.get("__unit__") == Some("count"));
+        assert!(objects.labels.get("__service_name__") == Some("api"));
+    }
+
+    #[test]
+    fn split_normalizes_pprof_location_ids_to_symbol_indices() {
+        let profile = crabka_pprof::proto::Profile {
+            sample_type: vec![crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }],
+            sample: vec![crabka_pprof::proto::Sample {
+                location_id: vec![2],
+                value: vec![5],
+                label: Vec::new(),
+            }],
+            location: vec![
+                crabka_pprof::proto::Location {
+                    id: 1,
+                    ..Default::default()
+                },
+                crabka_pprof::proto::Location {
+                    id: 2,
+                    ..Default::default()
+                },
+            ],
+            string_table: vec![
+                String::new(),
+                "samples".to_string(),
+                "count".to_string(),
+                "sample".to_string(),
+            ],
+            period_type: Some(crabka_pprof::proto::ValueType { r#type: 3, unit: 2 }),
+            ..Default::default()
+        };
+        let mut labels = Labels::new();
+        labels.insert("__name__", "samples");
+        labels.insert("service_name", "api");
+
+        let out = split_sample_types(&RawProfile {
+            labels,
+            profile: PprofProfile::from(profile),
+        })
+        .unwrap();
+
+        assert!(out[0].samples[0].stacktrace_location_refs == vec![1]);
+    }
+
+    #[test]
+    fn split_promotes_pprof_string_sample_labels_to_series_labels() {
+        let profile = crabka_pprof::proto::Profile {
+            sample_type: vec![crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }],
+            sample: vec![
+                crabka_pprof::proto::Sample {
+                    location_id: vec![1],
+                    value: vec![5],
+                    label: vec![crabka_pprof::proto::Label {
+                        key: 4,
+                        str: 5,
+                        num: 0,
+                        num_unit: 0,
+                    }],
+                },
+                crabka_pprof::proto::Sample {
+                    location_id: vec![1],
+                    value: vec![7],
+                    label: vec![crabka_pprof::proto::Label {
+                        key: 4,
+                        str: 6,
+                        num: 0,
+                        num_unit: 0,
+                    }],
+                },
+            ],
+            location: vec![crabka_pprof::proto::Location {
+                id: 1,
+                ..Default::default()
+            }],
+            string_table: vec![
+                String::new(),
+                "samples".to_string(),
+                "count".to_string(),
+                "sample".to_string(),
+                "target".to_string(),
+                "all".to_string(),
+                "self".to_string(),
+            ],
+            period_type: Some(crabka_pprof::proto::ValueType { r#type: 3, unit: 2 }),
+            ..Default::default()
+        };
+        let mut labels = Labels::new();
+        labels.insert("__name__", "samples");
+        labels.insert("service_name", "api");
+
+        let out = split_sample_types(&RawProfile {
+            labels,
+            profile: PprofProfile::from(profile),
+        })
+        .unwrap();
+
+        assert!(out.len() == 2);
+        assert!(
+            out.iter()
+                .any(|profile| profile.labels.get("target") == Some("all"))
+        );
+        assert!(
+            out.iter()
+                .any(|profile| profile.labels.get("target") == Some("self"))
+        );
     }
 }

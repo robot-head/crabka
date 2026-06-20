@@ -449,7 +449,7 @@ mod tests {
             samples: vec![WalSample {
                 stacktrace_location_refs: stack,
                 value,
-                timestamp_ns: 1000,
+                timestamp_ns: 1_000_000_000,
                 span_id: None,
                 trace_id: None,
             }],

@@ -14,7 +14,7 @@ use crate::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
         PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
     },
-    series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
+    series::{fold_bucket, step_ms_from_secs},
     tree_to_pprof,
 };
 
@@ -128,7 +128,8 @@ impl<S: ProfileStore> FlameEngine<S> {
         });
         let sql = format!(
             "SELECT {partition}, {stacktrace}, SUM({value}) AS v \
-             FROM {table}{span_where} GROUP BY {partition}, {stacktrace}",
+             FROM {table}{span_where} GROUP BY {partition}, {stacktrace} \
+             ORDER BY {partition}, {stacktrace}",
             partition = PCOL_STACKTRACE_PARTITION,
             stacktrace = PCOL_STACKTRACE_ID,
             value = PCOL_VALUE,
@@ -174,7 +175,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Series>, ProfileError> {
-        let step_ms = step_ms_from_secs(step_secs)?;
+        let _step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
             vec![Vec::new()]
@@ -217,8 +218,10 @@ impl<S: ProfileStore> FlameEngine<S> {
                 let timestamps = batch.column(0).as_primitive::<Int64Type>();
                 let totals = batch.column(1).as_primitive::<Int64Type>();
                 for row in 0..batch.num_rows() {
-                    let bucket = step_bucket_ms(timestamps.value(row), step_ms);
-                    buckets.entry(bucket).or_default().push(totals.value(row));
+                    buckets
+                        .entry(timestamps.value(row))
+                        .or_default()
+                        .push(totals.value(row));
                 }
             }
             if buckets.is_empty() {
@@ -913,7 +916,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_series_sum_buckets_total_value_once_per_profile() {
+    async fn select_series_sum_keeps_profile_timestamps_and_counts_total_once_per_profile() {
         let mut got = series_fixture()
             .select_series(
                 "tenant-a",
@@ -930,13 +933,13 @@ mod tests {
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
         assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
+        assert!(got[0].points == vec![(0, 100.0), (16_000, 50.0)]);
         assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
         assert!(got[1].points == vec![(0, 7.0)]);
     }
 
     #[tokio::test]
-    async fn select_series_average_and_label_selector() {
+    async fn select_series_average_and_label_selector_keeps_profile_timestamps() {
         let got = series_fixture()
             .select_series(
                 "tenant-a",
@@ -954,7 +957,7 @@ mod tests {
         assert!(
             got == vec![Series {
                 labels: Vec::new(),
-                points: vec![(0, 75.0)],
+                points: vec![(0, 100.0), (16_000, 50.0)],
             }]
         );
     }
@@ -976,7 +979,7 @@ mod tests {
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
         assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        assert!(got[0].points == vec![(0, 100.0), (15_000, 50.0)]);
+        assert!(got[0].points == vec![(0, 100.0), (16_000, 50.0)]);
         assert!(got[1].labels == vec![("service".to_string(), "web".to_string())]);
         assert!(got[1].points == vec![(0, 7.0)]);
     }

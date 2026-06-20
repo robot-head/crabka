@@ -20,6 +20,7 @@ use crate::error::ProfilesError;
 use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord, WalMapping, WalSymbolSet};
 
 pub const STACKTRACE_PARTITION: u64 = 0;
+const NANOS_PER_MILLI: i64 = 1_000_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltSample {
@@ -87,6 +88,11 @@ pub fn intern_record(symdb: &mut SymbolDb, rec: &ProfileRecord) -> Result<Vec<u3
         .collect()
 }
 
+#[must_use]
+pub fn profile_timestamp_ms(timestamp_ns: i64) -> i64 {
+    timestamp_ns.div_euclid(NANOS_PER_MILLI)
+}
+
 pub fn samples_batch(rows: &[BuiltSample]) -> Result<RecordBatch, ProfilesError> {
     let rows = rows
         .iter()
@@ -128,11 +134,12 @@ pub async fn build_block(
         fingerprints.insert(fp);
         let total_value = rec.samples.iter().map(|sample| sample.value).sum();
         for (sample, stack_id) in rec.samples.iter().zip(stack_ids) {
-            min_ts = min_ts.min(sample.timestamp_ns);
-            max_ts = max_ts.max(sample.timestamp_ns);
+            let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
+            min_ts = min_ts.min(timestamp_ms);
+            max_ts = max_ts.max(timestamp_ms);
             rows.push(BuiltSample {
                 series_fingerprint: fp,
-                timestamp_ns: sample.timestamp_ns,
+                timestamp_ns: timestamp_ms,
                 profile_type: rec.profile_type.clone(),
                 stacktrace_id: u64::from(stack_id),
                 value: sample.value,
@@ -476,6 +483,8 @@ mod tests {
         assert!(metas.len() == 1);
         assert!(metas[0].tenant == "t");
         assert!(metas[0].row_count == 2);
+        assert!(metas[0].min_ts == 1_700_000_000_000);
+        assert!(metas[0].max_ts == 1_700_000_000_000);
         let symdb_key = format!("{}.symdb", metas[0].object_key);
         assert!(
             store

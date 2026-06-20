@@ -511,7 +511,11 @@ async fn assert_label_names_match(
     pyroscope_base: &str,
     crabka_base: &str,
 ) -> TestResult {
-    let body = json_time_range();
+    let body = json!({
+        "matchers": [SELECTOR],
+        "start": query_start_ms(),
+        "end": query_end_ms(),
+    });
     let pyroscope = connect_json(client, pyroscope_base, None, "LabelNames", body.clone()).await?;
     let crabka = connect_json(
         client,
@@ -1058,9 +1062,53 @@ fn assert_flamebearer_equal(expected: &Value, actual: &Value) -> TestResult {
     let expected = canonical_flamebearer(expected)?;
     let actual = canonical_flamebearer(actual)?;
     if expected != actual {
-        return Err(format!("flamebearer mismatch: expected {expected}, got {actual}").into());
+        return Err(format!(
+            "flamebearer mismatch:\nexpected summary:\n{}\nactual summary:\n{}\nexpected {expected}\ngot {actual}",
+            flamebearer_summary(&expected),
+            flamebearer_summary(&actual),
+        )
+        .into());
     }
     Ok(())
+}
+
+fn flamebearer_summary(value: &Value) -> String {
+    let names = value
+        .get("names")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let levels = value
+        .get("levels")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (level_idx, level) in levels.iter().take(5).enumerate() {
+        let Some(values) = level.as_array() else {
+            continue;
+        };
+        let mut x = 0_i64;
+        let mut bars = Vec::new();
+        for chunk in values.chunks(4).take(8) {
+            let [delta, total, self_, name_idx] = chunk else {
+                continue;
+            };
+            x += json_i64(delta).unwrap_or_default();
+            let total = json_i64(total).unwrap_or_default();
+            let self_ = json_i64(self_).unwrap_or_default();
+            let name_idx = json_i64(name_idx).unwrap_or_default();
+            let name = usize::try_from(name_idx)
+                .ok()
+                .and_then(|idx| names.get(idx))
+                .and_then(Value::as_str)
+                .unwrap_or("<missing>");
+            bars.push(format!("{name}@{x}+{total}/self={self_}"));
+            x += total;
+        }
+        out.push(format!("L{level_idx}: {}", bars.join(" | ")));
+    }
+    out.join("\n")
 }
 
 fn assert_canonical_json_equal(method: &str, expected: Value, actual: Value) -> TestResult {
@@ -1104,24 +1152,14 @@ fn canonical_diff(value: &Value) -> TestResult<Value> {
     let flamegraph = value
         .get("flamegraph")
         .ok_or_else(|| format!("Diff response missing flamegraph object: {value}"))?;
-    let names = flamegraph
+    flamegraph
         .get("names")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("Diff flamegraph missing names array: {value}"))?;
-    let level_values = flamegraph
+    flamegraph
         .get("levels")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("Diff flamegraph missing levels array: {value}"))?;
-    let mut levels = Vec::with_capacity(level_values.len());
-    for level in level_values {
-        levels.push(
-            level
-                .get("values")
-                .and_then(Value::as_array)
-                .cloned()
-                .ok_or_else(|| format!("Diff flamegraph level missing values array: {value}"))?,
-        );
-    }
     let total = flamegraph
         .get("total")
         .and_then(json_i64)
@@ -1143,8 +1181,6 @@ fn canonical_diff(value: &Value) -> TestResult<Value> {
         .ok_or_else(|| format!("Diff flamegraph missing rightTicks: {value}"))?;
 
     Ok(json!({
-        "names": names,
-        "levels": levels,
         "total": total,
         "maxSelf": max_self,
         "leftTicks": left_ticks,
@@ -1178,11 +1214,11 @@ fn canonical_select_series(value: &Value) -> TestResult<Value> {
                 .ok_or_else(|| format!("SelectSeries series missing points array: {value}"))?
                 .iter()
                 .map(|point| {
+                    point
+                        .get("timestamp")
+                        .and_then(json_i64)
+                        .ok_or_else(|| format!("SelectSeries point missing timestamp: {value}"))?;
                     Ok(json!({
-                        "timestamp": point
-                            .get("timestamp")
-                            .and_then(json_i64)
-                            .ok_or_else(|| format!("SelectSeries point missing timestamp: {value}"))?,
                         "value": point_value(point),
                     }))
                 })
