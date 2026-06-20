@@ -102,6 +102,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
     assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
+    assert_label_names_match(&client, &pyroscope_base, &crabka.querier_base).await?;
     assert_label_values_match(&client, &pyroscope_base, &crabka.querier_base, "env").await?;
     assert_select_merge_stacktraces_match(&client, &pyroscope_base, &crabka.querier_base).await?;
     assert_select_series_match(&client, &pyroscope_base, &crabka.querier_base).await?;
@@ -503,6 +504,25 @@ async fn assert_label_values_contain(
         return Err(format!("LabelValues({name}) did not include {expected}: {response}").into());
     }
     Ok(())
+}
+
+async fn assert_label_names_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+) -> TestResult {
+    let body = json_time_range();
+    let pyroscope = connect_json(client, pyroscope_base, None, "LabelNames", body.clone()).await?;
+    let crabka = connect_json(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "LabelNames",
+        body.clone(),
+    )
+    .await?;
+
+    assert_label_names_equal(&pyroscope, &crabka)
 }
 
 async fn assert_profile_types_match(
@@ -1052,6 +1072,14 @@ fn assert_canonical_json_equal(method: &str, expected: Value, actual: Value) -> 
     Ok(())
 }
 
+fn assert_label_names_equal(expected: &Value, actual: &Value) -> TestResult {
+    assert_canonical_json_equal(
+        "LabelNames",
+        canonical_string_list(expected, "names")?,
+        canonical_string_list(actual, "names")?,
+    )
+}
+
 fn assert_connect_flamegraph_equal(method: &str, expected: &Value, actual: &Value) -> TestResult {
     assert_canonical_json_equal(
         method,
@@ -1307,6 +1335,15 @@ fn connect_differential_rejects_canonical_response_drift() {
     let actual = json!({ "names": ["__name__", "service_name"] });
 
     let err = assert_canonical_json_equal("LabelNames", expected, actual).unwrap_err();
+    assert!(err.to_string().contains("LabelNames mismatch"));
+}
+
+#[test]
+fn label_names_differential_rejects_name_drift() {
+    let expected = json!({ "names": ["__name__", "env"] });
+    let actual = json!({ "names": ["__name__", "service_name"] });
+
+    let err = assert_label_names_equal(&expected, &actual).unwrap_err();
     assert!(err.to_string().contains("LabelNames mismatch"));
 }
 
