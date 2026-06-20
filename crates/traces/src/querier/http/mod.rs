@@ -393,20 +393,65 @@ fn search_query(uri: &Uri) -> Option<String> {
 }
 
 fn tags_to_traceql(tags: &str) -> Option<String> {
-    let parts = tags
-        .split_whitespace()
-        .map(|part| {
-            let (key, value) = part.split_once('=')?;
-            (!key.is_empty()).then(|| {
-                format!(
-                    "{} = \"{}\"",
-                    traceql_tag_field(key),
-                    value.replace('\\', "\\\\").replace('"', "\\\"")
-                )
-            })
+    let parts = parse_logfmt_tags(tags)?
+        .into_iter()
+        .map(|(key, value)| {
+            format!(
+                "{} = \"{}\"",
+                traceql_tag_field(&key),
+                value.replace('\\', "\\\\").replace('"', "\\\"")
+            )
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Vec<_>>();
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(" && ")))
+}
+
+fn parse_logfmt_tags(tags: &str) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let mut rest = tags.trim_start();
+    while !rest.is_empty() {
+        let key_end = rest.find('=')?;
+        let key = &rest[..key_end];
+        if key.is_empty() || key.chars().any(char::is_whitespace) {
+            return None;
+        }
+        rest = &rest[key_end + 1..];
+        let (value, consumed) = parse_logfmt_value(rest)?;
+        out.push((key.to_string(), value));
+        rest = rest[consumed..].trim_start();
+    }
+    Some(out)
+}
+
+fn parse_logfmt_value(input: &str) -> Option<(String, usize)> {
+    if let Some(input) = input.strip_prefix('"') {
+        let mut value = String::new();
+        let mut escaped = false;
+        for (idx, ch) in input.char_indices() {
+            if escaped {
+                value.push(match ch {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                return Some((value, idx + 2));
+            } else {
+                value.push(ch);
+            }
+        }
+        return None;
+    }
+
+    let end = input
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(input.len());
+    Some((input[..end].to_string(), end))
 }
 
 fn traceql_tag_field(key: &str) -> String {
@@ -1462,6 +1507,15 @@ mod tests {
     #[tokio::test]
     async fn search_accepts_legacy_tags_parameter() {
         let (status, body) = get_json("/api/search?tags=svc%3Db&start=0&end=10").await;
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
+        assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
+    }
+
+    #[tokio::test]
+    async fn search_accepts_quoted_legacy_tags_parameter() {
+        let (status, body) = get_json("/api/search?tags=svc%3D%22b%22&start=0&end=10").await;
+
         assert!(status == StatusCode::OK);
         assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
         assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
