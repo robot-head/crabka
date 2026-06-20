@@ -26,15 +26,7 @@ fn any_to_attr(value: &AnyValue) -> Option<AttrValue> {
         Value::DoubleValue(value) => Some(AttrValue::Double(*value)),
         Value::BoolValue(value) => Some(AttrValue::Bool(*value)),
         Value::BytesValue(value) => Some(AttrValue::Bytes(value.clone())),
-        Value::ArrayValue(value) => Some(AttrValue::Str(format!(
-            "[{}]",
-            value
-                .values
-                .iter()
-                .filter_map(any_to_text)
-                .collect::<Vec<_>>()
-                .join(",")
-        ))),
+        Value::ArrayValue(_) => None,
         Value::KvlistValue(value) => Some(AttrValue::Str(format!(
             "{{{}}}",
             value
@@ -57,16 +49,34 @@ fn any_to_text(value: &AnyValue) -> Option<String> {
     }
 }
 
-fn kvs(attrs: &[OtlpKv]) -> Vec<KeyValue> {
-    attrs
-        .iter()
-        .filter_map(|attr| {
-            Some(KeyValue {
-                key: attr.key.clone(),
-                value: any_to_attr(attr.value.as_ref()?)?,
+fn kv_to_attrs(attr: &OtlpKv) -> Vec<KeyValue> {
+    let Some(value) = attr.value.as_ref() else {
+        return Vec::new();
+    };
+    match value.value.as_ref() {
+        Some(Value::ArrayValue(array)) => array
+            .values
+            .iter()
+            .filter_map(|value| {
+                Some(KeyValue {
+                    key: attr.key.clone(),
+                    value: any_to_attr(value)?,
+                })
             })
-        })
-        .collect()
+            .collect(),
+        _ => any_to_attr(value)
+            .map(|value| {
+                vec![KeyValue {
+                    key: attr.key.clone(),
+                    value,
+                }]
+            })
+            .unwrap_or_default(),
+    }
+}
+
+fn kvs(attrs: &[OtlpKv]) -> Vec<KeyValue> {
+    attrs.iter().flat_map(kv_to_attrs).collect()
 }
 
 fn status_of(status: Option<&Status>) -> (StatusCode, String) {
@@ -165,7 +175,7 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
 mod tests {
     use assert2::assert;
     use opentelemetry_proto::tonic::common::v1::{
-        AnyValue, InstrumentationScope, KeyValue as OtlpKv, any_value::Value,
+        AnyValue, ArrayValue, InstrumentationScope, KeyValue as OtlpKv, any_value::Value,
     };
     use opentelemetry_proto::tonic::resource::v1::Resource;
     use opentelemetry_proto::tonic::trace::v1::{
@@ -234,6 +244,40 @@ mod tests {
             )
         );
         assert!(span.span_attrs.iter().any(|attr| attr.key == "http.method"));
+    }
+
+    #[test]
+    fn decodes_array_attributes_as_repeated_values() {
+        let mut data = data();
+        data.resource_spans[0].scope_spans[0].spans[0]
+            .attributes
+            .push(OtlpKv {
+                key: "http.method".into(),
+                value: Some(AnyValue {
+                    value: Some(Value::ArrayValue(ArrayValue {
+                        values: vec![
+                            AnyValue {
+                                value: Some(Value::StringValue("GET".into())),
+                            },
+                            AnyValue {
+                                value: Some(Value::StringValue("POST".into())),
+                            },
+                        ],
+                    })),
+                }),
+                ..OtlpKv::default()
+            });
+
+        let spans = decode_otlp(&data).unwrap();
+        let methods = spans[0]
+            .span_attrs
+            .iter()
+            .filter(|attr| attr.key == "http.method")
+            .map(|attr| &attr.value)
+            .collect::<Vec<_>>();
+
+        assert!(methods.contains(&&AttrValue::Str("GET".into())));
+        assert!(methods.contains(&&AttrValue::Str("POST".into())));
     }
 
     #[test]

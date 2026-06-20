@@ -31,6 +31,20 @@ pub(crate) async fn plan_selector<S: SpanStore>(
     let scan = store
         .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
         .await?;
+    if !has_nested_scope(fe)
+        && !has_parent_scope(fe)
+        && field_expr_to_matcher_disjuncts(fe).is_some_and(|disjuncts| disjuncts.len() == 1)
+    {
+        let plan = scan
+            .ctx
+            .table(&scan.span_table)
+            .await?
+            .into_unoptimized_plan();
+        return Ok(PlannedSpanset {
+            ctx: scan.ctx,
+            plan,
+        });
+    }
     let table = ident(&scan.span_table);
     let sql = selector_sql(&table, fe)?;
     let df = scan.ctx.sql(&sql).await?;

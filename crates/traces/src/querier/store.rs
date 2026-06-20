@@ -426,14 +426,15 @@ fn is_link_matcher(matcher: &SpanMatcher) -> bool {
 
 fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool {
     let is_match = match matcher.scope {
-        MatchScope::Event => event
-            .attributes
-            .iter()
-            .find(|(key, _)| key == &matcher.key)
-            .map_or_else(
-                || nil_matches(matcher.op, &matcher.value),
-                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-            ),
+        MatchScope::Event => {
+            let values = event
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
+        }
         MatchScope::Intrinsic => match matcher.key.as_str() {
             "event:name" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| string_matches(&event.name, matcher.op, &matcher.value)),
@@ -468,14 +469,15 @@ fn event_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
 
 fn link_matcher_matches_link(link: &LinkRef, matcher: &SpanMatcher) -> bool {
     let is_match = match matcher.scope {
-        MatchScope::Link => link
-            .attributes
-            .iter()
-            .find(|(key, _)| key == &matcher.key)
-            .map_or_else(
-                || nil_matches(matcher.op, &matcher.value),
-                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-            ),
+        MatchScope::Link => {
+            let values = link
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
+        }
         MatchScope::Intrinsic => match matcher.key.as_str() {
             "link:traceID" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| {
@@ -513,23 +515,22 @@ fn row_matcher_matches(
 ) -> Result<bool, TraceqlError> {
     let is_match = match matcher.scope {
         MatchScope::Event => event_values(batch, row)?.iter().any(|event| {
-            event
+            let values = event
                 .attributes
                 .iter()
-                .find(|(key, _)| key == &matcher.key)
-                .map_or_else(
-                    || nil_matches(matcher.op, &matcher.value),
-                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-                )
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
         }),
         MatchScope::Link => link_values(batch, row)?.iter().any(|link| {
-            link.attributes
+            let values = link
+                .attributes
                 .iter()
-                .find(|(key, _)| key == &matcher.key)
-                .map_or_else(
-                    || nil_matches(matcher.op, &matcher.value),
-                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-                )
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
         }),
         MatchScope::Intrinsic => intrinsic_matches(batch, row, matcher)?,
         MatchScope::Resource => resource_matches(batch, row, matcher)?,
@@ -553,13 +554,13 @@ fn batch_attr_matches(
     op: MatchCmp,
     expected: &MatchValue,
 ) -> Result<bool, TraceqlError> {
-    Ok(attr_values(batch, row)?
+    let attrs = attr_values(batch, row)?;
+    let values = attrs
         .iter()
-        .find(|(attr_key, _)| attr_key == key)
-        .map_or_else(
-            || nil_matches(op, expected),
-            |(_, value)| attr_matches(value, op, expected),
-        ))
+        .filter(|(attr_key, _)| attr_key == key)
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    Ok(attr_values_match(&values, op, expected))
 }
 
 fn resource_matches(
@@ -747,6 +748,26 @@ fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool 
         AttrValue::Int(value) => int_matches(*value, op, expected),
         AttrValue::Float(value) => float_matches(*value, op, expected),
         AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn attr_values_match(values: &[&AttrValue], op: MatchCmp, expected: &MatchValue) -> bool {
+    if values.is_empty() {
+        return nil_matches(op, expected);
+    }
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    match op {
+        MatchCmp::Neq | MatchCmp::Nre => {
+            values.iter().all(|value| attr_matches(value, op, expected))
+        }
+        MatchCmp::Eq
+        | MatchCmp::Re
+        | MatchCmp::Lt
+        | MatchCmp::Lte
+        | MatchCmp::Gt
+        | MatchCmp::Gte => values.iter().any(|value| attr_matches(value, op, expected)),
     }
 }
 
@@ -2208,6 +2229,75 @@ mod tests {
                 .iter()
                 .any(|trace| trace.trace_id == no_event.trace_id)
         );
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_search_applies_repeated_attr_any_none_semantics() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let mut repeated = span_with_nested_refs();
+        repeated.span_attrs.push(KeyValue {
+            key: "http.method".into(),
+            value: SpanAttrValue::Str("GET".into()),
+        });
+        repeated.span_attrs.push(KeyValue {
+            key: "http.method".into(),
+            value: SpanAttrValue::Str("POST".into()),
+        });
+        let mut other = span_with_nested_refs();
+        other.trace_id = [3; 16];
+        other.span_id = [4; 8];
+        other.span_attrs.push(KeyValue {
+            key: "http.method".into(),
+            value: SpanAttrValue::Str("DELETE".into()),
+        });
+        let batch = span_batch(&[repeated.clone(), other.clone()]).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/search-array-attrs.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&repeated.trace_id);
+        bloom.insert(&other.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let resp = engine
+            .search("tenant", "{ span.http.method = \"POST\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == repeated.trace_id);
+
+        let resp = engine
+            .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == other.trace_id);
     }
 
     #[tokio::test]

@@ -1659,6 +1659,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_applies_array_any_none_semantics_to_repeated_attrs() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    attrs: vec![
+                        ("http.method".into(), AttrValue::Str("GET".into())),
+                        ("http.method".into(), AttrValue::Str("POST".into())),
+                    ],
+                    ..sp(9, 1, None, "a")
+                },
+                InputSpan {
+                    attrs: vec![("http.method".into(), AttrValue::Str("DELETE".into()))],
+                    ..sp(9, 2, Some(1), "b")
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ span.http.method = \"POST\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+
+        let r = e
+            .search("t", "{ span.http.method != \"POST\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
     async fn search_selector_matches_link_attribute_scope() {
         let mut span = sp(9, 1, None, "a");
         span.links = vec![LinkRef {

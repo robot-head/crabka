@@ -502,14 +502,15 @@ fn is_link_matcher(matcher: &SpanMatcher) -> bool {
 
 fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool {
     let is_match = match matcher.scope {
-        MatchScope::Event => event
-            .attributes
-            .iter()
-            .find(|(key, _)| key == &matcher.key)
-            .map_or_else(
-                || nil_matches(matcher.op, &matcher.value),
-                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-            ),
+        MatchScope::Event => {
+            let values = event
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
+        }
         MatchScope::Intrinsic => match matcher.key.as_str() {
             "event:name" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| string_matches(&event.name, matcher.op, &matcher.value)),
@@ -544,14 +545,15 @@ fn event_matcher_matches_absence(matcher: &SpanMatcher) -> bool {
 
 fn link_matcher_matches_link(link: &LinkRef, matcher: &SpanMatcher) -> bool {
     let is_match = match matcher.scope {
-        MatchScope::Link => link
-            .attributes
-            .iter()
-            .find(|(key, _)| key == &matcher.key)
-            .map_or_else(
-                || nil_matches(matcher.op, &matcher.value),
-                |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-            ),
+        MatchScope::Link => {
+            let values = link
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
+        }
         MatchScope::Intrinsic => match matcher.key.as_str() {
             "link:traceID" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| {
@@ -591,23 +593,22 @@ fn matcher_matches(
 ) -> bool {
     let is_match = match matcher.scope {
         MatchScope::Event => span.events.iter().any(|event| {
-            event
+            let values = event
                 .attributes
                 .iter()
-                .find(|(key, _)| key == &matcher.key)
-                .map_or_else(
-                    || nil_matches(matcher.op, &matcher.value),
-                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-                )
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
         }),
         MatchScope::Link => span.links.iter().any(|link| {
-            link.attributes
+            let values = link
+                .attributes
                 .iter()
-                .find(|(key, _)| key == &matcher.key)
-                .map_or_else(
-                    || nil_matches(matcher.op, &matcher.value),
-                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
-                )
+                .filter(|(key, _)| key == &matcher.key)
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>();
+            attr_values_match(&values, matcher.op, &matcher.value)
         }),
         MatchScope::Intrinsic => intrinsic_matches(trace, span, nested_sets, idx, matcher),
         MatchScope::Resource => resource_matches(trace, matcher),
@@ -623,13 +624,13 @@ fn matcher_matches(
 }
 
 fn span_attr_matches(span: &InputSpan, key: &str, op: MatchCmp, expected: &MatchValue) -> bool {
-    span.attrs
+    let values = span
+        .attrs
         .iter()
-        .find(|(attr_key, _)| attr_key == key)
-        .map_or_else(
-            || nil_matches(op, expected),
-            |(_, value)| attr_matches(value, op, expected),
-        )
+        .filter(|(attr_key, _)| attr_key == key)
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    attr_values_match(&values, op, expected)
 }
 
 fn resource_matches(trace: &StoredTrace, matcher: &SpanMatcher) -> bool {
@@ -756,6 +757,26 @@ fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool 
         AttrValue::Int(value) => int_matches(*value, op, expected),
         AttrValue::Float(value) => float_matches(*value, op, expected),
         AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn attr_values_match(values: &[&AttrValue], op: MatchCmp, expected: &MatchValue) -> bool {
+    if values.is_empty() {
+        return nil_matches(op, expected);
+    }
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    match op {
+        MatchCmp::Neq | MatchCmp::Nre => {
+            values.iter().all(|value| attr_matches(value, op, expected))
+        }
+        MatchCmp::Eq
+        | MatchCmp::Re
+        | MatchCmp::Lt
+        | MatchCmp::Lte
+        | MatchCmp::Gt
+        | MatchCmp::Gte => values.iter().any(|value| attr_matches(value, op, expected)),
     }
 }
 
