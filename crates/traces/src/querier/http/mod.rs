@@ -1589,6 +1589,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tag_values_v2_returns_intrinsic_values() {
+        let (status, body) = get_json("/api/v2/search/tag/span:name/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "span"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let (status, body) = get_json("/api/v2/search/tag/trace:rootService/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "svc-a"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn search_tag_values_v2_rejects_invalid_query_filter_as_bad_request() {
         let (status, body) = get_text("/api/v2/search/tag/.svc/values?q=%7B").await;
 

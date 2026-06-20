@@ -4,16 +4,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, LargeStringArray,
-    StringArray, StringViewArray,
+    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
+    LargeStringArray, StringArray, StringViewArray,
 };
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{BlockIndex, BlockStore, TraceIndex, span_block_schema};
 use crabka_traceql::{
-    ATTR_PREFIX, AttrValue, COL_DURATION, COL_NAME, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
-    COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_TRACE_ID, ScanResult, ScopedTag, SpanMatcher,
-    SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
+    ATTR_PREFIX, AttrValue, COL_DURATION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT,
+    COL_PARENT_ID, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID,
+    COL_START, COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult,
+    ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue,
+    span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -179,6 +181,11 @@ impl SpanStore for CrabkaSpanStore {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
+        if is_intrinsic_tag(tag) {
+            let scan = self.scan(tenant, &[], start_ns, end_ns).await?;
+            let batches = collect_table(&scan.ctx, &scan.span_table).await?;
+            return intrinsic_values_from_batches(tag, &batches);
+        }
         let mut values: BTreeSet<(String, String)> = self
             .trace_index
             .tag_values(tenant, tag, start_ns, end_ns)
@@ -246,6 +253,118 @@ fn trace_from_batches(
         root_trace_name,
         spans,
     }))
+}
+
+fn is_intrinsic_tag(tag: &str) -> bool {
+    tag.contains(':')
+}
+
+fn intrinsic_values_from_batches(
+    tag: &str,
+    batches: &[RecordBatch],
+) -> Result<Vec<TypedValue>, TraceqlError> {
+    let mut values = BTreeSet::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            collect_intrinsic_value(batch, row, tag, &mut values)?;
+        }
+    }
+    Ok(values
+        .into_iter()
+        .map(|(type_, value)| TypedValue { type_, value })
+        .collect())
+}
+
+fn collect_intrinsic_value(
+    batch: &RecordBatch,
+    row: usize,
+    tag: &str,
+    values: &mut BTreeSet<(String, String)>,
+) -> Result<(), TraceqlError> {
+    match tag {
+        "span:duration" => {
+            values.insert((
+                "duration".to_string(),
+                int64_value(batch, COL_DURATION, row)?.to_string(),
+            ));
+        }
+        "span:id" => {
+            values.insert((
+                "string".to_string(),
+                bytes_to_hex(fixed(batch, COL_SPAN_ID)?.value(row)),
+            ));
+        }
+        "span:kind" => {
+            values.insert((
+                "int".to_string(),
+                int32_value(batch, COL_KIND, row)?.to_string(),
+            ));
+        }
+        "span:name" => {
+            values.insert(("string".to_string(), string_value(batch, COL_NAME, row)?));
+        }
+        "span:parentID" => {
+            if let Some(parent_id) = nullable_fixed_value::<8>(batch, COL_PARENT_SPAN_ID, row)? {
+                values.insert(("string".to_string(), bytes_to_hex(&parent_id)));
+            }
+        }
+        "span:status" => {
+            values.insert((
+                "int".to_string(),
+                int32_value(batch, COL_STATUS_CODE, row)?.to_string(),
+            ));
+        }
+        "span:statusMessage" => {
+            let message = string_value(batch, COL_STATUS_MESSAGE, row)?;
+            if !message.is_empty() {
+                values.insert(("string".to_string(), message));
+            }
+        }
+        "span:nestedSetLeft" => {
+            values.insert((
+                "int".to_string(),
+                int32_value(batch, COL_NS_LEFT, row)?.to_string(),
+            ));
+        }
+        "span:nestedSetParent" => {
+            values.insert((
+                "int".to_string(),
+                int32_value(batch, COL_PARENT_ID, row)?.to_string(),
+            ));
+        }
+        "span:nestedSetRight" => {
+            values.insert((
+                "int".to_string(),
+                int32_value(batch, COL_NS_RIGHT, row)?.to_string(),
+            ));
+        }
+        "trace:duration" => {
+            values.insert((
+                "duration".to_string(),
+                int64_value(batch, COL_TRACE_DURATION, row)?.to_string(),
+            ));
+        }
+        "trace:id" => {
+            values.insert((
+                "string".to_string(),
+                bytes_to_hex(fixed(batch, COL_TRACE_ID)?.value(row)),
+            ));
+        }
+        "trace:rootName" => {
+            values.insert((
+                "string".to_string(),
+                string_value(batch, COL_ROOT_SPAN_NAME, row)?,
+            ));
+        }
+        "trace:rootService" => {
+            values.insert((
+                "string".to_string(),
+                string_value(batch, COL_ROOT_SERVICE_NAME, row)?,
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
@@ -345,6 +464,16 @@ fn int64_array_value(col: &dyn Array, row: usize) -> Result<i64, TraceqlError> {
         .ok_or_else(|| TraceqlError::Store("unsupported int64 column type".into()))
 }
 
+fn int32_value(batch: &RecordBatch, name: &str, row: usize) -> Result<i32, TraceqlError> {
+    let col = batch
+        .column_by_name(name)
+        .ok_or_else(|| TraceqlError::Store(format!("missing int32 column `{name}`")))?;
+    col.as_any()
+        .downcast_ref::<Int32Array>()
+        .map(|a| a.value(row))
+        .ok_or_else(|| TraceqlError::Store("unsupported int32 column type".into()))
+}
+
 fn float64_array_value(col: &dyn Array, row: usize) -> Result<f64, TraceqlError> {
     col.as_any()
         .downcast_ref::<Float64Array>()
@@ -357,6 +486,16 @@ fn bool_array_value(col: &dyn Array, row: usize) -> Result<bool, TraceqlError> {
         .downcast_ref::<BooleanArray>()
         .map(|a| a.value(row))
         .ok_or_else(|| TraceqlError::Store("unsupported bool column type".into()))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 fn tag_scope_key(scope: TagScope) -> &'static str {

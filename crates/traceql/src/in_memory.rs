@@ -306,10 +306,12 @@ impl SpanStore for InMemorySpanStore {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
         let mut values = BTreeSet::new();
         for trace in self.traces_in_range(tenant, start_ns, end_ns) {
+            collect_trace_intrinsic_values(trace, tag, &mut values);
             if tag == "service.name" {
                 values.insert(("string".to_string(), trace.root_service_name.clone()));
             }
-            for input in &trace.spans {
+            for (idx, input) in trace.spans.iter().enumerate() {
+                collect_span_intrinsic_values(input, trace.nested.get(idx), tag, &mut values);
                 values.extend(
                     input
                         .attrs
@@ -337,6 +339,92 @@ impl InMemorySpanStore {
             })
             .collect()
     }
+}
+
+fn collect_trace_intrinsic_values(
+    trace: &StoredTrace,
+    tag: &str,
+    values: &mut BTreeSet<(String, String)>,
+) {
+    match tag {
+        "trace:duration" => {
+            values.insert((
+                "duration".to_string(),
+                trace.trace_duration_nanos.to_string(),
+            ));
+        }
+        "trace:id" => {
+            values.insert(("string".to_string(), bytes_to_hex(&trace.trace_id)));
+        }
+        "trace:rootName" => {
+            values.insert(("string".to_string(), trace.root_span_name.clone()));
+        }
+        "trace:rootService" => {
+            values.insert(("string".to_string(), trace.root_service_name.clone()));
+        }
+        _ => {}
+    }
+}
+
+fn collect_span_intrinsic_values(
+    span: &InputSpan,
+    nested: Option<&NestedSet>,
+    tag: &str,
+    values: &mut BTreeSet<(String, String)>,
+) {
+    match tag {
+        "span:duration" => {
+            values.insert(("duration".to_string(), span.duration_nanos.to_string()));
+        }
+        "span:id" => {
+            values.insert(("string".to_string(), bytes_to_hex(&span.span_id)));
+        }
+        "span:kind" => {
+            values.insert(("int".to_string(), span.kind.to_string()));
+        }
+        "span:name" => {
+            values.insert(("string".to_string(), span.name.clone()));
+        }
+        "span:parentID" => {
+            if let Some(parent_id) = span.parent_span_id {
+                values.insert(("string".to_string(), bytes_to_hex(&parent_id)));
+            }
+        }
+        "span:status" => {
+            values.insert(("int".to_string(), span.status_code.to_string()));
+        }
+        "span:statusMessage" => {
+            if !span.status_message.is_empty() {
+                values.insert(("string".to_string(), span.status_message.clone()));
+            }
+        }
+        "span:nestedSetLeft" => {
+            if let Some(nested) = nested {
+                values.insert(("int".to_string(), nested.left.to_string()));
+            }
+        }
+        "span:nestedSetParent" => {
+            if let Some(nested) = nested {
+                values.insert(("int".to_string(), nested.parent_id.to_string()));
+            }
+        }
+        "span:nestedSetRight" => {
+            if let Some(nested) = nested {
+                values.insert(("int".to_string(), nested.right.to_string()));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 fn typed_value_parts(value: &AttrValue) -> (String, String) {
