@@ -66,6 +66,8 @@ pub struct SpanRow {
     pub duration_nanos: i64,
     pub status_code: StatusCode,
     pub status_message: Option<String>,
+    pub instrumentation_name: Option<String>,
+    pub instrumentation_version: Option<String>,
     pub attrs: Vec<SpanAttr>,
     pub events: Vec<SpanEvent>,
     pub links: Vec<SpanLink>,
@@ -98,6 +100,8 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
     let mut dur = Int64Builder::new();
     let mut status = Int32Builder::new();
     let mut status_msg = StringBuilder::new();
+    let mut instrumentation_name = StringBuilder::new();
+    let mut instrumentation_version = StringBuilder::new();
     let mut attr_keys = new_str_list();
     let mut attr_is_array = ListBuilder::new(BooleanBuilder::new());
     let mut attr_value = new_str_list_list();
@@ -134,6 +138,8 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
         dur.append_value(row.duration_nanos);
         status.append_value(row.status_code.as_i32());
         status_msg.append_option(row.status_message.as_deref());
+        instrumentation_name.append_option(row.instrumentation_name.as_deref());
+        instrumentation_version.append_option(row.instrumentation_version.as_deref());
 
         append_attrs(
             &row.attrs,
@@ -166,6 +172,8 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
         Arc::new(dur.finish()),
         Arc::new(status.finish()),
         Arc::new(status_msg.finish()),
+        Arc::new(instrumentation_name.finish()),
+        Arc::new(instrumentation_version.finish()),
         Arc::new(attr_keys.finish()),
         Arc::new(attr_is_array.finish()),
         Arc::new(attr_value.finish()),
@@ -372,6 +380,8 @@ mod tests {
             duration_nanos: 50,
             status_code: StatusCode::Error,
             status_message: Some("timeout".into()),
+            instrumentation_name: Some("tracer".into()),
+            instrumentation_version: None,
             attrs: vec![SpanAttr {
                 key: "http.method".into(),
                 is_array: false,

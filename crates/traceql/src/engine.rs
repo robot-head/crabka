@@ -1165,6 +1165,8 @@ mod tests {
             duration_nanos: 200,
             status_code: 0,
             status_message: String::new(),
+            instrumentation_name: "tracer".into(),
+            instrumentation_version: String::new(),
             attrs: vec![("svc".into(), AttrValue::Str(svc.into()))],
         }
     }
@@ -1229,6 +1231,28 @@ mod tests {
         assert!(r.traces[0].trace_id == [9; 16]);
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_instrumentation_name_intrinsic() {
+        let e = engine();
+        let r = e
+            .search("t", "{ instrumentation:name = \"tracer\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        assert!(r.traces.len() == 2);
+        let first = r
+            .traces
+            .iter()
+            .find(|trace| trace.trace_id == [9; 16])
+            .unwrap();
+        let second = r
+            .traces
+            .iter()
+            .find(|trace| trace.trace_id == [8; 16])
+            .unwrap();
+        assert!(first.span_sets[0].matched == 2);
+        assert!(second.span_sets[0].matched == 1);
     }
 
     #[tokio::test]

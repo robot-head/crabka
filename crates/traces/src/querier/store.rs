@@ -527,7 +527,10 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use assert2::assert;
     use crabka_blockstore::{ShardedTraceBloom, TraceBlockStats};
-    use crabka_traceql::{COL_CHILD_COUNT, EngineOpts, TraceqlEngine};
+    use crabka_traceql::{
+        COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
+        TraceqlEngine,
+    };
     use object_store::memory::InMemory;
     use url::Url;
 
@@ -552,6 +555,8 @@ mod tests {
             Field::new(COL_DURATION, DataType::Int64, false),
             Field::new("status_code", DataType::Int32, false),
             Field::new("status_message", DataType::Utf8, true),
+            Field::new(COL_INSTRUMENTATION_NAME, DataType::Utf8, true),
+            Field::new(COL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
             Field::new(format!("{ATTR_PREFIX}svc"), DataType::Utf8, true),
         ]))
     }
@@ -587,6 +592,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![100, 200])),
                 Arc::new(Int64Array::from(vec![10, 20])),
                 Arc::new(Int32Array::from(vec![0, 0])),
+                Arc::new(StringArray::from(vec!["", ""])),
+                Arc::new(StringArray::from(vec!["tracer", "tracer"])),
                 Arc::new(StringArray::from(vec!["", ""])),
                 Arc::new(StringArray::from(vec!["a", "b"])),
             ],

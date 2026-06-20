@@ -23,6 +23,8 @@ pub const SCOL_START_NANO: &str = "start_unix_nano";
 pub const SCOL_DURATION_NANOS: &str = "duration_nanos";
 pub const SCOL_STATUS_CODE: &str = "status_code";
 pub const SCOL_STATUS_MESSAGE: &str = "status_message";
+pub const SCOL_INSTRUMENTATION_NAME: &str = "instrumentation_name";
+pub const SCOL_INSTRUMENTATION_VERSION: &str = "instrumentation_version";
 pub const SCOL_ATTR_KEYS: &str = "attr_keys";
 pub const SCOL_ATTR_IS_ARRAY: &str = "attr_is_array";
 pub const SCOL_ATTR_VALUE: &str = "attr_value";
@@ -144,6 +146,8 @@ pub fn span_block_schema() -> SchemaRef {
         Field::new(SCOL_DURATION_NANOS, DataType::Int64, false),
         Field::new(SCOL_STATUS_CODE, DataType::Int32, false),
         Field::new(SCOL_STATUS_MESSAGE, DataType::Utf8, true),
+        Field::new(SCOL_INSTRUMENTATION_NAME, DataType::Utf8, true),
+        Field::new(SCOL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
         Field::new(SCOL_ATTR_KEYS, list_of("item", DataType::Utf8, true), true),
         Field::new(
             SCOL_ATTR_IS_ARRAY,

@@ -33,6 +33,8 @@ fn row(trace: u8, span: u8, left: i32) -> SpanRow {
         duration_nanos: 5,
         status_code: StatusCode::Ok,
         status_message: None,
+        instrumentation_name: Some("tracer".into()),
+        instrumentation_version: None,
         attrs: vec![SpanAttr {
             key: "k".into(),
             is_array: false,

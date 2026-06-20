@@ -2,9 +2,10 @@ use crate::ast::{ComparisonOp, Field, FieldExpr, Intrinsic, Scope, Value};
 use crate::error::{Result, TraceqlError};
 use crate::planner::{PlannedSpanset, PlannerContext};
 use crate::span_columns::{
-    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT,
-    COL_PARENT_ID, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID,
-    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID,
+    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
+    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
+    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_STATUS_CODE,
+    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID,
 };
 use crate::store::{MatchCmp, MatchScope, MatchValue, SpanMatcher, SpanStore};
 
@@ -48,12 +49,12 @@ pub(crate) fn field_to_column(field: &Field) -> Result<String> {
             Intrinsic::NestedSetRight => COL_NS_RIGHT,
             Intrinsic::NestedSetParent => COL_PARENT_ID,
             Intrinsic::ChildCount => COL_CHILD_COUNT,
+            Intrinsic::InstrumentationName => COL_INSTRUMENTATION_NAME,
+            Intrinsic::InstrumentationVersion => COL_INSTRUMENTATION_VERSION,
             Intrinsic::EventName
             | Intrinsic::EventTimeSinceStart
             | Intrinsic::LinkTraceId
-            | Intrinsic::LinkSpanId
-            | Intrinsic::InstrumentationName
-            | Intrinsic::InstrumentationVersion => {
+            | Intrinsic::LinkSpanId => {
                 return Err(TraceqlError::Unsupported(format!(
                     "intrinsic {i:?} is not mapped to a scalar span column yet"
                 )));

@@ -146,6 +146,7 @@ impl AttrBuilder {
 }
 
 #[async_trait::async_trait]
+#[allow(clippy::too_many_lines)]
 impl SpanStore for InMemorySpanStore {
     async fn scan(
         &self,
@@ -184,6 +185,8 @@ impl SpanStore for InMemorySpanStore {
         let mut duration = Int64Builder::new();
         let mut status_code = Int32Builder::new();
         let mut status_message = StringBuilder::new();
+        let mut instrumentation_name = StringBuilder::new();
+        let mut instrumentation_version = StringBuilder::new();
         let mut attr_builders: Vec<(String, AttrBuilder)> = attr_cols
             .iter()
             .map(|(key, dt)| (key.clone(), AttrBuilder::new(dt)))
@@ -218,6 +221,8 @@ impl SpanStore for InMemorySpanStore {
                 duration.append_value(span.duration_nanos);
                 status_code.append_value(span.status_code);
                 status_message.append_value(&span.status_message);
+                instrumentation_name.append_value(&span.instrumentation_name);
+                instrumentation_version.append_value(&span.instrumentation_version);
 
                 for (key, builder) in &mut attr_builders {
                     let value = span.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
@@ -244,6 +249,8 @@ impl SpanStore for InMemorySpanStore {
             Arc::new(duration.finish()),
             Arc::new(status_code.finish()),
             Arc::new(status_message.finish()),
+            Arc::new(instrumentation_name.finish()),
+            Arc::new(instrumentation_version.finish()),
         ];
         columns.extend(attr_builders.into_iter().map(|(_, b)| b.finish()));
 
@@ -494,6 +501,8 @@ mod tests {
             duration_nanos: 5,
             status_code: 0,
             status_message: String::new(),
+            instrumentation_name: String::new(),
+            instrumentation_version: String::new(),
             attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         }
     }

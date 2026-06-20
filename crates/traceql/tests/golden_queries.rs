@@ -23,6 +23,8 @@ fn span(
         duration_nanos,
         status_code: 0,
         status_message: String::new(),
+        instrumentation_name: String::new(),
+        instrumentation_version: String::new(),
         attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
     }
 }

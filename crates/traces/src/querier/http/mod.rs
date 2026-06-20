@@ -1042,6 +1042,8 @@ mod tests {
             duration_nanos: 200,
             status_code: 0,
             status_message: String::new(),
+            instrumentation_name: String::new(),
+            instrumentation_version: String::new(),
             attrs: all_attrs,
         }
     }

@@ -39,6 +39,8 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
             duration_nanos: span.duration_ns,
             status_code: block_status(span.status),
             status_message: Some(span.status_message.clone()),
+            instrumentation_name: Some(span.instrumentation_scope.clone()),
+            instrumentation_version: None,
             attrs: span_attrs(span),
             events: span_events(span),
             links: span_links(span),

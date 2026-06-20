@@ -24,6 +24,8 @@ pub const COL_START: &str = "start_unix_nano";
 pub const COL_DURATION: &str = "duration_nanos";
 pub const COL_STATUS_CODE: &str = "status_code";
 pub const COL_STATUS_MESSAGE: &str = "status_message";
+pub const COL_INSTRUMENTATION_NAME: &str = "instrumentation_name";
+pub const COL_INSTRUMENTATION_VERSION: &str = "instrumentation_version";
 pub const ATTR_PREFIX: &str = "attr.";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +39,8 @@ pub struct InputSpan {
     pub duration_nanos: i64,
     pub status_code: i32,
     pub status_message: String,
+    pub instrumentation_name: String,
+    pub instrumentation_version: String,
     pub attrs: Vec<(String, AttrValue)>,
 }
 
@@ -72,6 +76,8 @@ pub fn span_schema_with_attrs(attr_cols: &[(String, DataType)]) -> SchemaRef {
         Field::new(COL_DURATION, DataType::Int64, false),
         Field::new(COL_STATUS_CODE, DataType::Int32, false),
         Field::new(COL_STATUS_MESSAGE, DataType::Utf8, true),
+        Field::new(COL_INSTRUMENTATION_NAME, DataType::Utf8, true),
+        Field::new(COL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
     ];
 
     fields.extend(
@@ -169,6 +175,8 @@ mod tests {
             duration_nanos: 10,
             status_code: 0,
             status_message: String::new(),
+            instrumentation_name: String::new(),
+            instrumentation_version: String::new(),
             attrs: vec![],
         }
     }
