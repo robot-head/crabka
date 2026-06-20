@@ -971,18 +971,53 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
                         "value": {"stringValue": trace.root_service_name},
                     }],
                 },
-                "scopeSpans": [{
-                    "scope": {},
-                    "spans": trace.spans.iter()
-                        .take(returned_spans)
-                        .map(|span| trace_span_json(trace.trace_id, span))
-                        .collect::<Vec<_>>(),
-                }],
+                "scopeSpans": scope_spans_json(trace, returned_spans),
             }],
         },
         "status": status,
         "message": message,
     })
+}
+
+fn scope_spans_json(trace: &TraceSpans, returned_spans: usize) -> Value {
+    let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
+    for span in trace.spans.iter().take(returned_spans) {
+        let key = (
+            span.instrumentation_name.clone(),
+            span.instrumentation_version.clone(),
+        );
+        if let Some((_, spans)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
+            spans.push(span);
+        } else {
+            groups.push((key, vec![span]));
+        }
+    }
+
+    Value::Array(
+        groups
+            .into_iter()
+            .map(|((name, version), spans)| {
+                json!({
+                    "scope": instrumentation_scope_json(&name, &version),
+                    "spans": spans
+                        .into_iter()
+                        .map(|span| trace_span_json(trace.trace_id, span))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn instrumentation_scope_json(name: &str, version: &str) -> Value {
+    let mut scope = Map::new();
+    if !name.is_empty() {
+        scope.insert("name".into(), json!(name));
+    }
+    if !version.is_empty() {
+        scope.insert("version".into(), json!(version));
+    }
+    Value::Object(scope)
 }
 
 fn filter_trace_spans(mut trace: TraceSpans, start_ns: i64, end_ns: i64) -> TraceSpans {
@@ -1479,6 +1514,39 @@ mod tests {
                 "status": "COMPLETE",
                 "message": ""
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn by_id_projects_instrumentation_scope() {
+        let mut store = InMemorySpanStore::new();
+        let mut span = span_at(9, 1, None, "a", 1_000);
+        span.instrumentation_name = "tracer".into();
+        span.instrumentation_version = "1.2.3".into();
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![span]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body["trace"]["resourceSpans"][0]["scopeSpans"][0]["scope"]
+                == json!({
+                    "name": "tracer",
+                    "version": "1.2.3"
+                })
         );
     }
 
