@@ -2619,6 +2619,7 @@ dependencies = [
  "serde",
  "serde-wincode",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.18",

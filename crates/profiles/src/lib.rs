@@ -20,7 +20,7 @@ pub mod wire;
 
 pub use blockbuilder::{BuiltSample, build_block, intern_record, object_key, run, samples_batch};
 pub use error::ProfilesError;
-pub use limits::{LimitError, Limits};
+pub use limits::{LimitError, Limits, OverridesError, OverridesProvider};
 pub use wal::{
     PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
     WalSymbolSet, partition_key,

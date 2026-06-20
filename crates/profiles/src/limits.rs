@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "limits/overrides.rs"]
+mod overrides;
+
+pub use overrides::{OverridesError, OverridesProvider};
+
 /// Per-tenant profile limits.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
