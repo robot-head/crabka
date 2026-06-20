@@ -158,19 +158,56 @@ pub async fn decode_ingest_multipart(
         }
     };
     let profile = apply_query_time(profile, query)?;
-    let mut labels = Labels::new();
-    labels.insert("__name__", query.name.clone());
-    for (name, value) in &query.labels {
-        labels.insert(name.clone(), value.clone());
-    }
-    for (name, value) in multipart_labels {
-        labels.insert(name, value);
-    }
 
     Ok(RawProfile {
-        labels,
+        labels: query_labels(query, multipart_labels),
         profile,
         delta,
+        sample_timestamps_ns: Vec::new(),
+        sample_span_ids: Vec::new(),
+        sample_trace_ids: Vec::new(),
+    })
+}
+
+pub async fn decode_ingest_body(
+    query: &IngestQuery,
+    content_type: Option<&str>,
+    body: bytes::Bytes,
+    max: usize,
+) -> Result<RawProfile, ProfilesError> {
+    if let Some(content_type) = content_type
+        && content_type
+            .split(';')
+            .next()
+            .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("multipart/form-data"))
+    {
+        return decode_ingest_multipart(query, content_type, body, max).await;
+    }
+
+    if body.len() > max {
+        return Err(ProfilesError::TooLarge { limit: max });
+    }
+
+    let profile = match query.format {
+        IngestFormat::Groups => {
+            folded_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
+        }
+        IngestFormat::Pprof => {
+            return Err(ProfilesError::Invalid(
+                "legacy pprof ingest requires multipart `profile` part".to_string(),
+            ));
+        }
+        IngestFormat::Jfr => {
+            return Err(ProfilesError::Invalid(
+                "legacy jfr ingest requires multipart `jfr` part".to_string(),
+            ));
+        }
+    };
+    let profile = apply_query_time(profile, query)?;
+    Ok(RawProfile {
+        labels: query_labels(query, Vec::new()),
+        profile,
+        delta: false,
         sample_timestamps_ns: Vec::new(),
         sample_span_ids: Vec::new(),
         sample_trace_ids: Vec::new(),
@@ -207,6 +244,18 @@ fn apply_query_time(
     let mut profile = profile.into_inner();
     profile.time_nanos = time_nanos;
     Ok(PprofProfile::from(profile))
+}
+
+fn query_labels(query: &IngestQuery, extra_labels: Vec<(String, String)>) -> Labels {
+    let mut labels = Labels::new();
+    labels.insert("__name__", query.name.clone());
+    for (name, value) in &query.labels {
+        labels.insert(name.clone(), value.clone());
+    }
+    for (name, value) in extra_labels {
+        labels.insert(name, value);
+    }
+    labels
 }
 
 #[derive(Debug, Deserialize)]

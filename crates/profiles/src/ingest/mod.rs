@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ProfilesError;
 
-pub use legacy::{IngestFormat, IngestQuery, decode_ingest_multipart, parse_ingest_query};
+pub use legacy::{
+    IngestFormat, IngestQuery, decode_ingest_body, decode_ingest_multipart, parse_ingest_query,
+};
 pub use otlp::decode_otlp;
 pub use push_v1::{decode_push, gunzip};
 pub use split::split_sample_types;

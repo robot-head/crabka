@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 use crate::error::ProfilesError;
 use crate::ingest::{
-    RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_multipart,
+    RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
     decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
     split_sample_types,
 };
@@ -378,10 +378,8 @@ async fn ingest_handler(
         let query = parse_ingest_query(query.as_deref().unwrap_or(""))?;
         let content_type = headers
             .get(axum::http::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| ProfilesError::Invalid("missing content-type".to_string()))?;
-        let raw =
-            decode_ingest_multipart(&query, content_type, body, state.max_decompressed).await?;
+            .and_then(|value| value.to_str().ok());
+        let raw = decode_ingest_body(&query, content_type, body, state.max_decompressed).await?;
         process_raw(&state, &tenant, vec![raw]).await
     }
     .await;
@@ -1041,6 +1039,46 @@ overrides:
         assert!(recs[0].labels.iter().any(|(name, value)| {
             name == "__profile_type__" && value == "samples:samples:count:samples:count"
         }));
+    }
+
+    #[tokio::test]
+    async fn legacy_ingest_accepts_plain_folded_groups_body() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/ingest?name=myapp{{service_name=\"api\"}}&format=groups&units=samples&until=1700000000000"
+            ))
+            .header("content-type", "text/plain")
+            .header("x-scope-orgid", "tenant-a")
+            .body("main;work 3\n")
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK, "{response:?}");
+        let recs = sink.0.lock().unwrap();
+        assert!(recs.len() == 1);
+        assert!(recs[0].tenant == "tenant-a");
+        assert!(recs[0].labels.iter().any(|(name, value)| {
+            name == "__profile_type__" && value == "myapp:samples:samples:samples:samples"
+        }));
+        assert!(
+            recs[0]
+                .labels
+                .iter()
+                .any(|(name, value)| name == "service_name" && value == "api")
+        );
+        assert!(recs[0].samples.len() == 1);
+        assert!(recs[0].samples[0].value == 3);
+        assert!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
