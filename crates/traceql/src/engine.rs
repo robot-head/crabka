@@ -882,6 +882,9 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Intrinsic(Intrinsic::Id) => Ok(COL_SPAN_ID.to_string()),
         Scope::Intrinsic(Intrinsic::ParentId) => Ok(COL_PARENT_SPAN_ID.to_string()),
         Scope::Intrinsic(Intrinsic::ChildCount) => Ok(COL_CHILD_COUNT.to_string()),
+        Scope::Intrinsic(Intrinsic::NestedSetLeft) => Ok(COL_NS_LEFT.to_string()),
+        Scope::Intrinsic(Intrinsic::NestedSetRight) => Ok(COL_NS_RIGHT.to_string()),
+        Scope::Intrinsic(Intrinsic::NestedSetParent) => Ok(COL_PARENT_ID.to_string()),
         Scope::Intrinsic(Intrinsic::Kind) => Ok(COL_KIND.to_string()),
         Scope::Intrinsic(Intrinsic::Status) => Ok(COL_STATUS_CODE.to_string()),
         Scope::Intrinsic(Intrinsic::StatusMessage) => Ok(COL_STATUS_MESSAGE.to_string()),
@@ -1768,6 +1771,39 @@ mod tests {
         assert!(got.len() == 1);
         assert!(got[0].labels == vec![("name".into(), "tracer".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_nested_set_parent_intrinsic() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, Some(1), "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(span:Parent)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("Parent".into(), "0".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("Parent".into(), "1".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
