@@ -778,23 +778,42 @@ where
         Err(err) => return profile_error_response(err),
     };
     let now_ms = unix_now_ms();
-    let start = match query_param_render_time(&params, "from", now_ms, 0) {
+    let global_start = match query_param_render_time(&params, "from", now_ms, 0) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
-    let end = match query_param_render_time(&params, "until", now_ms, i64::MAX) {
+    let global_end = match query_param_render_time(&params, "until", now_ms, i64::MAX) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
-    if let Err(err) = state.validate_query_range(&tenant, start, end) {
+    let left_start = match query_param_render_time(&params, "leftFrom", now_ms, global_start) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    let left_end = match query_param_render_time(&params, "leftUntil", now_ms, global_end) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    let right_start = match query_param_render_time(&params, "rightFrom", now_ms, global_start) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    let right_end = match query_param_render_time(&params, "rightUntil", now_ms, global_end) {
+        Ok(value) => value,
+        Err(err) => return profile_error_response(err),
+    };
+    if let Err(err) = state.validate_query_range(&tenant, left_start, left_end) {
+        return profile_error_response(err);
+    }
+    if let Err(err) = state.validate_query_range(&tenant, right_start, right_end) {
         return profile_error_response(err);
     }
     match state
         .engine
         .diff(
             &tenant,
-            (&left_type, &left_selector, start, end),
-            (&right_type, &right_selector, start, end),
+            (&left_type, &left_selector, left_start, left_end),
+            (&right_type, &right_selector, right_start, right_end),
             state.effective_max_nodes(&tenant, query_param_i64(&params, "maxNodes").unwrap_or(0)),
         )
         .await
@@ -1206,6 +1225,38 @@ mod tests {
         store
     }
 
+    fn store_with_frame_samples(name: &str, samples: &[(i64, i64)]) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string(name);
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        for (timestamp, value) in samples {
+            store.push_sample(
+                "tenant-a",
+                PT,
+                vec![("service_name".to_string(), "api".to_string())],
+                0,
+                stacktrace,
+                *value,
+                *timestamp,
+            );
+        }
+        store
+    }
+
     fn store_with_leaf_frames(frames: &[(&str, i64)]) -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         for (name, value) in frames {
@@ -1410,6 +1461,52 @@ overrides:
         );
         assert!(
             body.pointer("/flamebearer/maxSelf")
+                .and_then(serde_json::Value::as_i64)
+                == Some(7),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_diff_uses_side_specific_windows() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame_samples(
+            "main.work",
+            &[(1_700_000_010_000, 5), (1_700_000_090_000, 7)],
+        ))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("leftQuery", &format!(r#"{PT}{{service_name="api"}}"#))
+            .append_pair("leftFrom", "1700000000000")
+            .append_pair("leftUntil", "1700000060000")
+            .append_pair("rightQuery", &format!(r#"{PT}{{service_name="api"}}"#))
+            .append_pair("rightFrom", "1700000060000")
+            .append_pair("rightUntil", "1700000120000")
+            .finish();
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{bound}/pyroscope/render-diff?{query}"))
+            .header("x-scope-orgid", "tenant-a")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            body.pointer("/flamebearer/leftTicks")
+                .and_then(serde_json::Value::as_i64)
+                == Some(5),
+            "{body}"
+        );
+        assert!(
+            body.pointer("/flamebearer/rightTicks")
                 .and_then(serde_json::Value::as_i64)
                 == Some(7),
             "{body}"
