@@ -576,6 +576,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_ids_never_cross_a_partition_boundary() {
+        let mut store = InMemoryProfileStore::new();
+        let (alpha_stack, beta_stack) = {
+            let db = store.symbols_mut();
+            let alpha = intern_location(db, "alpha");
+            let beta = intern_location(db, "beta");
+            (
+                db.intern_stacktrace(0, &[alpha]),
+                db.intern_stacktrace(1, &[beta]),
+            )
+        };
+        assert!(alpha_stack == beta_stack);
+        store.push_sample("tenant-a", PT, Vec::new(), 0, alpha_stack, 5, 0);
+        store.push_sample("tenant-a", PT, Vec::new(), 1, beta_stack, 7, 0);
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+
+        let fg = engine
+            .select_merge_stacktraces("tenant-a", PT, "{}", 0, 60_000, 0)
+            .await
+            .unwrap();
+
+        assert!(fg.names.iter().any(|name| name == "alpha"));
+        assert!(fg.names.iter().any(|name| name == "beta"));
+        assert!(fg.total == 12);
+    }
+
+    #[tokio::test]
     async fn merge_folds_duplicate_ids_before_symbolize() {
         let fg = merge_fixture()
             .select_merge_stacktraces("tenant-a", PT, "{}", 0, 200, 2048)
