@@ -138,6 +138,51 @@ async fn frontend_deduplicates_spans_across_shards() {
     assert!(spans[0]["spanID"] == "1111111111111111");
 }
 
+#[tokio::test]
+async fn frontend_search_requires_valid_start_and_end() {
+    let upstream_url = spawn_sharded_search_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let (status, body) = get_text(
+        router(cfg.clone()),
+        "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D",
+    )
+    .await;
+    assert!(status == axum::http::StatusCode::BAD_REQUEST);
+    assert!(body == "missing query parameter start");
+
+    let (status, body) = get_text(
+        router(cfg.clone()),
+        "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0",
+    )
+    .await;
+    assert!(status == axum::http::StatusCode::BAD_REQUEST);
+    assert!(body == "missing query parameter end");
+
+    let (status, body) = get_text(
+        router(cfg),
+        "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=bogus&end=1",
+    )
+    .await;
+    assert!(status == axum::http::StatusCode::BAD_REQUEST);
+    assert!(body == "invalid query parameter start");
+}
+
+async fn get_text(app: Router, uri: &str) -> (axum::http::StatusCode, String) {
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
 async fn spawn_recording_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(record_request))

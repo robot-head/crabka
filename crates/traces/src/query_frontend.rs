@@ -129,12 +129,14 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
     };
 
-    let start_ns = query_param(&uri, "start")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(0);
-    let end_ns = query_param(&uri, "end")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(i64::MAX);
+    let start_ns = match required_seconds_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end_ns = match required_seconds_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let mut merged_traces = Vec::new();
     let mut metrics = json!({
         "totalBlocks": 0,
@@ -359,6 +361,13 @@ fn forward_accept(req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest:
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
     url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
+    let Some(value) = query_param(uri, key) else {
+        return Err(format!("missing query parameter {key}"));
+    };
+    parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
