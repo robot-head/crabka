@@ -410,10 +410,8 @@ fn wants_protobuf(headers: &HeaderMap) -> bool {
         .is_some_and(|accept| {
             accept.split(',').any(|part| {
                 let media_type = part.split(';').next().unwrap_or_default().trim();
-                matches!(
-                    media_type,
-                    "application/protobuf" | "application/x-protobuf"
-                )
+                media_type.eq_ignore_ascii_case("application/protobuf")
+                    || media_type.eq_ignore_ascii_case("application/x-protobuf")
             })
         })
 }
@@ -1972,6 +1970,32 @@ mod tests {
         assert!(data.resource_spans.len() == 1);
         assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
         assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
+    }
+
+    #[tokio::test]
+    async fn by_id_accept_header_matches_media_type_case_insensitively() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .header("accept", "Application/Protobuf; q=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+
+        assert!(status == StatusCode::OK);
+        assert!(content_type.as_deref() == Some("application/x-protobuf"));
+        assert!(TracesData::decode(bytes).is_ok());
     }
 
     #[tokio::test]
