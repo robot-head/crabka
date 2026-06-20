@@ -247,7 +247,43 @@ fn collect_tags(
                 .or_default()
                 .insert(attr_value_string(&attr.value));
         }
+        for event in &span.events {
+            insert_tag_value(tag_names, tag_values, "event:name", event.name.clone());
+            insert_tag_value(
+                tag_names,
+                tag_values,
+                "event:timeSinceStart",
+                event
+                    .time_unix_nano
+                    .saturating_sub(span.start_ns)
+                    .to_string(),
+            );
+        }
+        for link in &span.links {
+            insert_tag_value(
+                tag_names,
+                tag_values,
+                "link:traceID",
+                hex::encode(link.trace_id),
+            );
+            insert_tag_value(
+                tag_names,
+                tag_values,
+                "link:spanID",
+                hex::encode(link.span_id),
+            );
+        }
     }
+}
+
+fn insert_tag_value(
+    tag_names: &mut BTreeSet<String>,
+    tag_values: &mut BTreeMap<String, BTreeSet<String>>,
+    tag: &str,
+    value: String,
+) {
+    tag_names.insert(tag.to_string());
+    tag_values.entry(tag.to_string()).or_default().insert(value);
 }
 
 fn tenants_in_records(records: &[SpanRecord]) -> BTreeSet<String> {
@@ -261,5 +297,60 @@ fn attr_value_string(value: &AttrValue) -> String {
         AttrValue::Double(value) => value.to_string(),
         AttrValue::Bool(value) => value.to_string(),
         AttrValue::Bytes(value) => hex::encode(value),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+    use crate::span::{EventRecord, KeyValue, LinkRecord, SpanKind, StatusCode};
+
+    fn span() -> Span {
+        Span {
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: "GET /".into(),
+            kind: SpanKind::Server,
+            start_ns: 1_000,
+            duration_ns: 100,
+            status: StatusCode::Ok,
+            status_message: String::new(),
+            resource_attrs: vec![KeyValue {
+                key: "service.name".into(),
+                value: AttrValue::Str("api".into()),
+            }],
+            span_attrs: Vec::new(),
+            events: vec![EventRecord {
+                time_unix_nano: 1_050,
+                name: "exception".into(),
+                attrs: Vec::new(),
+            }],
+            links: vec![LinkRecord {
+                trace_id: [9; 16],
+                span_id: [8; 8],
+                attrs: Vec::new(),
+            }],
+            instrumentation_scope: String::new(),
+        }
+    }
+
+    #[test]
+    fn collect_tags_indexes_event_and_link_intrinsics() {
+        let mut tag_names = BTreeSet::new();
+        let mut tag_values = BTreeMap::new();
+
+        collect_tags(&[span()], &mut tag_names, &mut tag_values);
+
+        assert!(tag_names.contains("event:name"));
+        assert!(tag_names.contains("event:timeSinceStart"));
+        assert!(tag_names.contains("link:traceID"));
+        assert!(tag_names.contains("link:spanID"));
+        assert!(tag_values["event:name"].contains("exception"));
+        assert!(tag_values["event:timeSinceStart"].contains("50"));
+        assert!(tag_values["link:traceID"].contains("09090909090909090909090909090909"));
+        assert!(tag_values["link:spanID"].contains("0808080808080808"));
     }
 }
