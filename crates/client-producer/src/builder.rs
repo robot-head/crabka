@@ -156,6 +156,7 @@ impl Producer {
         let client = Client::builder()
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
+            .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
             .maybe_security(security.clone())
             .build()
@@ -205,6 +206,7 @@ impl Producer {
             max_in_flight: max_in_flight_per_connection,
             metadata_cache: metadata_cache.clone(),
             partition_leaders: partition_leaders.clone(),
+            partitioner: partitioner.clone(),
             accumulators: accumulators.clone(),
             next_seq: next_seq.clone(),
             state: state.clone(),
@@ -255,6 +257,7 @@ impl Producer {
 mod security_arg_tests {
     use super::*;
     use assert2::assert;
+    use crabka_client_core::MockBroker;
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
 
@@ -342,5 +345,30 @@ mod security_arg_tests {
             .build()
             .await;
         assert!(res.is_err(), "connect to closed port must fail");
+    }
+
+    #[tokio::test]
+    async fn producer_builder_uses_request_timeout_for_initial_connect_handshake() {
+        let mock = MockBroker::start(|_api_key, _version, _corr_id, _body| None).await;
+
+        let build = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(Duration::from_millis(100))
+            .build();
+        let res = tokio::time::timeout(Duration::from_millis(500), build).await;
+
+        mock.stop();
+
+        let err = res
+            .expect("producer build should not retain the 30s connect timeout")
+            .expect_err("silent broker must time out during build");
+        assert!(
+            matches!(
+                err,
+                ProducerError::Client(ClientError::Timeout(d))
+                    if d == Duration::from_millis(100)
+            ),
+            "expected 100ms timeout, got {err:?}"
+        );
     }
 }

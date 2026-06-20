@@ -7,6 +7,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -144,20 +145,17 @@ async fn send_alter_partition(
     new_isr: Vec<NodeId>,
     leader_epoch: i32,
 ) -> Result<(), String> {
-    use crabka_protocol::owned::alter_partition_request::{
-        AlterPartitionRequest, BrokerState, PartitionData, TopicData,
-    };
+    use crabka_protocol::owned::alter_partition_request::{BrokerState, PartitionData, TopicData};
 
-    // Look up the controller leader's address via metadata image.
-    let leader_id = *controller.watch_leader().borrow();
-    let Some(leader_id) = leader_id else {
-        return Err("no controller leader".into());
-    };
     let image = controller.current_image();
-    let Some(broker_rec) = image.broker(leader_id) else {
-        return Err("controller leader not in image".into());
-    };
-    let addr = format!("{}:{}", broker_rec.host, broker_rec.port);
+    let leader_id = *controller.watch_leader().borrow();
+    let targets = alter_partition_targets(&image, leader_id);
+    if targets.is_empty() {
+        return match leader_id {
+            Some(_) => Err("controller leader not in image".into()),
+            None => Err("no controller leader".into()),
+        };
+    }
 
     // Look up topic_id from the metadata image and convert to the protocol Uuid type.
     let topic_id = {
@@ -212,40 +210,167 @@ async fn send_alter_partition(
         ..Default::default()
     };
 
+    let mut last_err = String::new();
+    for (target_id, addr) in targets {
+        match send_alter_partition_to(broker_id, &addr, req.clone()).await {
+            Ok(()) => {
+                debug!(
+                    topic = topic,
+                    partition = partition,
+                    new_isr_len = new_isr.len(),
+                    controller_target = target_id,
+                    "AlterPartition proposed"
+                );
+                return Ok(());
+            }
+            Err(AlterPartitionSendError::NotController) => {
+                last_err = format!("target {target_id} is not controller");
+                continue;
+            }
+            Err(AlterPartitionSendError::Rejected {
+                global_err,
+                part_err,
+            }) => {
+                warn!(
+                    topic = topic,
+                    partition = partition,
+                    new_isr_len = new_isr.len(),
+                    controller_target = target_id,
+                    global_error_code = global_err,
+                    partition_error_code = part_err,
+                    "AlterPartition rejected by controller"
+                );
+                return Err(format!(
+                    "AlterPartition rejected: global={global_err} partition={part_err}"
+                ));
+            }
+            Err(AlterPartitionSendError::Transport(e)) => {
+                last_err = format!("target {target_id} ({addr}): {e}");
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn alter_partition_targets(
+    image: &crabka_metadata::MetadataImage,
+    leader_id: Option<NodeId>,
+) -> Vec<(NodeId, String)> {
+    let mut out = Vec::new();
+    if let Some(id) = leader_id
+        && let Some(b) = image.broker(id)
+    {
+        out.push((id, format!("{}:{}", b.host, b.port)));
+    }
+    let mut others: Vec<(NodeId, String)> = image
+        .brokers()
+        .filter(|b| Some(b.node_id) != leader_id)
+        .map(|b| (b.node_id, format!("{}:{}", b.host, b.port)))
+        .collect();
+    others.sort_by_key(|(id, _)| *id);
+    out.extend(others);
+    out
+}
+
+enum AlterPartitionSendError {
+    NotController,
+    Rejected { global_err: i16, part_err: i16 },
+    Transport(String),
+}
+
+async fn send_alter_partition_to(
+    broker_id: i32,
+    addr: &str,
+    req: AlterPartitionRequest,
+) -> Result<(), AlterPartitionSendError> {
     let client = crabka_client_core::Client::builder()
-        .bootstrap(addr)
+        .bootstrap(addr.to_string())
         .client_id(format!("crabka-broker-{broker_id}-isr"))
         .build()
         .await
-        .map_err(|e| format!("connect: {e}"))?;
+        .map_err(|e| AlterPartitionSendError::Transport(format!("connect: {e}")))?;
 
-    let resp = client.send(req).await.map_err(|e| format!("send: {e}"))?;
-    // Log the global error code and per-partition error codes so failures
-    // are visible (previously _resp was discarded, hiding non-zero codes).
+    let resp = client
+        .send(req)
+        .await
+        .map_err(|e| AlterPartitionSendError::Transport(format!("send: {e}")))?;
     let global_err = resp.error_code;
     let part_err = resp
         .topics
         .first()
         .and_then(|t| t.partitions.first())
         .map_or(0, |p| p.error_code);
+    if is_not_controller_response(global_err, part_err) {
+        return Err(AlterPartitionSendError::NotController);
+    }
     if global_err != 0 || part_err != 0 {
-        warn!(
-            topic = topic,
-            partition = partition,
-            new_isr_len = new_isr.len(),
-            global_error_code = global_err,
-            partition_error_code = part_err,
-            "AlterPartition rejected by controller"
+        return Err(AlterPartitionSendError::Rejected {
+            global_err,
+            part_err,
+        });
+    }
+    Ok(())
+}
+
+fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
+    global_err == crate::codes::NOT_CONTROLLER || part_err == crate::codes::NOT_CONTROLLER
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord};
+
+    fn reg(id: NodeId) -> MetadataRecord {
+        MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id: id,
+            broker_epoch: id as i64,
+            incarnation_id: uuid::Uuid::nil(),
+            host: format!("b{id}"),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+        })
+    }
+
+    #[test]
+    fn alter_partition_targets_try_hint_first_then_remaining_brokers() {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&reg(2));
+        image.apply(&reg(0));
+        image.apply(&reg(1));
+
+        let targets = alter_partition_targets(&image, Some(2));
+
+        assert!(
+            targets
+                == vec![
+                    (2, "b2:9092".to_string()),
+                    (0, "b0:9092".to_string()),
+                    (1, "b1:9092".to_string()),
+                ]
         );
-        return Err(format!(
-            "AlterPartition rejected: global={global_err} partition={part_err}"
+    }
+
+    #[test]
+    fn alter_partition_targets_fall_back_when_hint_missing() {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&reg(1));
+        image.apply(&reg(0));
+
+        let targets = alter_partition_targets(&image, Some(9));
+
+        assert!(targets == vec![(0, "b0:9092".to_string()), (1, "b1:9092".to_string())]);
+    }
+
+    #[test]
+    fn not_controller_classification_covers_global_and_partition_codes() {
+        assert!(is_not_controller_response(crate::codes::NOT_CONTROLLER, 0));
+        assert!(is_not_controller_response(0, crate::codes::NOT_CONTROLLER));
+        assert!(!is_not_controller_response(0, 0));
+        assert!(!is_not_controller_response(
+            crate::codes::UNKNOWN_SERVER_ERROR,
+            0
         ));
     }
-    debug!(
-        topic = topic,
-        partition = partition,
-        new_isr_len = new_isr.len(),
-        "AlterPartition proposed"
-    );
-    Ok(())
 }

@@ -3004,6 +3004,11 @@ pub fn render_broker_toml(
     let mut out = String::new();
     let _ = writeln!(out, "broker_id = {broker_id}");
     let _ = writeln!(out, "log_dir = \"/var/lib/crabka/data\"");
+    let _ = writeln!(out, "heartbeat_interval_ms = 500");
+    let _ = writeln!(out, "heartbeat_timeout_ms = 3000");
+    let _ = writeln!(out, "replica_lag_time_max_ms = 2000");
+    let _ = writeln!(out, "controller_election_timeout_ms = 500");
+    let _ = writeln!(out, "controller_heartbeat_interval_ms = 100");
     let _ = writeln!(
         out,
         "inter_broker_listener_name = \"{inter_broker_listener_name}\""
@@ -3502,6 +3507,11 @@ mod toml_rendering_tests {
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
         assert!(parsed.broker_id == Some(0));
         assert!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
+        assert!(parsed.heartbeat_interval_ms == Some(500));
+        assert!(parsed.heartbeat_timeout_ms == Some(3000));
+        assert!(parsed.replica_lag_time_max_ms == Some(2000));
+        assert!(parsed.controller_election_timeout_ms == Some(500));
+        assert!(parsed.controller_heartbeat_interval_ms == Some(100));
         assert!(parsed.listeners.len() == 1);
         assert!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
     }

@@ -36,6 +36,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -50,6 +51,7 @@ use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordHeader};
 use crate::accumulator::{Accumulator, InProgressBatch, PendingRecord};
 use crate::compression::Compression;
 use crate::error::ProducerError;
+use crate::partitioner::UniformStickyPartitioner;
 use crate::producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata};
 use crate::record::RecordMetadata;
 use crate::transactional::TxnState;
@@ -165,6 +167,9 @@ pub(crate) struct SenderConfig {
     /// consults it to route each Produce to the partition leader and refreshes
     /// it on `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`.
     pub partition_leaders: Arc<DashMap<(String, i32), i32>>,
+    /// Shared null-key sticky partitioner. Rotated when the sender seals a
+    /// topic batch so subsequent keyless records fan out across partitions.
+    pub partitioner: Arc<UniformStickyPartitioner>,
     pub accumulators: Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
@@ -329,7 +334,11 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         // Seal the in-progress batch, then take a single ready batch.
         {
             let mut a = acc.lock().await;
+            let had_current = a.current.as_ref().is_some_and(|b| !b.is_empty());
             a.seal_current();
+            if had_current && let Some(num_partitions) = topic_partition_count(cfg, &key.0).await {
+                cfg.partitioner.rotate(&key.0, num_partitions);
+            }
         }
         let batch = {
             let mut a = acc.lock().await;
@@ -469,6 +478,15 @@ fn resolve_leader(cfg: &SenderConfig, topic: &str, partition: i32) -> i32 {
     }
 }
 
+async fn topic_partition_count(cfg: &SenderConfig, topic: &str) -> Option<i32> {
+    cfg.metadata_cache
+        .lock()
+        .await
+        .get(topic)
+        .map(|meta| meta.num_partitions)
+        .filter(|count| *count > 0)
+}
+
 /// Build the v2 `RecordBatch` for a drained partition batch, allocating its
 /// `base_sequence` range from `next_seq`. The result is sent (and any retry
 /// resent) verbatim, so the sequence is allocated exactly once per batch.
@@ -539,18 +557,25 @@ struct BatchSendResult {
 /// per-partition ordering is undisturbed. Futures are polled on this one task
 /// (no spawn), so they share `&cfg` safely.
 async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Vec<PreparedBatch>) {
-    let results =
-        futures::future::join_all(to_send.into_iter().map(|pb| send_one_batch(cfg, pb))).await;
+    let mut results: FuturesUnordered<_> = to_send
+        .into_iter()
+        .map(|pb| send_one_batch(cfg, pb))
+        .collect();
 
     let mut needs_refresh = false;
-    let mut results = results.into_iter();
-    while let Some(res) = results.next() {
+    let mut fenced: Option<Vec<PreparedBatch>> = None;
+    while let Some(res) = results.next().await {
         let BatchSendResult {
             pb,
             verdict,
             refresh_needed,
         } = res;
         needs_refresh |= refresh_needed;
+
+        if let Some(to_fail) = &mut fenced {
+            to_fail.push(pb);
+            continue;
+        }
 
         match verdict {
             // Durable: resolve the records with their offsets, free the slot.
@@ -574,14 +599,14 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
             // not yet processed (their in-flight slots are counted, so they must
             // be released), then fence the producer and stop sending.
             BatchVerdict::Fence => {
-                let mut to_fail = vec![pb];
-                for r in results {
-                    to_fail.push(r.pb);
-                }
-                fence(cfg, state, to_fail);
-                return;
+                fenced = Some(vec![pb]);
             }
         }
+    }
+
+    if let Some(to_fail) = fenced {
+        fence(cfg, state, to_fail);
+        return;
     }
 
     if needs_refresh {
@@ -1210,6 +1235,8 @@ mod harness {
         fail_once_seq: StdMutex<Option<i32>>,
         /// One-shot transport error for the next send to a specific broker id.
         fail_once_leader: StdMutex<Option<i32>>,
+        /// Artificial per-leader delay before producing a response/error.
+        leader_delay: StdMutex<HashMap<i32, Duration>>,
         /// One-shot injected broker response, keyed by `base_sequence`. The next
         /// send to that sequence returns a synthesized `ProduceResponse` (custom
         /// name / `topic_id` / error code / offset / leader hint) once, then is
@@ -1262,6 +1289,7 @@ mod harness {
                 applied: AtomicUsize::new(0),
                 fail_once_seq: StdMutex::new(None),
                 fail_once_leader: StdMutex::new(None),
+                leader_delay: StdMutex::new(HashMap::new()),
                 inject_once: StdMutex::new(None),
                 evicted: StdMutex::new(Vec::new()),
                 last_timeout_ms: AtomicI64::new(0),
@@ -1279,6 +1307,10 @@ mod harness {
 
         fn fail_once_on_leader(self: &Arc<Self>, leader: i32) {
             *self.fail_once_leader.lock().unwrap() = Some(leader);
+        }
+
+        fn delay_leader(self: &Arc<Self>, leader: i32, delay: Duration) {
+            self.leader_delay.lock().unwrap().insert(leader, delay);
         }
 
         /// Make the next send to `seq` return a `ProduceResponse` carrying
@@ -1402,6 +1434,12 @@ mod harness {
             self.last_timeout_ms
                 .store(i64::from(req.timeout_ms), Ordering::Relaxed);
 
+            if let Some(delay) =
+                leader.and_then(|id| self.leader_delay.lock().unwrap().get(&id).copied())
+            {
+                tokio::time::sleep(delay).await;
+            }
+
             {
                 let mut guard = self.fail_once_leader.lock().unwrap();
                 if let (Some(target), Some(actual)) = (*guard, leader)
@@ -1507,6 +1545,7 @@ mod harness {
         flush_notify: Arc<Notify>,
         in_flight: Arc<AtomicUsize>,
         shutdown: CancellationToken,
+        partitioner: Arc<UniformStickyPartitioner>,
         transport: Arc<MockTransport>,
         handle: tokio::task::JoinHandle<()>,
     }
@@ -1533,6 +1572,7 @@ mod harness {
         let metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let partition_leaders: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
+        let partitioner = Arc::new(UniformStickyPartitioner::new());
         let state = Arc::new(AtomicU8::new(STATE_ACTIVE));
 
         // Box the same Arc<MockTransport> for the sender; keep a clone for the
@@ -1549,6 +1589,7 @@ mod harness {
             max_in_flight,
             metadata_cache: metadata_cache.clone(),
             partition_leaders: partition_leaders.clone(),
+            partitioner: partitioner.clone(),
             accumulators: accumulators.clone(),
             next_seq: next_seq.clone(),
             state: state.clone(),
@@ -1572,6 +1613,7 @@ mod harness {
             flush_notify,
             in_flight,
             shutdown,
+            partitioner,
             transport,
             handle,
         }
@@ -1622,6 +1664,17 @@ mod harness {
         partition: i32,
         n: usize,
     ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
+        let rxs = produce_single_batch_without_wake(h, topic, partition, n).await;
+        let _ = h.wake_tx.try_send(());
+        rxs
+    }
+
+    async fn produce_single_batch_without_wake(
+        h: &Harness,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
         let key = (topic.to_string(), partition);
         let acc = h
             .accumulators
@@ -1642,7 +1695,6 @@ mod harness {
                 rxs.push(rx);
             }
         }
-        let _ = h.wake_tx.try_send(());
         rxs
     }
 
@@ -1731,6 +1783,35 @@ mod harness {
             let expected: Vec<i64> = (0..i64::try_from(PER).unwrap()).collect();
             assert!(offsets == expected, "partition {p} offsets out of order");
         }
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sealing_batch_rotates_null_key_sticky_partition() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender(transport.clone(), 5);
+        h.metadata_cache.lock().await.insert(
+            "t".to_string(),
+            TopicMetadata {
+                num_partitions: 3,
+                topic_id: Uuid::ZERO,
+            },
+        );
+
+        assert!(h.partitioner.pick("t", None, 3) == 0);
+
+        let mut rxs = produce_single_batch(&h, "t", 0, 1).await;
+        tokio::time::timeout(Duration::from_secs(5), rxs.remove(0))
+            .await
+            .expect("record ack should resolve")
+            .expect("oneshot sender should stay alive")
+            .expect("record should ack");
+
+        assert!(
+            h.partitioner.pick("t", None, 3) == 1,
+            "sender should rotate the shared sticky partition after sealing partition 0"
+        );
 
         shutdown(h).await;
     }
@@ -1824,6 +1905,65 @@ mod harness {
             "sender should try stale leader once, then reroute to fresh leader"
         );
         assert!(h.transport.evicted() == vec![0]);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn slow_dead_leader_does_not_block_live_partition_ack() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(0);
+        transport.add_known_broker(1);
+        transport.add_known_broker(6);
+        transport.fail_once_on_leader(0);
+        transport.delay_leader(0, Duration::from_millis(250));
+        transport.set_refresh_response(MetadataResponse {
+            brokers: Vec::new(),
+            topics: vec![MetadataResponseTopic {
+                name: Some("t".to_string()),
+                partitions: vec![MetadataResponsePartition {
+                    partition_index: 0,
+                    leader_id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let h = spawn_sender(transport.clone(), 5);
+        h.partition_leaders.insert(("t".to_string(), 0), 0);
+        h.partition_leaders.insert(("t".to_string(), 1), 6);
+
+        let mut dead_rx = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+        let mut live_rx = produce_single_batch_without_wake(&h, "t", 1, 1).await;
+        let _ = h.wake_tx.try_send(());
+
+        let live_md = tokio::time::timeout(Duration::from_millis(100), live_rx.remove(0))
+            .await
+            .expect("live partition ack should not wait for a slow dead leader")
+            .expect("oneshot sender should stay alive")
+            .expect("live partition should ack Ok");
+        assert!(live_md.partition == 1);
+        assert!(live_md.offset == 0);
+
+        let dead_md = tokio::time::timeout(Duration::from_secs(5), dead_rx.remove(0))
+            .await
+            .expect("dead leader partition should resolve after reroute")
+            .expect("oneshot sender should stay alive")
+            .expect("dead leader partition should ack after reroute");
+        assert!(dead_md.partition == 0);
+        assert!(dead_md.offset == 0);
+
+        let sent = h.transport.sent_leaders();
+        assert!(
+            sent.len() == 3 && sent[2] == Some(1),
+            "sender should reroute the stale leader after the first two sends, got {sent:?}"
+        );
+        assert!(
+            sent[..2].contains(&Some(0)) && sent[..2].contains(&Some(6)),
+            "first cycle should include stale leader and live leader sends, got {sent:?}"
+        );
 
         shutdown(h).await;
     }

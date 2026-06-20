@@ -47,6 +47,15 @@ fn is_read_committed(isolation_level: IsolationLevel) -> bool {
     isolation_level == IsolationLevel::ReadCommitted
 }
 
+fn is_transient_transport_error(e: &crabka_client_core::ClientError) -> bool {
+    matches!(
+        e,
+        crabka_client_core::ClientError::Disconnected
+            | crabka_client_core::ClientError::Timeout(_)
+            | crabka_client_core::ClientError::Io(_)
+    )
+}
+
 fn aborted_txn_started(first_offset: i64, batch_base_offset: i64) -> bool {
     first_offset <= batch_base_offset
 }
@@ -244,7 +253,16 @@ impl Consumer {
             let resp = if should_use_bootstrap_leader(leader) {
                 self.client.send(req).await?
             } else {
-                self.client.broker(leader).send(req).await?
+                match self.client.broker(leader).send(req).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if is_transient_transport_error(&e) {
+                            self.client.evict_broker(leader);
+                            continue;
+                        }
+                        return Err(e.into());
+                    }
+                }
             };
             responses.push(resp);
         }
