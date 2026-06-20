@@ -80,7 +80,11 @@ fn exposes_recent_spans_as_mem_table_over_span_schema() {
 async fn live_source_exposes_trace_spans_and_tags() {
     let mut store = LiveStore::new(i64::MAX);
     store.ingest(record("tenant-a", span([1; 16], 1, 10)));
-    store.ingest(record("tenant-a", span([1; 16], 2, 20)));
+    let mut child = span([1; 16], 2, 20);
+    child.parent_span_id = Some([1; 8]);
+    child.status_message = "retryable".into();
+    child.instrumentation_scope = "otel-rust".into();
+    store.ingest(record("tenant-a", child));
 
     let trace = store
         .trace_spans("tenant-a", &[1; 16])
@@ -109,6 +113,15 @@ async fn live_source_exposes_trace_spans_and_tags() {
             .iter()
             .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
     );
+    assert!(names.iter().any(|tags| {
+        tags.scope == TagScope::Intrinsic
+            && tags.tags.contains(&"span:parentID".to_string())
+            && tags.tags.contains(&"span:statusMessage".to_string())
+    }));
+    assert!(names.iter().any(|tags| {
+        tags.scope == TagScope::Instrumentation
+            && tags.tags.contains(&"instrumentation:name".to_string())
+    }));
 
     let values = store
         .tag_values("tenant-a", ".http.method", 0, 100)
@@ -118,6 +131,33 @@ async fn live_source_exposes_trace_spans_and_tags() {
         values
             .iter()
             .any(|value| value.type_ == "string" && value.value == "GET")
+    );
+    let parent_ids = store
+        .tag_values("tenant-a", "span:parentID", 0, 100)
+        .await
+        .unwrap();
+    assert!(
+        parent_ids
+            .iter()
+            .any(|value| value.type_ == "string" && value.value == "0101010101010101")
+    );
+    let status_messages = store
+        .tag_values("tenant-a", "span:statusMessage", 0, 100)
+        .await
+        .unwrap();
+    assert!(
+        status_messages
+            .iter()
+            .any(|value| value.type_ == "string" && value.value == "retryable")
+    );
+    let instrumentation_names = store
+        .tag_values("tenant-a", "instrumentation:name", 0, 100)
+        .await
+        .unwrap();
+    assert!(
+        instrumentation_names
+            .iter()
+            .any(|value| value.type_ == "string" && value.value == "otel-rust")
     );
 }
 

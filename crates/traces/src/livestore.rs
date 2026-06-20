@@ -15,6 +15,24 @@ use crate::querier::live::{LiveSource, Result as LiveResult};
 use crate::span::{AttrValue, KeyValue, Span, batch::span_batch, nested_set};
 use crate::wal::SpanRecord;
 
+const INTRINSIC_TAGS: &[&str] = &[
+    "span:childCount",
+    "span:duration",
+    "span:id",
+    "span:kind",
+    "span:name",
+    "span:Parent",
+    "span:parentID",
+    "span:nestedSetLeft",
+    "span:nestedSetParent",
+    "span:nestedSetRight",
+    "span:status",
+    "span:statusMessage",
+    "trace:id",
+    "trace:rootName",
+    "trace:rootService",
+];
+
 /// In-memory recent span store keyed by tenant and trace id.
 #[derive(Debug)]
 pub struct LiveStore {
@@ -177,14 +195,20 @@ impl LiveSource for LiveStore {
     ) -> LiveResult<Vec<crabka_traceql::ScopedTag>> {
         let mut resource = BTreeSet::new();
         let mut span = BTreeSet::new();
+        let mut instrumentation = BTreeSet::new();
+        let mut has_spans = false;
         if let Some(traces) = self.by_tenant.get(tenant) {
             for item in traces
                 .values()
                 .flatten()
                 .filter(|item| in_time_range(item, start_ns, end_ns))
             {
+                has_spans = true;
                 resource.extend(item.resource_attrs.iter().map(|attr| attr.key.clone()));
                 span.extend(item.span_attrs.iter().map(|attr| attr.key.clone()));
+                if !item.instrumentation_scope.is_empty() {
+                    instrumentation.insert("instrumentation:name".to_string());
+                }
             }
         }
 
@@ -200,6 +224,25 @@ impl LiveSource for LiveStore {
             out.push(crabka_traceql::ScopedTag {
                 scope: crabka_traceql::TagScope::Span,
                 tags: span.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(crabka_traceql::TagScope::Intrinsic)) && has_spans {
+            out.push(crabka_traceql::ScopedTag {
+                scope: crabka_traceql::TagScope::Intrinsic,
+                tags: INTRINSIC_TAGS
+                    .iter()
+                    .map(|tag| (*tag).to_string())
+                    .collect(),
+            });
+        }
+        if matches!(
+            scope,
+            None | Some(crabka_traceql::TagScope::Instrumentation)
+        ) && !instrumentation.is_empty()
+        {
+            out.push(crabka_traceql::ScopedTag {
+                scope: crabka_traceql::TagScope::Instrumentation,
+                tags: instrumentation.into_iter().collect(),
             });
         }
         Ok(out)
@@ -227,6 +270,10 @@ impl LiveSource for LiveStore {
                         .filter(|attr| attr.key == tag)
                         .map(|attr| typed_value_parts(&attr.value)),
                 );
+                collect_span_intrinsic_value(span, tag, &mut values);
+                if tag == "instrumentation:name" && !span.instrumentation_scope.is_empty() {
+                    values.insert(("string".into(), span.instrumentation_scope.clone()));
+                }
             }
         }
         Ok(values
@@ -322,6 +369,50 @@ fn typed_value_parts(value: &AttrValue) -> (String, String) {
         AttrValue::Bool(value) => ("bool".into(), value.to_string()),
         AttrValue::Bytes(value) => ("string".into(), hex::encode(value)),
     }
+}
+
+fn collect_span_intrinsic_value(span: &Span, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    match tag {
+        "span:duration" => {
+            values.insert(("duration".into(), span.duration_ns.to_string()));
+        }
+        "span:id" => {
+            values.insert(("string".into(), bytes_to_hex(&span.span_id)));
+        }
+        "span:kind" => {
+            values.insert(("int".into(), span.kind.as_i32().to_string()));
+        }
+        "span:name" => {
+            values.insert(("string".into(), span.name.clone()));
+        }
+        "span:parentID" => {
+            if let Some(parent_id) = span.parent_span_id {
+                values.insert(("string".into(), bytes_to_hex(&parent_id)));
+            }
+        }
+        "span:status" => {
+            values.insert(("int".into(), span.status.as_i32().to_string()));
+        }
+        "span:statusMessage" => {
+            if !span.status_message.is_empty() {
+                values.insert(("string".into(), span.status_message.clone()));
+            }
+        }
+        "trace:id" => {
+            values.insert(("string".into(), bytes_to_hex(&span.trace_id)));
+        }
+        _ => {}
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 fn non_negative_u64(value: i64) -> u64 {
