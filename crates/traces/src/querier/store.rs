@@ -7,6 +7,7 @@ use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
     LargeStringArray, ListArray, StringArray, StringViewArray, StructArray,
 };
+use arrow::compute::filter_record_batch;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
@@ -19,8 +20,8 @@ use crabka_traceql::{
     COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EventRef, LinkRef,
-    ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
-    TypedValue, span_schema,
+    MatchCmp, MatchScope, MatchValue, ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore,
+    TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -108,7 +109,7 @@ impl SpanStore for CrabkaSpanStore {
     async fn scan(
         &self,
         tenant: &str,
-        _matchers: &[SpanMatcher],
+        matchers: &[SpanMatcher],
         start_ns: i64,
         end_ns: i64,
     ) -> Result<ScanResult, TraceqlError> {
@@ -126,6 +127,7 @@ impl SpanStore for CrabkaSpanStore {
         {
             batches.extend(live.span_batches(tenant, live_start, end_ns).await?);
         }
+        let batches = filter_batches_by_matchers(batches, matchers)?;
 
         let schema = batches
             .first()
@@ -320,6 +322,370 @@ async fn collect_table(
     table: &str,
 ) -> Result<Vec<RecordBatch>, TraceqlError> {
     Ok(ctx.table(table).await?.collect().await?)
+}
+
+fn filter_batches_by_matchers(
+    batches: Vec<RecordBatch>,
+    matchers: &[SpanMatcher],
+) -> Result<Vec<RecordBatch>, TraceqlError> {
+    if matchers.is_empty() {
+        return Ok(batches);
+    }
+    batches
+        .into_iter()
+        .map(|batch| {
+            let mask = (0..batch.num_rows())
+                .map(|row| row_matches(&batch, row, matchers))
+                .collect::<Result<Vec<_>, _>>()?;
+            filter_record_batch(&batch, &BooleanArray::from(mask))
+                .map_err(|err| TraceqlError::Store(err.to_string()))
+        })
+        .collect()
+}
+
+fn row_matches(
+    batch: &RecordBatch,
+    row: usize,
+    matchers: &[SpanMatcher],
+) -> Result<bool, TraceqlError> {
+    matchers.iter().try_fold(true, |matched, matcher| {
+        if !matched {
+            return Ok(false);
+        }
+        row_matcher_matches(batch, row, matcher)
+    })
+}
+
+fn row_matcher_matches(
+    batch: &RecordBatch,
+    row: usize,
+    matcher: &SpanMatcher,
+) -> Result<bool, TraceqlError> {
+    Ok(match matcher.scope {
+        MatchScope::Event => event_values(batch, row)?.iter().any(|event| {
+            event
+                .attributes
+                .iter()
+                .find(|(key, _)| key == &matcher.key)
+                .map_or_else(
+                    || nil_matches(matcher.op, &matcher.value),
+                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+                )
+        }),
+        MatchScope::Link => link_values(batch, row)?.iter().any(|link| {
+            link.attributes
+                .iter()
+                .find(|(key, _)| key == &matcher.key)
+                .map_or_else(
+                    || nil_matches(matcher.op, &matcher.value),
+                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+                )
+        }),
+        MatchScope::Intrinsic => intrinsic_matches(batch, row, matcher)?,
+        MatchScope::Resource => resource_matches(batch, row, matcher)?,
+        MatchScope::Instrumentation => instrumentation_matches(batch, row, matcher)?,
+        MatchScope::Both => {
+            resource_matches(batch, row, matcher)?
+                || batch_attr_matches(batch, row, &matcher.key, matcher.op, &matcher.value)?
+        }
+        MatchScope::Span => {
+            batch_attr_matches(batch, row, &matcher.key, matcher.op, &matcher.value)?
+        }
+        MatchScope::Parent => true,
+    })
+}
+
+fn batch_attr_matches(
+    batch: &RecordBatch,
+    row: usize,
+    key: &str,
+    op: MatchCmp,
+    expected: &MatchValue,
+) -> Result<bool, TraceqlError> {
+    Ok(attr_values(batch, row)?
+        .iter()
+        .find(|(attr_key, _)| attr_key == key)
+        .map_or_else(
+            || nil_matches(op, expected),
+            |(_, value)| attr_matches(value, op, expected),
+        ))
+}
+
+fn resource_matches(
+    batch: &RecordBatch,
+    row: usize,
+    matcher: &SpanMatcher,
+) -> Result<bool, TraceqlError> {
+    Ok(match matcher.key.as_str() {
+        "service.name" => string_matches(
+            &string_value(batch, COL_ROOT_SERVICE_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        _ => nil_matches(matcher.op, &matcher.value),
+    })
+}
+
+fn instrumentation_matches(
+    batch: &RecordBatch,
+    row: usize,
+    matcher: &SpanMatcher,
+) -> Result<bool, TraceqlError> {
+    Ok(match matcher.key.as_str() {
+        "name" | "instrumentation:name" => string_matches(
+            &string_value(batch, COL_INSTRUMENTATION_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "version" | "instrumentation:version" => string_matches(
+            &string_value(batch, COL_INSTRUMENTATION_VERSION, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        _ => nil_matches(matcher.op, &matcher.value),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn intrinsic_matches(
+    batch: &RecordBatch,
+    row: usize,
+    matcher: &SpanMatcher,
+) -> Result<bool, TraceqlError> {
+    Ok(match matcher.key.as_str() {
+        "span:name" => string_matches(
+            &string_value(batch, COL_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "event:name" => event_values(batch, row)?
+            .iter()
+            .any(|event| string_matches(&event.name, matcher.op, &matcher.value)),
+        "event:timeSinceStart" => event_values(batch, row)?.iter().any(|event| {
+            int_matches(
+                i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                matcher.op,
+                &matcher.value,
+            )
+        }),
+        "link:traceID" => link_values(batch, row)?
+            .iter()
+            .any(|link| string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)),
+        "link:spanID" => link_values(batch, row)?
+            .iter()
+            .any(|link| string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)),
+        "trace:id" => string_matches(
+            &bytes_to_hex(&fixed_value::<16>(batch, COL_TRACE_ID, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "trace:rootService" => string_matches(
+            &string_value(batch, COL_ROOT_SERVICE_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "trace:rootName" => string_matches(
+            &string_value(batch, COL_ROOT_SPAN_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "trace:duration" => int_matches(
+            int64_value(batch, COL_TRACE_DURATION, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:duration" => int_matches(
+            int64_value(batch, COL_DURATION, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:id" => string_matches(
+            &bytes_to_hex(&fixed_value::<8>(batch, COL_SPAN_ID, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:parentID" => nullable_fixed_value::<8>(batch, COL_PARENT_SPAN_ID, row)?.map_or_else(
+            || nil_matches(matcher.op, &matcher.value),
+            |parent| string_matches(&bytes_to_hex(&parent), matcher.op, &matcher.value),
+        ),
+        "span:kind" => enum_int_matches(
+            i64::from(int32_value(batch, COL_KIND, row)?),
+            matcher.op,
+            &matcher.value,
+            kind_enum_value,
+        ),
+        "span:status" => enum_int_matches(
+            i64::from(int32_value(batch, COL_STATUS_CODE, row)?),
+            matcher.op,
+            &matcher.value,
+            status_enum_value,
+        ),
+        "span:statusMessage" => string_matches(
+            &string_value(batch, COL_STATUS_MESSAGE, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:childCount" => int_matches(
+            i64::from(int32_value(batch, COL_CHILD_COUNT, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:nestedSetLeft" => int_matches(
+            i64::from(int32_value(batch, COL_NS_LEFT, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:nestedSetRight" => int_matches(
+            i64::from(int32_value(batch, COL_NS_RIGHT, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:nestedSetParent" | "span:Parent" => int_matches(
+            i64::from(int32_value(batch, COL_PARENT_ID, row)?),
+            matcher.op,
+            &matcher.value,
+        ),
+        "instrumentation:name" => string_matches(
+            &string_value(batch, COL_INSTRUMENTATION_NAME, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        "instrumentation:version" => string_matches(
+            &string_value(batch, COL_INSTRUMENTATION_VERSION, row)?,
+            matcher.op,
+            &matcher.value,
+        ),
+        _ => true,
+    })
+}
+
+fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool {
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    match value {
+        AttrValue::Str(value) => string_matches(value, op, expected),
+        AttrValue::Int(value) => int_matches(*value, op, expected),
+        AttrValue::Float(value) => float_matches(*value, op, expected),
+        AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn present_value_matches(op: MatchCmp, expected: &MatchValue) -> Option<bool> {
+    match (op, expected) {
+        (MatchCmp::Eq, MatchValue::Nil) => Some(false),
+        (MatchCmp::Neq, MatchValue::Nil) => Some(true),
+        _ => None,
+    }
+}
+
+fn nil_matches(op: MatchCmp, expected: &MatchValue) -> bool {
+    matches!((op, expected), (MatchCmp::Eq, MatchValue::Nil))
+}
+
+fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
+    let MatchValue::Str(expected) = expected else {
+        return false;
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Re => {
+            regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| re.is_match(value))
+        }
+        MatchCmp::Nre => {
+            regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| !re.is_match(value))
+        }
+        MatchCmp::Lt | MatchCmp::Lte | MatchCmp::Gt | MatchCmp::Gte => false,
+    }
+}
+
+fn int_matches(value: i64, op: MatchCmp, expected: &MatchValue) -> bool {
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    let expected = match expected {
+        MatchValue::Int(value) => *value,
+        _ => return false,
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Lt => value < expected,
+        MatchCmp::Lte => value <= expected,
+        MatchCmp::Gt => value > expected,
+        MatchCmp::Gte => value >= expected,
+        MatchCmp::Re | MatchCmp::Nre => false,
+    }
+}
+
+fn enum_int_matches(
+    value: i64,
+    op: MatchCmp,
+    expected: &MatchValue,
+    enum_value: fn(&str) -> Option<i32>,
+) -> bool {
+    let expected = match expected {
+        MatchValue::Str(name) => enum_value(&name.to_ascii_lowercase()).map(i64::from),
+        MatchValue::Int(value) => Some(*value),
+        MatchValue::Nil => return present_value_matches(op, expected).unwrap_or(false),
+        MatchValue::Float(_) | MatchValue::Bool(_) => None,
+    };
+    expected.is_some_and(|expected| int_matches(value, op, &MatchValue::Int(expected)))
+}
+
+fn status_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unset" => Some(0),
+        "ok" => Some(1),
+        "error" => Some(2),
+        _ => None,
+    }
+}
+
+fn kind_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unspecified" => Some(0),
+        "internal" => Some(1),
+        "server" => Some(2),
+        "client" => Some(3),
+        "producer" => Some(4),
+        "consumer" => Some(5),
+        _ => None,
+    }
+}
+
+#[allow(clippy::float_cmp)]
+fn float_matches(value: f64, op: MatchCmp, expected: &MatchValue) -> bool {
+    let expected = match expected {
+        MatchValue::Float(value) => *value,
+        _ => return false,
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Lt => value < expected,
+        MatchCmp::Lte => value <= expected,
+        MatchCmp::Gt => value > expected,
+        MatchCmp::Gte => value >= expected,
+        MatchCmp::Re | MatchCmp::Nre => false,
+    }
+}
+
+fn bool_matches(value: bool, op: MatchCmp, expected: &MatchValue) -> bool {
+    let MatchValue::Bool(expected) = expected else {
+        return false;
+    };
+    match op {
+        MatchCmp::Eq => value == *expected,
+        MatchCmp::Neq => value != *expected,
+        MatchCmp::Lt
+        | MatchCmp::Lte
+        | MatchCmp::Gt
+        | MatchCmp::Gte
+        | MatchCmp::Re
+        | MatchCmp::Nre => false,
+    }
 }
 
 fn trace_from_batches(
@@ -1518,6 +1884,58 @@ mod tests {
                     attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
                 }]
         );
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_search_filters_event_intrinsics() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let matching = span_with_nested_refs();
+        let mut other = span_with_nested_refs();
+        other.trace_id = [3; 16];
+        other.span_id = [4; 8];
+        other.events[0].name = "cache.hit".into();
+        let batch = span_batch(&[matching.clone(), other.clone()]).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/search-events.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&matching.trace_id);
+        bloom.insert(&other.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let resp = engine
+            .search("tenant", "{ event:name = \"exception\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == matching.trace_id);
     }
 
     #[tokio::test]

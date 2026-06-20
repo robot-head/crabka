@@ -29,6 +29,9 @@ pub(crate) async fn plan_selector<S: SpanStore>(
 }
 
 pub(crate) fn selector_sql(table: &str, fe: &FieldExpr) -> Result<String> {
+    if has_nested_scope(fe) {
+        return Ok(format!("SELECT * FROM {table}"));
+    }
     if has_parent_scope(fe) {
         let predicate = field_expr_to_sql_qualified(fe, "s", "p")?;
         let trace = ident(COL_TRACE_ID);
@@ -101,6 +104,25 @@ pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
         )),
         FieldExpr::Not(inner) => Ok(format!("(NOT {})", field_expr_to_sql(inner)?)),
         FieldExpr::Field(field) => Ok(format!("{} IS NOT NULL", ident(&field_to_column(field)?))),
+    }
+}
+
+fn has_nested_scope(fe: &FieldExpr) -> bool {
+    match fe {
+        FieldExpr::Comparison { lhs, .. } | FieldExpr::Field(lhs) => {
+            matches!(lhs.scope, Scope::Event | Scope::Link)
+                || matches!(
+                    lhs.scope,
+                    Scope::Intrinsic(
+                        Intrinsic::EventName
+                            | Intrinsic::EventTimeSinceStart
+                            | Intrinsic::LinkTraceId
+                            | Intrinsic::LinkSpanId
+                    )
+                )
+        }
+        FieldExpr::And(a, b) | FieldExpr::Or(a, b) => has_nested_scope(a) || has_nested_scope(b),
+        FieldExpr::Not(inner) => has_nested_scope(inner),
     }
 }
 
@@ -218,11 +240,44 @@ pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
         }
         FieldExpr::Comparison { lhs, op, rhs } => vec![SpanMatcher {
             scope: match_scope(&lhs.scope),
-            key: lhs.key.clone(),
+            key: matcher_key(lhs),
             op: match_cmp(*op),
             value: match_value(rhs),
         }],
         FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) => vec![],
+    }
+}
+
+fn matcher_key(field: &Field) -> String {
+    match &field.scope {
+        Scope::Intrinsic(intrinsic) => intrinsic_match_key(intrinsic).to_string(),
+        _ => field.key.clone(),
+    }
+}
+
+fn intrinsic_match_key(intrinsic: &Intrinsic) -> &'static str {
+    match intrinsic {
+        Intrinsic::Name => "span:name",
+        Intrinsic::Duration => "span:duration",
+        Intrinsic::Kind => "span:kind",
+        Intrinsic::Status => "span:status",
+        Intrinsic::StatusMessage => "span:statusMessage",
+        Intrinsic::Id => "span:id",
+        Intrinsic::ParentId => "span:parentID",
+        Intrinsic::TraceDuration => "trace:duration",
+        Intrinsic::TraceRootName => "trace:rootName",
+        Intrinsic::TraceRootService => "trace:rootService",
+        Intrinsic::TraceId => "trace:id",
+        Intrinsic::NestedSetLeft => "span:nestedSetLeft",
+        Intrinsic::NestedSetRight => "span:nestedSetRight",
+        Intrinsic::NestedSetParent => "span:nestedSetParent",
+        Intrinsic::ChildCount => "span:childCount",
+        Intrinsic::InstrumentationName => "instrumentation:name",
+        Intrinsic::InstrumentationVersion => "instrumentation:version",
+        Intrinsic::EventName => "event:name",
+        Intrinsic::EventTimeSinceStart => "event:timeSinceStart",
+        Intrinsic::LinkTraceId => "link:traceID",
+        Intrinsic::LinkSpanId => "link:spanID",
     }
 }
 

@@ -2962,6 +2962,7 @@ dependencies = [
  "object_store",
  "opentelemetry-proto",
  "prost",
+ "regex",
  "reqwest 0.13.4",
  "serde",
  "serde-wincode",

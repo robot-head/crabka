@@ -15,7 +15,7 @@ use datafusion::prelude::SessionContext;
 use crate::error::{Result, TraceqlError};
 use crate::result::{AttrValue, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue};
 use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_with_attrs};
-use crate::store::{ScanResult, SpanMatcher, SpanStore};
+use crate::store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
 
 const INTRINSIC_TAGS: &[&str] = &[
     "event:name",
@@ -180,7 +180,7 @@ impl SpanStore for InMemorySpanStore {
     async fn scan(
         &self,
         tenant: &str,
-        _matchers: &[SpanMatcher],
+        matchers: &[SpanMatcher],
         start_ns: i64,
         end_ns: i64,
     ) -> Result<ScanResult> {
@@ -223,6 +223,9 @@ impl SpanStore for InMemorySpanStore {
 
         for trace in &in_range {
             for (i, span) in trace.spans.iter().enumerate() {
+                if !span_matches(trace, span, &trace.nested, i, matchers) {
+                    continue;
+                }
                 trace_id
                     .append_value(span.trace_id)
                     .map_err(|e| TraceqlError::Store(e.to_string()))?;
@@ -426,6 +429,294 @@ impl SpanStore for InMemorySpanStore {
             .into_iter()
             .map(|(type_, value)| TypedValue { type_, value })
             .collect())
+    }
+}
+
+fn span_matches(
+    trace: &StoredTrace,
+    span: &InputSpan,
+    nested_sets: &[NestedSet],
+    idx: usize,
+    matchers: &[SpanMatcher],
+) -> bool {
+    matchers
+        .iter()
+        .all(|matcher| matcher_matches(trace, span, nested_sets, idx, matcher))
+}
+
+fn matcher_matches(
+    trace: &StoredTrace,
+    span: &InputSpan,
+    nested_sets: &[NestedSet],
+    idx: usize,
+    matcher: &SpanMatcher,
+) -> bool {
+    match matcher.scope {
+        MatchScope::Event => span.events.iter().any(|event| {
+            event
+                .attributes
+                .iter()
+                .find(|(key, _)| key == &matcher.key)
+                .map_or_else(
+                    || nil_matches(matcher.op, &matcher.value),
+                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+                )
+        }),
+        MatchScope::Link => span.links.iter().any(|link| {
+            link.attributes
+                .iter()
+                .find(|(key, _)| key == &matcher.key)
+                .map_or_else(
+                    || nil_matches(matcher.op, &matcher.value),
+                    |(_, value)| attr_matches(value, matcher.op, &matcher.value),
+                )
+        }),
+        MatchScope::Intrinsic => intrinsic_matches(trace, span, nested_sets, idx, matcher),
+        MatchScope::Resource => resource_matches(trace, matcher),
+        MatchScope::Instrumentation => instrumentation_matches(span, matcher),
+        MatchScope::Both => {
+            resource_matches(trace, matcher)
+                || span_attr_matches(span, &matcher.key, matcher.op, &matcher.value)
+        }
+        MatchScope::Span => span_attr_matches(span, &matcher.key, matcher.op, &matcher.value),
+        MatchScope::Parent => true,
+    }
+}
+
+fn span_attr_matches(span: &InputSpan, key: &str, op: MatchCmp, expected: &MatchValue) -> bool {
+    span.attrs
+        .iter()
+        .find(|(attr_key, _)| attr_key == key)
+        .map_or_else(
+            || nil_matches(op, expected),
+            |(_, value)| attr_matches(value, op, expected),
+        )
+}
+
+fn resource_matches(trace: &StoredTrace, matcher: &SpanMatcher) -> bool {
+    match matcher.key.as_str() {
+        "service.name" => string_matches(&trace.root_service_name, matcher.op, &matcher.value),
+        _ => nil_matches(matcher.op, &matcher.value),
+    }
+}
+
+fn instrumentation_matches(span: &InputSpan, matcher: &SpanMatcher) -> bool {
+    match matcher.key.as_str() {
+        "name" | "instrumentation:name" => {
+            string_matches(&span.instrumentation_name, matcher.op, &matcher.value)
+        }
+        "version" | "instrumentation:version" => {
+            string_matches(&span.instrumentation_version, matcher.op, &matcher.value)
+        }
+        _ => nil_matches(matcher.op, &matcher.value),
+    }
+}
+
+fn intrinsic_matches(
+    trace: &StoredTrace,
+    span: &InputSpan,
+    nested_sets: &[NestedSet],
+    idx: usize,
+    matcher: &SpanMatcher,
+) -> bool {
+    match matcher.key.as_str() {
+        "name" | "span:name" => string_matches(&span.name, matcher.op, &matcher.value),
+        "event:name" => span
+            .events
+            .iter()
+            .any(|event| string_matches(&event.name, matcher.op, &matcher.value)),
+        "event:timeSinceStart" => span.events.iter().any(|event| {
+            int_matches(
+                i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                matcher.op,
+                &matcher.value,
+            )
+        }),
+        "link:traceID" => span
+            .links
+            .iter()
+            .any(|link| string_matches(&bytes_to_hex(&link.trace_id), matcher.op, &matcher.value)),
+        "link:spanID" => span
+            .links
+            .iter()
+            .any(|link| string_matches(&bytes_to_hex(&link.span_id), matcher.op, &matcher.value)),
+        "trace:id" => string_matches(&bytes_to_hex(&trace.trace_id), matcher.op, &matcher.value),
+        "trace:rootService" => string_matches(&trace.root_service_name, matcher.op, &matcher.value),
+        "trace:rootName" => string_matches(&trace.root_span_name, matcher.op, &matcher.value),
+        "trace:duration" => int_matches(trace.trace_duration_nanos, matcher.op, &matcher.value),
+        "duration" | "span:duration" => {
+            int_matches(span.duration_nanos, matcher.op, &matcher.value)
+        }
+        "span:id" => string_matches(&bytes_to_hex(&span.span_id), matcher.op, &matcher.value),
+        "span:parentID" => span.parent_span_id.map_or_else(
+            || nil_matches(matcher.op, &matcher.value),
+            |parent| string_matches(&bytes_to_hex(&parent), matcher.op, &matcher.value),
+        ),
+        "kind" | "span:kind" => enum_int_matches(
+            i64::from(span.kind),
+            matcher.op,
+            &matcher.value,
+            kind_enum_value,
+        ),
+        "status" | "span:status" => enum_int_matches(
+            i64::from(span.status_code),
+            matcher.op,
+            &matcher.value,
+            status_enum_value,
+        ),
+        "statusMessage" | "span:statusMessage" => {
+            string_matches(&span.status_message, matcher.op, &matcher.value)
+        }
+        "span:childCount" => int_matches(
+            i64::from(child_count_for(nested_sets, idx)),
+            matcher.op,
+            &matcher.value,
+        ),
+        "span:nestedSetLeft" => nested_sets
+            .get(idx)
+            .is_some_and(|nested| int_matches(i64::from(nested.left), matcher.op, &matcher.value)),
+        "span:nestedSetRight" => nested_sets
+            .get(idx)
+            .is_some_and(|nested| int_matches(i64::from(nested.right), matcher.op, &matcher.value)),
+        "span:nestedSetParent" | "span:Parent" => nested_sets.get(idx).is_some_and(|nested| {
+            int_matches(i64::from(nested.parent_id), matcher.op, &matcher.value)
+        }),
+        "instrumentation:name" => {
+            string_matches(&span.instrumentation_name, matcher.op, &matcher.value)
+        }
+        "instrumentation:version" => {
+            string_matches(&span.instrumentation_version, matcher.op, &matcher.value)
+        }
+        _ => true,
+    }
+}
+
+fn attr_matches(value: &AttrValue, op: MatchCmp, expected: &MatchValue) -> bool {
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    match value {
+        AttrValue::Str(value) => string_matches(value, op, expected),
+        AttrValue::Int(value) => int_matches(*value, op, expected),
+        AttrValue::Float(value) => float_matches(*value, op, expected),
+        AttrValue::Bool(value) => bool_matches(*value, op, expected),
+    }
+}
+
+fn present_value_matches(op: MatchCmp, expected: &MatchValue) -> Option<bool> {
+    match (op, expected) {
+        (MatchCmp::Eq, MatchValue::Nil) => Some(false),
+        (MatchCmp::Neq, MatchValue::Nil) => Some(true),
+        _ => None,
+    }
+}
+
+fn nil_matches(op: MatchCmp, expected: &MatchValue) -> bool {
+    matches!((op, expected), (MatchCmp::Eq, MatchValue::Nil))
+}
+
+fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
+    let MatchValue::Str(expected) = expected else {
+        return false;
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Re => {
+            regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| re.is_match(value))
+        }
+        MatchCmp::Nre => {
+            regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| !re.is_match(value))
+        }
+        MatchCmp::Lt | MatchCmp::Lte | MatchCmp::Gt | MatchCmp::Gte => false,
+    }
+}
+
+fn int_matches(value: i64, op: MatchCmp, expected: &MatchValue) -> bool {
+    if let Some(matches) = present_value_matches(op, expected) {
+        return matches;
+    }
+    let expected = match expected {
+        MatchValue::Int(value) => *value,
+        _ => return false,
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Lt => value < expected,
+        MatchCmp::Lte => value <= expected,
+        MatchCmp::Gt => value > expected,
+        MatchCmp::Gte => value >= expected,
+        MatchCmp::Re | MatchCmp::Nre => false,
+    }
+}
+
+fn enum_int_matches(
+    value: i64,
+    op: MatchCmp,
+    expected: &MatchValue,
+    enum_value: fn(&str) -> Option<i32>,
+) -> bool {
+    let expected = match expected {
+        MatchValue::Str(name) => enum_value(&name.to_ascii_lowercase()).map(i64::from),
+        MatchValue::Int(value) => Some(*value),
+        MatchValue::Nil => return present_value_matches(op, expected).unwrap_or(false),
+        MatchValue::Float(_) | MatchValue::Bool(_) => None,
+    };
+    expected.is_some_and(|expected| int_matches(value, op, &MatchValue::Int(expected)))
+}
+
+fn status_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unset" => Some(0),
+        "ok" => Some(1),
+        "error" => Some(2),
+        _ => None,
+    }
+}
+
+fn kind_enum_value(name: &str) -> Option<i32> {
+    match name {
+        "unspecified" => Some(0),
+        "internal" => Some(1),
+        "server" => Some(2),
+        "client" => Some(3),
+        "producer" => Some(4),
+        "consumer" => Some(5),
+        _ => None,
+    }
+}
+
+#[allow(clippy::float_cmp)]
+fn float_matches(value: f64, op: MatchCmp, expected: &MatchValue) -> bool {
+    let expected = match expected {
+        MatchValue::Float(value) => *value,
+        _ => return false,
+    };
+    match op {
+        MatchCmp::Eq => value == expected,
+        MatchCmp::Neq => value != expected,
+        MatchCmp::Lt => value < expected,
+        MatchCmp::Lte => value <= expected,
+        MatchCmp::Gt => value > expected,
+        MatchCmp::Gte => value >= expected,
+        MatchCmp::Re | MatchCmp::Nre => false,
+    }
+}
+
+fn bool_matches(value: bool, op: MatchCmp, expected: &MatchValue) -> bool {
+    let MatchValue::Bool(expected) = expected else {
+        return false;
+    };
+    match op {
+        MatchCmp::Eq => value == *expected,
+        MatchCmp::Neq => value != *expected,
+        MatchCmp::Lt
+        | MatchCmp::Lte
+        | MatchCmp::Gt
+        | MatchCmp::Gte
+        | MatchCmp::Re
+        | MatchCmp::Nre => false,
     }
 }
 

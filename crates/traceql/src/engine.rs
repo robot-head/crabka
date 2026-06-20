@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow::array::Array;
+use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
@@ -912,7 +912,10 @@ fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<S
         return Ok(String::new());
     }
     match array.data_type() {
-        DataType::Utf8 => Ok(array.as_string::<i32>().value(row).to_string()),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+            string_array_value(array.as_ref(), row)
+                .ok_or_else(|| TraceqlError::Exec("unsupported string column type".into()))
+        }
         DataType::Int64 => Ok(array
             .as_primitive::<arrow::datatypes::Int64Type>()
             .value(row)
@@ -1136,8 +1139,30 @@ fn i32_value(batch: &RecordBatch, col: &str, row: usize) -> Result<i32> {
 }
 
 fn string_value(batch: &RecordBatch, col: &str, row: usize) -> Option<String> {
-    let arr = batch.column_by_name(col)?.as_string::<i32>();
-    (!arr.is_null(row)).then(|| arr.value(row).to_string())
+    let arr = batch.column_by_name(col)?;
+    if arr.is_null(row) {
+        return None;
+    }
+    string_array_value(arr.as_ref(), row)
+}
+
+fn string_array_value(array: &dyn Array, row: usize) -> Option<String> {
+    array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .map(|arr| arr.value(row).to_string())
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .map(|arr| arr.value(row).to_string())
+        })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .map(|arr| arr.value(row).to_string())
+        })
 }
 
 fn row_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>> {
@@ -1152,7 +1177,11 @@ fn row_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>
             continue;
         }
         let value = match field.data_type() {
-            DataType::Utf8 => AttrValue::Str(array.as_string::<i32>().value(row).to_string()),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
+                AttrValue::Str(string_array_value(array.as_ref(), row).ok_or_else(|| {
+                    TraceqlError::Exec(format!("unsupported string attribute column {name}"))
+                })?)
+            }
             DataType::Int64 => AttrValue::Int(
                 array
                     .as_primitive::<arrow::datatypes::Int64Type>()
@@ -1188,7 +1217,7 @@ mod tests {
 
     use super::*;
     use crate::in_memory::InMemorySpanStore;
-    use crate::result::AttrValue;
+    use crate::result::{AttrValue, EventRef, LinkRef};
     use crate::span_columns::InputSpan;
 
     fn sp(tid: u8, id: u8, parent: Option<u8>, svc: &str) -> InputSpan {
@@ -1383,6 +1412,52 @@ mod tests {
         assert!(r.traces[0].trace_id == [9; 16]);
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_event_intrinsic() {
+        let mut span = sp(9, 1, None, "a");
+        span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![span, sp(8, 1, None, "x")]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ event:name = \"cache.miss\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_selector_matches_link_attribute_scope() {
+        let mut span = sp(9, 1, None, "a");
+        span.links = vec![LinkRef {
+            trace_id: [7; 16],
+            span_id: [6; 8],
+            attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![span, sp(8, 1, None, "x")]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ link.link.kind = \"retry\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
