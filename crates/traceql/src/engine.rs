@@ -392,6 +392,11 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
         }
         [
             Pipeline::Aggregate(aggregate),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Compare,
+        ] => metric_plan_with_compare(aggregate, Vec::new(), Some(rank_limit(rank)?)),
+        [
+            Pipeline::Aggregate(aggregate),
             Pipeline::By(by),
             Pipeline::Compare,
         ] => metric_plan_with_compare(aggregate, by.clone(), None),
@@ -1856,6 +1861,41 @@ mod tests {
                     ("svc".into(), "api".into())
                 ]
         );
+        assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn compare_supports_ungrouped_ranked_metric_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(1, 1, None, "api", -120_000)]);
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(2, 1, None, "api", 0),
+                sp_at(2, 2, None, "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | topk(1) | compare()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.len() == 2);
+        assert!(series[0].labels == vec![("comparison".into(), "current".into())]);
+        assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(series[1].labels == vec![("comparison".into(), "previous".into())]);
         assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
