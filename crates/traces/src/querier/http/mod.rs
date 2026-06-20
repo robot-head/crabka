@@ -171,11 +171,17 @@ where
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
     let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
-    match state
-        .engine
-        .tag_names(&tenant, scope, start_ns, end_ns)
-        .await
-    {
+    let tags = if let Some(query) = query_param(&uri, "q") {
+        matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns)
+            .await
+            .map(|traces| scoped_tags_from_traces(&traces, scope))
+    } else {
+        state
+            .engine
+            .tag_names(&tenant, scope, start_ns, end_ns)
+            .await
+    };
+    match tags {
         Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
@@ -214,11 +220,9 @@ where
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
     let values = if let Some(query) = query_param(&uri, "q") {
-        state
-            .engine
-            .search(&tenant, &query, start_ns, end_ns, 0)
+        matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns)
             .await
-            .map(|resp| tag_values_from_search(&resp, &tag))
+            .map(|traces| tag_values_from_traces(&traces, &tag))
     } else {
         state
             .engine
@@ -596,22 +600,79 @@ fn search_tag_values_v2_json(values: &[TypedValue]) -> Value {
     })
 }
 
-fn tag_values_from_search(resp: &SearchResponse, tag: &str) -> Vec<TypedValue> {
+async fn matching_traces<S>(
+    engine: &TraceqlEngine<S>,
+    tenant: &str,
+    query: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<TraceSpans>, crabka_traceql::TraceqlError>
+where
+    S: SpanStore + 'static,
+{
+    let resp = engine.search(tenant, query, start_ns, end_ns, 0).await?;
+    let mut seen = BTreeSet::new();
+    let mut traces = Vec::new();
+    for trace in resp.traces {
+        if seen.insert(trace.trace_id)
+            && let Some(trace) = engine.trace_by_id(tenant, &trace.trace_id).await?
+        {
+            traces.push(trace);
+        }
+    }
+    Ok(traces)
+}
+
+fn scoped_tags_from_traces(traces: &[TraceSpans], scope: Option<TagScope>) -> Vec<ScopedTag> {
+    let mut out = Vec::new();
+
+    if matches!(scope, None | Some(TagScope::Resource)) {
+        let mut tags = BTreeSet::new();
+        for trace in traces {
+            if !trace.root_service_name.is_empty() {
+                tags.insert("service.name".to_string());
+            }
+        }
+        if !tags.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Resource,
+                tags: tags.into_iter().collect(),
+            });
+        }
+    }
+
+    if matches!(scope, None | Some(TagScope::Span)) {
+        let mut tags = BTreeSet::new();
+        for trace in traces {
+            for span in &trace.spans {
+                tags.extend(span.attributes.iter().map(|(key, _)| key.clone()));
+            }
+        }
+        if !tags.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Span,
+                tags: tags.into_iter().collect(),
+            });
+        }
+    }
+
+    out
+}
+
+fn tag_values_from_traces(traces: &[TraceSpans], tag: &str) -> Vec<TypedValue> {
     let tag = tag.strip_prefix('.').unwrap_or(tag);
     let mut values = BTreeSet::new();
-    for trace in &resp.traces {
+    for trace in traces {
         if tag == "service.name" {
             values.insert(("string".to_string(), trace.root_service_name.clone()));
         }
-        for span_set in &trace.span_sets {
-            for span in &span_set.spans {
-                values.extend(
-                    span.attributes
-                        .iter()
-                        .filter(|(key, _)| key == tag)
-                        .map(|(_, value)| typed_value_parts(value)),
-                );
-            }
+        for span in &trace.spans {
+            values.extend(
+                span.attributes
+                    .iter()
+                    .filter(|(key, _)| key == tag)
+                    .map(|(_, value)| typed_value_parts(value)),
+            );
         }
     }
     values
@@ -1314,6 +1375,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tags_v2_respects_query_filter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at_with_attrs(
+                    1,
+                    1,
+                    None,
+                    "a",
+                    1_000,
+                    vec![("env".into(), AttrValue::Str("prod".into()))],
+                ),
+                span_at_with_attrs(
+                    1,
+                    2,
+                    Some(1),
+                    "b",
+                    2_000,
+                    vec![("target".into(), AttrValue::Str("kept".into()))],
+                ),
+            ],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "c",
+                3_000,
+                vec![
+                    ("env".into(), AttrValue::Str("dev".into())),
+                    ("noise".into(), AttrValue::Str("dropped".into())),
+                ],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tags?q=%7B%20.env%20%3D%20%22prod%22%20%7D&scope=span")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "span",
+                    "tags": ["env", "svc", "target"]
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn search_tag_values_returns_legacy_tempo_shape() {
         let (status, body) = get_json("/api/search/tag/service.name/values").await;
         assert!(status == StatusCode::OK);
@@ -1357,14 +1490,24 @@ mod tests {
             "tenant-a",
             "svc-a",
             "root-a",
-            vec![span_at_with_attrs(
-                1,
-                1,
-                None,
-                "a",
-                1_000,
-                vec![("env".into(), AttrValue::Str("prod".into()))],
-            )],
+            vec![
+                span_at_with_attrs(
+                    1,
+                    1,
+                    None,
+                    "a",
+                    1_000,
+                    vec![("env".into(), AttrValue::Str("prod".into()))],
+                ),
+                span_at_with_attrs(
+                    1,
+                    2,
+                    Some(1),
+                    "b",
+                    2_000,
+                    vec![("target".into(), AttrValue::Str("kept".into()))],
+                ),
+            ],
         );
         store.push_trace(
             "tenant-a",
@@ -1382,6 +1525,7 @@ mod tests {
         let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
         let app = router(engine);
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v2/search/tag/.svc/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
@@ -1398,9 +1542,42 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(
             body == json!({
+                "tagValues": [
+                    {
+                        "type": "string",
+                        "value": "a"
+                    },
+                    {
+                        "type": "string",
+                        "value": "b"
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/.target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
                 "tagValues": [{
                     "type": "string",
-                    "value": "a"
+                    "value": "kept"
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
