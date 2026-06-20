@@ -191,6 +191,9 @@ async fn otlp_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Err(err) = require_content_type(&headers, &["application/x-protobuf"]) {
+        return error_response(&err);
+    }
     match decode_body(&headers, &body, state.max_decompressed)
         .and_then(|body| {
             TracesData::decode(body.as_slice()).map_err(|err| TracesError::Decode(err.to_string()))
@@ -209,6 +212,9 @@ async fn zipkin_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Err(err) = require_content_type(&headers, &["application/json"]) {
+        return error_response(&err);
+    }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| decode_zipkin(&body))
     {
         Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await,
@@ -221,6 +227,12 @@ async fn jaeger_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    if let Err(err) = require_content_type(
+        &headers,
+        &["application/x-thrift", "application/octet-stream"],
+    ) {
+        return error_response(&err);
+    }
     match decode_body(&headers, &body, state.max_decompressed)
         .and_then(|body| decode_jaeger_thrift(&body))
     {
@@ -260,6 +272,29 @@ fn otlp_success_response() -> Response {
     }
     .encode_to_vec();
     ([(header::CONTENT_TYPE, "application/x-protobuf")], body).into_response()
+}
+
+fn require_content_type(headers: &HeaderMap, allowed: &[&str]) -> Result<(), TracesError> {
+    let Some(value) = headers.get(header::CONTENT_TYPE) else {
+        return Ok(());
+    };
+    let declared = value
+        .to_str()
+        .map_err(|err| TracesError::UnsupportedContentType(err.to_string()))?;
+    let media_type = declared
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if allowed
+        .iter()
+        .any(|allowed| media_type == allowed.to_ascii_lowercase())
+    {
+        Ok(())
+    } else {
+        Err(TracesError::UnsupportedContentType(declared.to_string()))
+    }
 }
 
 fn decode_body(
@@ -527,6 +562,25 @@ mod tests {
 
         assert!(resp.status() == StatusCode::OK);
         assert!(sink.count() == 1);
+    }
+
+    #[tokio::test]
+    async fn otlp_push_rejects_declared_non_protobuf_content_type() {
+        let (state, sink) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "text/plain")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert!(sink.count() == 0);
     }
 
     #[tokio::test]
