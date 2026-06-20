@@ -144,10 +144,7 @@ fn count_filter_sql(op: ComparisonOp, value: f64) -> Result<String> {
 
 fn spanset_to_sql(expr: &SpansetExpr, table: &str) -> Result<String> {
     match expr {
-        SpansetExpr::Selector(fe) => Ok(format!(
-            "SELECT * FROM {table} WHERE {}",
-            selector::field_expr_to_sql(fe)?
-        )),
+        SpansetExpr::Selector(fe) => selector::selector_sql(table, fe),
         SpansetExpr::Or(lhs, rhs) => Ok(format!(
             "({}) UNION ({})",
             spanset_to_sql(lhs, table)?,

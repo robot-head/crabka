@@ -19,26 +19,30 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
         .await?;
     let table = ident(&scan.span_table);
-    let sql = if has_parent_scope(fe) {
-        let predicate = field_expr_to_sql_qualified(fe, "s", "p")?;
-        let trace = ident(COL_TRACE_ID);
-        let parent = ident(COL_PARENT_ID);
-        let left = ident(COL_NS_LEFT);
-        format!(
-            "SELECT s.* FROM {table} AS s JOIN {table} AS p \
-             ON s.{trace} = p.{trace} AND s.{parent} = p.{left} \
-             WHERE {predicate}"
-        )
-    } else {
-        let predicate = field_expr_to_sql(fe)?;
-        format!("SELECT * FROM {table} WHERE {predicate}")
-    };
+    let sql = selector_sql(&table, fe)?;
     let df = scan.ctx.sql(&sql).await?;
     let plan = df.into_unoptimized_plan();
     Ok(PlannedSpanset {
         ctx: scan.ctx,
         plan,
     })
+}
+
+pub(crate) fn selector_sql(table: &str, fe: &FieldExpr) -> Result<String> {
+    if has_parent_scope(fe) {
+        let predicate = field_expr_to_sql_qualified(fe, "s", "p")?;
+        let trace = ident(COL_TRACE_ID);
+        let parent = ident(COL_PARENT_ID);
+        let left = ident(COL_NS_LEFT);
+        Ok(format!(
+            "SELECT s.* FROM {table} AS s JOIN {table} AS p \
+             ON s.{trace} = p.{trace} AND s.{parent} = p.{left} \
+             WHERE {predicate}"
+        ))
+    } else {
+        let predicate = field_expr_to_sql(fe)?;
+        Ok(format!("SELECT * FROM {table} WHERE {predicate}"))
+    }
 }
 
 pub(crate) fn field_to_column(field: &Field) -> Result<String> {
