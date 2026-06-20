@@ -361,13 +361,20 @@ where
         )
         .await
         .map_err(connect_error)?;
-    Ok(ConnectResponse::new(
+    let response = if req.format == pb::querier::v1::ProfileFormat::Dot as i32 {
+        pb::querier::v1::SelectMergeStacktracesResponse {
+            flamegraph: None,
+            tree: Vec::new(),
+            dot: flamegraph_dot(&flamegraph),
+        }
+    } else {
         pb::querier::v1::SelectMergeStacktracesResponse {
             flamegraph: Some(flamegraph.into()),
             tree: Vec::new(),
             dot: String::new(),
-        },
-    ))
+        }
+    };
+    Ok(ConnectResponse::new(response))
 }
 
 async fn select_series_handler<S>(
@@ -1046,6 +1053,55 @@ mod tests {
 
         assert!(body.starts_with("digraph flamegraph"));
         assert!(body.contains("main.work"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_stacktraces_dot_format_returns_dot_only() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeStacktraces"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "format": "PROFILE_FORMAT_DOT",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(response.get("flamegraph").is_none(), "{response}");
+        assert!(
+            response
+                .get("dot")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(
+                    |dot| dot.starts_with("digraph flamegraph") && dot.contains("main.work")
+                ),
+            "{response}"
+        );
+        assert!(
+            response
+                .get("tree")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty),
+            "{response}"
+        );
     }
 
     #[test]
