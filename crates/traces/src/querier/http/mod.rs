@@ -237,7 +237,7 @@ where
         .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(start_ns);
     let step_ns = query_param(&uri, "step")
-        .and_then(|v| parse_seconds_to_ns(&v))
+        .and_then(|v| parse_step_to_ns(&v))
         .unwrap_or(1_000_000_000);
     let include_exemplars = include_exemplars(&uri);
 
@@ -368,6 +368,10 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+}
+
+fn parse_step_to_ns(value: &str) -> Option<i64> {
+    parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
 }
 
 fn include_exemplars(uri: &Uri) -> bool {
@@ -866,6 +870,20 @@ mod tests {
 
         assert!(status == StatusCode::OK);
         assert!(body["series"][0]["exemplars"] == json!([]));
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_accepts_duration_step() {
+        let (status, body) = get_json(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=500ms&exemplars=false",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body["series"][0]["points"]
+                == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
+        );
     }
 
     #[tokio::test]
