@@ -109,6 +109,25 @@ impl ProfileIndex {
     }
 
     #[must_use]
+    pub fn profile_types_for_time(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
+        self.extras
+            .get(tenant)
+            .map(|extras| {
+                extras
+                    .profile_types
+                    .iter()
+                    .filter(|(_, fps)| {
+                        !self
+                            .candidate_blocks_for_series(tenant, fps, min_ts, max_ts)
+                            .is_empty()
+                    })
+                    .map(|(profile_type, _)| profile_type.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[must_use]
     pub fn fingerprints_for_profile_type(
         &self,
         tenant: &str,
