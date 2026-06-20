@@ -28,6 +28,7 @@ const INTRINSIC_TAGS: &[&str] = &[
     "span:nestedSetRight",
     "span:status",
     "span:statusMessage",
+    "trace:duration",
     "trace:id",
     "trace:rootName",
     "trace:rootService",
@@ -258,6 +259,13 @@ impl LiveSource for LiveStore {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
         let mut values = BTreeSet::new();
         if let Some(traces) = self.by_tenant.get(tenant) {
+            for spans in traces.values() {
+                let in_range = spans
+                    .iter()
+                    .filter(|span| in_time_range(span, start_ns, end_ns))
+                    .collect::<Vec<_>>();
+                collect_trace_intrinsic_values(&in_range, tag, &mut values);
+            }
             for span in traces
                 .values()
                 .flatten()
@@ -403,6 +411,48 @@ fn collect_span_intrinsic_value(span: &Span, tag: &str, values: &mut BTreeSet<(S
         }
         _ => {}
     }
+}
+
+fn collect_trace_intrinsic_values(
+    spans: &[&Span],
+    tag: &str,
+    values: &mut BTreeSet<(String, String)>,
+) {
+    if spans.is_empty() {
+        return;
+    }
+    match tag {
+        "trace:duration" => {
+            let start = spans.iter().map(|span| span.start_ns).min().unwrap_or(0);
+            let end = spans
+                .iter()
+                .map(|span| span.start_ns.saturating_add(span.duration_ns))
+                .max()
+                .unwrap_or(start);
+            values.insert(("duration".into(), end.saturating_sub(start).to_string()));
+        }
+        "trace:rootName" => {
+            if let Some(root) = root_span(spans) {
+                values.insert(("string".into(), root.name.clone()));
+            }
+        }
+        "trace:rootService" => {
+            if let Some(root) = root_span(spans)
+                && let Some(service) = attr_string(&root.resource_attrs, "service.name")
+            {
+                values.insert(("string".into(), service));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn root_span<'a>(spans: &'a [&'a Span]) -> Option<&'a Span> {
+    spans
+        .iter()
+        .copied()
+        .find(|span| span.is_root())
+        .or_else(|| spans.iter().copied().min_by_key(|span| span.start_ns))
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {

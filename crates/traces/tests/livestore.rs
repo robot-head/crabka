@@ -1,6 +1,6 @@
 use assert2::assert;
 use crabka_blockstore::{SCOL_TRACE_ID, span_block_schema};
-use crabka_traceql::{AttrValue as TraceqlAttrValue, TagScope};
+use crabka_traceql::{AttrValue as TraceqlAttrValue, ScopedTag, TagScope, TypedValue};
 use crabka_traces::{
     AttrValue, KeyValue, LiveStore, Span, SpanKind, SpanRecord, StatusCode,
     livestore::ingest_wal_payloads, querier::live::LiveSource,
@@ -113,51 +113,64 @@ async fn live_source_exposes_trace_spans_and_tags() {
             .iter()
             .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
     );
-    assert!(names.iter().any(|tags| {
-        tags.scope == TagScope::Intrinsic
-            && tags.tags.contains(&"span:parentID".to_string())
-            && tags.tags.contains(&"span:statusMessage".to_string())
-    }));
-    assert!(names.iter().any(|tags| {
-        tags.scope == TagScope::Instrumentation
-            && tags.tags.contains(&"instrumentation:name".to_string())
-    }));
+    assert_tag_scope_contains(
+        &names,
+        TagScope::Intrinsic,
+        &["span:parentID", "span:statusMessage", "trace:duration"],
+    );
+    assert_tag_scope_contains(&names, TagScope::Instrumentation, &["instrumentation:name"]);
 
     let values = store
         .tag_values("tenant-a", ".http.method", 0, 100)
         .await
         .unwrap();
-    assert!(
-        values
-            .iter()
-            .any(|value| value.type_ == "string" && value.value == "GET")
-    );
+    assert_typed_value(&values, "string", "GET");
     let parent_ids = store
         .tag_values("tenant-a", "span:parentID", 0, 100)
         .await
         .unwrap();
-    assert!(
-        parent_ids
-            .iter()
-            .any(|value| value.type_ == "string" && value.value == "0101010101010101")
-    );
+    assert_typed_value(&parent_ids, "string", "0101010101010101");
     let status_messages = store
         .tag_values("tenant-a", "span:statusMessage", 0, 100)
         .await
         .unwrap();
-    assert!(
-        status_messages
-            .iter()
-            .any(|value| value.type_ == "string" && value.value == "retryable")
-    );
+    assert_typed_value(&status_messages, "string", "retryable");
     let instrumentation_names = store
         .tag_values("tenant-a", "instrumentation:name", 0, 100)
         .await
         .unwrap();
+    assert_typed_value(&instrumentation_names, "string", "otel-rust");
+    let trace_root_names = store
+        .tag_values("tenant-a", "trace:rootName", 0, 100)
+        .await
+        .unwrap();
+    assert_typed_value(&trace_root_names, "string", "span-1");
+    let trace_root_services = store
+        .tag_values("tenant-a", "trace:rootService", 0, 100)
+        .await
+        .unwrap();
+    assert_typed_value(&trace_root_services, "string", "api");
+    let trace_durations = store
+        .tag_values("tenant-a", "trace:duration", 0, 100)
+        .await
+        .unwrap();
+    assert_typed_value(&trace_durations, "duration", "20");
+}
+
+fn assert_tag_scope_contains(tags: &[ScopedTag], scope: TagScope, expected: &[&str]) {
+    assert!(tags.iter().any(|tags| {
+        tags.scope == scope
+            && expected
+                .iter()
+                .all(|expected| tags.tags.contains(&(*expected).to_string()))
+    }));
+}
+
+fn assert_typed_value(values: &[TypedValue], type_: &str, value: &str) {
     assert!(
-        instrumentation_names
+        values
             .iter()
-            .any(|value| value.type_ == "string" && value.value == "otel-rust")
+            .any(|got| got.type_ == type_ && got.value == value)
     );
 }
 
