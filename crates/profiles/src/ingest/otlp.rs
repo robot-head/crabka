@@ -132,11 +132,68 @@ fn otlp_profile_to_pprof(
         pprof.sample.push(crabka_pprof::proto::Sample {
             location_id,
             value: sample.values.clone(),
-            label: Vec::new(),
+            label: sample_labels(sample, dict, &mut pprof.string_table)?,
         });
     }
 
     Ok(PprofProfile::from(pprof))
+}
+
+fn sample_labels(
+    sample: &pb::otlp_profiles::Sample,
+    dict: &pb::otlp_profiles::ProfilesDictionary,
+    strings: &mut Vec<String>,
+) -> Result<Vec<crabka_pprof::proto::Label>, ProfilesError> {
+    use pb::opentelemetry::proto::common::v1::any_value::Value;
+
+    let mut labels = Vec::new();
+    for attr_idx in &sample.attribute_indices {
+        let attr = usize::try_from(*attr_idx)
+            .ok()
+            .and_then(|idx| dict.attribute_table.get(idx))
+            .ok_or_else(|| {
+                ProfilesError::Invalid("OTLP sample references missing attribute".into())
+            })?;
+        let key = profile_string_index(dict, attr.key_strindex, "OTLP attribute key")?;
+        let Some(value) = attr.value.as_ref().and_then(|value| value.value.as_ref()) else {
+            continue;
+        };
+        let value_idx = match value {
+            Value::StringValue(value) => intern_string(strings, value),
+            Value::IntValue(value) => intern_string(strings, &value.to_string()),
+        };
+        labels.push(crabka_pprof::proto::Label {
+            key,
+            str: value_idx,
+            num: 0,
+            num_unit: 0,
+        });
+    }
+    Ok(labels)
+}
+
+fn profile_string_index(
+    dict: &pb::otlp_profiles::ProfilesDictionary,
+    index: i32,
+    field: &str,
+) -> Result<i64, ProfilesError> {
+    let idx = usize::try_from(index)
+        .map_err(|_| ProfilesError::Invalid(format!("{field} references missing string")))?;
+    if idx >= dict.string_table.len() {
+        return Err(ProfilesError::Invalid(format!(
+            "{field} references missing string"
+        )));
+    }
+    Ok(i64::from(index))
+}
+
+fn intern_string(strings: &mut Vec<String>, value: &str) -> i64 {
+    if let Some(idx) = strings.iter().position(|existing| existing == value) {
+        return i64::try_from(idx).expect("string index fits i64");
+    }
+    let idx = i64::try_from(strings.len()).expect("string index fits i64");
+    strings.push(value.to_string());
+    idx
 }
 
 fn otlp_sample_timestamps(
@@ -244,9 +301,10 @@ mod tests {
 
     #[test]
     fn otlp_resolves_dictionary_into_rawprofile() {
+        use pb::opentelemetry::proto::common::v1::{AnyValue, any_value::Value};
         use pb::otlp_profiles::{
-            Function, Line, Link, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
-            ScopeProfiles, Stack, ValueType,
+            Function, KeyValueAndUnit, Line, Link, Location, Profile, ProfilesDictionary,
+            ResourceProfiles, Sample, ScopeProfiles, Stack, ValueType,
         };
 
         let dict = ProfilesDictionary {
@@ -255,7 +313,16 @@ mod tests {
                 "samples".into(),
                 "count".into(),
                 "main".into(),
+                "target".into(),
+                "all".into(),
             ],
+            attribute_table: vec![KeyValueAndUnit {
+                key_strindex: 4,
+                value: Some(AnyValue {
+                    value: Some(Value::StringValue("all".to_string())),
+                }),
+                unit_strindex: 0,
+            }],
             function_table: vec![Function {
                 name_strindex: 3,
                 ..Default::default()
@@ -290,6 +357,7 @@ mod tests {
             samples: vec![Sample {
                 stack_index: 0,
                 link_index: 0,
+                attribute_indices: vec![0],
                 values: vec![7],
                 timestamps_unix_nano: vec![1_700_000_000_000_000_123],
                 ..Default::default()
@@ -317,5 +385,6 @@ mod tests {
         assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
         assert!(split[0].samples[0].span_id == Some(42));
         assert!(split[0].samples[0].trace_id == Some(vec![0xaa; 16]));
+        assert!(split[0].labels.get("target") == Some("all"));
     }
 }
