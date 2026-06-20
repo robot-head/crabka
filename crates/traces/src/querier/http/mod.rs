@@ -37,6 +37,8 @@ const INTRINSIC_TAGS: &[&str] = &[
     "trace:rootName",
     "trace:rootService",
 ];
+const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
+const LINK_TAGS: &[&str] = &["link:spanID", "link:traceID"];
 const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation:version"];
 
 struct AppState<S: SpanStore> {
@@ -662,6 +664,18 @@ fn add_intrinsic_tags(mut tags: Vec<ScopedTag>, scope: Option<TagScope>) -> Vec<
                 .iter()
                 .map(|tag| (*tag).to_string())
                 .collect(),
+        });
+    }
+    if matches!(scope, None | Some(TagScope::Event)) {
+        tags.push(ScopedTag {
+            scope: TagScope::Event,
+            tags: EVENT_TAGS.iter().map(|tag| (*tag).to_string()).collect(),
+        });
+    }
+    if matches!(scope, None | Some(TagScope::Link)) {
+        tags.push(ScopedTag {
+            scope: TagScope::Link,
+            tags: LINK_TAGS.iter().map(|tag| (*tag).to_string()).collect(),
         });
     }
     if matches!(scope, None | Some(TagScope::Instrumentation)) {
@@ -1533,6 +1547,14 @@ mod tests {
                         "tags": INTRINSIC_TAGS
                     },
                     {
+                        "name": "event",
+                        "tags": ["event:name", "event:timeSinceStart"]
+                    },
+                    {
+                        "name": "link",
+                        "tags": ["link:spanID", "link:traceID"]
+                    },
+                    {
                         "name": "instrumentation",
                         "tags": ["instrumentation:name", "instrumentation:version"]
                     }
@@ -1570,6 +1592,40 @@ mod tests {
                 "scopes": [{
                     "name": "intrinsic",
                     "tags": INTRINSIC_TAGS
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_returns_event_scope() {
+        let (status, body) = get_json("/api/v2/search/tags?scope=event").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "event",
+                    "tags": ["event:name", "event:timeSinceStart"]
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_returns_link_scope() {
+        let (status, body) = get_json("/api/v2/search/tags?scope=link").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "link",
+                    "tags": ["link:spanID", "link:traceID"]
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
