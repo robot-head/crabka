@@ -378,7 +378,7 @@ fn tenant(headers: &HeaderMap) -> String {
         .get(TENANT_HEADER)
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
-        .unwrap_or("default")
+        .unwrap_or("anonymous")
         .to_string()
 }
 
@@ -1540,6 +1540,35 @@ mod tests {
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_defaults_missing_tenant_to_anonymous() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("anonymous", "svc-a", "root-a", vec![span(9, 1, None, "a")]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%3D%20%22a%22%20%7D&start=0&end=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            status == StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
     }
 
     #[tokio::test]
