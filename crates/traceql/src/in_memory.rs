@@ -451,7 +451,7 @@ fn matcher_matches(
     idx: usize,
     matcher: &SpanMatcher,
 ) -> bool {
-    match matcher.scope {
+    let is_match = match matcher.scope {
         MatchScope::Event => span.events.iter().any(|event| {
             event
                 .attributes
@@ -480,7 +480,8 @@ fn matcher_matches(
         }
         MatchScope::Span => span_attr_matches(span, &matcher.key, matcher.op, &matcher.value),
         MatchScope::Parent => true,
-    }
+    };
+    is_match != matcher.negated
 }
 
 fn span_attr_matches(span: &InputSpan, key: &str, op: MatchCmp, expected: &MatchValue) -> bool {

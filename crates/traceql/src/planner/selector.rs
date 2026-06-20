@@ -282,30 +282,21 @@ pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
             out.extend(field_expr_to_matchers(b));
             out
         }
-        FieldExpr::Comparison { lhs, op, rhs } => vec![SpanMatcher {
-            scope: match_scope(&lhs.scope),
-            key: matcher_key(lhs),
-            op: match_cmp(*op),
-            value: match_value(rhs),
-        }],
+        FieldExpr::Comparison { .. } => matcher_from_field_expr(fe).into_iter().collect(),
+        FieldExpr::Not(inner) if has_nested_scope(inner) => matcher_from_field_expr(inner)
+            .map(|matcher| vec![negate_matcher(matcher)])
+            .unwrap_or_default(),
         FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) => vec![],
     }
 }
 
 fn field_expr_to_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher>>> {
     match fe {
-        FieldExpr::Comparison { lhs, op, rhs } => Some(vec![vec![SpanMatcher {
-            scope: match_scope(&lhs.scope),
-            key: matcher_key(lhs),
-            op: match_cmp(*op),
-            value: match_value(rhs),
-        }]]),
-        FieldExpr::Field(field) => Some(vec![vec![SpanMatcher {
-            scope: match_scope(&field.scope),
-            key: matcher_key(field),
-            op: MatchCmp::Neq,
-            value: MatchValue::Nil,
-        }]]),
+        FieldExpr::Comparison { .. } | FieldExpr::Field(_) => {
+            Some(vec![vec![matcher_from_field_expr(fe).expect(
+                "comparison and field expressions lower to matchers",
+            )]])
+        }
         FieldExpr::And(a, b) => {
             let left = field_expr_to_matcher_disjuncts(a)?;
             let right = field_expr_to_matcher_disjuncts(b)?;
@@ -326,8 +317,36 @@ fn field_expr_to_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher
             out.extend(field_expr_to_matcher_disjuncts(b)?);
             Some(out)
         }
+        FieldExpr::Not(inner) if has_nested_scope(inner) => {
+            matcher_from_field_expr(inner).map(|matcher| vec![vec![negate_matcher(matcher)]])
+        }
         FieldExpr::Not(_) => None,
     }
+}
+
+fn matcher_from_field_expr(fe: &FieldExpr) -> Option<SpanMatcher> {
+    match fe {
+        FieldExpr::Comparison { lhs, op, rhs } => Some(SpanMatcher {
+            scope: match_scope(&lhs.scope),
+            key: matcher_key(lhs),
+            op: match_cmp(*op),
+            value: match_value(rhs),
+            negated: false,
+        }),
+        FieldExpr::Field(field) => Some(SpanMatcher {
+            scope: match_scope(&field.scope),
+            key: matcher_key(field),
+            op: MatchCmp::Neq,
+            value: MatchValue::Nil,
+            negated: false,
+        }),
+        FieldExpr::And(_, _) | FieldExpr::Or(_, _) | FieldExpr::Not(_) => None,
+    }
+}
+
+fn negate_matcher(mut matcher: SpanMatcher) -> SpanMatcher {
+    matcher.negated = !matcher.negated;
+    matcher
 }
 
 fn matcher_key(field: &Field) -> String {

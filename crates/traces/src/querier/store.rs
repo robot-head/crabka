@@ -361,7 +361,7 @@ fn row_matcher_matches(
     row: usize,
     matcher: &SpanMatcher,
 ) -> Result<bool, TraceqlError> {
-    Ok(match matcher.scope {
+    let is_match = match matcher.scope {
         MatchScope::Event => event_values(batch, row)?.iter().any(|event| {
             event
                 .attributes
@@ -392,7 +392,8 @@ fn row_matcher_matches(
             batch_attr_matches(batch, row, &matcher.key, matcher.op, &matcher.value)?
         }
         MatchScope::Parent => true,
-    })
+    };
+    Ok(is_match != matcher.negated)
 }
 
 fn batch_attr_matches(

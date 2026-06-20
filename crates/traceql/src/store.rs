@@ -44,6 +44,7 @@ pub struct SpanMatcher {
     pub key: String,
     pub op: MatchCmp,
     pub value: MatchValue,
+    pub negated: bool,
 }
 
 pub struct ScanResult {
