@@ -1493,7 +1493,13 @@ mod tests {
             "root-a",
             vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
         );
-        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let engine = Arc::new(TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts {
+                max_exemplars: 1,
+                ..EngineOpts::default()
+            },
+        ));
         router(engine)
     }
 

@@ -55,7 +55,7 @@ impl Default for EngineOpts {
             default_limit: 20,
             default_spss: 3,
             max_traces: 1000,
-            max_exemplars: 1,
+            max_exemplars: 0,
         }
     }
 }
@@ -2577,7 +2577,13 @@ mod tests {
                 sp_at(0x11, 0x33, None, "api", 10_000),
             ],
         );
-        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let e = TraceqlEngine::new(
+            Arc::new(s),
+            EngineOpts {
+                max_exemplars: 1,
+                ..EngineOpts::default()
+            },
+        );
         let got = e
             .query_range(
                 "t",
@@ -2599,5 +2605,26 @@ mod tests {
         );
         assert!(got.series[0].exemplars[0].timestamp_ns == 0);
         assert!((got.series[0].exemplars[0].value - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn default_options_disable_traceql_metric_exemplars() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(0x11, 0x22, None, "api", 0)]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].exemplars.is_empty());
     }
 }
