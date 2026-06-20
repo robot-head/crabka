@@ -1133,42 +1133,49 @@ fn block_attr_values(
         if key_values.is_null(attr_idx) {
             continue;
         }
-        let Some(value) = block_attr_value(
+        let values = block_attr_values_for_key(
             str_values,
             int_values,
             double_values,
             bool_values,
             row,
             attr_idx,
-        )?
-        else {
-            continue;
-        };
-        out.push((key_values.value(attr_idx).to_string(), value));
+        )?;
+        out.extend(
+            values
+                .into_iter()
+                .map(|value| (key_values.value(attr_idx).to_string(), value)),
+        );
     }
     Ok(out)
 }
 
-fn block_attr_value(
+fn block_attr_values_for_key(
     str_values: Option<&ListArray>,
     int_values: Option<&ListArray>,
     double_values: Option<&ListArray>,
     bool_values: Option<&ListArray>,
     row: usize,
     attr_idx: usize,
-) -> Result<Option<AttrValue>, TraceqlError> {
-    if let Some(value) = first_string_attr_value(str_values, row, attr_idx, SCOL_ATTR_VALUE)? {
-        return Ok(Some(AttrValue::Str(value)));
+) -> Result<Vec<AttrValue>, TraceqlError> {
+    let values = string_attr_values(str_values, row, attr_idx, SCOL_ATTR_VALUE)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Str).collect());
     }
-    if let Some(value) = first_i64_attr_value(int_values, row, attr_idx, SCOL_ATTR_VALUE_INT)? {
-        return Ok(Some(AttrValue::Int(value)));
+    let values = i64_attr_values(int_values, row, attr_idx, SCOL_ATTR_VALUE_INT)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Int).collect());
     }
-    if let Some(value) = first_f64_attr_value(double_values, row, attr_idx, SCOL_ATTR_VALUE_DOUBLE)?
-    {
-        return Ok(Some(AttrValue::Float(value)));
+    let values = f64_attr_values(double_values, row, attr_idx, SCOL_ATTR_VALUE_DOUBLE)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Float).collect());
     }
-    first_bool_attr_value(bool_values, row, attr_idx, SCOL_ATTR_VALUE_BOOL)
-        .map(|value| value.map(AttrValue::Bool))
+    Ok(
+        bool_attr_values(bool_values, row, attr_idx, SCOL_ATTR_VALUE_BOOL)?
+            .into_iter()
+            .map(AttrValue::Bool)
+            .collect(),
+    )
 }
 
 fn row_attr_values(
@@ -1196,76 +1203,80 @@ fn row_attr_values(
     Ok(Some(row_values.value(attr_idx)))
 }
 
-fn first_string_attr_value(
+fn string_attr_values(
     values: Option<&ListArray>,
     row: usize,
     attr_idx: usize,
     name: &str,
-) -> Result<Option<String>, TraceqlError> {
+) -> Result<Vec<String>, TraceqlError> {
     let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let values = values
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Utf8")))?;
     Ok((0..values.len())
-        .find(|idx| !values.is_null(*idx))
-        .map(|idx| values.value(idx).to_string()))
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx).to_string())
+        .collect())
 }
 
-fn first_i64_attr_value(
+fn i64_attr_values(
     values: Option<&ListArray>,
     row: usize,
     attr_idx: usize,
     name: &str,
-) -> Result<Option<i64>, TraceqlError> {
+) -> Result<Vec<i64>, TraceqlError> {
     let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let values = values
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Int64")))?;
     Ok((0..values.len())
-        .find(|idx| !values.is_null(*idx))
-        .map(|idx| values.value(idx)))
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
 }
 
-fn first_f64_attr_value(
+fn f64_attr_values(
     values: Option<&ListArray>,
     row: usize,
     attr_idx: usize,
     name: &str,
-) -> Result<Option<f64>, TraceqlError> {
+) -> Result<Vec<f64>, TraceqlError> {
     let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let values = values
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Float64")))?;
     Ok((0..values.len())
-        .find(|idx| !values.is_null(*idx))
-        .map(|idx| values.value(idx)))
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
 }
 
-fn first_bool_attr_value(
+fn bool_attr_values(
     values: Option<&ListArray>,
     row: usize,
     attr_idx: usize,
     name: &str,
-) -> Result<Option<bool>, TraceqlError> {
+) -> Result<Vec<bool>, TraceqlError> {
     let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let values = values
         .as_any()
         .downcast_ref::<BooleanArray>()
         .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Boolean")))?;
     Ok((0..values.len())
-        .find(|idx| !values.is_null(*idx))
-        .map(|idx| values.value(idx)))
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
 }
 
 fn event_values(batch: &RecordBatch, row: usize) -> Result<Vec<EventRef>, TraceqlError> {
@@ -1598,8 +1609,10 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use assert2::assert;
     use crabka_blockstore::{
-        BlockWriter, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SummaryColumns,
-        TraceBlockStats, span_block_decl,
+        AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, SCOL_START_NANO,
+        SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind, SpanRow,
+        StatusCode as BlockStatusCode, SummaryColumns, TraceBlockStats, encode_span_rows,
+        span_block_decl,
     };
     use crabka_traceql::{
         COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
@@ -2298,6 +2311,114 @@ mod tests {
             .unwrap();
         assert!(resp.traces.len() == 1);
         assert!(resp.traces[0].trace_id == other.trace_id);
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_search_applies_block_array_attr_any_none_semantics() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let rows = vec![
+            block_attr_span_row(
+                [1; 16],
+                [2; 8],
+                "GET /users",
+                true,
+                vec!["GET".into(), "POST".into()],
+            ),
+            block_attr_span_row(
+                [3; 16],
+                [4; 8],
+                "DELETE /users",
+                false,
+                vec!["DELETE".into()],
+            ),
+        ];
+        let batch = encode_span_rows(&rows).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/search-block-array-attrs.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&[1; 16]);
+        bloom.insert(&[3; 16]);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let resp = engine
+            .search("tenant", "{ span.http.method = \"POST\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == [1; 16]);
+
+        let resp = engine
+            .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == [3; 16]);
+    }
+
+    fn block_attr_span_row(
+        trace_id: [u8; 16],
+        span_id: [u8; 8],
+        name: &str,
+        is_array: bool,
+        values: Vec<String>,
+    ) -> SpanRow {
+        SpanRow {
+            trace_id,
+            span_id,
+            parent_span_id: None,
+            nested_set: BlockNestedSet {
+                nested_set_left: 1,
+                nested_set_right: 2,
+                parent_id: 0,
+            },
+            child_count: 0,
+            root_service_name: Some("api".into()),
+            root_span_name: Some("root".into()),
+            trace_start_unix_nano: 1_000,
+            trace_duration_nanos: 500,
+            name: Some(name.into()),
+            kind: BlockSpanKind::Server,
+            start_unix_nano: 1_000,
+            duration_nanos: 500,
+            status_code: BlockStatusCode::Ok,
+            status_message: None,
+            instrumentation_name: Some("otel-rust".into()),
+            instrumentation_version: None,
+            attrs: vec![SpanAttr {
+                key: "http.method".into(),
+                is_array,
+                value: BlockAttrValue::Str(values),
+            }],
+            events: Vec::new(),
+            links: Vec::new(),
+        }
     }
 
     #[tokio::test]
