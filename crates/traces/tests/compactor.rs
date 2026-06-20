@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arrow::array::{FixedSizeBinaryArray, Int32Array};
 use assert2::assert;
 use crabka_blockstore::{BlockWriter, TraceIndex, read_block};
 use crabka_traces::{
@@ -104,4 +105,83 @@ async fn compact_block_keys_merges_late_spans_and_replaces_index_entries() {
             .sum::<usize>()
             == 2
     );
+}
+
+#[tokio::test]
+async fn compact_block_keys_recomputes_nested_sets_for_late_children() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = BlockWriter::new(store.clone());
+    let mut index = TraceIndex::new();
+
+    let first = build_blocks(
+        &writer,
+        &mut index,
+        "tenant-a",
+        7,
+        &[rec([1; 16], 1, None, 100)],
+        (10, 10),
+    )
+    .await
+    .unwrap();
+    let late = build_blocks(
+        &writer,
+        &mut index,
+        "tenant-a",
+        7,
+        &[rec([1; 16], 2, Some(1), 200)],
+        (20, 20),
+    )
+    .await
+    .unwrap();
+    let input_keys = vec![first[0].object_key.clone(), late[0].object_key.clone()];
+    let output_key = compacted_object_key("tenant-a", 7, 10, 20, 100);
+
+    compact_block_keys(
+        store.clone(),
+        &writer,
+        &mut index,
+        "tenant-a",
+        &input_keys,
+        &output_key,
+    )
+    .await
+    .unwrap();
+
+    let batches = read_block(store, &output_key).await.unwrap();
+    let batch = &batches[0];
+    let span_ids = batch
+        .column_by_name(crabka_blockstore::SCOL_SPAN_ID)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    let left = batch
+        .column_by_name(crabka_blockstore::SCOL_NESTED_SET_LEFT)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    let right = batch
+        .column_by_name(crabka_blockstore::SCOL_NESTED_SET_RIGHT)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    let parent_id = batch
+        .column_by_name(crabka_blockstore::SCOL_PARENT_ID)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+
+    let root = (0..batch.num_rows())
+        .find(|row| span_ids.value(*row) == [1; 8])
+        .unwrap();
+    let child = (0..batch.num_rows())
+        .find(|row| span_ids.value(*row) == [2; 8])
+        .unwrap();
+
+    assert!(parent_id.value(child) == left.value(root));
+    assert!(left.value(root) < left.value(child));
+    assert!(right.value(child) < right.value(root));
 }

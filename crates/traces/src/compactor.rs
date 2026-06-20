@@ -1,19 +1,21 @@
 //! Compactor helpers for merging late-span blocks into replacement span blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array, ListArray, StringArray,
-    StructArray,
+    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
+    StringArray, StructArray,
 };
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
-    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME,
-    SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
-    SummaryColumns, TraceBlockStats, TraceIndex, read_block, span_block_decl, span_block_schema,
+    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_EVENTS,
+    SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_NESTED_SET_LEFT,
+    SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID, SCOL_SPAN_ID, SCOL_START_NANO,
+    SCOL_TRACE_ID, ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, read_block,
+    span_block_decl, span_block_schema,
 };
 use object_store::ObjectStore;
 
@@ -60,6 +62,7 @@ pub async fn compact_block_keys(
     let schema = span_block_schema();
     let concatenated =
         concat_batches(&schema, &batches).map_err(|err| TracesError::Block(err.to_string()))?;
+    let concatenated = recompute_nested_sets(&concatenated)?;
     let meta = writer
         .write_block_with_decl(
             tenant,
@@ -88,6 +91,150 @@ pub async fn compact_block_keys(
     );
 
     Ok(meta)
+}
+
+fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError> {
+    enum Frame {
+        Enter { row: usize, parent_left: i32 },
+        Exit { row: usize },
+    }
+
+    let trace_ids = fixed_column(batch, SCOL_TRACE_ID, 16)?;
+    let span_ids = fixed_column(batch, SCOL_SPAN_ID, 8)?;
+    let parent_span_ids = fixed_column(batch, SCOL_PARENT_SPAN_ID, 8)?;
+    let mut by_trace: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
+    for row in 0..batch.num_rows() {
+        if trace_ids.is_null(row) {
+            continue;
+        }
+        let mut trace_id = [0_u8; 16];
+        trace_id.copy_from_slice(trace_ids.value(row));
+        by_trace.entry(trace_id).or_default().push(row);
+    }
+
+    let mut left = vec![0_i32; batch.num_rows()];
+    let mut right = vec![0_i32; batch.num_rows()];
+    let mut parent_id = vec![0_i32; batch.num_rows()];
+
+    for rows in by_trace.values() {
+        let mut pos = HashMap::new();
+        for row in rows {
+            if span_ids.is_null(*row) {
+                continue;
+            }
+            let mut span_id = [0_u8; 8];
+            span_id.copy_from_slice(span_ids.value(*row));
+            pos.insert(span_id, *row);
+        }
+
+        let mut children: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut roots = Vec::new();
+        for row in rows {
+            let parent = (!parent_span_ids.is_null(*row)).then(|| {
+                let mut parent = [0_u8; 8];
+                parent.copy_from_slice(parent_span_ids.value(*row));
+                parent
+            });
+            match parent.and_then(|parent| pos.get(&parent).copied()) {
+                Some(parent_row) if parent_row != *row => {
+                    children.entry(parent_row).or_default().push(*row);
+                }
+                _ => roots.push(*row),
+            }
+        }
+
+        let mut counter = 1_i32;
+        let mut stack = Vec::new();
+        for row in roots.iter().rev() {
+            stack.push(Frame::Enter {
+                row: *row,
+                parent_left: 0,
+            });
+        }
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter {
+                    row,
+                    parent_left: parent,
+                } => {
+                    left[row] = counter;
+                    parent_id[row] = parent;
+                    counter += 1;
+                    stack.push(Frame::Exit { row });
+                    if let Some(children) = children.get(&row) {
+                        for child in children.iter().rev() {
+                            stack.push(Frame::Enter {
+                                row: *child,
+                                parent_left: left[row],
+                            });
+                        }
+                    }
+                }
+                Frame::Exit { row } => {
+                    right[row] = counter;
+                    counter += 1;
+                }
+            }
+        }
+    }
+
+    let child_count = left
+        .iter()
+        .map(|node_left| {
+            i32::try_from(
+                parent_id
+                    .iter()
+                    .filter(|parent| *parent == node_left)
+                    .count(),
+            )
+            .unwrap_or(i32::MAX)
+        })
+        .collect::<Vec<_>>();
+    replace_int32_columns(
+        batch,
+        &[
+            (SCOL_NESTED_SET_LEFT, left),
+            (SCOL_NESTED_SET_RIGHT, right),
+            (SCOL_PARENT_ID, parent_id),
+            (SCOL_CHILD_COUNT, child_count),
+        ],
+    )
+}
+
+fn replace_int32_columns(
+    batch: &RecordBatch,
+    replacements: &[(&str, Vec<i32>)],
+) -> Result<RecordBatch, TracesError> {
+    let schema = batch.schema();
+    let mut columns = batch.columns().to_vec();
+    for (name, values) in replacements {
+        let idx = schema
+            .column_with_name(name)
+            .ok_or_else(|| TracesError::Block(format!("missing column {name}")))?
+            .0;
+        columns[idx] = Arc::new(Int32Array::from(values.clone()));
+    }
+    RecordBatch::try_new(schema, columns).map_err(|err| TracesError::Block(err.to_string()))
+}
+
+fn fixed_column<'a>(
+    batch: &'a RecordBatch,
+    column: &str,
+    width: i32,
+) -> Result<&'a FixedSizeBinaryArray, TracesError> {
+    let array = batch
+        .column_by_name(column)
+        .ok_or_else(|| TracesError::Block(format!("missing column {column}")))?
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .ok_or_else(|| TracesError::Block(format!("{column} is not FixedSizeBinary")))?;
+    if array.value_length() != width {
+        return Err(TracesError::Block(format!(
+            "{column} is FixedSizeBinary({}), expected {width}",
+            array.value_length()
+        )));
+    }
+    Ok(array)
 }
 
 fn trace_bloom(batches: &[RecordBatch]) -> Result<ShardedTraceBloom, TracesError> {
