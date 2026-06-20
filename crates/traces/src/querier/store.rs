@@ -29,12 +29,6 @@ use datafusion::prelude::SessionContext;
 use crate::querier::live::LiveTier;
 
 const INTRINSIC_TAGS: &[&str] = &[
-    "event:name",
-    "event:timeSinceStart",
-    "instrumentation:name",
-    "instrumentation:version",
-    "link:spanID",
-    "link:traceID",
     "span:childCount",
     "span:duration",
     "span:id",

@@ -20,10 +20,6 @@ use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_w
 use crate::store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
 
 const INTRINSIC_TAGS: &[&str] = &[
-    "event:name",
-    "event:timeSinceStart",
-    "link:spanID",
-    "link:traceID",
     "span:childCount",
     "span:duration",
     "span:id",
@@ -1314,10 +1310,6 @@ mod tests {
         assert!(
             got[0].tags
                 == vec![
-                    "event:name",
-                    "event:timeSinceStart",
-                    "link:spanID",
-                    "link:traceID",
                     "span:childCount",
                     "span:duration",
                     "span:id",

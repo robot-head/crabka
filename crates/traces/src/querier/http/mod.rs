@@ -26,12 +26,6 @@ use serde_json::{Map, Value, json};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
-    "event:name",
-    "event:timeSinceStart",
-    "instrumentation:name",
-    "instrumentation:version",
-    "link:spanID",
-    "link:traceID",
     "span:childCount",
     "span:duration",
     "span:id",
@@ -2522,7 +2516,24 @@ mod tests {
             body == json!({
                 "scopes": [{
                     "name": "intrinsic",
-                    "tags": INTRINSIC_TAGS
+                    "tags": [
+                        "span:childCount",
+                        "span:duration",
+                        "span:id",
+                        "span:kind",
+                        "span:name",
+                        "span:Parent",
+                        "span:nestedSetLeft",
+                        "span:nestedSetParent",
+                        "span:nestedSetRight",
+                        "span:parentID",
+                        "span:status",
+                        "span:statusMessage",
+                        "trace:duration",
+                        "trace:id",
+                        "trace:rootName",
+                        "trace:rootService"
+                    ]
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
@@ -2738,12 +2749,6 @@ mod tests {
                     {
                         "name": "intrinsic",
                         "tags": [
-                            "event:name",
-                            "event:timeSinceStart",
-                            "instrumentation:name",
-                            "instrumentation:version",
-                            "link:spanID",
-                            "link:traceID",
                             "span:childCount",
                             "span:duration",
                             "span:id",
