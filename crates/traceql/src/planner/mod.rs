@@ -883,6 +883,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_filter_accepts_literal_arithmetic_threshold() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 1, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 1, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "api-c", 1, vec![("svc", AttrValue::Str("api".into()))]),
+                span(4, "db-a", 1, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned("{ .svc != nil } | count() | by(span.svc) > 1 + 1", &store)
+            .await
+            .unwrap();
+
+        assert!(
+            names(&out)
+                == vec![
+                    "api-a".to_string(),
+                    "api-b".to_string(),
+                    "api-c".to_string()
+                ]
+        );
+    }
+
+    #[tokio::test]
     async fn preserving_stage_before_count_filter_is_ignored_for_search() {
         let mut store = InMemorySpanStore::new();
         store.push_trace(

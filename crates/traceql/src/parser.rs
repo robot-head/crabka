@@ -232,18 +232,7 @@ impl Parser {
         let Some(op) = self.parse_comparison_op() else {
             return Ok(None);
         };
-        let value = match self.advance() {
-            Token::Int(v) => v
-                .to_string()
-                .parse::<f64>()
-                .map_err(|e| TraceqlError::Parse(e.to_string()))?,
-            Token::Float(v) => v,
-            other => {
-                return Err(Self::err(format!(
-                    "expected numeric filter value, got {other:?}"
-                )));
-            }
-        };
+        let value = numeric_filter_value(self.parse_additive_value(&numeric_filter_field())?)?;
         Ok(Some((op, value)))
     }
 
@@ -723,6 +712,23 @@ fn i64_to_f64(value: i64) -> Result<f64> {
         .map_err(|e: std::num::ParseFloatError| TraceqlError::Parse(e.to_string()))
 }
 
+fn numeric_filter_field() -> Field {
+    Field {
+        scope: Scope::Both,
+        key: String::new(),
+    }
+}
+
+fn numeric_filter_value(value: Value) -> Result<f64> {
+    match value {
+        Value::Int(value) => i64_to_f64(value),
+        Value::Float(value) => Ok(value),
+        other => Err(TraceqlError::Parse(format!(
+            "expected numeric filter value, got {other:?}"
+        ))),
+    }
+}
+
 fn parse_duration_nanos(s: &str) -> Result<i64> {
     if s.is_empty() {
         return Err(TraceqlError::Parse("empty duration".into()));
@@ -930,6 +936,20 @@ mod tests {
                 == Pipeline::Filter {
                     op: ComparisonOp::Gt,
                     value: 2.0,
+                }
+        );
+    }
+
+    #[test]
+    fn pipeline_scalar_filter_accepts_literal_arithmetic() {
+        let q = parse("{ .a = 1 } | count() > 1 + 2 * 3").unwrap();
+        assert!(q.pipeline.len() == 2);
+        assert!(q.pipeline[0] == Pipeline::Aggregate(Aggregate::Count));
+        assert!(
+            q.pipeline[1]
+                == Pipeline::Filter {
+                    op: ComparisonOp::Gt,
+                    value: 7.0,
                 }
         );
     }
