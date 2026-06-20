@@ -335,19 +335,19 @@ where
     let Some(query) = query_param(&uri, "q") else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
-    let ts_ns = match optional_seconds_param(&uri, "time") {
-        Ok(value) => value.unwrap_or(0),
+    let (start_ns, end_ns, step_ns, point_ns) = match instant_metric_bounds(&uri) {
+        Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let include_exemplars = include_exemplars(&uri);
 
     match state
         .engine
-        .query_range(&tenant, &query, ts_ns, ts_ns, 1_000_000_000)
+        .query_range(&tenant, &query, start_ns, end_ns, step_ns)
         .await
     {
         Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
-            resp,
+            instant_metrics_response(resp, point_ns),
             include_exemplars,
         )))
         .into_response(),
@@ -510,6 +510,22 @@ fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
     let start_ns = optional_seconds_param(uri, "start")?.unwrap_or(0);
     let end_ns = optional_seconds_param(uri, "end")?.unwrap_or(i64::MAX);
     Ok((start_ns, end_ns))
+}
+
+fn instant_metric_bounds(uri: &Uri) -> Result<(i64, i64, i64, i64), String> {
+    if query_param(uri, "start").is_some() || query_param(uri, "end").is_some() {
+        let start_ns = required_seconds_param(uri, "start")?;
+        let end_ns = required_seconds_param(uri, "end")?;
+        let step_ns = end_ns
+            .checked_sub(start_ns)
+            .and_then(|width| width.checked_add(1))
+            .filter(|step| *step > 0)
+            .ok_or_else(|| "metrics end must be >= start".to_string())?;
+        return Ok((start_ns, end_ns, step_ns, end_ns));
+    }
+
+    let ts_ns = optional_seconds_param(uri, "time")?.unwrap_or(0);
+    Ok((ts_ns, ts_ns, 1_000_000_000, ts_ns))
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
@@ -1080,6 +1096,18 @@ fn filter_metrics_exemplars(
     resp
 }
 
+fn instant_metrics_response(mut resp: TraceMetricsResponse, point_ns: i64) -> TraceMetricsResponse {
+    for series in &mut resp.series {
+        let value = series
+            .points
+            .last()
+            .map(|(_, value)| *value)
+            .unwrap_or_default();
+        series.points = vec![(point_ns, value)];
+    }
+    resp
+}
+
 fn tag_scope_name(scope: TagScope) -> &'static str {
     match scope {
         TagScope::Resource => "resource",
@@ -1620,6 +1648,18 @@ mod tests {
             body["series"][0]["points"]
                 == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_query_uses_start_end_range_without_step() {
+        let (status, body) = get_json(
+            "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&exemplars=false",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        assert!(body["series"][0]["points"] == json!([["1000000000", 2.0]]));
+        assert!(body["series"][0]["exemplars"] == json!([]));
     }
 
     #[tokio::test]
