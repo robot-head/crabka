@@ -190,7 +190,9 @@ impl SpanStore for CrabkaSpanStore {
         if matches!(scope, None | Some(TagScope::Span)) {
             by_scope.insert("span", (TagScope::Span, BTreeSet::new()));
             for tag in self.trace_index.tag_names(tenant, start_ns, end_ns) {
-                by_scope.get_mut("span").expect("span scope").1.insert(tag);
+                if !is_intrinsic_tag(&tag) {
+                    by_scope.get_mut("span").expect("span scope").1.insert(tag);
+                }
             }
         }
         if has_cold_blocks {
@@ -927,6 +929,40 @@ mod tests {
             .unwrap();
         assert!(instrumentation.len() == 1);
         assert!(instrumentation[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+    }
+
+    #[tokio::test]
+    async fn cold_span_tag_discovery_excludes_intrinsic_index_names() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: "blocks/none.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::new(1, 8, 0.01),
+                tag_names: BTreeSet::from([
+                    "http.method".to_string(),
+                    "event:name".to_string(),
+                    "instrumentation:name".to_string(),
+                ]),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let tags = store
+            .tag_names("tenant", Some(TagScope::Span), 0, 10)
+            .await
+            .unwrap();
+
+        assert!(tags.len() == 1);
+        assert!(tags[0].scope == TagScope::Span);
+        assert!(tags[0].tags == vec!["http.method"]);
     }
 
     #[tokio::test]
