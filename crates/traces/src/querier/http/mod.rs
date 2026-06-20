@@ -133,9 +133,10 @@ where
 {
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
+    let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
     match state
         .engine
-        .tag_names(&tenant, None, start_ns, end_ns)
+        .tag_names(&tenant, scope, start_ns, end_ns)
         .await
     {
         Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
@@ -883,6 +884,23 @@ mod tests {
                         "tags": ["svc"]
                     }
                 ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_respects_scope_parameter() {
+        let (status, body) = get_json("/api/v2/search/tags?scope=span").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "span",
+                    "tags": ["svc"]
+                }],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
