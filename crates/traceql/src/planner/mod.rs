@@ -58,10 +58,16 @@ async fn plan_spanset_sql<S: SpanStore>(
 
 fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
     match pipeline {
-        [] => Ok(format!("SELECT * FROM ({spanset_sql}) AS q")),
-        [Pipeline::Aggregate(Aggregate::Count)] => {
-            Ok(format!("SELECT * FROM ({spanset_sql}) AS q"))
-        }
+        []
+        | [
+            Pipeline::Aggregate(
+                Aggregate::Count
+                | Aggregate::Sum(_)
+                | Aggregate::Avg(_)
+                | Aggregate::Min(_)
+                | Aggregate::Max(_),
+            ),
+        ] => Ok(format!("SELECT * FROM ({spanset_sql}) AS q")),
         [
             Pipeline::Aggregate(Aggregate::Count),
             Pipeline::Filter { op, value },
@@ -83,6 +89,18 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
             ),
             Pipeline::Filter { op, value },
         ] => aggregate_filter_sql_query(spanset_sql, agg, *op, *value),
+        [
+            Pipeline::Aggregate(
+                Aggregate::Sum(_) | Aggregate::Avg(_) | Aggregate::Min(_) | Aggregate::Max(_),
+            ),
+            Pipeline::By(by),
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(
+                Aggregate::Sum(_) | Aggregate::Avg(_) | Aggregate::Min(_) | Aggregate::Max(_),
+            ),
+        ] => grouped_aggregate_sql(spanset_sql, by, None),
         [Pipeline::Aggregate(Aggregate::Count), Pipeline::By(by)]
         | [Pipeline::By(by), Pipeline::Aggregate(Aggregate::Count)] => {
             grouped_aggregate_sql(spanset_sql, by, None)
@@ -778,6 +796,26 @@ mod tests {
             .await
             .unwrap();
         assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn avg_without_filter_preserves_matched_spans() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned("{ .svc = \"api\" } | avg(span:duration)", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
