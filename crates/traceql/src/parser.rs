@@ -341,6 +341,11 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Result<FieldExpr> {
+        if self.eat(&Token::LParen) {
+            let expr = self.parse_field_or()?;
+            self.expect(&Token::RParen)?;
+            return Ok(expr);
+        }
         let lhs = self.parse_field()?;
         let Some(op) = self.parse_comparison_op() else {
             return Ok(FieldExpr::Field(lhs));
@@ -601,6 +606,17 @@ mod tests {
             panic!()
         };
         assert!(matches!(fe.as_ref(), FieldExpr::And(_, _)));
+    }
+
+    #[test]
+    fn grouped_field_boolean_parses_inside_selector() {
+        let q = parse("{ !(.a = 1 || .b = 2) }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        assert!(
+            matches!(fe.as_ref(), FieldExpr::Not(inner) if matches!(inner.as_ref(), FieldExpr::Or(_, _)))
+        );
     }
 
     #[test]
