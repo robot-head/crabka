@@ -7,8 +7,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use crabka_traceql::{
-    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlEngine,
-    TypedValue,
+    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanStore, TagScope, TraceMetricsResponse,
+    TraceSpans, TraceqlEngine, TypedValue,
 };
 use serde_json::{Map, Value, json};
 
@@ -31,6 +31,9 @@ where
     S: SpanStore + 'static,
 {
     Router::new()
+        .route("/api/echo", get(echo))
+        .route("/ready", get(ready))
+        .route("/status", get(ready))
         .route("/api/search", get(search::<S>))
         .route("/api/search/tags", get(search_tags::<S>))
         .route("/api/v2/search/tags", get(search_tags_v2::<S>))
@@ -39,8 +42,18 @@ where
             "/api/v2/search/tag/{tag}/values",
             get(search_tag_values_v2::<S>),
         )
+        .route("/api/metrics/query_range", get(query_range::<S>))
+        .route("/api/metrics/query", get(query_instant::<S>))
         .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
         .with_state(AppState { engine })
+}
+
+async fn echo() -> &'static str {
+    "echo"
+}
+
+async fn ready() -> &'static str {
+    "ready"
 }
 
 async fn search<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
@@ -150,6 +163,60 @@ where
     }
 }
 
+async fn query_range<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let Some(query) = query_param(&uri, "q") else {
+        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    };
+    let start_ns = query_param(&uri, "start")
+        .and_then(|v| parse_seconds_to_ns(&v))
+        .unwrap_or(0);
+    let end_ns = query_param(&uri, "end")
+        .and_then(|v| parse_seconds_to_ns(&v))
+        .unwrap_or(start_ns);
+    let step_ns = query_param(&uri, "step")
+        .and_then(|v| parse_seconds_to_ns(&v))
+        .unwrap_or(1_000_000_000);
+
+    match state
+        .engine
+        .query_range(&tenant, &query, start_ns, end_ns, step_ns)
+        .await
+    {
+        Ok(resp) => Json(trace_metrics_json(&resp)).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+async fn query_instant<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let Some(query) = query_param(&uri, "q") else {
+        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    };
+    let ts_ns = query_param(&uri, "time")
+        .and_then(|v| parse_seconds_to_ns(&v))
+        .unwrap_or(0);
+
+    match state
+        .engine
+        .query_range(&tenant, &query, ts_ns, ts_ns, 1_000_000_000)
+        .await
+    {
+        Ok(resp) => Json(trace_metrics_json(&resp)).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
 async fn trace_by_id<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
@@ -192,6 +259,10 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
         .and_then(|v| v.parse().ok())
         .unwrap_or(i64::MAX);
     (start_ns, end_ns)
+}
+
+fn parse_seconds_to_ns(value: &str) -> Option<i64> {
+    value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
 }
 
 fn parse_tag_scope(scope: &str) -> Option<TagScope> {
@@ -281,6 +352,21 @@ fn search_tag_values_v2_json(values: &[TypedValue]) -> Value {
         "metrics": {
             "inspectedBytes": "0",
         },
+    })
+}
+
+fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
+    json!({
+        "series": resp.series.iter().map(|series| {
+            json!({
+                "labels": series.labels.iter()
+                    .map(|(key, value)| (key.clone(), json!(value)))
+                    .collect::<Map<_, _>>(),
+                "points": series.points.iter()
+                    .map(|(ts, value)| json!([ts.to_string(), *value]))
+                    .collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
@@ -427,6 +513,51 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn get_text(uri: &str) -> (StatusCode, String) {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn operational_probes_return_plain_text() {
+        let (status, body) = get_text("/api/echo").await;
+        assert!(status == StatusCode::OK);
+        assert!(body == "echo");
+
+        let (status, body) = get_text("/ready").await;
+        assert!(status == StatusCode::OK);
+        assert!(body == "ready");
+
+        let (status, body) = get_text("/status").await;
+        assert!(status == StatusCode::OK);
+        assert!(body == "ready");
+    }
+
+    #[tokio::test]
+    async fn metrics_routes_return_plain_text_unsupported_until_traceql_metrics_land() {
+        let (status, body) =
+            get_text("/api/metrics/query_range?q=%7B%20%7D%20%7C%20rate()&start=0&end=60&step=60")
+                .await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "unsupported: traceql metrics: slice 3");
+
+        let (status, body) =
+            get_text("/api/metrics/query?q=%7B%20%7D%20%7C%20rate()&time=60").await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "unsupported: traceql metrics: slice 3");
     }
 
     #[tokio::test]
