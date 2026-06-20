@@ -62,6 +62,14 @@ fn zipkin_kind(kind: Option<&str>) -> SpanKind {
     }
 }
 
+fn zipkin_status(tags: &BTreeMap<String, String>) -> StatusCode {
+    if tags.get("error").is_some_and(|value| value == "true") {
+        StatusCode::Error
+    } else {
+        StatusCode::Unset
+    }
+}
+
 /// Decode a Zipkin v2 JSON span array.
 pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
     let raw: Vec<ZipkinSpan> =
@@ -79,6 +87,7 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
                 }]
             })
             .unwrap_or_default();
+        let status = zipkin_status(&span.tags);
         let span_attrs = span
             .tags
             .into_iter()
@@ -105,7 +114,7 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
             kind: zipkin_kind(span.kind.as_deref()),
             start_ns: span.timestamp.saturating_mul(1_000),
             duration_ns: span.duration.saturating_mul(1_000),
-            status: StatusCode::Unset,
+            status,
             status_message: String::new(),
             resource_attrs,
             span_attrs,
@@ -156,6 +165,27 @@ mod tests {
         );
         assert!(span.span_attrs.iter().any(|attr| attr.key == "http.method"));
         assert!(span.events[0].time_unix_nano == 1_100_000);
+    }
+
+    #[test]
+    fn error_tag_sets_status_error() {
+        let body = r#"[
+          {
+            "traceId": "0000000000000001",
+            "id": "0000000000000002",
+            "tags": { "error": "true" }
+          }
+        ]"#;
+
+        let spans = decode_zipkin(body.as_bytes()).unwrap();
+
+        assert!(spans[0].status == StatusCode::Error);
+        assert!(
+            spans[0]
+                .span_attrs
+                .iter()
+                .any(|attr| attr.key == "error" && attr.value == AttrValue::Str("true".into()))
+        );
     }
 
     #[test]
