@@ -25,9 +25,13 @@ pub fn decode_otlp(
             for profile in &scope_profiles.profiles {
                 let sample_timestamps_ns = otlp_sample_timestamps(profile)?;
                 let (sample_span_ids, sample_trace_ids) = otlp_sample_links(profile, dict)?;
+                let profile_labels = profile_labels(profile, dict)?;
                 let profile = otlp_profile_to_pprof(profile, dict)?;
                 let mut labels = Labels::new();
                 labels.insert("service_name", service_name.clone());
+                for (name, value) in profile_labels {
+                    labels.insert(name, value);
+                }
                 if let Some((name, _)) = profile.sample_types().first() {
                     labels.insert("__name__", name.clone());
                 }
@@ -139,29 +143,27 @@ fn otlp_profile_to_pprof(
     Ok(PprofProfile::from(pprof))
 }
 
+fn profile_labels(
+    profile: &pb::otlp_profiles::Profile,
+    dict: &pb::otlp_profiles::ProfilesDictionary,
+) -> Result<Vec<(String, String)>, ProfilesError> {
+    profile
+        .attribute_indices
+        .iter()
+        .map(|idx| attribute_label(*idx, dict))
+        .collect()
+}
+
 fn sample_labels(
     sample: &pb::otlp_profiles::Sample,
     dict: &pb::otlp_profiles::ProfilesDictionary,
     strings: &mut Vec<String>,
 ) -> Result<Vec<crabka_pprof::proto::Label>, ProfilesError> {
-    use pb::opentelemetry::proto::common::v1::any_value::Value;
-
     let mut labels = Vec::new();
     for attr_idx in &sample.attribute_indices {
-        let attr = usize::try_from(*attr_idx)
-            .ok()
-            .and_then(|idx| dict.attribute_table.get(idx))
-            .ok_or_else(|| {
-                ProfilesError::Invalid("OTLP sample references missing attribute".into())
-            })?;
-        let key = profile_string_index(dict, attr.key_strindex, "OTLP attribute key")?;
-        let Some(value) = attr.value.as_ref().and_then(|value| value.value.as_ref()) else {
-            continue;
-        };
-        let value_idx = match value {
-            Value::StringValue(value) => intern_string(strings, value),
-            Value::IntValue(value) => intern_string(strings, &value.to_string()),
-        };
+        let (name, value) = attribute_label(*attr_idx, dict)?;
+        let key = intern_string(strings, &name);
+        let value_idx = intern_string(strings, &value);
         labels.push(crabka_pprof::proto::Label {
             key,
             str: value_idx,
@@ -172,19 +174,33 @@ fn sample_labels(
     Ok(labels)
 }
 
-fn profile_string_index(
-    dict: &pb::otlp_profiles::ProfilesDictionary,
+fn attribute_label(
     index: i32,
-    field: &str,
-) -> Result<i64, ProfilesError> {
-    let idx = usize::try_from(index)
-        .map_err(|_| ProfilesError::Invalid(format!("{field} references missing string")))?;
-    if idx >= dict.string_table.len() {
-        return Err(ProfilesError::Invalid(format!(
-            "{field} references missing string"
-        )));
-    }
-    Ok(i64::from(index))
+    dict: &pb::otlp_profiles::ProfilesDictionary,
+) -> Result<(String, String), ProfilesError> {
+    use pb::opentelemetry::proto::common::v1::any_value::Value;
+
+    let attr = usize::try_from(index)
+        .ok()
+        .and_then(|idx| dict.attribute_table.get(idx))
+        .ok_or_else(|| ProfilesError::Invalid("OTLP references missing attribute".into()))?;
+    let key_idx = usize::try_from(attr.key_strindex).map_err(|_| {
+        ProfilesError::Invalid("OTLP attribute key references missing string".to_string())
+    })?;
+    let key = dict
+        .string_table
+        .get(key_idx)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ProfilesError::Invalid("OTLP attribute key references missing string".to_string())
+        })?
+        .clone();
+    let value = match attr.value.as_ref().and_then(|value| value.value.as_ref()) {
+        Some(Value::StringValue(value)) => value.clone(),
+        Some(Value::IntValue(value)) => value.to_string(),
+        None => String::new(),
+    };
+    Ok((key, value))
 }
 
 fn intern_string(strings: &mut Vec<String>, value: &str) -> i64 {
@@ -315,14 +331,24 @@ mod tests {
                 "main".into(),
                 "target".into(),
                 "all".into(),
+                "env".into(),
             ],
-            attribute_table: vec![KeyValueAndUnit {
-                key_strindex: 4,
-                value: Some(AnyValue {
-                    value: Some(Value::StringValue("all".to_string())),
-                }),
-                unit_strindex: 0,
-            }],
+            attribute_table: vec![
+                KeyValueAndUnit {
+                    key_strindex: 4,
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("all".to_string())),
+                    }),
+                    unit_strindex: 0,
+                },
+                KeyValueAndUnit {
+                    key_strindex: 6,
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("prod".to_string())),
+                    }),
+                    unit_strindex: 0,
+                },
+            ],
             function_table: vec![Function {
                 name_strindex: 3,
                 ..Default::default()
@@ -363,6 +389,7 @@ mod tests {
                 ..Default::default()
             }],
             time_unix_nano: 1_700_000_000_000_000_000,
+            attribute_indices: vec![1],
             ..Default::default()
         };
         let req = pb::otlp_profiles::ExportProfilesServiceRequest {
@@ -380,6 +407,7 @@ mod tests {
 
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__name__") == Some("samples"));
+        assert!(out[0].labels.get("env") == Some("prod"));
         assert!(!out[0].profile.sample_types().is_empty());
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
         assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
