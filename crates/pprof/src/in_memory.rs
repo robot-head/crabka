@@ -270,7 +270,7 @@ impl ProfileStore for InMemoryProfileStore {
                         .map(|(name, value)| (name.clone(), value.clone()))
                 })
                 .collect();
-            if !projected.is_empty() {
+            if !projected.is_empty() || label_names.is_empty() {
                 out.insert(projected);
             }
         }
@@ -513,5 +513,11 @@ mod tests {
             .await
             .unwrap();
         assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+
+        let unprojected = store
+            .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
+            .await
+            .unwrap();
+        assert!(unprojected == vec![Vec::<(String, String)>::new()]);
     }
 }
