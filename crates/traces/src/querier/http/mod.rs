@@ -855,7 +855,7 @@ where
         if seen.insert(trace.trace_id)
             && let Some(trace) = engine.trace_by_id(tenant, &trace.trace_id).await?
         {
-            traces.push(trace);
+            traces.push(filter_trace_spans(trace, start_ns, end_ns));
         }
     }
     Ok(traces)
@@ -2909,6 +2909,68 @@ mod tests {
                 "tagValues": [{
                     "type": "string",
                     "value": "kept"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_honors_time_bounds() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at_with_attrs(
+                    1,
+                    1,
+                    None,
+                    "a",
+                    1_000_000_000,
+                    vec![
+                        ("env".into(), AttrValue::Str("prod".into())),
+                        ("target".into(), AttrValue::Str("inside".into())),
+                    ],
+                ),
+                span_at_with_attrs(
+                    1,
+                    2,
+                    Some(1),
+                    "b",
+                    5_000_000_000,
+                    vec![("target".into(), AttrValue::Str("outside".into()))],
+                ),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/.target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D&start=0&end=2",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "inside"
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
