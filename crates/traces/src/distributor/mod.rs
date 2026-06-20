@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -197,7 +197,9 @@ async fn otlp_push(
         })
         .and_then(|data| decode_otlp(&data))
     {
-        Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::OK).await,
+        Ok(spans) => {
+            append_decoded_response(&state, &headers, spans, otlp_success_response()).await
+        }
         Err(err) => error_response(&err),
     }
 }
@@ -233,6 +235,15 @@ async fn append_decoded(
     spans: Vec<Span>,
     success: StatusCode,
 ) -> Response {
+    append_decoded_response(state, headers, spans, success.into_response()).await
+}
+
+async fn append_decoded_response(
+    state: &DistributorState,
+    headers: &HeaderMap,
+    spans: Vec<Span>,
+    success: Response,
+) -> Response {
     let tenant = tenant(headers);
     if let Err(err) = validate(&spans, &state.limits) {
         return error_response(&err);
@@ -241,6 +252,14 @@ async fn append_decoded(
         Ok(()) => success.into_response(),
         Err(err) => error_response(&err),
     }
+}
+
+fn otlp_success_response() -> Response {
+    let body = ExportTraceServiceResponse {
+        partial_success: None,
+    }
+    .encode_to_vec();
+    ([(header::CONTENT_TYPE, "application/x-protobuf")], body).into_response()
 }
 
 fn decode_body(
@@ -362,6 +381,7 @@ mod tests {
     use axum::http::Request;
     use flate2::Compression;
     use flate2::write::GzEncoder;
+    use http_body_util::BodyExt as _;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use opentelemetry_proto::tonic::trace::v1::{
         ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
@@ -460,6 +480,34 @@ mod tests {
         assert!(resp.status() == StatusCode::OK);
         assert!(sink.count() == 1);
         assert!(sink.tenant(0) == "tenant-a");
+    }
+
+    #[tokio::test]
+    async fn otlp_push_returns_export_response_protobuf() {
+        let (state, sink) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/x-protobuf")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::OK);
+        assert!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                == Some("application/x-protobuf")
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let response = ExportTraceServiceResponse::decode(body.as_ref()).unwrap();
+        assert!(response.partial_success.is_none());
+        assert!(sink.count() == 1);
     }
 
     #[tokio::test]
