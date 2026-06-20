@@ -37,6 +37,7 @@ const INTRINSIC_TAGS: &[&str] = &[
     "trace:rootName",
     "trace:rootService",
 ];
+const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation:version"];
 
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
@@ -658,6 +659,15 @@ fn add_intrinsic_tags(mut tags: Vec<ScopedTag>, scope: Option<TagScope>) -> Vec<
         tags.push(ScopedTag {
             scope: TagScope::Intrinsic,
             tags: INTRINSIC_TAGS
+                .iter()
+                .map(|tag| (*tag).to_string())
+                .collect(),
+        });
+    }
+    if matches!(scope, None | Some(TagScope::Instrumentation)) {
+        tags.push(ScopedTag {
+            scope: TagScope::Instrumentation,
+            tags: INSTRUMENTATION_TAGS
                 .iter()
                 .map(|tag| (*tag).to_string())
                 .collect(),
@@ -1521,6 +1531,10 @@ mod tests {
                     {
                         "name": "intrinsic",
                         "tags": INTRINSIC_TAGS
+                    },
+                    {
+                        "name": "instrumentation",
+                        "tags": ["instrumentation:name", "instrumentation:version"]
                     }
                 ],
                 "metrics": {
@@ -1556,6 +1570,23 @@ mod tests {
                 "scopes": [{
                     "name": "intrinsic",
                     "tags": INTRINSIC_TAGS
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_returns_instrumentation_scope() {
+        let (status, body) = get_json("/api/v2/search/tags?scope=instrumentation").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [{
+                    "name": "instrumentation",
+                    "tags": ["instrumentation:name", "instrumentation:version"]
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
