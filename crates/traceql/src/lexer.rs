@@ -73,6 +73,12 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             continue;
         }
 
+        if rest.starts_with("==") {
+            return Err(TraceqlError::Parse(format!(
+                "use single = for equality; == is not TraceQL at byte {i}"
+            )));
+        }
+
         if let Some((tok, len)) = op_token(rest) {
             i += len;
             prev = match tok {
@@ -297,7 +303,7 @@ mod tests {
                     Token::Int(200),
                 ]
         );
-        assert!(lex("a == b").is_ok());
+        assert!(lex("a == b").is_err());
     }
 
     #[test]
