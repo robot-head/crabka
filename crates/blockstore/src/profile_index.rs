@@ -142,6 +142,18 @@ impl ProfileIndex {
             .label_values_for_fingerprints(tenant, name, &active))
     }
 
+    pub fn label_names_for_time(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        min_ts: i64,
+        max_ts: i64,
+    ) -> Result<Vec<String>> {
+        let fps = self.matching_fingerprints(tenant, matchers)?;
+        let active = self.active_fingerprints_for_time(tenant, &fps, min_ts, max_ts);
+        Ok(self.series.label_names_for_fingerprints(tenant, &active))
+    }
+
     #[must_use]
     pub fn fingerprints_for_profile_type(
         &self,

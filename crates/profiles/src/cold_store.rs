@@ -148,11 +148,11 @@ impl ProfileStore for ColdProfileStore {
         &self,
         tenant: &str,
         matchers: &[LabelMatcher],
-        _start_ms: i64,
-        _end_ms: i64,
+        start_ms: i64,
+        end_ms: i64,
     ) -> Result<Vec<String>, ProfileError> {
         self.index
-            .label_names_for(tenant, matchers)
+            .label_names_for_time(tenant, matchers, start_ms, end_ms)
             .map_err(|err| ProfileError::Store(err.to_string()))
     }
 
@@ -479,6 +479,25 @@ mod tests {
             .unwrap();
 
         assert!(values.is_empty(), "{values:?}");
+    }
+
+    #[tokio::test]
+    async fn cold_store_label_names_honor_query_time_range() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rec = record("t", "api", vec![0], 5);
+        let meta = build_block(&store, "t", 0, std::slice::from_ref(&rec), (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        let labels = Labels::from_pairs(rec.labels.iter().cloned());
+        index.add_series("t", labels.fingerprint(), &labels);
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let names = cold.label_names("t", &[], 2_000, 3_000).await.unwrap();
+
+        assert!(names.is_empty(), "{names:?}");
     }
 
     #[test]
