@@ -414,6 +414,35 @@ async fn assert_profile_types_contain(
         .and_then(Value::as_array)
         .ok_or_else(|| format!("ProfileTypes response missing profileTypes: {response}"))?
         .iter()
+        .inspect(|profile_type| {
+            if profile_type
+                .get("ID")
+                .or_else(|| profile_type.get("id"))
+                .and_then(Value::as_str)
+                == Some(PROFILE_TYPE)
+            {
+                assert_eq!(
+                    profile_type.get("name").and_then(Value::as_str),
+                    Some("goroutines")
+                );
+                assert_eq!(
+                    profile_type.get("sampleType").and_then(Value::as_str),
+                    Some("goroutine")
+                );
+                assert_eq!(
+                    profile_type.get("sampleUnit").and_then(Value::as_str),
+                    Some("count")
+                );
+                assert_eq!(
+                    profile_type.get("periodType").and_then(Value::as_str),
+                    Some("goroutine")
+                );
+                assert_eq!(
+                    profile_type.get("periodUnit").and_then(Value::as_str),
+                    Some("count")
+                );
+            }
+        })
         .filter_map(|value| {
             value
                 .get("ID")

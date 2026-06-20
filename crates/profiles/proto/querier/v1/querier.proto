@@ -25,6 +25,11 @@ message ProfileTypesRequest {
 
 message ProfileType {
   string ID = 1;
+  string name = 2;
+  string sample_type = 4;
+  string sample_unit = 5;
+  string period_type = 6;
+  string period_unit = 7;
 }
 
 message ProfileTypesResponse {
@@ -69,7 +74,7 @@ message LabelPair {
 }
 
 message SeriesResponse {
-  repeated Labels labels_set = 1;
+  repeated Labels labels_set = 2;
 }
 
 message SelectMergeStacktracesRequest {
@@ -80,7 +85,7 @@ message SelectMergeStacktracesRequest {
   int64 max_nodes = 5;
   Format format = 6;
   string stack_trace_selector = 7;
-  string profile_id_selector = 8;
+  repeated string profile_id_selector = 8;
 }
 
 enum Format {
@@ -135,7 +140,7 @@ message SelectSeriesRequest {
   repeated string group_by = 5;
   double step = 6;
   SeriesAggregationType aggregation = 7;
-  int64 limit = 8;
+  int64 limit = 9;
 }
 
 enum SeriesAggregationType {
@@ -153,8 +158,8 @@ message ProfileSeries {
 }
 
 message Point {
-  int64 timestamp = 1;
-  double value = 2;
+  double value = 1;
+  int64 timestamp = 2;
 }
 
 message SelectHeatmapRequest {
@@ -196,8 +201,10 @@ message DiffResponse {
 message FlameGraphDiff {
   repeated string names = 1;
   repeated Level levels = 2;
-  int64 left_ticks = 3;
-  int64 right_ticks = 4;
+  int64 total = 3;
+  int64 max_self = 4;
+  int64 left_ticks = 5;
+  int64 right_ticks = 6;
 }
 
 message GetProfileStatsRequest {

@@ -238,4 +238,46 @@ mod tests {
             vec![5]
         );
     }
+
+    #[test]
+    fn querier_point_uses_upstream_field_numbers() {
+        let point = pb::querier::v1::Point {
+            timestamp: 42,
+            value: 1.5,
+        };
+
+        let bytes = point.encode_to_vec();
+
+        assert_eq!(
+            bytes,
+            vec![
+                0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, // value = 1.5, field 1
+                0x10, 42, // timestamp = 42, field 2
+            ]
+        );
+    }
+
+    #[test]
+    fn querier_diff_uses_upstream_field_numbers() {
+        let diff = pb::querier::v1::FlameGraphDiff {
+            names: Vec::new(),
+            levels: Vec::new(),
+            total: 100,
+            max_self: 40,
+            left_ticks: 60,
+            right_ticks: 40,
+        };
+
+        let bytes = diff.encode_to_vec();
+
+        assert_eq!(
+            bytes,
+            vec![
+                0x18, 100, // total, field 3
+                0x20, 40, // max_self, field 4
+                0x28, 60, // leftTicks, field 5
+                0x30, 40, // rightTicks, field 6
+            ]
+        );
+    }
 }

@@ -250,8 +250,18 @@ where
         pb::querier::v1::ProfileTypesResponse {
             profile_types: types
                 .into_iter()
-                .map(|id| pb::querier::v1::ProfileType { id })
-                .collect(),
+                .map(|id| {
+                    ProfileType::parse(&id).map(|parsed| pb::querier::v1::ProfileType {
+                        id,
+                        name: parsed.name,
+                        sample_type: parsed.sample_type,
+                        sample_unit: parsed.sample_unit,
+                        period_type: parsed.period_type,
+                        period_unit: parsed.period_unit,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(connect_error)?,
         },
     ))
 }
@@ -778,6 +788,12 @@ impl From<crabka_pprof::FlameGraph> for pb::querier::v1::FlameGraph {
 
 impl From<crabka_pprof::FlameGraphDiff> for pb::querier::v1::FlameGraphDiff {
     fn from(value: crabka_pprof::FlameGraphDiff) -> Self {
+        let max_self = value
+            .levels
+            .iter()
+            .flat_map(|level| level.values.chunks_exact(7))
+            .fold(0, |max_self, bar| max_self.max(bar[2]).max(bar[5]));
+        let total = value.left_ticks + value.right_ticks;
         Self {
             names: value.names,
             levels: value
@@ -787,6 +803,8 @@ impl From<crabka_pprof::FlameGraphDiff> for pb::querier::v1::FlameGraphDiff {
                     values: level.values,
                 })
                 .collect(),
+            total,
+            max_self,
             left_ticks: value.left_ticks,
             right_ticks: value.right_ticks,
         }
