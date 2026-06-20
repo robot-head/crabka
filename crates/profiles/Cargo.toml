@@ -49,6 +49,7 @@ crabka-pprof = { path = "../pprof", version = "0.3.7" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
+crabka-broker = { path = "../broker", version = "0.3.7" }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
@@ -61,5 +62,4 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 reqwest = { workspace = true, features = ["json"] }
 testcontainers = { workspace = true }
 base64 = { workspace = true }
-crabka-broker = { path = "../broker", version = "0.3.7", features = ["test-helpers"] }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }

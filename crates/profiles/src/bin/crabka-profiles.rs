@@ -83,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 limits,
                 profile_overrides,
                 active_series: Default::default(),
+                ingestion_buckets: Default::default(),
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: 1 << 24,
             });

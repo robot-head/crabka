@@ -11,6 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Router, routing::post};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
+use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
 use tokio::net::TcpListener;
@@ -71,6 +72,7 @@ pub struct DistributorState {
     pub limits: TenantLimitConfig,
     pub profile_overrides: OverridesProvider,
     pub active_series: Mutex<HashMap<String, BTreeSet<u64>>>,
+    pub ingestion_buckets: Mutex<HashMap<String, Arc<TokenBucket>>>,
     pub relabel: Vec<RelabelConfig>,
     pub max_decompressed: usize,
 }
@@ -118,6 +120,7 @@ pub async fn process_raw(
     }
 
     enforce_max_series(state, tenant, &pending)?;
+    enforce_ingestion_rate(state, tenant, pending.len())?;
     for rec in pending {
         let fingerprint = rec.series_fingerprint();
         state.sink.append(rec).await?;
@@ -125,6 +128,68 @@ pub async fn process_raw(
     }
 
     Ok(())
+}
+
+fn enforce_ingestion_rate(
+    state: &DistributorState,
+    tenant: &str,
+    profile_count: usize,
+) -> Result<(), ProfilesError> {
+    if profile_count == 0 || !state.profile_overrides.has_tenant_override(tenant) {
+        return Ok(());
+    }
+    let limits = state.profile_overrides.for_tenant(tenant);
+    if limits.ingestion_rate_profiles_per_sec <= 0.0 {
+        return Ok(());
+    }
+    let requested = u64::try_from(profile_count).unwrap_or(u64::MAX);
+    if limits.ingestion_burst_profiles > 0 && requested > limits.ingestion_burst_profiles {
+        return Err(crate::limits::LimitError::IngestionRateExceeded {
+            rate: limits.ingestion_rate_profiles_per_sec,
+            observed: requested as f64,
+        }
+        .into());
+    }
+
+    let configured_rate = rate_tokens_per_sec(limits);
+    let bucket = ingestion_bucket_for_tenant(state, tenant, configured_rate)?;
+    let granted = bucket.try_consume(requested);
+    if granted < requested {
+        return Err(crate::limits::LimitError::IngestionRateExceeded {
+            rate: limits.ingestion_rate_profiles_per_sec,
+            observed: requested as f64,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn rate_tokens_per_sec(limits: &Limits) -> u64 {
+    let rate = limits.ingestion_rate_profiles_per_sec.ceil().max(1.0) as u64;
+    if limits.ingestion_burst_profiles > 0 {
+        rate.min(limits.ingestion_burst_profiles)
+    } else {
+        rate
+    }
+}
+
+fn ingestion_bucket_for_tenant(
+    state: &DistributorState,
+    tenant: &str,
+    rate: u64,
+) -> Result<Arc<TokenBucket>, ProfilesError> {
+    let mut buckets = state
+        .ingestion_buckets
+        .lock()
+        .map_err(|_| ProfilesError::Invalid("ingestion bucket lock poisoned".to_string()))?;
+    let bucket = buckets
+        .entry(tenant.to_string())
+        .or_insert_with(|| Arc::new(TokenBucket::new()))
+        .clone();
+    if bucket.rate() != rate {
+        bucket.set_rate(rate);
+    }
+    Ok(bucket)
 }
 
 fn ingest_limits_for_tenant(state: &DistributorState, tenant: &str) -> crate::ingest::TenantLimits {
@@ -476,6 +541,7 @@ mod tests {
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::new(Default::default()),
             active_series: Default::default(),
+            ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         })
@@ -581,6 +647,7 @@ mod tests {
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::new(Default::default()),
             active_series: Default::default(),
+            ingestion_buckets: Default::default(),
             relabel: vec![RelabelConfig {
                 source_labels: vec!["__name__".to_string()],
                 regex: "process_cpu".to_string(),
@@ -611,6 +678,7 @@ mod tests {
             ),
             profile_overrides: OverridesProvider::new(Default::default()),
             active_series: Default::default(),
+            ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         });
@@ -648,6 +716,7 @@ overrides:
             )
             .unwrap(),
             active_series: Default::default(),
+            ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         });
@@ -685,6 +754,7 @@ overrides:
             )
             .unwrap(),
             active_series: Default::default(),
+            ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         });
@@ -699,6 +769,86 @@ overrides:
 
         assert!(err.to_string().contains("max series exceeded"), "{err}");
         assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pyroscope_overrides_enforce_ingestion_burst_without_partial_writes() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink: sink.clone(),
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    ingestion_rate_profiles_per_sec: 100
+    ingestion_burst_profiles: 1
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_2types()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pyroscope_overrides_enforce_ingestion_rate_per_tenant() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink: sink.clone(),
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    ingestion_rate_profiles_per_sec: 1
+    ingestion_burst_profiles: 1
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap();
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap_err();
+        process_raw(
+            &state,
+            "tenant-b",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap();
+
+        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().len() == 2);
     }
 
     #[test]

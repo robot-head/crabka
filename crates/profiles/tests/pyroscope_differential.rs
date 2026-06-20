@@ -266,6 +266,7 @@ async fn start_crabka_pair(
         limits: TenantLimitConfig::default(),
         profile_overrides: OverridesProvider::new(Default::default()),
         active_series: Default::default(),
+        ingestion_buckets: Default::default(),
         relabel: Vec::new(),
         max_decompressed: 16 * 1024 * 1024,
     });
