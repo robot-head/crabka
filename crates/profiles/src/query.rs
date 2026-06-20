@@ -660,10 +660,14 @@ where
     let right_label_selector =
         merge_profile_id_selector(&right.label_selector, &right.profile_id_selector)
             .map_err(connect_error)?;
+    let left_call_sites =
+        stack_trace_call_sites_from_json(&left.stack_trace_selector).map_err(connect_error)?;
+    let right_call_sites =
+        stack_trace_call_sites_from_json(&right.stack_trace_selector).map_err(connect_error)?;
     let max_nodes = state.effective_max_nodes(&tenant, left.max_nodes.max(right.max_nodes));
     let flamegraph = state
         .engine
-        .diff(
+        .diff_with_stack_trace_selector(
             &tenant,
             (
                 &left.profile_type_id,
@@ -678,6 +682,8 @@ where
                 right.end,
             ),
             max_nodes,
+            &left_call_sites,
+            &right_call_sites,
         )
         .await
         .map_err(connect_error)?;
@@ -1837,6 +1843,59 @@ overrides:
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
         assert!(total == Some(7), "{response}");
+    }
+
+    #[tokio::test]
+    async fn diff_honors_embedded_stack_trace_selectors() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("hot.path", 7),
+            ("cold.path", 10),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!("http://{bound}/querier.v1.QuerierService/Diff"))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "left": {
+                    "profileTypeID": PT,
+                    "labelSelector": r#"{service_name="api"}"#,
+                    "stackTraceSelector": r#"{"callSite":[{"name":"hot.path"}]}"#,
+                    "start": 0,
+                    "end": 100
+                },
+                "right": {
+                    "profileTypeID": PT,
+                    "labelSelector": r#"{service_name="api"}"#,
+                    "stackTraceSelector": r#"{"callSite":[{"name":"cold.path"}]}"#,
+                    "start": 0,
+                    "end": 100
+                }
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            response.pointer("/flamegraph/leftTicks").and_then(json_i64) == Some(7),
+            "{response}"
+        );
+        assert!(
+            response
+                .pointer("/flamegraph/rightTicks")
+                .and_then(json_i64)
+                == Some(10),
+            "{response}"
+        );
     }
 
     #[tokio::test]

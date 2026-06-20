@@ -420,11 +420,41 @@ impl<S: ProfileStore> FlameEngine<S> {
         right: (&str, &str, i64, i64),
         max_nodes: i64,
     ) -> Result<FlameGraphDiff, ProfileError> {
+        self.diff_with_stack_trace_selector(tenant, left, right, max_nodes, &[], &[])
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn diff_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        left: (&str, &str, i64, i64),
+        right: (&str, &str, i64, i64),
+        max_nodes: i64,
+        left_call_sites: &[String],
+        right_call_sites: &[String],
+    ) -> Result<FlameGraphDiff, ProfileError> {
         let left_tree = self
-            .merge_to_tree(tenant, left.0, left.1, left.2, left.3, None, &[])
+            .merge_to_tree(
+                tenant,
+                left.0,
+                left.1,
+                left.2,
+                left.3,
+                None,
+                left_call_sites,
+            )
             .await?;
         let right_tree = self
-            .merge_to_tree(tenant, right.0, right.1, right.2, right.3, None, &[])
+            .merge_to_tree(
+                tenant,
+                right.0,
+                right.1,
+                right.2,
+                right.3,
+                None,
+                right_call_sites,
+            )
             .await?;
         let max_nodes = if max_nodes > 0 {
             max_nodes
