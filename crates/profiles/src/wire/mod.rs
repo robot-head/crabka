@@ -17,6 +17,13 @@ pub mod pb {
         }
     }
 
+    /// Pprof-compatible `google.v1.Profile` messages used by Pyroscope.
+    pub mod google {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/google.v1.rs"));
+        }
+    }
+
     /// Pyroscope `querier.v1.QuerierService`.
     pub mod querier {
         pub mod v1 {

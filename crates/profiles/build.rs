@@ -4,6 +4,7 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
+        "proto/google/v1/profile.proto",
         "proto/push/v1/push.proto",
         "proto/querier/v1/querier.proto",
         "proto/opentelemetry/proto/collector/profiles/v1development/profiles_service.proto",
@@ -16,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     builder.compile()?;
     for path in [
         "proto/types/v1/types.proto",
+        "proto/google/v1/profile.proto",
         "proto/push/v1/push.proto",
         "proto/querier/v1/querier.proto",
         "proto/opentelemetry/proto/common/v1/common.proto",

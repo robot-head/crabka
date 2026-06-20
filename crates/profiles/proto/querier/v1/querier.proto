@@ -4,6 +4,7 @@ package querier.v1;
 // Covers the datasource health/query path: profile types, labels, merge, series, and diff.
 
 import "types/v1/types.proto";
+import "google/v1/profile.proto";
 
 service QuerierService {
   rpc ProfileTypes(ProfileTypesRequest) returns (ProfileTypesResponse) {}
@@ -12,7 +13,7 @@ service QuerierService {
   rpc Series(SeriesRequest) returns (SeriesResponse) {}
   rpc SelectMergeStacktraces(SelectMergeStacktracesRequest) returns (SelectMergeStacktracesResponse) {}
   rpc SelectMergeSpanProfile(SelectMergeSpanProfileRequest) returns (SelectMergeSpanProfileResponse) {}
-  rpc SelectMergeProfile(SelectMergeProfileRequest) returns (SelectMergeProfileResponse) {}
+  rpc SelectMergeProfile(SelectMergeProfileRequest) returns (google.v1.Profile) {}
   rpc SelectSeries(SelectSeriesRequest) returns (SelectSeriesResponse) {}
   rpc SelectHeatmap(SelectHeatmapRequest) returns (SelectHeatmapResponse) {}
   rpc Diff(DiffRequest) returns (DiffResponse) {}
@@ -126,10 +127,6 @@ message SelectMergeProfileRequest {
   int64 max_nodes = 5;
   types.v1.StackTraceSelector stack_trace_selector = 6;
   repeated string profile_id_selector = 7;
-}
-
-message SelectMergeProfileResponse {
-  bytes profile = 1;
 }
 
 message FlameGraph {

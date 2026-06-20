@@ -13,6 +13,7 @@ use crabka_pprof::{
     EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore, ProfileError, ProfileStore,
     ProfileType, Series, SeriesAgg, parse_label_selector, step_ms_from_secs,
 };
+use prost::Message;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -707,7 +708,7 @@ async fn select_merge_profile_handler<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
-) -> Result<ConnectResponse<pb::querier::v1::SelectMergeProfileResponse>, ConnectError>
+) -> Result<ConnectResponse<pb::google::v1::Profile>, ConnectError>
 where
     S: ProfileStore,
 {
@@ -731,9 +732,9 @@ where
         )
         .await
         .map_err(connect_error)?;
-    Ok(ConnectResponse::new(
-        pb::querier::v1::SelectMergeProfileResponse { profile },
-    ))
+    let profile = pb::google::v1::Profile::decode(profile.as_slice())
+        .map_err(|err| connect_error(ProfileError::Decode(err.to_string())))?;
+    Ok(ConnectResponse::new(profile))
 }
 
 async fn select_heatmap_handler<S>(
@@ -2100,21 +2101,20 @@ overrides:
             .json()
             .await
             .unwrap();
-        let profile = response
-            .get("profile")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|profile| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(profile)
-                    .ok()
-            })
-            .and_then(|profile| crabka_pprof::PprofProfile::decode(&profile).ok())
-            .unwrap();
-        let total: i64 = profile
-            .inner()
-            .sample
+        assert!(response.get("profile").is_none(), "{response}");
+        let total: i64 = response
+            .get("sample")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
             .iter()
-            .map(|sample| sample.value.iter().sum::<i64>())
+            .flat_map(|sample| {
+                sample
+                    .get("value")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(json_i64)
             .sum();
 
         assert!(total == 5, "{response}");
@@ -2154,21 +2154,20 @@ overrides:
             .json()
             .await
             .unwrap();
-        let profile = response
-            .get("profile")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|profile| {
-                base64::engine::general_purpose::STANDARD
-                    .decode(profile)
-                    .ok()
-            })
-            .and_then(|profile| crabka_pprof::PprofProfile::decode(&profile).ok())
-            .unwrap();
-        let total: i64 = profile
-            .inner()
-            .sample
+        assert!(response.get("profile").is_none(), "{response}");
+        let total: i64 = response
+            .get("sample")
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
             .iter()
-            .map(|sample| sample.value.iter().sum::<i64>())
+            .flat_map(|sample| {
+                sample
+                    .get("value")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(json_i64)
             .sum();
 
         assert!(total == 7, "{response}");
