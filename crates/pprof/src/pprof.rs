@@ -31,6 +31,46 @@ impl PprofProfile {
     pub fn into_inner(self) -> crate::proto::Profile {
         self.inner
     }
+
+    #[must_use]
+    pub fn string(&self, index: i64) -> Option<&str> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|idx| self.inner.string_table.get(idx))
+            .map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn sample_types(&self) -> Vec<(String, String)> {
+        self.inner
+            .sample_type
+            .iter()
+            .map(|sample_type| {
+                (
+                    self.string(sample_type.r#type).unwrap_or("").to_string(),
+                    self.string(sample_type.unit).unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn period_type_strings(&self) -> (String, String) {
+        self.inner.period_type.map_or_else(
+            || (String::new(), String::new()),
+            |period_type| {
+                (
+                    self.string(period_type.r#type).unwrap_or("").to_string(),
+                    self.string(period_type.unit).unwrap_or("").to_string(),
+                )
+            },
+        )
+    }
+
+    #[must_use]
+    pub fn samples(&self) -> &[crate::proto::Sample] {
+        &self.inner.sample
+    }
 }
 
 impl From<crate::proto::Profile> for PprofProfile {

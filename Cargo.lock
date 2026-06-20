@@ -2557,6 +2557,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-profiles"
+version = "0.3.7"
+dependencies = [
+ "arrow",
+ "assert2",
+ "async-trait",
+ "axum",
+ "bytes",
+ "clap",
+ "connectrpc-axum",
+ "connectrpc-axum-build",
+ "crabka-blockstore",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-client-consumer",
+ "crabka-client-core",
+ "crabka-client-producer",
+ "crabka-pprof",
+ "flate2",
+ "futures",
+ "multer",
+ "object_store",
+ "parquet",
+ "pbjson",
+ "proptest",
+ "prost",
+ "regex",
+ "serde",
+ "serde-wincode",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wincode",
+]
+
+[[package]]
 name = "crabka-protocol"
 version = "0.3.7"
 dependencies = [

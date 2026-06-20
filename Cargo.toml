@@ -76,6 +76,7 @@ once_cell = "1"
 object_store = { version = "0.13", features = ["aws", "gcp"] }
 url = "2"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+multer = "3"
 snap = "1"
 lz4_flex = { version = "0.13", default-features = false, features = ["frame"] }
 zstd = "0.13"

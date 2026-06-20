@@ -1,0 +1,59 @@
+[package]
+name = "crabka-profiles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Crabka profiles ingest service (distributor + block-builder) - Grafana-Pyroscope replacement"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-profiles"
+readme = "README.md"
+keywords = ["observability", "profiling", "pyroscope", "pprof", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+object_store = { workspace = true }
+parquet = { workspace = true }
+prost = { workspace = true }
+pbjson = { workspace = true }
+connectrpc-axum = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+tower = { workspace = true }
+futures = { workspace = true }
+regex = { workspace = true }
+bytes = { workspace = true }
+flate2 = { workspace = true }
+multer = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wincode = { workspace = true }
+wincode = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+url = { workspace = true }
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-pprof = { path = "../pprof", version = "0.3.7" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
+crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
+
+[build-dependencies]
+connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+crabka-broker = { path = "../broker", version = "0.3.7", features = ["test-helpers"] }
+crabka-client-core = { path = "../client-core", version = "0.3.7" }
