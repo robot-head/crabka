@@ -377,7 +377,9 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
-    let agg = if req.aggregation == pb::querier::v1::SeriesAggregationType::Average as i32 {
+    let agg = if req.aggregation
+        == pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32
+    {
         SeriesAgg::Average
     } else {
         SeriesAgg::Sum
@@ -415,18 +417,19 @@ async fn select_merge_span_profile_handler<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
-) -> Result<ConnectResponse<pb::querier::v1::SelectMergeStacktracesResponse>, ConnectError>
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeSpanProfileResponse>, ConnectError>
 where
     S: ProfileStore,
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
+    let span_ids = parse_span_selectors(&req.span_selector).map_err(connect_error)?;
     let flamegraph = state
         .select_merge_span_profile(
             &tenant,
             &req.profile_type_id,
             &req.label_selector,
-            &req.span_ids,
+            &span_ids,
             req.start,
             req.end,
             req.max_nodes,
@@ -434,10 +437,9 @@ where
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
-        pb::querier::v1::SelectMergeStacktracesResponse {
+        pb::querier::v1::SelectMergeSpanProfileResponse {
             flamegraph: Some(flamegraph.into()),
             tree: Vec::new(),
-            dot: String::new(),
         },
     ))
 }
@@ -720,6 +722,19 @@ fn parse_render_query(query: &str) -> Result<(String, String), ProfileError> {
     Ok((profile_type.to_string(), selector.to_string()))
 }
 
+fn parse_span_selectors(selectors: &[String]) -> Result<Vec<u64>, ProfileError> {
+    selectors
+        .iter()
+        .map(|selector| {
+            let trimmed = selector.trim();
+            trimmed
+                .parse::<u64>()
+                .or_else(|_| u64::from_str_radix(trimmed.strip_prefix("0x").unwrap_or(trimmed), 16))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| ProfileError::Plan(format!("invalid span_selector: {err}")))
+}
+
 fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
     params
         .iter()
@@ -859,5 +874,18 @@ mod tests {
     fn limit_zero_means_unlimited() {
         assert!(limit(0) == usize::MAX);
         assert!(limit(2) == 2);
+    }
+
+    #[test]
+    fn parse_span_selectors_accepts_decimal_and_hex() {
+        let spans =
+            parse_span_selectors(&["42".to_string(), "9a517183f26a089d".to_string()]).unwrap();
+
+        assert!(spans == vec![42, 0x9a51_7183_f26a_089d]);
+    }
+
+    #[test]
+    fn parse_span_selectors_rejects_bad_span() {
+        assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
     }
 }

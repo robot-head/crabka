@@ -9,7 +9,7 @@ service QuerierService {
   rpc LabelValues(LabelValuesRequest) returns (LabelValuesResponse) {}
   rpc Series(SeriesRequest) returns (SeriesResponse) {}
   rpc SelectMergeStacktraces(SelectMergeStacktracesRequest) returns (SelectMergeStacktracesResponse) {}
-  rpc SelectMergeSpanProfile(SelectMergeSpanProfileRequest) returns (SelectMergeStacktracesResponse) {}
+  rpc SelectMergeSpanProfile(SelectMergeSpanProfileRequest) returns (SelectMergeSpanProfileResponse) {}
   rpc SelectMergeProfile(SelectMergeProfileRequest) returns (SelectMergeProfileResponse) {}
   rpc SelectSeries(SelectSeriesRequest) returns (SelectSeriesResponse) {}
   rpc SelectHeatmap(SelectHeatmapRequest) returns (SelectHeatmapResponse) {}
@@ -83,16 +83,16 @@ message SelectMergeStacktracesRequest {
   int64 start = 3;
   int64 end = 4;
   int64 max_nodes = 5;
-  Format format = 6;
+  ProfileFormat format = 6;
   string stack_trace_selector = 7;
   repeated string profile_id_selector = 8;
 }
 
-enum Format {
-  FORMAT_UNSPECIFIED = 0;
-  FLAMEGRAPH = 1;
-  TREE = 2;
-  DOT = 3;
+enum ProfileFormat {
+  PROFILE_FORMAT_UNSPECIFIED = 0;
+  PROFILE_FORMAT_FLAMEGRAPH = 1;
+  PROFILE_FORMAT_TREE = 2;
+  PROFILE_FORMAT_DOT = 3;
 }
 
 message SelectMergeStacktracesResponse {
@@ -104,10 +104,16 @@ message SelectMergeStacktracesResponse {
 message SelectMergeSpanProfileRequest {
   string profile_typeID = 1;
   string label_selector = 2;
-  repeated uint64 span_ids = 3;
+  repeated string span_selector = 3;
   int64 start = 4;
   int64 end = 5;
   int64 max_nodes = 6;
+  ProfileFormat format = 7;
+}
+
+message SelectMergeSpanProfileResponse {
+  FlameGraph flamegraph = 1;
+  bytes tree = 2;
 }
 
 message SelectMergeProfileRequest {
@@ -144,8 +150,8 @@ message SelectSeriesRequest {
 }
 
 enum SeriesAggregationType {
-  SUM = 0;
-  AVERAGE = 1;
+  TIME_SERIES_AGGREGATION_TYPE_SUM = 0;
+  TIME_SERIES_AGGREGATION_TYPE_AVERAGE = 1;
 }
 
 message SelectSeriesResponse {

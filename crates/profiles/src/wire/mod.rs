@@ -280,4 +280,49 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn querier_enums_use_upstream_names_and_values() {
+        assert_eq!(pb::querier::v1::ProfileFormat::Flamegraph as i32, 1);
+        assert_eq!(
+            pb::querier::v1::ProfileFormat::Flamegraph.as_str_name(),
+            "PROFILE_FORMAT_FLAMEGRAPH"
+        );
+        assert_eq!(
+            pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32,
+            1
+        );
+    }
+
+    #[test]
+    fn span_profile_request_uses_upstream_span_selector_field() {
+        let request = pb::querier::v1::SelectMergeSpanProfileRequest {
+            profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
+            label_selector: "{}".to_string(),
+            span_selector: vec!["9a517183f26a089d".to_string()],
+            start: 10,
+            end: 20,
+            max_nodes: 30,
+            format: pb::querier::v1::ProfileFormat::Flamegraph as i32,
+        };
+
+        let bytes = request.encode_to_vec();
+
+        assert_eq!(
+            bytes,
+            vec![
+                0x0a, 0x2b, b'p', b'r', b'o', b'c', b'e', b's', b's', b'_', b'c', b'p', b'u', b':',
+                b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's', b'e', b'c', b'o', b'n', b'd',
+                b's', b':', b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's', b'e', b'c', b'o',
+                b'n', b'd', b's', // profile_typeID, field 1
+                0x12, 0x02, b'{', b'}', // label_selector, field 2
+                0x1a, 0x10, b'9', b'a', b'5', b'1', b'7', b'1', b'8', b'3', b'f', b'2', b'6', b'a',
+                b'0', b'8', b'9', b'd', // span_selector, field 3
+                0x20, 10, // start, field 4
+                0x28, 20, // end, field 5
+                0x30, 30, // max_nodes, field 6
+                0x38, 1, // format, field 7
+            ]
+        );
+    }
 }

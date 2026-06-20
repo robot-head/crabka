@@ -514,7 +514,7 @@ async fn assert_select_series_has_points(
             "end": query_end_ms(),
             "groupBy": ["env"],
             "step": 10.0,
-            "aggregation": "SUM",
+            "aggregation": "TIME_SERIES_AGGREGATION_TYPE_SUM",
             "limit": 10,
         }),
     )
@@ -551,7 +551,7 @@ async fn assert_select_merge_stacktraces_has_symbol(
             "start": query_start_ms(),
             "end": query_end_ms(),
             "maxNodes": 1024,
-            "format": "FLAMEGRAPH",
+            "format": "PROFILE_FORMAT_FLAMEGRAPH",
         }),
     )
     .await?;
@@ -582,7 +582,7 @@ async fn assert_diff_has_ticks(
         "start": query_start_ms(),
         "end": query_end_ms(),
         "maxNodes": 1024,
-        "format": "FLAMEGRAPH",
+        "format": "PROFILE_FORMAT_FLAMEGRAPH",
     });
     let response = connect_json(
         client,
