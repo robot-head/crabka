@@ -47,8 +47,12 @@ pub fn decode_push(
         for sample in &series.samples {
             let raw = gunzip(&sample.raw_profile, max_decompressed)?;
             let profile = PprofProfile::decode(&raw)?;
+            let mut labels = labels.clone();
+            if !sample.id.is_empty() {
+                labels.insert("__profile_id__", sample.id.clone());
+            }
             out.push(RawProfile {
-                labels: labels.clone(),
+                labels,
                 profile,
                 delta: false,
                 sample_timestamps_ns: Vec::new(),
@@ -110,5 +114,34 @@ mod tests {
 
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__name__") == Some("process_cpu"));
+    }
+
+    #[test]
+    fn decode_push_promotes_sample_id_to_profile_id_label() {
+        let pprof_bytes = crate::wire::test_fixtures::cpu_profile_pprof_bytes();
+        let req = pb::push::v1::PushRequest {
+            series: vec![pb::push::v1::RawProfileSeries {
+                labels: vec![
+                    pb::types::v1::LabelPair {
+                        name: "__name__".into(),
+                        value: "process_cpu".into(),
+                    },
+                    pb::types::v1::LabelPair {
+                        name: "service_name".into(),
+                        value: "api".into(),
+                    },
+                ],
+                samples: vec![pb::push::v1::RawSample {
+                    raw_profile: gzip(&pprof_bytes),
+                    id: "profile-a".into(),
+                }],
+                annotations: Vec::new(),
+            }],
+        };
+
+        let out = decode_push(&req, 1 << 20).unwrap();
+
+        assert!(out.len() == 1);
+        assert!(out[0].labels.get("__profile_id__") == Some("profile-a"));
     }
 }
