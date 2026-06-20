@@ -267,6 +267,45 @@ impl Tree {
         )
     }
 
+    pub(crate) fn sample_paths(&self, max_nodes: i64) -> Vec<(Vec<String>, i64)> {
+        let keep = self.keep_set(max_nodes);
+        let mut samples = Vec::new();
+        let mut path = Vec::new();
+        self.collect_sample_paths(self.root, &keep, &mut path, &mut samples);
+        samples
+    }
+
+    fn collect_sample_paths(
+        &self,
+        node_idx: usize,
+        keep: &HashSet<usize>,
+        path: &mut Vec<String>,
+        samples: &mut Vec<(Vec<String>, i64)>,
+    ) {
+        if node_idx != self.root {
+            path.push(self.nodes[node_idx].name.clone());
+        }
+        if self.nodes[node_idx].self_ != 0 && !path.is_empty() {
+            samples.push((path.clone(), self.nodes[node_idx].self_));
+        }
+        let mut other_self = 0;
+        for child in &self.nodes[node_idx].children {
+            if keep.contains(child) {
+                self.collect_sample_paths(*child, keep, path, samples);
+            } else {
+                other_self += subtree_self(self, *child);
+            }
+        }
+        if other_self != 0 {
+            let mut other_path = path.clone();
+            other_path.push(OTHER_NAME.to_string());
+            samples.push((other_path, other_self));
+        }
+        if node_idx != self.root {
+            path.pop();
+        }
+    }
+
     #[cfg(test)]
     fn total_of(&self, path: &[&str]) -> i64 {
         self.node_at(path).total

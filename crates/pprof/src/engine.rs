@@ -15,7 +15,7 @@ use crate::{
         PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
     },
     series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
-    tree_to_pprof,
+    tree_to_pprof, tree_to_pprof_with_max_nodes,
 };
 
 /// Engine configuration.
@@ -573,6 +573,37 @@ impl<S: ProfileStore> FlameEngine<S> {
             )
             .await?;
         Ok(tree_to_pprof(&tree, &profile_type).encode())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_profile_with_max_nodes_and_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        call_sites: &[String],
+    ) -> Result<Vec<u8>, ProfileError> {
+        let profile_type = ProfileType::parse(profile_type)?;
+        let tree = self
+            .merge_to_tree(
+                tenant,
+                &profile_type.to_string(),
+                label_selector,
+                start_ms,
+                end_ms,
+                None,
+                call_sites,
+            )
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree_to_pprof_with_max_nodes(&tree, &profile_type, max_nodes).encode())
     }
 
     #[allow(clippy::too_many_arguments)]

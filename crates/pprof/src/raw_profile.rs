@@ -14,6 +14,19 @@ pub fn tree_to_pprof(tree: &Tree, profile_type: &ProfileType) -> PprofProfile {
     builder.finish()
 }
 
+#[must_use]
+pub fn tree_to_pprof_with_max_nodes(
+    tree: &Tree,
+    profile_type: &ProfileType,
+    max_nodes: i64,
+) -> PprofProfile {
+    let mut builder = PprofBuilder::new(profile_type);
+    for (path, value) in tree.sample_paths(max_nodes) {
+        builder.add_sample(&path, value);
+    }
+    builder.finish()
+}
+
 fn collect_samples(
     root: usize,
     node_idx: usize,
@@ -176,5 +189,27 @@ mod tests {
         assert!(total == 10);
         assert!(inner.string_table[usize::try_from(sample_type.r#type).unwrap()] == "cpu");
         assert!(inner.string_table[usize::try_from(sample_type.unit).unwrap()] == "nanoseconds");
+    }
+
+    #[test]
+    fn tree_to_pprof_with_max_nodes_emits_synthetic_other() {
+        let profile_type =
+            ProfileType::parse("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
+        let mut tree = Tree::new();
+        for idx in 0..10 {
+            tree.add_stack(&[frame(&format!("leaf{idx}"))], 1);
+        }
+
+        let profile = tree_to_pprof_with_max_nodes(&tree, &profile_type, 4);
+        let inner = profile.inner();
+        let total: i64 = inner
+            .sample
+            .iter()
+            .map(|sample| sample.value.iter().sum::<i64>())
+            .sum();
+
+        assert!(inner.sample.len() <= 4);
+        assert!(total == 10);
+        assert!(inner.string_table.iter().any(|value| value == "other"));
     }
 }

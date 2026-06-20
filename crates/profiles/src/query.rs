@@ -720,14 +720,16 @@ where
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
+    let max_nodes = state.effective_max_nodes(&tenant, req.max_nodes);
     let profile = state
         .engine
-        .select_merge_profile_with_stack_trace_selector(
+        .select_merge_profile_with_max_nodes_and_stack_trace_selector(
             &tenant,
             &req.profile_type_id,
             &label_selector,
             req.start,
             req.end,
+            max_nodes,
             &stack_trace_call_sites,
         )
         .await
@@ -2194,6 +2196,75 @@ overrides:
             .sum();
 
         assert!(total == 7, "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_profile_max_nodes_truncates_to_other() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("leaf0", 1),
+            ("leaf1", 1),
+            ("leaf2", 1),
+            ("leaf3", 1),
+            ("leaf4", 1),
+            ("leaf5", 1),
+            ("leaf6", 1),
+            ("leaf7", 1),
+            ("leaf8", 1),
+            ("leaf9", 1),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeProfile"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "maxNodes": 4,
+                "start": 0,
+                "end": 100,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let samples = response
+            .get("sample")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        let total: i64 = samples
+            .iter()
+            .flat_map(|sample| {
+                sample
+                    .get("value")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(json_i64)
+            .sum();
+        let strings = response
+            .get("stringTable")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+
+        assert!(samples.len() <= 4, "{response}");
+        assert!(total == 10, "{response}");
+        assert!(
+            strings.iter().any(|value| value.as_str() == Some("other")),
+            "{response}"
+        );
     }
 
     #[tokio::test]
