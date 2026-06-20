@@ -10,6 +10,8 @@ use super::nested_set::assign_nested_set;
 use super::{AttrValue, KeyValue, Span};
 use crate::error::TracesError;
 
+pub(crate) const RESOURCE_ATTR_PREFIX: &str = "__resource.";
+
 /// Build one span-block `RecordBatch` from spans of one trace.
 pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
     let nested = assign_nested_set(spans);
@@ -95,12 +97,16 @@ fn service_name(attrs: &[KeyValue]) -> Option<String> {
 fn span_attrs(span: &Span) -> Vec<SpanAttr> {
     span.resource_attrs
         .iter()
-        .chain(&span.span_attrs)
         .map(|attr| SpanAttr {
-            key: attr.key.clone(),
+            key: format!("{RESOURCE_ATTR_PREFIX}{}", attr.key),
             is_array: false,
             value: block_attr_value(&attr.value),
         })
+        .chain(span.span_attrs.iter().map(|attr| SpanAttr {
+            key: attr.key.clone(),
+            is_array: false,
+            value: block_attr_value(&attr.value),
+        }))
         .collect()
 }
 

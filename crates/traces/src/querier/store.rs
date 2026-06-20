@@ -27,6 +27,7 @@ use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
 
 use crate::querier::live::LiveTier;
+use crate::span::batch::RESOURCE_ATTR_PREFIX;
 
 const INTRINSIC_TAGS: &[&str] = &[
     "span:childCount",
@@ -548,7 +549,18 @@ fn batch_attr_matches(
     op: MatchCmp,
     expected: &MatchValue,
 ) -> Result<bool, TraceqlError> {
-    let attrs = attr_values(batch, row)?;
+    batch_attr_matches_with_resource(batch, row, key, op, expected, false)
+}
+
+fn batch_attr_matches_with_resource(
+    batch: &RecordBatch,
+    row: usize,
+    key: &str,
+    op: MatchCmp,
+    expected: &MatchValue,
+    include_resource: bool,
+) -> Result<bool, TraceqlError> {
+    let attrs = attr_values_with_resource(batch, row, include_resource)?;
     let values = attrs
         .iter()
         .filter(|(attr_key, _)| attr_key == key)
@@ -568,7 +580,14 @@ fn resource_matches(
             matcher.op,
             &matcher.value,
         ),
-        _ => nil_matches(matcher.op, &matcher.value),
+        _ => batch_attr_matches_with_resource(
+            batch,
+            row,
+            &format!("{RESOURCE_ATTR_PREFIX}{}", matcher.key),
+            matcher.op,
+            &matcher.value,
+            true,
+        )?,
     })
 }
 
@@ -1080,6 +1099,14 @@ fn insert_i64_value(
 }
 
 fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
+    attr_values_with_resource(batch, row, false)
+}
+
+fn attr_values_with_resource(
+    batch: &RecordBatch,
+    row: usize,
+    include_resource: bool,
+) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
     let mut out = Vec::new();
     for (idx, field) in batch.schema().fields().iter().enumerate() {
         let Some(key) = field.name().strip_prefix(ATTR_PREFIX) else {
@@ -1098,13 +1125,14 @@ fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue
         };
         out.push((key.to_string(), value));
     }
-    out.extend(block_attr_values(batch, row)?);
+    out.extend(block_attr_values(batch, row, include_resource)?);
     Ok(out)
 }
 
 fn block_attr_values(
     batch: &RecordBatch,
     row: usize,
+    include_resource: bool,
 ) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
     let Some(keys) = optional_list_column(batch, SCOL_ATTR_KEYS)? else {
         return Ok(Vec::new());
@@ -1135,11 +1163,11 @@ fn block_attr_values(
             row,
             attr_idx,
         )?;
-        out.extend(
-            values
-                .into_iter()
-                .map(|value| (key_values.value(attr_idx).to_string(), value)),
-        );
+        out.extend(values.into_iter().filter_map(|value| {
+            let key = key_values.value(attr_idx);
+            (include_resource || !key.starts_with(RESOURCE_ATTR_PREFIX))
+                .then(|| (key.to_string(), value))
+        }));
     }
     Ok(out)
 }
@@ -2078,7 +2106,6 @@ mod tests {
         assert!(
             trace.spans[0].attributes
                 == vec![
-                    ("service.name".into(), AttrValue::Str("api".into())),
                     ("http.status_code".into(), AttrValue::Int(504)),
                     ("retryable".into(), AttrValue::Bool(true)),
                 ]
@@ -2305,6 +2332,91 @@ mod tests {
             .unwrap();
         assert!(resp.traces.len() == 1);
         assert!(resp.traces[0].trace_id == other.trace_id);
+    }
+
+    #[tokio::test]
+    async fn cold_traceql_search_keeps_resource_and_span_scopes_distinct() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let mut span = span_with_nested_refs();
+        span.resource_attrs.push(KeyValue {
+            key: "cloud.region".into(),
+            value: SpanAttrValue::Str("us-east-1".into()),
+        });
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/search-resource-scope.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let resource = engine
+            .search(
+                "tenant",
+                "{ resource.service.name = \"api\" }",
+                0,
+                10_000,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(resource.traces.len() == 1);
+
+        let bare = engine
+            .search("tenant", "{ .service.name = \"api\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(bare.traces.len() == 1);
+
+        let resource_attr = engine
+            .search(
+                "tenant",
+                "{ resource.cloud.region = \"us-east-1\" }",
+                0,
+                10_000,
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(resource_attr.traces.len() == 1);
+
+        let bare_attr = engine
+            .search("tenant", "{ .cloud.region = \"us-east-1\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(bare_attr.traces.len() == 1);
+
+        let span = engine
+            .search("tenant", "{ span.service.name = \"api\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+        assert!(span.traces.is_empty());
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ use crabka_blockstore::{
 use object_store::ObjectStore;
 
 use crate::error::TracesError;
+use crate::span::batch::RESOURCE_ATTR_PREFIX;
 
 type TagMetadata = (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>);
 
@@ -307,7 +308,10 @@ fn collect_attr_metadata(
             if row_keys.is_null(idx) {
                 continue;
             }
-            let key = row_keys.value(idx);
+            let key = row_keys
+                .value(idx)
+                .strip_prefix(RESOURCE_ATTR_PREFIX)
+                .unwrap_or_else(|| row_keys.value(idx));
             if let Some(value) = attr_value(batch, row, idx)? {
                 insert_tag_value(tag_names, tag_values, key, value);
             } else {
