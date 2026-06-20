@@ -646,7 +646,7 @@ where
             )
                 .into_response()
         }
-        Ok(flamegraph) => Json(flamebearer_json(flamegraph)).into_response(),
+        Ok(flamegraph) => Json(flamebearer_json(flamegraph, &profile_type)).into_response(),
         Err(err) => profile_error_response(err),
     }
 }
@@ -700,7 +700,7 @@ where
                 "leftTicks": diff.left_ticks,
                 "rightTicks": diff.right_ticks,
             },
-            "metadata": { "format": "double" }
+            "metadata": flamebearer_metadata("double", &left_type)
         }))
         .into_response(),
         Err(err) => profile_error_response(err),
@@ -774,7 +774,7 @@ fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
         .and_then(|(_, value)| value.parse().ok())
 }
 
-fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph) -> serde_json::Value {
+fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph, profile_type: &str) -> serde_json::Value {
     json!({
         "flamebearer": {
             "names": flamegraph.names,
@@ -782,8 +782,27 @@ fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph) -> serde_json::Value {
             "numTicks": flamegraph.total,
             "maxSelf": flamegraph.max_self,
         },
-        "metadata": { "format": "single" }
+        "metadata": flamebearer_metadata("single", profile_type)
     })
+}
+
+fn flamebearer_metadata(format: &str, profile_type: &str) -> serde_json::Value {
+    match ProfileType::parse(profile_type) {
+        Ok(parsed) => json!({
+            "format": format,
+            "spyName": parsed.name,
+            "sampleRate": 100,
+            "units": parsed.sample_unit,
+            "name": profile_type,
+        }),
+        Err(_) => json!({
+            "format": format,
+            "spyName": "",
+            "sampleRate": 100,
+            "units": "",
+            "name": profile_type,
+        }),
+    }
 }
 
 fn flamegraph_dot(flamegraph: &crabka_pprof::FlameGraph) -> String {
@@ -1047,6 +1066,34 @@ mod tests {
 
         assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
         assert!(selector == "{}");
+    }
+
+    #[test]
+    fn flamebearer_json_includes_profile_metadata() {
+        let response = flamebearer_json(
+            crabka_pprof::FlameGraph {
+                names: vec!["total".to_string()],
+                levels: Vec::new(),
+                total: 7,
+                max_self: 7,
+            },
+            PT,
+        );
+
+        let metadata = response.get("metadata").unwrap();
+        assert!(metadata.get("format").and_then(serde_json::Value::as_str) == Some("single"));
+        assert!(metadata.get("spyName").and_then(serde_json::Value::as_str) == Some("process_cpu"));
+        assert!(
+            metadata
+                .get("sampleRate")
+                .and_then(serde_json::Value::as_u64)
+                == Some(100)
+        );
+        assert!(metadata.get("units").and_then(serde_json::Value::as_str) == Some("nanoseconds"));
+        assert!(
+            metadata.get("name").and_then(serde_json::Value::as_str)
+                == Some("process_cpu:cpu:nanoseconds:cpu:nanoseconds")
+        );
     }
 
     #[test]
