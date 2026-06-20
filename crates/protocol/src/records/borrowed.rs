@@ -200,6 +200,44 @@ pub fn validate_one_v2_batch(buf: &[u8]) -> Result<ValidatedBatch<'_>, RecordsEr
     })
 }
 
+/// Sum the `records_count` header field of every concatenated v2 batch in
+/// `buf` without decompressing or parsing any record body.
+///
+/// This is intentionally a best-effort metrics helper: non-v2 input returns
+/// 0, malformed/truncated input contributes every complete v2 batch before the
+/// first bad boundary, and negative `records_count` contributes 0. Real append
+/// validation still goes through [`validate_one_v2_batch`].
+#[must_use]
+pub fn count_records_in_v2_batches(buf: &[u8]) -> u64 {
+    // Magic byte sits at offset 16; only v2 (magic == 2) carries a
+    // `records_count` header. Legacy slices contribute 0 here.
+    const MAGIC_OFFSET: usize = 16;
+    if buf.len() <= MAGIC_OFFSET || buf[MAGIC_OFFSET] != 2 {
+        return 0;
+    }
+
+    let mut total = 0u64;
+    let mut remaining = buf;
+    while remaining.len() >= HEADER_LEN {
+        if remaining[MAGIC_OFFSET] != 2 {
+            break;
+        }
+        let Ok(hdr) = RecordBatchHeader::ref_from_bytes(&remaining[..HEADER_LEN]) else {
+            break;
+        };
+        let Ok(after_len) = usize::try_from(hdr.batch_length.get()) else {
+            break;
+        };
+        let total_len = 12 + after_len;
+        if total_len < HEADER_LEN || total_len > remaining.len() {
+            break;
+        }
+        total += u64::try_from(hdr.records_count.get().max(0)).unwrap_or(0);
+        remaining = &remaining[total_len..];
+    }
+    total
+}
+
 // ── Iteration ─────────────────────────────────────────────────────────────────
 
 impl RecordBatch<'_> {
@@ -595,6 +633,44 @@ mod tests {
         let encoded = encode_owned_then_borrow(&owned);
         let err = validate_one_v2_batch(&encoded[..encoded.len() - 2]).unwrap_err();
         assert!(matches!(err, RecordsError::BodyTooShort { .. }));
+    }
+
+    #[test]
+    fn count_records_in_v2_batches_counts_single_and_concatenated_batches() {
+        let one = encode_owned_then_borrow(&super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record::default()],
+            ..Default::default()
+        });
+        let three = encode_owned_then_borrow(&super::super::owned::RecordBatch {
+            last_offset_delta: 2,
+            records: vec![
+                super::super::owned::Record::default(),
+                super::super::owned::Record::default(),
+                super::super::owned::Record::default(),
+            ],
+            ..Default::default()
+        });
+        let mut both = Vec::with_capacity(one.len() + three.len());
+        both.extend_from_slice(&one);
+        both.extend_from_slice(&three);
+
+        assert!(count_records_in_v2_batches(&one) == 1);
+        assert!(count_records_in_v2_batches(&both) == 4);
+    }
+
+    #[test]
+    fn count_records_in_v2_batches_stops_at_bad_or_non_v2_input() {
+        assert!(count_records_in_v2_batches(&[]) == 0);
+        assert!(count_records_in_v2_batches(&[0u8; HEADER_LEN]) == 0);
+
+        let encoded = encode_owned_then_borrow(&super::super::owned::RecordBatch {
+            records: vec![super::super::owned::Record::default()],
+            ..Default::default()
+        });
+        let mut with_truncated_tail = encoded.clone();
+        with_truncated_tail.extend_from_slice(&encoded[..HEADER_LEN - 1]);
+
+        assert!(count_records_in_v2_batches(&with_truncated_tail) == 1);
     }
 
     #[test]
