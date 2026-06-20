@@ -222,6 +222,9 @@ impl LiveSource for LiveStore {
                 if !item.instrumentation_scope.is_empty() {
                     instrumentation.insert("instrumentation:name".to_string());
                 }
+                if !item.instrumentation_version.is_empty() {
+                    instrumentation.insert("instrumentation:version".to_string());
+                }
             }
         }
 
@@ -307,6 +310,9 @@ impl LiveSource for LiveStore {
                 collect_link_values(span, tag, &mut values);
                 if tag == "instrumentation:name" && !span.instrumentation_scope.is_empty() {
                     values.insert(("string".into(), span.instrumentation_scope.clone()));
+                }
+                if tag == "instrumentation:version" && !span.instrumentation_version.is_empty() {
+                    values.insert(("string".into(), span.instrumentation_version.clone()));
                 }
             }
         }

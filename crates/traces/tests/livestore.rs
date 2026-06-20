@@ -85,6 +85,7 @@ async fn live_source_exposes_trace_spans_and_tags() {
     child.parent_span_id = Some([1; 8]);
     child.status_message = "retryable".into();
     child.instrumentation_scope = "otel-rust".into();
+    child.instrumentation_version = "1.2.3".into();
     store.ingest(record("tenant-a", child));
 
     let trace = store
@@ -119,7 +120,11 @@ async fn live_source_exposes_trace_spans_and_tags() {
         TagScope::Intrinsic,
         &["span:parentID", "span:statusMessage", "trace:duration"],
     );
-    assert_tag_scope_contains(&names, TagScope::Instrumentation, &["instrumentation:name"]);
+    assert_tag_scope_contains(
+        &names,
+        TagScope::Instrumentation,
+        &["instrumentation:name", "instrumentation:version"],
+    );
 
     let values = store
         .tag_values("tenant-a", ".http.method", 0, 100)
@@ -141,6 +146,11 @@ async fn live_source_exposes_trace_spans_and_tags() {
         .await
         .unwrap();
     assert_typed_value(&instrumentation_names, "string", "otel-rust");
+    let instrumentation_versions = store
+        .tag_values("tenant-a", "instrumentation:version", 0, 100)
+        .await
+        .unwrap();
+    assert_typed_value(&instrumentation_versions, "string", "1.2.3");
     let trace_root_names = store
         .tag_values("tenant-a", "trace:rootName", 0, 100)
         .await
