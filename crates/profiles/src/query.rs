@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json, Router, routing::get};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
-use crabka_blockstore::{LabelMatcher, MatchOp};
+use crabka_blockstore::{LABEL_PROFILE_TYPE, LabelMatcher, MatchOp};
 use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
     LabeledHeatmap, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE,
@@ -1621,7 +1621,8 @@ where
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
-    let (_profile_type, selector) = parse_render_query(&req.query).map_err(connect_error)?;
+    let (profile_type, selector) = parse_render_query(&req.query).map_err(connect_error)?;
+    let selector = merge_profile_type_selector(&selector, &profile_type).map_err(connect_error)?;
     let matchers = parse_label_selector(&selector).map_err(connect_error)?;
     let label_names = state
         .store
@@ -2125,6 +2126,41 @@ fn merge_profile_id_selector(
     Ok(merged)
 }
 
+fn merge_profile_type_selector(
+    label_selector: &str,
+    profile_type: &str,
+) -> Result<String, ProfileError> {
+    merge_label_matcher(
+        label_selector,
+        &format!(
+            r#"{LABEL_PROFILE_TYPE}="{}""#,
+            label_matcher_value_escape(profile_type)
+        ),
+    )
+}
+
+fn merge_label_matcher(label_selector: &str, matcher: &str) -> Result<String, ProfileError> {
+    let trimmed = label_selector.trim();
+    let merged = if trimmed.is_empty() || trimmed == "{}" {
+        format!("{{{matcher}}}")
+    } else if let Some(inner) = trimmed.strip_prefix('{') {
+        let inner = inner
+            .strip_suffix('}')
+            .ok_or_else(|| ProfileError::Plan("unclosed label selector".to_string()))?
+            .trim();
+        if inner.is_empty() {
+            format!("{{{matcher}}}")
+        } else {
+            format!("{{{inner},{matcher}}}")
+        }
+    } else {
+        format!("{{{trimmed},{matcher}}}")
+    };
+
+    parse_label_selector(&merged)?;
+    Ok(merged)
+}
+
 fn label_matcher_value_escape(value: &str) -> String {
     value
         .chars()
@@ -2305,6 +2341,41 @@ mod tests {
             7,
             10,
         );
+        store
+    }
+
+    fn store_with_two_profile_types() -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        for profile_type in [PT, "memory:alloc_space:bytes:space:bytes"] {
+            store.push_sample(
+                "tenant-a",
+                profile_type,
+                vec![
+                    ("service_name".to_string(), "api".to_string()),
+                    ("__profile_type__".to_string(), profile_type.to_string()),
+                ],
+                0,
+                stacktrace,
+                7,
+                10,
+            );
+        }
         store
     }
 
@@ -3755,10 +3826,7 @@ overrides:
 
     #[tokio::test]
     async fn analyze_query_returns_scope_and_impact_for_matching_series() {
-        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
-            ("hot.path", 7),
-            ("cold.path", 10),
-        ]))));
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_two_profile_types())));
         let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
             let _ = shutdown_rx.await;
@@ -3802,6 +3870,43 @@ overrides:
         assert!(
             response
                 .pointer("/queryScopes/0/seriesCount")
+                .and_then(json_i64)
+                == Some(1),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_query_counts_only_the_queried_profile_type() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_two_profile_types())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/AnalyzeQuery"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "start": 0,
+                "end": 100,
+                "query": format!(r#"{PT}{{service_name="api"}}"#),
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .pointer("/queryImpact/totalQueriedSeries")
                 .and_then(json_i64)
                 == Some(1),
             "{response}"
