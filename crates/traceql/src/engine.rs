@@ -879,6 +879,8 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
         Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
+        Scope::Intrinsic(Intrinsic::Kind) => Ok(COL_KIND.to_string()),
+        Scope::Intrinsic(Intrinsic::Status) => Ok(COL_STATUS_CODE.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootService) => Ok(COL_ROOT_SERVICE_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::TraceRootName) => Ok(COL_ROOT_SPAN_NAME.to_string()),
         _ => Err(TraceqlError::Unsupported(format!(
@@ -1582,6 +1584,54 @@ mod tests {
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
         assert!(got[1].labels == vec![("svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_kind_and_status_intrinsics() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    kind: 2,
+                    status_code: 0,
+                    ..sp_at(1, 1, None, "api", 0)
+                },
+                InputSpan {
+                    kind: 2,
+                    status_code: 2,
+                    ..sp_at(1, 2, None, "api", 10_000)
+                },
+                InputSpan {
+                    kind: 3,
+                    status_code: 2,
+                    ..sp_at(1, 3, None, "api", 20_000)
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(span:kind, span:status)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 3);
+        assert!(got[0].labels == vec![("kind".into(), "2".into()), ("status".into(), "0".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("kind".into(), "2".into()), ("status".into(), "2".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[2].labels == vec![("kind".into(), "3".into()), ("status".into(), "2".into())]);
+        assert!(got[2].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
