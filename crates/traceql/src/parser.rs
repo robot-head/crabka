@@ -403,6 +403,53 @@ impl Parser {
     }
 
     fn parse_value(&mut self, lhs: &Field) -> Result<Value> {
+        self.parse_additive_value(lhs)
+    }
+
+    fn parse_additive_value(&mut self, lhs: &Field) -> Result<Value> {
+        let mut value = self.parse_multiplicative_value(lhs)?;
+        loop {
+            if self.eat(&Token::Plus) {
+                value = value_add(value, self.parse_multiplicative_value(lhs)?)?;
+            } else if self.eat(&Token::Minus) {
+                value = value_sub(value, self.parse_multiplicative_value(lhs)?)?;
+            } else {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn parse_multiplicative_value(&mut self, lhs: &Field) -> Result<Value> {
+        let mut value = self.parse_power_value(lhs)?;
+        loop {
+            if self.eat(&Token::Star) {
+                value = value_mul(value, self.parse_power_value(lhs)?)?;
+            } else if self.eat(&Token::Slash) {
+                value = value_div(value, self.parse_power_value(lhs)?)?;
+            } else if self.eat(&Token::Mod) {
+                value = value_mod(value, self.parse_power_value(lhs)?)?;
+            } else {
+                return Ok(value);
+            }
+        }
+    }
+
+    fn parse_power_value(&mut self, lhs: &Field) -> Result<Value> {
+        let mut value = self.parse_unary_value(lhs)?;
+        while self.eat(&Token::Caret) {
+            value = value_pow(value, self.parse_unary_value(lhs)?)?;
+        }
+        Ok(value)
+    }
+
+    fn parse_unary_value(&mut self, lhs: &Field) -> Result<Value> {
+        if self.eat(&Token::Minus) {
+            return value_neg(self.parse_unary_value(lhs)?);
+        }
+        self.parse_primary_value(lhs)
+    }
+
+    fn parse_primary_value(&mut self, lhs: &Field) -> Result<Value> {
         match self.advance() {
             Token::Ident(v) if is_duration_field(lhs) => {
                 parse_duration_nanos(&v).map(Value::Duration)
@@ -412,6 +459,11 @@ impl Parser {
             Token::Float(v) => Ok(Value::Float(v)),
             Token::Bool(v) => Ok(Value::Bool(v)),
             Token::Nil => Ok(Value::Nil),
+            Token::LParen => {
+                let value = self.parse_additive_value(lhs)?;
+                self.expect(&Token::RParen)?;
+                Ok(value)
+            }
             other => Err(Self::err(format!("expected value, got {other:?}"))),
         }
     }
@@ -542,6 +594,133 @@ fn is_duration_field(field: &Field) -> bool {
             Intrinsic::Duration | Intrinsic::TraceDuration | Intrinsic::EventTimeSinceStart
         )
     )
+}
+
+fn value_add(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) => lhs
+            .checked_add(rhs)
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer addition out of range".into())),
+        (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs + rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? + rhs)),
+        (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs + i64_to_f64(rhs)?)),
+        (Value::Duration(lhs), Value::Duration(rhs)) => lhs
+            .checked_add(rhs)
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration addition out of range".into())),
+        (lhs, rhs) => arithmetic_type_error("+", &lhs, &rhs),
+    }
+}
+
+fn value_sub(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) => lhs
+            .checked_sub(rhs)
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer subtraction out of range".into())),
+        (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs - rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? - rhs)),
+        (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs - i64_to_f64(rhs)?)),
+        (Value::Duration(lhs), Value::Duration(rhs)) => lhs
+            .checked_sub(rhs)
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration subtraction out of range".into())),
+        (lhs, rhs) => arithmetic_type_error("-", &lhs, &rhs),
+    }
+}
+
+fn value_mul(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) => lhs
+            .checked_mul(rhs)
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer multiplication out of range".into())),
+        (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs * rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? * rhs)),
+        (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs * i64_to_f64(rhs)?)),
+        (Value::Duration(lhs), Value::Int(rhs)) | (Value::Int(rhs), Value::Duration(lhs)) => lhs
+            .checked_mul(rhs)
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration multiplication out of range".into())),
+        (lhs, rhs) => arithmetic_type_error("*", &lhs, &rhs),
+    }
+}
+
+fn value_div(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (_, Value::Int(0) | Value::Float(0.0)) => {
+            Err(TraceqlError::Parse("division by zero".into()))
+        }
+        (Value::Int(lhs), Value::Int(rhs)) if lhs % rhs == 0 => Ok(Value::Int(lhs / rhs)),
+        (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? / i64_to_f64(rhs)?)),
+        (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs / rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? / rhs)),
+        (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs / i64_to_f64(rhs)?)),
+        (Value::Duration(lhs), Value::Int(rhs)) => lhs
+            .checked_div(rhs)
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration division out of range".into())),
+        (lhs, rhs) => arithmetic_type_error("/", &lhs, &rhs),
+    }
+}
+
+fn value_mod(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (_, Value::Int(0) | Value::Duration(0)) => {
+            Err(TraceqlError::Parse("modulo by zero".into()))
+        }
+        (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs % rhs)),
+        (Value::Duration(lhs), Value::Duration(rhs)) => Ok(Value::Duration(lhs % rhs)),
+        (lhs, rhs) => arithmetic_type_error("%", &lhs, &rhs),
+    }
+}
+
+fn value_pow(lhs: Value, rhs: Value) -> Result<Value> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) if rhs >= 0 => u32::try_from(rhs)
+            .ok()
+            .and_then(|rhs| lhs.checked_pow(rhs))
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer exponentiation out of range".into())),
+        (Value::Int(lhs), Value::Int(rhs)) => {
+            Ok(Value::Float(i64_to_f64(lhs)?.powf(i64_to_f64(rhs)?)))
+        }
+        (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs.powf(rhs))),
+        (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)?.powf(rhs))),
+        (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs.powf(i64_to_f64(rhs)?))),
+        (lhs, rhs) => arithmetic_type_error("^", &lhs, &rhs),
+    }
+}
+
+fn value_neg(value: Value) -> Result<Value> {
+    match value {
+        Value::Int(value) => value
+            .checked_neg()
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer negation out of range".into())),
+        Value::Float(value) => Ok(Value::Float(-value)),
+        Value::Duration(value) => value
+            .checked_neg()
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration negation out of range".into())),
+        other => Err(TraceqlError::Parse(format!(
+            "unary - is not supported for {other:?}"
+        ))),
+    }
+}
+
+fn arithmetic_type_error(op: &str, lhs: &Value, rhs: &Value) -> Result<Value> {
+    Err(TraceqlError::Parse(format!(
+        "operator {op} is not supported for {lhs:?} and {rhs:?}"
+    )))
+}
+
+fn i64_to_f64(value: i64) -> Result<f64> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| TraceqlError::Parse(e.to_string()))
 }
 
 fn parse_duration_nanos(s: &str) -> Result<i64> {
@@ -680,6 +859,30 @@ mod tests {
             panic!()
         };
         assert!(*rhs == Value::Duration(90_000_000_000));
+    }
+
+    #[test]
+    fn duration_literal_arithmetic_obeys_precedence() {
+        let q = parse("{ span:duration > 100ms + 2 * 50ms }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
+            panic!()
+        };
+        assert!(*rhs == Value::Duration(200_000_000));
+    }
+
+    #[test]
+    fn numeric_literal_arithmetic_obeys_precedence() {
+        let q = parse("{ .retries = 1 + 2 * 3 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
+            panic!()
+        };
+        assert!(*rhs == Value::Int(7));
     }
 
     #[test]
