@@ -53,6 +53,7 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
             sample_unit: sample_unit.clone(),
             period_type: period_type.clone(),
             period_unit: period_unit.clone(),
+            delta: false,
         }
         .to_string();
 

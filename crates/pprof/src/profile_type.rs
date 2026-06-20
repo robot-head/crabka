@@ -1,10 +1,10 @@
-//! The 5-part profile-type string carried as the `__profile_type__` label.
+//! The profile-type string carried as the `__profile_type__` label.
 
 use std::fmt;
 
 use crate::error::ProfileError;
 
-/// The profile type `name:sample_type:sample_unit:period_type:period_unit`.
+/// The profile type `name:sample_type:sample_unit:period_type:period_unit[:delta]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileType {
     pub name: String,
@@ -12,15 +12,17 @@ pub struct ProfileType {
     pub sample_unit: String,
     pub period_type: String,
     pub period_unit: String,
+    pub delta: bool,
 }
 
 impl ProfileType {
-    /// Parse exactly five colon-separated non-empty parts.
+    /// Parse five colon-separated non-empty parts plus an optional `:delta` suffix.
     pub fn parse(input: &str) -> Result<Self, ProfileError> {
         let parts: Vec<&str> = input.split(':').collect();
-        if parts.len() != 5 || parts.iter().any(|part| part.is_empty()) {
+        let delta = matches!(parts.as_slice(), [_, _, _, _, _, "delta"]);
+        if !(parts.len() == 5 || delta) || parts.iter().any(|part| part.is_empty()) {
             return Err(ProfileError::Decode(format!(
-                "invalid profile_type {input:?}: expected name:sample_type:sample_unit:period_type:period_unit"
+                "invalid profile_type {input:?}: expected name:sample_type:sample_unit:period_type:period_unit[:delta]"
             )));
         }
         Ok(Self {
@@ -29,6 +31,7 @@ impl ProfileType {
             sample_unit: parts[2].to_string(),
             period_type: parts[3].to_string(),
             period_unit: parts[4].to_string(),
+            delta,
         })
     }
 }
@@ -39,7 +42,11 @@ impl fmt::Display for ProfileType {
             f,
             "{}:{}:{}:{}:{}",
             self.name, self.sample_type, self.sample_unit, self.period_type, self.period_unit
-        )
+        )?;
+        if self.delta {
+            f.write_str(":delta")?;
+        }
+        Ok(())
     }
 }
 
@@ -72,9 +79,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_optional_delta_suffix() {
+        let input = "process_cpu:cpu:nanoseconds:cpu:nanoseconds:delta";
+        let pt = ProfileType::parse(input).unwrap();
+
+        assert!(pt.name == "process_cpu");
+        assert!(pt.delta);
+        assert!(format!("{pt}") == input);
+    }
+
+    #[test]
     fn rejects_wrong_part_count() {
         assert!(ProfileType::parse("a:b:c:d").is_err());
         assert!(ProfileType::parse("a:b:c:d:e:f").is_err());
         assert!(ProfileType::parse("a:b::d:e").is_err());
+        assert!(ProfileType::parse("a:b:c:d:e:cumulative").is_err());
     }
 }
