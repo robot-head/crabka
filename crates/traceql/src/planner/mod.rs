@@ -164,6 +164,21 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             by,
             Some((aggregate_expr_sql(agg)?, *op, *value)),
         ),
+        [
+            Pipeline::Aggregate(agg),
+            Pipeline::By(by),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] if is_search_preserving_aggregate(agg) => grouped_rank_sql(
+            spanset_sql,
+            by,
+            &aggregate_rank_expr_sql(agg)?,
+            rank_limit(rank)?,
+        ),
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
@@ -225,6 +240,35 @@ fn grouped_aggregate_sql(
     ))
 }
 
+fn grouped_rank_sql(
+    spanset_sql: &str,
+    by: &[Field],
+    expr: &str,
+    rank: RankLimit,
+) -> Result<String> {
+    let group_cols = by
+        .iter()
+        .map(|field| selector::field_to_column(field).map(|col| selector::ident(&col)))
+        .collect::<Result<Vec<_>>>()?;
+    let group_exprs = group_cols.join(", ");
+    let join_pred = group_cols
+        .iter()
+        .map(|col| format!("matched.{col} = passing.{col}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let direction = match rank.direction {
+        RankDirection::Top => "DESC",
+        RankDirection::Bottom => "ASC",
+    };
+    Ok(format!(
+        "WITH matched AS ({spanset_sql}), \
+         passing AS (SELECT {group_exprs}, {expr} AS rank_value FROM matched GROUP BY {group_exprs} \
+                     ORDER BY rank_value {direction} LIMIT {}) \
+         SELECT matched.* FROM matched JOIN passing ON {join_pred}",
+        rank.k
+    ))
+}
+
 fn aggregate_filter_sql_query(
     spanset_sql: &str,
     agg: &Aggregate,
@@ -239,6 +283,46 @@ fn aggregate_filter_sql_query(
          passing AS (SELECT {trace} FROM matched GROUP BY {trace} HAVING {pred}) \
          SELECT matched.* FROM matched JOIN passing ON matched.{trace} = passing.{trace}"
     ))
+}
+
+#[derive(Clone, Copy)]
+enum RankDirection {
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy)]
+struct RankLimit {
+    direction: RankDirection,
+    k: usize,
+}
+
+fn rank_limit(pipeline: &Pipeline) -> Result<RankLimit> {
+    match pipeline {
+        Pipeline::TopK(k) => Ok(RankLimit {
+            direction: RankDirection::Top,
+            k: *k,
+        }),
+        Pipeline::BottomK(k) => Ok(RankLimit {
+            direction: RankDirection::Bottom,
+            k: *k,
+        }),
+        other => Err(TraceqlError::Unsupported(format!(
+            "expected topk/bottomk, got {other:?}"
+        ))),
+    }
+}
+
+fn aggregate_rank_expr_sql(agg: &Aggregate) -> Result<String> {
+    match agg {
+        Aggregate::Count => Ok("COUNT(*)".to_string()),
+        Aggregate::Sum(_) | Aggregate::Avg(_) | Aggregate::Min(_) | Aggregate::Max(_) => {
+            aggregate_expr_sql(agg)
+        }
+        _ => Err(TraceqlError::Unsupported(format!(
+            "aggregate {agg:?} is not supported in search ranking"
+        ))),
+    }
 }
 
 fn aggregate_expr_sql(agg: &Aggregate) -> Result<String> {
@@ -1027,5 +1111,58 @@ mod tests {
         .await
         .unwrap();
         assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn count_by_topk_and_bottomk_keep_spans_from_ranked_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let top = planned("{ .svc != nil } | count() | by(span.svc) | topk(1)", &store)
+            .await
+            .unwrap();
+        assert!(
+            names(&top)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
+
+        let bottom = planned(
+            "{ .svc != nil } | count() | by(span.svc) | bottomk(1)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(names(&bottom) == vec!["db-a".to_string()]);
     }
 }
