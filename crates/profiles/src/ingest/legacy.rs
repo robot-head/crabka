@@ -14,6 +14,7 @@ pub enum IngestFormat {
     Pprof,
     Jfr,
     Lines,
+    Speedscope,
     Groups,
 }
 
@@ -49,6 +50,7 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
                     "pprof" => IngestFormat::Pprof,
                     "jfr" => IngestFormat::Jfr,
                     "lines" => IngestFormat::Lines,
+                    "speedscope" => IngestFormat::Speedscope,
                     _ => IngestFormat::Groups,
                 };
             }
@@ -124,6 +126,9 @@ pub async fn decode_ingest_multipart(
             {
                 folded_bytes = Some(data.to_vec());
             }
+            "profile" | "speedscope" if query.format == IngestFormat::Speedscope => {
+                folded_bytes = Some(data.to_vec());
+            }
             "jfr" if query.format == IngestFormat::Jfr => jfr_bytes = Some(data.to_vec()),
             "labels" if query.format == IngestFormat::Jfr => {
                 multipart_labels = parse_labels_part(&data)?;
@@ -159,6 +164,12 @@ pub async fn decode_ingest_multipart(
                 ProfilesError::Invalid("missing multipart lines `profile` part".to_string())
             })?;
             lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&raw))?
+        }
+        IngestFormat::Speedscope => {
+            let raw = folded_bytes.ok_or_else(|| {
+                ProfilesError::Invalid("missing multipart speedscope `profile` part".to_string())
+            })?;
+            speedscope_to_pprof(&query.name, &query.units, &raw)?
         }
         IngestFormat::Jfr => {
             let raw = jfr_bytes.ok_or_else(|| {
@@ -205,6 +216,7 @@ pub async fn decode_ingest_body(
         IngestFormat::Lines => {
             lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
         }
+        IngestFormat::Speedscope => speedscope_to_pprof(&query.name, &query.units, &body)?,
         IngestFormat::Pprof => {
             return Err(ProfilesError::Invalid(
                 "legacy pprof ingest requires multipart `profile` part".to_string(),
@@ -502,6 +514,113 @@ fn lines_to_pprof(
     stacks_to_pprof(name, "samples", sample_unit, stacks)
 }
 
+fn speedscope_to_pprof(
+    name: &str,
+    default_unit: &str,
+    body: &[u8],
+) -> Result<PprofProfile, ProfilesError> {
+    let json: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|err| ProfilesError::Decode(format!("speedscope profile is not JSON: {err}")))?;
+    let frames = json
+        .pointer("/shared/frames")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ProfilesError::Decode("speedscope shared.frames missing".to_string()))?;
+    let frame_names = frames
+        .iter()
+        .enumerate()
+        .map(|(idx, frame)| {
+            frame
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    ProfilesError::Decode(format!("speedscope shared.frames[{idx}].name missing"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let profiles = json
+        .get("profiles")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ProfilesError::Decode("speedscope profiles missing".to_string()))?;
+    let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+    let mut sample_unit = default_unit.to_string();
+
+    for (profile_idx, profile) in profiles.iter().enumerate() {
+        let profile_type = profile
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if profile_type != "sampled" {
+            continue;
+        }
+        if let Some(unit) = profile
+            .get("unit")
+            .and_then(serde_json::Value::as_str)
+            .filter(|unit| !unit.is_empty())
+        {
+            sample_unit = unit.to_string();
+        }
+        let samples = profile
+            .get("samples")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                ProfilesError::Decode(format!(
+                    "speedscope profiles[{profile_idx}].samples missing"
+                ))
+            })?;
+        let weights = profile
+            .get("weights")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (sample_idx, sample) in samples.iter().enumerate() {
+            let stack = sample.as_array().ok_or_else(|| {
+                ProfilesError::Decode(format!(
+                    "speedscope profiles[{profile_idx}].samples[{sample_idx}] must be an array"
+                ))
+            })?;
+            let mut frames = Vec::new();
+            for frame in stack {
+                let frame_idx = frame.as_u64().ok_or_else(|| {
+                    ProfilesError::Decode(format!(
+                        "speedscope profiles[{profile_idx}].samples[{sample_idx}] frame index must be unsigned"
+                    ))
+                })?;
+                let name = frame_names
+                    .get(usize::try_from(frame_idx).map_err(|err| {
+                        ProfilesError::Decode(format!(
+                            "speedscope frame index does not fit usize: {err}"
+                        ))
+                    })?)
+                    .ok_or_else(|| {
+                        ProfilesError::Decode(format!(
+                            "speedscope frame index {frame_idx} is out of bounds"
+                        ))
+                    })?;
+                frames.push((name.clone(), 0));
+            }
+            if frames.is_empty() {
+                return Err(ProfilesError::Decode(format!(
+                    "speedscope profiles[{profile_idx}].samples[{sample_idx}] has empty stack"
+                )));
+            }
+            let value = weights
+                .get(sample_idx)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1);
+            *stacks.entry(frames).or_default() += value;
+        }
+    }
+
+    if stacks.is_empty() {
+        return Err(ProfilesError::Decode(
+            "speedscope profile has no sampled stacks".to_string(),
+        ));
+    }
+    stacks_to_pprof(name, "samples", &sample_unit, stacks)
+}
+
 fn stacks_to_pprof(
     name: &str,
     sample_type: &str,
@@ -790,6 +909,51 @@ mod tests {
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
         assert!(values == vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn decode_plain_speedscope_sampled_profile_uses_shared_frames_and_weights() {
+        let query = parse_ingest_query("name=myapp&format=speedscope&units=samples").unwrap();
+        let body = r#"{
+          "$schema": "https://www.speedscope.app/file-format-schema.json",
+          "shared": {
+            "frames": [
+              { "name": "main" },
+              { "name": "work" },
+              { "name": "idle" }
+            ]
+          },
+          "profiles": [{
+            "type": "sampled",
+            "name": "cpu",
+            "unit": "samples",
+            "startValue": 0,
+            "endValue": 10,
+            "samples": [[0, 1], [0, 1], [0, 2]],
+            "weights": [2, 3, 4]
+          }]
+        }"#;
+
+        let raw = decode_ingest_body(
+            &query,
+            Some("application/json"),
+            bytes::Bytes::from(body),
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+        let mut values = raw
+            .profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value[0])
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![4, 5]);
     }
 
     #[tokio::test]
