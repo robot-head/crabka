@@ -102,6 +102,37 @@ impl InMemoryProfileStore {
                 timestamp_ms,
             });
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_sample_with_total_and_span(
+        &mut self,
+        tenant: &str,
+        profile_type: &str,
+        labels: Vec<(String, String)>,
+        partition: u64,
+        stacktrace_id: u32,
+        value: i64,
+        total_value: i64,
+        timestamp_ms: i64,
+        span_id: u64,
+    ) {
+        let fingerprint = fingerprint_labels(&labels);
+        self.samples
+            .entry(tenant.to_string())
+            .or_default()
+            .push(SampleRow {
+                profile_type: profile_type.to_string(),
+                fingerprint,
+                labels,
+                partition,
+                stacktrace_id,
+                value,
+                total_value,
+                span_id: Some(span_id),
+                trace_id: None,
+                timestamp_ms,
+            });
+    }
 }
 
 #[async_trait::async_trait]

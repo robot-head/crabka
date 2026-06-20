@@ -11,8 +11,8 @@ use crate::{
     FlameGraph, FlameGraphDiff, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, Tree,
     diff_trees,
     samples::{
-        COL_FINGERPRINT, COL_TIMESTAMP, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION,
-        PCOL_TOTAL_VALUE, PCOL_VALUE,
+        COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
+        PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
     },
     series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
     tree_to_pprof,
@@ -54,7 +54,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         max_nodes: i64,
     ) -> Result<FlameGraph, ProfileError> {
         let tree = self
-            .merge_to_tree(tenant, profile_type, label_selector, start_ms, end_ms)
+            .merge_to_tree(tenant, profile_type, label_selector, start_ms, end_ms, None)
             .await?;
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -71,19 +71,33 @@ impl<S: ProfileStore> FlameEngine<S> {
         label_selector: &str,
         start_ms: i64,
         end_ms: i64,
+        span_ids: Option<&[u64]>,
     ) -> Result<Tree, ProfileError> {
+        if matches!(span_ids, Some(ids) if ids.is_empty()) {
+            return Err(ProfileError::Plan(
+                "span selector must contain at least one span id".to_string(),
+            ));
+        }
         let matchers = crate::matcher::parse_label_selector(label_selector)?;
         let scan = self
             .store
             .select(tenant, profile_type, &matchers, start_ms, end_ms)
             .await?;
+        let span_where = span_ids.map_or_else(String::new, |ids| {
+            format!(
+                " WHERE {span} IN ({ids})",
+                span = PCOL_SPAN_ID,
+                ids = ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            )
+        });
         let sql = format!(
             "SELECT {partition}, {stacktrace}, SUM({value}) AS v \
-             FROM {table} GROUP BY {partition}, {stacktrace}",
+             FROM {table}{span_where} GROUP BY {partition}, {stacktrace}",
             partition = PCOL_STACKTRACE_PARTITION,
             stacktrace = PCOL_STACKTRACE_ID,
             value = PCOL_VALUE,
             table = scan.samples_table,
+            span_where = span_where,
         );
         let batches = scan
             .ctx
@@ -193,10 +207,10 @@ impl<S: ProfileStore> FlameEngine<S> {
         max_nodes: i64,
     ) -> Result<FlameGraphDiff, ProfileError> {
         let left_tree = self
-            .merge_to_tree(tenant, left.0, left.1, left.2, left.3)
+            .merge_to_tree(tenant, left.0, left.1, left.2, left.3, None)
             .await?;
         let right_tree = self
-            .merge_to_tree(tenant, right.0, right.1, right.2, right.3)
+            .merge_to_tree(tenant, right.0, right.1, right.2, right.3, None)
             .await?;
         let max_nodes = if max_nodes > 0 {
             max_nodes
@@ -222,9 +236,39 @@ impl<S: ProfileStore> FlameEngine<S> {
                 label_selector,
                 start_ms,
                 end_ms,
+                None,
             )
             .await?;
         Ok(tree_to_pprof(&tree, &profile_type).encode())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_span_profile(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_selector: &[u64],
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<FlameGraph, ProfileError> {
+        let tree = self
+            .merge_to_tree(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                Some(span_selector),
+            )
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_flamegraph(max_nodes))
     }
 }
 
@@ -389,6 +433,53 @@ mod tests {
             .sum();
 
         assert!(total == 15);
+    }
+
+    #[tokio::test]
+    async fn span_profile_filters_by_span_id() {
+        let mut store = InMemoryProfileStore::new();
+        let (stack_a, stack_b) = {
+            let db = store.symbols_mut();
+            let a = intern_location(db, "a");
+            let b = intern_location(db, "b");
+            (db.intern_stacktrace(0, &[a]), db.intern_stacktrace(0, &[b]))
+        };
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_a,
+            6,
+            10,
+            0,
+            111,
+        );
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("svc".to_string(), "x".to_string())],
+            0,
+            stack_b,
+            4,
+            10,
+            0,
+            222,
+        );
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+
+        let fg = engine
+            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .await
+            .unwrap();
+
+        assert!(fg.total == 6);
+        assert!(
+            engine
+                .select_merge_span_profile("tenant-a", PT, "{}", &[], 0, 60_000, 0)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
