@@ -629,7 +629,11 @@ mod tests {
         process_raw(
             &state,
             "tenant-a",
-            vec![crate::ingest::RawProfile { labels, profile }],
+            vec![crate::ingest::RawProfile {
+                labels,
+                profile,
+                delta: false,
+            }],
         )
         .await
         .unwrap();

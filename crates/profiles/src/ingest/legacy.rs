@@ -116,6 +116,10 @@ pub async fn decode_ingest_multipart(
         }
     }
 
+    let delta = sample_type_config
+        .as_ref()
+        .and_then(|config| config.cumulative)
+        .is_some_and(|cumulative| !cumulative);
     let profile = match query.format {
         IngestFormat::Pprof => {
             let raw = pprof_bytes.ok_or_else(|| {
@@ -150,7 +154,11 @@ pub async fn decode_ingest_multipart(
         labels.insert(name, value);
     }
 
-    Ok(RawProfile { labels, profile })
+    Ok(RawProfile {
+        labels,
+        profile,
+        delta,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,7 +168,6 @@ struct SampleTypeConfig {
     display_name: Option<String>,
     #[allow(dead_code)]
     aggregation: Option<String>,
-    #[allow(dead_code)]
     cumulative: Option<bool>,
     #[allow(dead_code)]
     sampled: Option<bool>,
@@ -561,6 +568,8 @@ mod tests {
         assert!(
             raw.profile.period_type_strings() == ("wall".to_string(), "nanoseconds".to_string())
         );
+        let split = crate::ingest::split_sample_types(&raw).unwrap();
+        assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
     }
 
     #[tokio::test]

@@ -89,6 +89,7 @@ pub(crate) mod test_fixtures {
         crate::ingest::RawProfile {
             labels,
             profile: cpu_profile(),
+            delta: false,
         }
     }
 
@@ -136,6 +137,7 @@ pub(crate) mod test_fixtures {
                 period_type: Some(crabka_pprof::proto::ValueType { r#type: 5, unit: 4 }),
                 ..Default::default()
             }),
+            delta: false,
         }
     }
 

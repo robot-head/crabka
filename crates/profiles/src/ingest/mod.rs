@@ -27,6 +27,7 @@ pub use split::split_sample_types;
 pub struct RawProfile {
     pub labels: Labels,
     pub profile: PprofProfile,
+    pub delta: bool,
 }
 
 /// One series after the multi-value split: a single `__profile_type__`.

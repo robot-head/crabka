@@ -50,6 +50,7 @@ pub fn decode_push(
             out.push(RawProfile {
                 labels: labels.clone(),
                 profile,
+                delta: false,
             });
         }
     }

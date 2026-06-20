@@ -29,7 +29,11 @@ pub fn decode_otlp(
                 if let Some((name, _)) = profile.sample_types().first() {
                     labels.insert("__name__", name.clone());
                 }
-                out.push(RawProfile { labels, profile });
+                out.push(RawProfile {
+                    labels,
+                    profile,
+                    delta: false,
+                });
             }
         }
     }

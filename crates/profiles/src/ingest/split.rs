@@ -53,7 +53,7 @@ pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, Profi
             sample_unit: sample_unit.clone(),
             period_type: period_type.clone(),
             period_unit: period_unit.clone(),
-            delta: false,
+            delta: raw.delta,
         }
         .to_string();
 
@@ -194,6 +194,7 @@ mod tests {
         let raw = RawProfile {
             labels,
             profile: two_type_profile(),
+            delta: false,
         };
 
         let out = split_sample_types(&raw).unwrap();
@@ -270,6 +271,7 @@ mod tests {
         let out = split_sample_types(&RawProfile {
             labels,
             profile: PprofProfile::from(profile),
+            delta: false,
         })
         .unwrap();
 
@@ -325,6 +327,7 @@ mod tests {
         let out = split_sample_types(&RawProfile {
             labels,
             profile: PprofProfile::from(profile),
+            delta: false,
         })
         .unwrap();
 
