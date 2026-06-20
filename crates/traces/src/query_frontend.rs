@@ -215,8 +215,73 @@ fn merge_trace(traces: &mut Vec<Value>, trace: Value) {
         return;
     };
     if let Some(existing_span_sets) = existing.get_mut("spanSets").and_then(Value::as_array_mut) {
-        existing_span_sets.extend(new_span_sets.iter().cloned());
+        merge_span_sets(existing_span_sets, new_span_sets);
     }
+}
+
+fn merge_span_sets(existing_span_sets: &mut Vec<Value>, new_span_sets: &[Value]) {
+    for span_set in new_span_sets {
+        let Some(new_spans) = span_set.get("spans").and_then(Value::as_array) else {
+            existing_span_sets.push(span_set.clone());
+            continue;
+        };
+        if new_spans
+            .iter()
+            .all(|span| span_id_seen(existing_span_sets, span))
+        {
+            continue;
+        }
+
+        let Some(existing_span_set) = existing_span_sets.first_mut() else {
+            let mut span_set = span_set.clone();
+            set_matched_to_span_count(&mut span_set);
+            existing_span_sets.push(span_set);
+            continue;
+        };
+        let Some(existing_spans) = existing_span_set
+            .get_mut("spans")
+            .and_then(Value::as_array_mut)
+        else {
+            existing_span_sets.push(span_set.clone());
+            continue;
+        };
+        for span in new_spans {
+            if !existing_spans
+                .iter()
+                .any(|existing| same_span_id(existing, span))
+            {
+                existing_spans.push(span.clone());
+            }
+        }
+        set_matched_to_span_count(existing_span_set);
+    }
+}
+
+fn span_id_seen(span_sets: &[Value], span: &Value) -> bool {
+    span_sets.iter().any(|span_set| {
+        span_set
+            .get("spans")
+            .and_then(Value::as_array)
+            .is_some_and(|spans| spans.iter().any(|existing| same_span_id(existing, span)))
+    })
+}
+
+fn same_span_id(lhs: &Value, rhs: &Value) -> bool {
+    let Some(lhs) = lhs.get("spanID").and_then(Value::as_str) else {
+        return false;
+    };
+    rhs.get("spanID").and_then(Value::as_str) == Some(lhs)
+}
+
+fn set_matched_to_span_count(span_set: &mut Value) {
+    let Some(count) = span_set
+        .get("spans")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+    else {
+        return;
+    };
+    span_set["matched"] = json!(count);
 }
 
 fn build_querier_request(
