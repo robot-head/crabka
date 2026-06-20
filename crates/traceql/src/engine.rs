@@ -918,6 +918,9 @@ fn metric_labels(
 
 fn metric_field_column(field: &Field) -> Result<String> {
     match field.scope {
+        Scope::Both | Scope::Resource if field.key == "service.name" => {
+            Ok(COL_ROOT_SERVICE_NAME.to_string())
+        }
         Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
         Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
@@ -2077,6 +2080,37 @@ mod tests {
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
         assert!(got[1].labels == vec![("svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_resource_service_name_uses_root_service_column() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![sp_at(1, 1, None, "api", 0)]);
+        s.push_trace(
+            "t",
+            "billing",
+            "root",
+            vec![sp_at(2, 1, None, "api", 10_000)],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(resource.service.name)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("service.name".into(), "billing".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("service.name".into(), "checkout".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
