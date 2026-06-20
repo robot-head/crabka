@@ -174,7 +174,7 @@ mod tests {
         let sample_type = inner.sample_type[0];
 
         assert!(total == 10);
-        assert!(inner.string_table[sample_type.r#type as usize] == "cpu");
-        assert!(inner.string_table[sample_type.unit as usize] == "nanoseconds");
+        assert!(inner.string_table[usize::try_from(sample_type.r#type).unwrap()] == "cpu");
+        assert!(inner.string_table[usize::try_from(sample_type.unit).unwrap()] == "nanoseconds");
     }
 }
