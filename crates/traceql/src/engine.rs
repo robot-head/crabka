@@ -373,7 +373,20 @@ struct MetricsRange {
 }
 
 fn metric_plan(q: &Query) -> Result<MetricPlan> {
-    match q.pipeline.as_slice() {
+    let normalized_pipeline;
+    let pipeline = if q.pipeline.iter().any(is_inert_metric_stage) {
+        normalized_pipeline = q
+            .pipeline
+            .iter()
+            .filter(|stage| !is_inert_metric_stage(stage))
+            .cloned()
+            .collect::<Vec<_>>();
+        normalized_pipeline.as_slice()
+    } else {
+        q.pipeline.as_slice()
+    };
+
+    match pipeline {
         [Pipeline::Aggregate(aggregate)] => metric_plan_for(aggregate, Vec::new(), None),
         [Pipeline::Aggregate(aggregate), Pipeline::By(by)] => {
             metric_plan_for(aggregate, by.clone(), None)
@@ -410,6 +423,13 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
             "traceql metrics: expected supported *_over_time() metric".into(),
         )),
     }
+}
+
+fn is_inert_metric_stage(stage: &Pipeline) -> bool {
+    matches!(
+        stage,
+        Pipeline::Select(_) | Pipeline::Coalesce | Pipeline::With(_)
+    )
 }
 
 fn rank_limit(pipeline: &Pipeline) -> Result<RankLimit> {
@@ -1960,6 +1980,40 @@ mod tests {
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
         assert!(got[1].labels == vec![("svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn inert_stage_before_metric_aggregate_is_ignored() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | select(span.svc) | count_over_time() | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
