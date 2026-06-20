@@ -178,6 +178,16 @@ impl ProfileIndex {
             .series_for_fingerprints(tenant, &active, label_names))
     }
 
+    pub fn series_for_fingerprints(
+        &self,
+        tenant: &str,
+        fps: &BTreeSet<SeriesFingerprint>,
+        label_names: &[String],
+    ) -> Vec<Vec<(String, String)>> {
+        self.series
+            .series_for_fingerprints(tenant, fps, label_names)
+    }
+
     #[must_use]
     pub fn fingerprints_for_profile_type(
         &self,

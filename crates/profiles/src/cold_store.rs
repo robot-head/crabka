@@ -189,9 +189,12 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Vec<(String, String)>>, ProfileError> {
-        self.index
-            .series_for_time(tenant, matchers, label_names, start_ms, end_ms)
-            .map_err(|err| ProfileError::Store(err.to_string()))
+        let active = self
+            .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
+            .await?;
+        Ok(self
+            .index
+            .series_for_fingerprints(tenant, &active, label_names))
     }
 
     async fn stats(
@@ -617,6 +620,35 @@ mod tests {
             .unwrap();
 
         assert!(series.is_empty(), "{series:?}");
+    }
+
+    #[tokio::test]
+    async fn cold_store_series_do_not_leak_series_outside_time_range_in_same_block() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let api = record_at("t", "api", vec![0], 5, 1_000_000_000);
+        let worker = record_at("t", "worker", vec![0], 7, 3_000_000_000);
+        let records = vec![api.clone(), worker.clone()];
+        let meta = build_block(&store, "t", 0, &records, (0, 0))
+            .await
+            .unwrap()
+            .remove(0);
+        let mut index = ProfileIndex::new();
+        for rec in &records {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+        }
+        index.add_block(&meta);
+        let cold = ColdProfileStore::new(store, Arc::new(index));
+
+        let series = cold
+            .series("t", &[], &["service_name".to_string()], 1_000, 1_000)
+            .await
+            .unwrap();
+
+        assert!(
+            series == vec![vec![("service_name".to_string(), "api".to_string())]],
+            "{series:?}"
+        );
     }
 
     #[test]
