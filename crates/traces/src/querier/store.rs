@@ -238,9 +238,12 @@ fn trace_from_batches(
                 span_id: fixed_value::<8>(&batch, COL_SPAN_ID, row)?,
                 parent_span_id: nullable_fixed_value::<8>(&batch, COL_PARENT_SPAN_ID, row)?,
                 name: string_value(&batch, COL_NAME, row)?,
+                kind: int32_value(&batch, COL_KIND, row)?,
                 start_time_unix_nano: u64::try_from(int64_value(&batch, COL_START, row)?)
                     .unwrap_or(0),
                 duration_nanos: u64::try_from(int64_value(&batch, COL_DURATION, row)?).unwrap_or(0),
+                status_code: int32_value(&batch, COL_STATUS_CODE, row)?,
+                status_message: string_value(&batch, COL_STATUS_MESSAGE, row)?,
                 attributes: attr_values(&batch, row)?,
             });
         }

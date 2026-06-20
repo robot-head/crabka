@@ -272,8 +272,11 @@ fn span_ref(span: &Span) -> crabka_traceql::SpanRef {
         span_id: span.span_id,
         parent_span_id: span.parent_span_id,
         name: span.name.clone(),
+        kind: span.kind.as_i32(),
         start_time_unix_nano: non_negative_u64(span.start_ns),
         duration_nanos: non_negative_u64(span.duration_ns),
+        status_code: span.status.as_i32(),
+        status_message: span.status_message.clone(),
         attributes: span
             .resource_attrs
             .iter()

@@ -163,8 +163,11 @@ mod tests {
                 span_id: [2; 8],
                 parent_span_id: None,
                 name: "GET /".into(),
+                kind: 0,
                 start_time_unix_nano: 2_000,
                 duration_nanos: 50,
+                status_code: 0,
+                status_message: String::new(),
                 attributes: vec![("svc".into(), AttrValue::Str("api".into()))],
             }],
         }

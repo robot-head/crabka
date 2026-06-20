@@ -15,8 +15,11 @@ pub struct SpanRef {
     pub span_id: [u8; 8],
     pub parent_span_id: Option<[u8; 8]>,
     pub name: String,
+    pub kind: i32,
     pub start_time_unix_nano: u64,
     pub duration_nanos: u64,
+    pub status_code: i32,
+    pub status_message: String,
     pub attributes: Vec<(String, AttrValue)>,
 }
 
@@ -111,8 +114,11 @@ mod tests {
             span_id: [1; 8],
             parent_span_id: None,
             name: "op".into(),
+            kind: 0,
             start_time_unix_nano: 1000,
             duration_nanos: 42,
+            status_code: 0,
+            status_message: String::new(),
             attributes: vec![
                 ("http.status_code".into(), AttrValue::Int(200)),
                 ("ok".into(), AttrValue::Bool(true)),

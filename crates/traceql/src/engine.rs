@@ -17,8 +17,9 @@ use crate::result::{
     TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 use crate::span_columns::{
-    ATTR_PREFIX, COL_DURATION, COL_NAME, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
-    COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
+    ATTR_PREFIX, COL_DURATION, COL_KIND, COL_NAME, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
+    COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE, COL_STATUS_MESSAGE,
+    COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
 use crate::store::SpanStore;
 
@@ -988,8 +989,11 @@ pub(crate) fn assemble_search_response(
                 span_id: fixed_8(batch, COL_SPAN_ID, row)?,
                 parent_span_id: optional_fixed_8(batch, COL_PARENT_SPAN_ID, row)?,
                 name: string_value(batch, COL_NAME, row).unwrap_or_default(),
+                kind: i32_value(batch, COL_KIND, row)?,
                 start_time_unix_nano: u64_from_i64(i64_value(batch, COL_START, row)?)?,
                 duration_nanos: u64_from_i64(i64_value(batch, COL_DURATION, row)?)?,
+                status_code: i32_value(batch, COL_STATUS_CODE, row)?,
+                status_message: string_value(batch, COL_STATUS_MESSAGE, row).unwrap_or_default(),
                 attributes: row_attrs(batch, row)?,
             };
             traces
@@ -1076,6 +1080,14 @@ fn i64_value(batch: &RecordBatch, col: &str, row: usize) -> Result<i64> {
         .column_by_name(col)
         .ok_or_else(|| TraceqlError::Exec(format!("missing column {col}")))?
         .as_primitive::<arrow::datatypes::Int64Type>()
+        .value(row))
+}
+
+fn i32_value(batch: &RecordBatch, col: &str, row: usize) -> Result<i32> {
+    Ok(batch
+        .column_by_name(col)
+        .ok_or_else(|| TraceqlError::Exec(format!("missing column {col}")))?
+        .as_primitive::<arrow::datatypes::Int32Type>()
         .value(row))
 }
 

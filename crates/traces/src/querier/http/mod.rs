@@ -804,6 +804,9 @@ fn collect_span_intrinsic_values(
         "span:id" => {
             values.insert(("string".to_string(), hex::encode(span.span_id)));
         }
+        "span:kind" => {
+            values.insert(("int".to_string(), span.kind.to_string()));
+        }
         "span:name" => {
             values.insert(("string".to_string(), span.name.clone()));
         }
@@ -811,6 +814,12 @@ fn collect_span_intrinsic_values(
             if let Some(parent_id) = span.parent_span_id {
                 values.insert(("string".to_string(), hex::encode(parent_id)));
             }
+        }
+        "span:status" => {
+            values.insert(("int".to_string(), span.status_code.to_string()));
+        }
+        "span:statusMessage" if !span.status_message.is_empty() => {
+            values.insert(("string".to_string(), span.status_message.clone()));
         }
         _ => {}
     }
@@ -1798,6 +1807,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn search_tag_values_v2_query_filter_returns_intrinsic_values() {
         let mut store = InMemorySpanStore::new();
         let mut root = span_at_with_attrs(
@@ -1861,6 +1871,7 @@ mod tests {
         );
 
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(
@@ -1882,6 +1893,35 @@ mod tests {
                 "tagValues": [{
                     "type": "duration",
                     "value": "1200"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/span:status/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "int",
+                    "value": "0"
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
