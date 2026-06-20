@@ -57,24 +57,12 @@ async fn plan_spanset_sql<S: SpanStore>(
 }
 
 fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
+    if pipeline.iter().all(is_search_preserving_pipeline_stage) {
+        return Ok(format!("SELECT * FROM ({spanset_sql}) AS q"));
+    }
+
     match pipeline {
-        []
-        | [
-            Pipeline::By(_)
-            | Pipeline::Select(_)
-            | Pipeline::Coalesce
-            | Pipeline::With(_)
-            | Pipeline::Aggregate(
-                Aggregate::Count
-                | Aggregate::Sum(_)
-                | Aggregate::Avg(_)
-                | Aggregate::Min(_)
-                | Aggregate::Max(_),
-            ),
-        ]
-        | [Pipeline::By(_), Pipeline::Coalesce] => {
-            Ok(format!("SELECT * FROM ({spanset_sql}) AS q"))
-        }
+        [] => Ok(format!("SELECT * FROM ({spanset_sql}) AS q")),
         [
             Pipeline::Aggregate(Aggregate::Count),
             Pipeline::Filter { op, value },
@@ -98,6 +86,23 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
         ] => aggregate_filter_sql_query(spanset_sql, agg, *op, *value),
         _ => grouped_pipeline_sql(spanset_sql, pipeline),
     }
+}
+
+fn is_search_preserving_pipeline_stage(stage: &Pipeline) -> bool {
+    matches!(
+        stage,
+        Pipeline::By(_)
+            | Pipeline::Select(_)
+            | Pipeline::Coalesce
+            | Pipeline::With(_)
+            | Pipeline::Aggregate(
+                Aggregate::Count
+                    | Aggregate::Sum(_)
+                    | Aggregate::Avg(_)
+                    | Aggregate::Min(_)
+                    | Aggregate::Max(_)
+            )
+    )
 }
 
 fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
@@ -870,6 +875,29 @@ mod tests {
         .await
         .unwrap();
         assert!(names(&out) == vec!["api-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn select_coalesce_preserves_matched_spans_for_search() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc = \"api\" } | select(span:duration, span.svc) | coalesce()",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
