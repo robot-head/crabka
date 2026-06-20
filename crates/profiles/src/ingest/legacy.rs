@@ -13,6 +13,8 @@ use crate::ingest::RawProfile;
 pub enum IngestFormat {
     Pprof,
     Jfr,
+    Trie,
+    Tree,
     Lines,
     Speedscope,
     Groups,
@@ -49,6 +51,8 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
                 format = match value.as_str() {
                     "pprof" => IngestFormat::Pprof,
                     "jfr" => IngestFormat::Jfr,
+                    "trie" => IngestFormat::Trie,
+                    "tree" => IngestFormat::Tree,
                     "lines" => IngestFormat::Lines,
                     "speedscope" => IngestFormat::Speedscope,
                     _ => IngestFormat::Groups,
@@ -126,6 +130,12 @@ pub async fn decode_ingest_multipart(
             {
                 folded_bytes = Some(data.to_vec());
             }
+            "profile" | "tree" if query.format == IngestFormat::Tree => {
+                folded_bytes = Some(data.to_vec());
+            }
+            "profile" | "trie" if query.format == IngestFormat::Trie => {
+                folded_bytes = Some(data.to_vec());
+            }
             "profile" | "speedscope" if query.format == IngestFormat::Speedscope => {
                 folded_bytes = Some(data.to_vec());
             }
@@ -164,6 +174,18 @@ pub async fn decode_ingest_multipart(
                 ProfilesError::Invalid("missing multipart lines `profile` part".to_string())
             })?;
             lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&raw))?
+        }
+        IngestFormat::Tree => {
+            let raw = folded_bytes.ok_or_else(|| {
+                ProfilesError::Invalid("missing multipart tree `profile` part".to_string())
+            })?;
+            tree_to_pprof(&query.name, &query.units, &raw)?
+        }
+        IngestFormat::Trie => {
+            let raw = folded_bytes.ok_or_else(|| {
+                ProfilesError::Invalid("missing multipart trie `profile` part".to_string())
+            })?;
+            trie_to_pprof(&query.name, &query.units, &raw)?
         }
         IngestFormat::Speedscope => {
             let raw = folded_bytes.ok_or_else(|| {
@@ -216,6 +238,8 @@ pub async fn decode_ingest_body(
         IngestFormat::Lines => {
             lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
         }
+        IngestFormat::Trie => trie_to_pprof(&query.name, &query.units, &body)?,
+        IngestFormat::Tree => tree_to_pprof(&query.name, &query.units, &body)?,
         IngestFormat::Speedscope => speedscope_to_pprof(&query.name, &query.units, &body)?,
         IngestFormat::Pprof => {
             return Err(ProfilesError::Invalid(
@@ -512,6 +536,174 @@ fn lines_to_pprof(
         ));
     }
     stacks_to_pprof(name, "samples", sample_unit, stacks)
+}
+
+fn tree_to_pprof(
+    name: &str,
+    sample_unit: &str,
+    body: &[u8],
+) -> Result<PprofProfile, ProfilesError> {
+    let mut pos = 0;
+    let mut pending = vec![Vec::<(String, i32)>::new()];
+    let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+
+    while let Some(parent_path) = pending.pop() {
+        let name_len = read_tree_varint(body, &mut pos, "node name length")?;
+        let name_len = usize::try_from(name_len).map_err(|err| {
+            ProfilesError::Decode(format!("tree node name length does not fit usize: {err}"))
+        })?;
+        let name_end = pos.checked_add(name_len).ok_or_else(|| {
+            ProfilesError::Decode("tree node name length overflows payload offset".to_string())
+        })?;
+        if name_end > body.len() {
+            return Err(ProfilesError::Decode(
+                "tree node name length exceeds payload".to_string(),
+            ));
+        }
+        let name = std::str::from_utf8(&body[pos..name_end])
+            .map_err(|err| ProfilesError::Decode(format!("tree node name is not UTF-8: {err}")))?;
+        pos = name_end;
+
+        let self_value = read_tree_varint(body, &mut pos, "node self value")?;
+        let children_len = read_tree_varint(body, &mut pos, "node children length")?;
+        let children_len = usize::try_from(children_len).map_err(|err| {
+            ProfilesError::Decode(format!(
+                "tree node children length does not fit usize: {err}"
+            ))
+        })?;
+        if children_len > body.len().saturating_sub(pos) + 1 {
+            return Err(ProfilesError::Decode(
+                "tree node children length exceeds remaining payload".to_string(),
+            ));
+        }
+
+        let mut path = parent_path;
+        if !name.is_empty() {
+            path.push((name.to_string(), 0));
+        }
+        if self_value > 0 && !path.is_empty() {
+            let value = i64::try_from(self_value).map_err(|err| {
+                ProfilesError::Decode(format!("tree node self value does not fit i64: {err}"))
+            })?;
+            *stacks.entry(path.clone()).or_default() += value;
+        }
+        pending.extend(std::iter::repeat_n(path, children_len));
+    }
+
+    if pos != body.len() {
+        return Err(ProfilesError::Decode(
+            "tree profile has trailing bytes".to_string(),
+        ));
+    }
+    if stacks.is_empty() {
+        return Err(ProfilesError::Decode(
+            "tree profile has no samples".to_string(),
+        ));
+    }
+    stacks_to_pprof(name, "samples", sample_unit, stacks)
+}
+
+fn read_tree_varint(body: &[u8], pos: &mut usize, field: &str) -> Result<u64, ProfilesError> {
+    let mut value = 0_u64;
+    let mut shift = 0_u32;
+    loop {
+        let byte = *body
+            .get(*pos)
+            .ok_or_else(|| ProfilesError::Decode(format!("tree payload ended before {field}")))?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(ProfilesError::Decode(format!(
+                "tree {field} varint overflows u64"
+            )));
+        }
+    }
+}
+
+fn trie_to_pprof(
+    name: &str,
+    sample_unit: &str,
+    body: &[u8],
+) -> Result<PprofProfile, ProfilesError> {
+    let mut pos = 0;
+    let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+
+    while pos < body.len() {
+        parse_trie_node(body, &mut pos, &[], &mut stacks)?;
+    }
+
+    if stacks.is_empty() {
+        return Err(ProfilesError::Decode(
+            "trie profile has no samples".to_string(),
+        ));
+    }
+    stacks_to_pprof(name, "samples", sample_unit, stacks)
+}
+
+fn parse_trie_node(
+    body: &[u8],
+    pos: &mut usize,
+    prefix: &[u8],
+    stacks: &mut BTreeMap<Vec<(String, i32)>, i64>,
+) -> Result<(), ProfilesError> {
+    let suffix_len = read_tree_varint(body, pos, "trie node suffix length")?;
+    let suffix_len = usize::try_from(suffix_len).map_err(|err| {
+        ProfilesError::Decode(format!("trie node suffix length does not fit usize: {err}"))
+    })?;
+    let suffix_end = pos.checked_add(suffix_len).ok_or_else(|| {
+        ProfilesError::Decode("trie node suffix length overflows payload offset".to_string())
+    })?;
+    if suffix_end > body.len() {
+        return Err(ProfilesError::Decode(
+            "trie node suffix length exceeds payload".to_string(),
+        ));
+    }
+
+    let mut key = Vec::with_capacity(prefix.len() + suffix_len);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(&body[*pos..suffix_end]);
+    *pos = suffix_end;
+
+    let value = read_tree_varint(body, pos, "trie node value")?;
+    let children_len = read_tree_varint(body, pos, "trie node children length")?;
+    let children_len = usize::try_from(children_len).map_err(|err| {
+        ProfilesError::Decode(format!(
+            "trie node children length does not fit usize: {err}"
+        ))
+    })?;
+    if children_len > body.len().saturating_sub(*pos) + 1 {
+        return Err(ProfilesError::Decode(
+            "trie node children length exceeds remaining payload".to_string(),
+        ));
+    }
+
+    if value > 0 {
+        let value = i64::try_from(value).map_err(|err| {
+            ProfilesError::Decode(format!("trie node value does not fit i64: {err}"))
+        })?;
+        let key = std::str::from_utf8(&key)
+            .map_err(|err| ProfilesError::Decode(format!("trie key is not UTF-8: {err}")))?;
+        let frames = key
+            .split(';')
+            .filter(|frame| !frame.is_empty())
+            .map(|frame| (frame.to_string(), 0))
+            .collect::<Vec<_>>();
+        if frames.is_empty() {
+            return Err(ProfilesError::Decode(
+                "trie profile has an empty stack".to_string(),
+            ));
+        }
+        *stacks.entry(frames).or_default() += value;
+    }
+
+    for _ in 0..children_len {
+        parse_trie_node(body, pos, &key, stacks)?;
+    }
+    Ok(())
 }
 
 fn speedscope_to_pprof(
@@ -954,6 +1146,72 @@ mod tests {
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
         assert!(values == vec![4, 5]);
+    }
+
+    #[tokio::test]
+    async fn decode_plain_tree_format_payload_uses_serialized_tree_nodes() {
+        let query = parse_ingest_query("name=myapp&format=tree&units=samples").unwrap();
+        let body =
+            bytes::Bytes::from_static(b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00");
+
+        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, 1 << 20)
+            .await
+            .unwrap();
+
+        let mut values = raw
+            .profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value[0])
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        let functions = raw
+            .profile
+            .inner()
+            .function
+            .iter()
+            .filter_map(|function| raw.profile.string(function.name))
+            .collect::<Vec<_>>();
+
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![1, 2]);
+        assert!(functions.contains(&"a"));
+        assert!(functions.contains(&"b"));
+        assert!(functions.contains(&"c"));
+    }
+
+    #[tokio::test]
+    async fn decode_plain_trie_format_payload_uses_serialized_folded_stack_trie() {
+        let query = parse_ingest_query("name=myapp&format=trie&units=samples").unwrap();
+        let body =
+            bytes::Bytes::from_static(b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00");
+
+        let raw = decode_ingest_body(&query, Some("application/octet-stream"), body, 1 << 20)
+            .await
+            .unwrap();
+
+        let mut values = raw
+            .profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value[0])
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+        let functions = raw
+            .profile
+            .inner()
+            .function
+            .iter()
+            .filter_map(|function| raw.profile.string(function.name))
+            .collect::<Vec<_>>();
+
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![1, 2]);
+        assert!(functions.contains(&"a"));
+        assert!(functions.contains(&"b"));
+        assert!(functions.contains(&"c"));
     }
 
     #[tokio::test]
