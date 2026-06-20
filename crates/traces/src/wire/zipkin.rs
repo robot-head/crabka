@@ -62,11 +62,17 @@ fn zipkin_kind(kind: Option<&str>) -> SpanKind {
     }
 }
 
-fn zipkin_status(tags: &BTreeMap<String, String>) -> StatusCode {
-    if tags.get("error").is_some_and(|value| value == "true") {
-        StatusCode::Error
-    } else {
-        StatusCode::Unset
+fn zipkin_status(tags: &BTreeMap<String, String>) -> (StatusCode, String) {
+    match tags.get("error") {
+        Some(value) => {
+            let message = if value == "true" || value == "false" {
+                String::new()
+            } else {
+                value.clone()
+            };
+            (StatusCode::Error, message)
+        }
+        None => (StatusCode::Unset, String::new()),
     }
 }
 
@@ -87,7 +93,7 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
                 }]
             })
             .unwrap_or_default();
-        let status = zipkin_status(&span.tags);
+        let (status, status_message) = zipkin_status(&span.tags);
         let span_attrs = span
             .tags
             .into_iter()
@@ -115,7 +121,7 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
             start_ns: span.timestamp.saturating_mul(1_000),
             duration_ns: span.duration.saturating_mul(1_000),
             status,
-            status_message: String::new(),
+            status_message,
             resource_attrs,
             span_attrs,
             events,
@@ -186,6 +192,22 @@ mod tests {
                 .iter()
                 .any(|attr| attr.key == "error" && attr.value == AttrValue::Str("true".into()))
         );
+    }
+
+    #[test]
+    fn error_tag_description_sets_status_message() {
+        let body = r#"[
+          {
+            "traceId": "0000000000000001",
+            "id": "0000000000000002",
+            "tags": { "error": "deadline exceeded" }
+          }
+        ]"#;
+
+        let spans = decode_zipkin(body.as_bytes()).unwrap();
+
+        assert!(spans[0].status == StatusCode::Error);
+        assert!(spans[0].status_message == "deadline exceeded");
     }
 
     #[test]
