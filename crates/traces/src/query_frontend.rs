@@ -152,13 +152,16 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
             return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
         };
         let status = resp.status();
-        let Ok(body) = resp.json::<Value>().await else {
+        let Ok(bytes) = resp.bytes().await else {
             return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
         };
         if !status.is_success() {
             let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            return (status, body.to_string()).into_response();
+            return (status, bytes).into_response();
         }
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
         if let Some(traces) = body.get("traces").and_then(Value::as_array) {
             for trace in traces {
                 merge_trace(&mut merged_traces, trace.clone());

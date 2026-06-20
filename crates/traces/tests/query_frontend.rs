@@ -1,7 +1,8 @@
 use assert2::assert;
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use crabka_traces::query_frontend::{
     QueryFrontendConfig, QueryShard, QueryTier, plan_time_shards, router,
@@ -168,6 +169,17 @@ async fn frontend_search_requires_valid_start_and_end() {
     assert!(body == "invalid query parameter start");
 }
 
+#[tokio::test]
+async fn frontend_search_preserves_upstream_text_errors() {
+    let upstream_url = spawn_text_error_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let (status, body) = get_text(router(cfg), "/api/search?q=%7B&start=0&end=1").await;
+
+    assert!(status == StatusCode::BAD_REQUEST);
+    assert!(body == "parse error: expected selector");
+}
+
 async fn get_text(app: Router, uri: &str) -> (axum::http::StatusCode, String) {
     let response = app
         .oneshot(
@@ -234,6 +246,18 @@ async fn spawn_overlapping_search_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_text_error_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(text_error_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn sharded_search_response(State(()): State<()>, headers: HeaderMap) -> axum::Json<Value> {
     let tier = headers
         .get("x-crabka-query-tier")
@@ -284,4 +308,8 @@ async fn overlapping_search_response() -> axum::Json<Value> {
             "inspectedBytes": 0
         }
     }))
+}
+
+async fn text_error_response() -> impl IntoResponse {
+    (StatusCode::BAD_REQUEST, "parse error: expected selector")
 }
