@@ -2921,6 +2921,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-traceql"
+version = "0.3.7"
+dependencies = [
+ "arrow",
+ "assert2",
+ "async-trait",
+ "crabka-blockstore",
+ "datafusion",
+ "futures",
+ "proptest",
+ "regex",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "crabka-traces"
+version = "0.3.7"
+dependencies = [
+ "assert2",
+ "axum",
+ "base64",
+ "crabka-traceql",
+ "hex",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "crabka-voters"
 version = "0.3.7"
 dependencies = [

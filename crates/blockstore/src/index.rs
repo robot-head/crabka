@@ -1,8 +1,10 @@
 //! In-memory label/series/block index.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
-use regex::Regex;
+use object_store::path::Path;
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMeta;
@@ -16,8 +18,6 @@ struct BlockEntry {
     object_key: String,
     min_ts: i64,
     max_ts: i64,
-    #[serde(default)]
-    row_count: usize,
     fingerprints: BTreeSet<SeriesFingerprint>,
 }
 
@@ -29,45 +29,42 @@ struct TenantIndex {
     blocks: Vec<BlockEntry>,
 }
 
-/// Multi-tenant label postings index for logs/metrics/profile series.
+/// Multi-tenant in-memory index.
 #[derive(Default, Serialize, Deserialize)]
-pub struct SeriesIndex {
+pub struct Index {
     tenants: HashMap<String, TenantIndex>,
 }
 
-impl SeriesIndex {
+impl Index {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     pub fn add_series(&mut self, tenant: &str, fp: SeriesFingerprint, labels: &Labels) {
-        let index = self.tenants.entry(tenant.to_string()).or_default();
-        if index.series.contains_key(&fp) {
+        let t = self.tenants.entry(tenant.to_string()).or_default();
+        if t.series.contains_key(&fp) {
             return;
         }
-        index.series.insert(fp, labels.clone());
+        t.series.insert(fp, labels.clone());
         for (name, value) in labels.iter() {
-            index
-                .postings
+            t.postings
                 .entry(posting_key(name, value))
                 .or_default()
                 .insert(fp);
-            index
-                .values
-                .entry(name.to_string())
+            t.values
+                .entry(name.clone())
                 .or_default()
-                .insert(value.to_string());
+                .insert(value.clone());
         }
     }
 
     pub fn add_block(&mut self, meta: &BlockMeta) {
-        let index = self.tenants.entry(meta.tenant.clone()).or_default();
-        index.blocks.push(BlockEntry {
+        let t = self.tenants.entry(meta.tenant.clone()).or_default();
+        t.blocks.push(BlockEntry {
             object_key: meta.object_key.clone(),
             min_ts: meta.min_ts,
             max_ts: meta.max_ts,
-            row_count: meta.row_count,
             fingerprints: meta.fingerprints.iter().copied().collect(),
         });
     }
@@ -79,19 +76,19 @@ impl SeriesIndex {
     ) -> Result<BTreeSet<SeriesFingerprint>> {
         if matchers.is_empty() {
             return Err(BlockStoreError::InvalidBlock(
-                "at least one label matcher is required".to_string(),
+                "at least one label matcher is required".into(),
             ));
         }
-        let Some(index) = self.tenants.get(tenant) else {
+        let Some(t) = self.tenants.get(tenant) else {
             return Ok(BTreeSet::new());
         };
 
         let mut acc: Option<BTreeSet<SeriesFingerprint>> = None;
         for matcher in matchers {
-            let matched = index.match_one(matcher)?;
+            let matched = t.match_one(matcher)?;
             acc = Some(match acc {
-                Some(current) => current.intersection(&matched).copied().collect(),
                 None => matched,
+                Some(prev) => prev.intersection(&matched).copied().collect(),
             });
             if acc.as_ref().is_some_and(BTreeSet::is_empty) {
                 break;
@@ -100,192 +97,30 @@ impl SeriesIndex {
         Ok(acc.unwrap_or_default())
     }
 
-    pub fn matching_fingerprints(
-        &self,
-        tenant: &str,
-        matchers: &[LabelMatcher],
-    ) -> Result<BTreeSet<SeriesFingerprint>> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Ok(BTreeSet::new());
-        };
-        if matchers.is_empty() {
-            return Ok(index.series.keys().copied().collect());
-        }
-        self.resolve(tenant, matchers)
-    }
-
-    pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Ok(Vec::new());
-        };
-        let fps = self.matching_fingerprints(tenant, matchers)?;
-        let mut names = BTreeSet::new();
-        for fp in fps {
-            if let Some(labels) = index.series.get(&fp) {
-                names.extend(labels.iter().map(|(name, _)| name.to_string()));
-            }
-        }
-        Ok(names.into_iter().collect())
-    }
-
     #[must_use]
-    pub fn label_names_for_fingerprints(
-        &self,
-        tenant: &str,
-        fps: &BTreeSet<SeriesFingerprint>,
-    ) -> Vec<String> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Vec::new();
-        };
-        let mut names = BTreeSet::new();
-        for fp in fps {
-            if let Some(labels) = index.series.get(fp) {
-                names.extend(labels.iter().map(|(name, _)| name.to_string()));
-            }
-        }
-        names.into_iter().collect()
-    }
-
-    pub fn label_values_for(
-        &self,
-        tenant: &str,
-        name: &str,
-        matchers: &[LabelMatcher],
-    ) -> Result<Vec<String>> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Ok(Vec::new());
-        };
-        let fps = self.matching_fingerprints(tenant, matchers)?;
-        let mut values = BTreeSet::new();
-        for fp in fps {
-            if let Some(labels) = index.series.get(&fp)
-                && let Some(value) = labels.get(name)
-            {
-                values.insert(value.to_string());
-            }
-        }
-        Ok(values.into_iter().collect())
-    }
-
-    #[must_use]
-    pub fn label_values_for_fingerprints(
-        &self,
-        tenant: &str,
-        name: &str,
-        fps: &BTreeSet<SeriesFingerprint>,
-    ) -> Vec<String> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Vec::new();
-        };
-        let mut values = BTreeSet::new();
-        for fp in fps {
-            if let Some(labels) = index.series.get(fp)
-                && let Some(value) = labels.get(name)
-            {
-                values.insert(value.to_string());
-            }
-        }
-        values.into_iter().collect()
-    }
-
-    pub fn series(
-        &self,
-        tenant: &str,
-        matchers: &[LabelMatcher],
-        label_names: &[String],
-    ) -> Result<Vec<Vec<(String, String)>>> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Ok(Vec::new());
-        };
-        let fps = self.matching_fingerprints(tenant, matchers)?;
-        let mut out = BTreeSet::new();
-        for fp in fps {
-            let Some(labels) = index.series.get(&fp) else {
-                continue;
-            };
-            let projected = label_names
-                .iter()
-                .filter_map(|name| {
-                    labels
-                        .get(name)
-                        .map(|value| (name.clone(), value.to_string()))
-                })
-                .collect::<Vec<_>>();
-            if !projected.is_empty() || label_names.is_empty() {
-                out.insert(projected);
-            }
-        }
-        Ok(out.into_iter().collect())
-    }
-
-    #[must_use]
-    pub fn series_for_fingerprints(
-        &self,
-        tenant: &str,
-        fps: &BTreeSet<SeriesFingerprint>,
-        label_names: &[String],
-    ) -> Vec<Vec<(String, String)>> {
-        let Some(index) = self.tenants.get(tenant) else {
-            return Vec::new();
-        };
-        let mut out = BTreeSet::new();
-        for fp in fps {
-            let Some(labels) = index.series.get(fp) else {
-                continue;
-            };
-            let projected = label_names
-                .iter()
-                .filter_map(|name| {
-                    labels
-                        .get(name)
-                        .map(|value| (name.clone(), value.to_string()))
-                })
-                .collect::<Vec<_>>();
-            if !projected.is_empty() || label_names.is_empty() {
-                out.insert(projected);
-            }
-        }
-        out.into_iter().collect()
-    }
-
-    #[must_use]
-    pub fn candidate_blocks_for_series(
+    pub fn candidate_blocks(
         &self,
         tenant: &str,
         fps: &BTreeSet<SeriesFingerprint>,
         min_ts: i64,
         max_ts: i64,
     ) -> Vec<String> {
-        let Some(index) = self.tenants.get(tenant) else {
+        let Some(t) = self.tenants.get(tenant) else {
             return Vec::new();
         };
-        index
-            .blocks
+        t.blocks
             .iter()
-            .filter(|block| overlaps(block.min_ts, block.max_ts, min_ts, max_ts))
-            .filter(|block| block.fingerprints.iter().any(|fp| fps.contains(fp)))
-            .map(|block| block.object_key.clone())
+            .filter(|b| b.min_ts <= max_ts && b.max_ts >= min_ts)
+            .filter(|b| b.fingerprints.iter().any(|fp| fps.contains(fp)))
+            .map(|b| b.object_key.clone())
             .collect()
-    }
-
-    #[must_use]
-    pub fn block_time_bounds(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Option<(i64, i64)> {
-        let index = self.tenants.get(tenant)?;
-        index
-            .blocks
-            .iter()
-            .filter(|block| overlaps(block.min_ts, block.max_ts, min_ts, max_ts))
-            .fold(None, |acc, block| match acc {
-                Some((min, max)) => Some((min.min(block.min_ts), max.max(block.max_ts))),
-                None => Some((block.min_ts, block.max_ts)),
-            })
     }
 
     #[must_use]
     pub fn label_names(&self, tenant: &str) -> Vec<String> {
         self.tenants
             .get(tenant)
-            .map(|index| index.values.keys().cloned().collect())
+            .map(|t| t.values.keys().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -293,67 +128,45 @@ impl SeriesIndex {
     pub fn label_values(&self, tenant: &str, name: &str) -> Vec<String> {
         self.tenants
             .get(tenant)
-            .and_then(|index| index.values.get(name))
+            .and_then(|t| t.values.get(name))
             .map(|values| values.iter().cloned().collect())
             .unwrap_or_default()
     }
 
-    pub fn replace_blocks(&mut self, tenant: &str, remove_keys: &[String], add: &[BlockMeta]) {
-        let index = self.tenants.entry(tenant.to_string()).or_default();
-        let remove_keys = remove_keys.iter().collect::<BTreeSet<_>>();
-        index
-            .blocks
-            .retain(|block| !remove_keys.contains(&block.object_key));
-        for meta in add {
-            index.blocks.push(BlockEntry {
-                object_key: meta.object_key.clone(),
-                min_ts: meta.min_ts,
-                max_ts: meta.max_ts,
-                row_count: meta.row_count,
-                fingerprints: meta.fingerprints.iter().copied().collect(),
-            });
-        }
+    pub async fn save(&self, store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<()> {
+        let bytes = serde_json::to_vec(self)?;
+        store
+            .put(&Path::from(object_key), PutPayload::from(bytes))
+            .await?;
+        Ok(())
     }
 
-    #[must_use]
-    pub fn all_blocks(&self) -> Vec<BlockMeta> {
-        self.tenants
-            .iter()
-            .flat_map(|(tenant, index)| {
-                index.blocks.iter().map(|block| BlockMeta {
-                    tenant: tenant.clone(),
-                    object_key: block.object_key.clone(),
-                    min_ts: block.min_ts,
-                    max_ts: block.max_ts,
-                    row_count: block.row_count,
-                    fingerprints: block.fingerprints.iter().copied().collect(),
-                })
-            })
-            .collect()
+    pub async fn load(store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<Self> {
+        let bytes = store.get(&Path::from(object_key)).await?.bytes().await?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
-impl BlockIndex for SeriesIndex {
+impl BlockIndex for Index {
     fn add_block(&mut self, meta: &BlockMeta) {
         Self::add_block(self, meta);
     }
 
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
-        let Some(index) = self.tenants.get(tenant) else {
+        let Some(t) = self.tenants.get(tenant) else {
             return Vec::new();
         };
-        index
-            .blocks
+        t.blocks
             .iter()
-            .filter(|block| overlaps(block.min_ts, block.max_ts, min_ts, max_ts))
-            .map(|block| block.object_key.clone())
+            .filter(|b| b.min_ts <= max_ts && b.max_ts >= min_ts)
+            .map(|b| b.object_key.clone())
             .collect()
     }
 
     fn block_count(&self, tenant: &str) -> usize {
         self.tenants
             .get(tenant)
-            .map_or(0, |index| index.blocks.len())
+            .map_or(0, |tenant_index| tenant_index.blocks.len())
     }
 }
 
@@ -378,45 +191,43 @@ impl TenantIndex {
                     .filter(|fp| !excluded.contains(fp))
                     .collect())
             }
-            MatchOp::Re | MatchOp::Nre => self.match_regex(matcher),
-        }
-    }
-
-    fn match_regex(&self, matcher: &LabelMatcher) -> Result<BTreeSet<SeriesFingerprint>> {
-        let regex = Regex::new(&format!("^(?:{})$", matcher.value))
-            .map_err(|err| BlockStoreError::InvalidBlock(format!("bad regex: {err}")))?;
-        let mut matching_fps = BTreeSet::new();
-        for (key, fps) in &self.postings {
-            let Some((name, value)) = split_posting_key(key) else {
-                continue;
-            };
-            if name == matcher.name && regex.is_match(value) {
-                matching_fps.extend(fps.iter().copied());
+            MatchOp::Re | MatchOp::Nre => {
+                let re = regex::Regex::new(&anchored(&matcher.value))
+                    .map_err(|e| BlockStoreError::InvalidBlock(format!("bad regex: {e}")))?;
+                let mut matching_fps = BTreeSet::new();
+                for (key, fps) in &self.postings {
+                    let Some((name, value)) = split_posting_key(key) else {
+                        continue;
+                    };
+                    if name == matcher.name && re.is_match(value) {
+                        matching_fps.extend(fps.iter().copied());
+                    }
+                }
+                if matcher.op == MatchOp::Re {
+                    Ok(matching_fps)
+                } else {
+                    Ok(self
+                        .series
+                        .keys()
+                        .copied()
+                        .filter(|fp| !matching_fps.contains(fp))
+                        .collect())
+                }
             }
-        }
-        if matcher.op == MatchOp::Re {
-            Ok(matching_fps)
-        } else {
-            Ok(self
-                .series
-                .keys()
-                .copied()
-                .filter(|fp| !matching_fps.contains(fp))
-                .collect())
         }
     }
 }
 
-fn overlaps(left_min: i64, left_max: i64, right_min: i64, right_max: i64) -> bool {
-    left_min <= right_max && left_max >= right_min
+fn anchored(pattern: &str) -> String {
+    format!("^(?:{pattern})$")
 }
 
 fn posting_key(name: &str, value: &str) -> String {
-    format!("{name}\u{1f}{value}")
+    format!("{name}\u{0}{value}")
 }
 
 fn split_posting_key(key: &str) -> Option<(String, &str)> {
-    let (name, value) = key.split_once('\u{1f}')?;
+    let (name, value) = key.split_once('\0')?;
     Some((name.to_string(), value))
 }
 
@@ -427,28 +238,34 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::{BlockMeta, Labels};
+    use crate::block::BlockMeta;
+    use crate::labels::Labels;
+    use crate::matcher::{LabelMatcher, MatchOp};
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
-        Labels::from_pairs(pairs.iter().copied())
+        let mut l = Labels::new();
+        for (k, v) in pairs {
+            l.insert(*k, *v);
+        }
+        l
     }
 
-    fn seed() -> SeriesIndex {
-        let mut index = SeriesIndex::new();
+    fn seed() -> Index {
+        let mut idx = Index::new();
         let api_prod = labels(&[("app", "api"), ("env", "prod")]);
         let api_dev = labels(&[("app", "api"), ("env", "dev")]);
         let web_prod = labels(&[("app", "web"), ("env", "prod")]);
-        index.add_series("t", api_prod.fingerprint(), &api_prod);
-        index.add_series("t", api_dev.fingerprint(), &api_dev);
-        index.add_series("t", web_prod.fingerprint(), &web_prod);
-        index
+        idx.add_series("t", api_prod.fingerprint(), &api_prod);
+        idx.add_series("t", api_dev.fingerprint(), &api_dev);
+        idx.add_series("t", web_prod.fingerprint(), &web_prod);
+        idx
     }
 
     #[test]
     fn resolve_eq_intersection() {
-        let index = seed();
+        let idx = seed();
         let want = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
-        let got = index
+        let got = idx
             .resolve(
                 "t",
                 &[
@@ -462,8 +279,8 @@ mod tests {
 
     #[test]
     fn resolve_neq_excludes() {
-        let index = seed();
-        let got = index
+        let idx = seed();
+        let got = idx
             .resolve(
                 "t",
                 &[
@@ -478,8 +295,8 @@ mod tests {
 
     #[test]
     fn resolve_regex_union() {
-        let index = seed();
-        let got = index
+        let idx = seed();
+        let got = idx
             .resolve("t", &[LabelMatcher::new("env", MatchOp::Re, "pro.*")])
             .unwrap();
         let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
@@ -489,8 +306,8 @@ mod tests {
 
     #[test]
     fn resolve_unknown_tenant_is_empty() {
-        let index = seed();
-        let got = index
+        let idx = seed();
+        let got = idx
             .resolve("nope", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
             .unwrap();
         assert!(got.is_empty());
@@ -498,93 +315,86 @@ mod tests {
 
     #[test]
     fn candidate_blocks_prune_by_fp_and_time() {
-        let mut index = seed();
+        let mut idx = seed();
         let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
         let web_prod = labels(&[("app", "web"), ("env", "prod")]).fingerprint();
-        index.add_block(&BlockMeta {
-            tenant: "t".to_string(),
-            object_key: "b1.parquet".to_string(),
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b1.parquet".into(),
             min_ts: 0,
             max_ts: 100,
             row_count: 1,
             fingerprints: vec![api_prod],
         });
-        index.add_block(&BlockMeta {
-            tenant: "t".to_string(),
-            object_key: "b2.parquet".to_string(),
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b2.parquet".into(),
             min_ts: 200,
             max_ts: 300,
             row_count: 1,
             fingerprints: vec![web_prod],
         });
 
-        let got = index.candidate_blocks_for_series("t", &BTreeSet::from([api_prod]), 0, 150);
+        let got = idx.candidate_blocks("t", &BTreeSet::from([api_prod]), 0, 150);
         assert!(got == vec!["b1.parquet".to_string()]);
 
-        let got = index.candidate_blocks_for_series("t", &BTreeSet::from([api_prod]), 500, 600);
+        let got = idx.candidate_blocks("t", &BTreeSet::from([api_prod]), 500, 600);
         assert!(got.is_empty());
     }
 
     #[test]
-    fn trait_candidate_blocks_are_time_only() {
-        let mut index = seed();
-        index.add_block(&BlockMeta {
-            tenant: "t".to_string(),
-            object_key: "b1.parquet".to_string(),
+    fn label_names_and_values() {
+        let idx = seed();
+        let mut names = idx.label_names("t");
+        names.sort();
+        assert!(names == vec!["app".to_string(), "env".to_string()]);
+        let mut envs = idx.label_values("t", "env");
+        envs.sort();
+        assert!(envs == vec!["dev".to_string(), "prod".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_round_trips() {
+        use std::sync::Arc;
+
+        use object_store::ObjectStore;
+        use object_store::memory::InMemory;
+
+        let idx = seed();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        idx.save(&store, "index/snapshot.json").await.unwrap();
+
+        let loaded = Index::load(&store, "index/snapshot.json").await.unwrap();
+        let got = loaded
+            .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+            .unwrap();
+        assert!(got.len() == 2);
+    }
+
+    #[test]
+    fn index_implements_block_index_time_prefilter() {
+        let mut idx = seed();
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b1.parquet".into(),
             min_ts: 0,
             max_ts: 100,
             row_count: 1,
             fingerprints: vec![],
         });
-        assert!(BlockIndex::candidate_blocks(&index, "t", 50, 60) == vec!["b1.parquet"]);
-        assert!(BlockIndex::block_count(&index, "t") == 1);
-    }
-
-    #[test]
-    fn label_names_and_values() {
-        let index = seed();
-        let mut names = index.label_names("t");
-        names.sort();
-        assert!(names == vec!["app".to_string(), "env".to_string()]);
-        let mut envs = index.label_values("t", "env");
-        envs.sort();
-        assert!(envs == vec!["dev".to_string(), "prod".to_string()]);
-    }
-
-    #[test]
-    fn replace_blocks_swaps_old_keys_for_new_metadata() {
-        let mut index = seed();
-        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
-        index.add_block(&BlockMeta {
-            tenant: "t".to_string(),
-            object_key: "old-a.parquet".to_string(),
-            min_ts: 0,
-            max_ts: 10,
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b2.parquet".into(),
+            min_ts: 200,
+            max_ts: 300,
             row_count: 1,
-            fingerprints: vec![api_prod],
-        });
-        index.add_block(&BlockMeta {
-            tenant: "t".to_string(),
-            object_key: "old-b.parquet".to_string(),
-            min_ts: 20,
-            max_ts: 30,
-            row_count: 1,
-            fingerprints: vec![api_prod],
+            fingerprints: vec![],
         });
 
-        index.replace_blocks(
-            "t",
-            &["old-a.parquet".to_string(), "old-b.parquet".to_string()],
-            &[BlockMeta {
-                tenant: "t".to_string(),
-                object_key: "new.parquet".to_string(),
-                min_ts: 0,
-                max_ts: 30,
-                row_count: 2,
-                fingerprints: vec![api_prod],
-            }],
+        assert!(<Index as BlockIndex>::block_count(&idx, "t") == 2);
+        assert!(
+            <Index as BlockIndex>::candidate_blocks(&idx, "t", 50, 150)
+                == vec!["b1.parquet".to_string()]
         );
-
-        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 30) == vec!["new.parquet"]);
     }
 }

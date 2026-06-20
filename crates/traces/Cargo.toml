@@ -1,0 +1,35 @@
+[package]
+name = "crabka-traces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Tempo-compatible traces service for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-traces"
+readme = "README.md"
+keywords = ["observability", "tempo", "traceql", "traces", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-traceql = { path = "../traceql", version = "0.3.7" }
+axum = { workspace = true, features = ["json"] }
+base64 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+http-body-util = "0.1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }

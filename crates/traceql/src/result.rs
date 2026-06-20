@@ -1,0 +1,142 @@
+//! Tempo-shaped `TraceQL` result model.
+
+/// A typed attribute value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AttrValue {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+/// One matched span in a result span set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpanRef {
+    pub span_id: [u8; 8],
+    pub parent_span_id: Option<[u8; 8]>,
+    pub name: String,
+    pub start_time_unix_nano: u64,
+    pub duration_nanos: u64,
+    pub attributes: Vec<(String, AttrValue)>,
+}
+
+/// A matched span set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpanSet {
+    pub spans: Vec<SpanRef>,
+    pub matched: u32,
+}
+
+/// One trace in a search response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceResult {
+    pub trace_id: [u8; 16],
+    pub root_service_name: String,
+    pub root_trace_name: String,
+    pub start_time_unix_nano: u64,
+    pub duration_ms: u64,
+    pub span_sets: Vec<SpanSet>,
+}
+
+/// Search response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchResponse {
+    pub traces: Vec<TraceResult>,
+}
+
+/// Full span set for one trace.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceSpans {
+    pub trace_id: [u8; 16],
+    pub root_service_name: String,
+    pub root_trace_name: String,
+    pub spans: Vec<SpanRef>,
+}
+
+/// Tag discovery scope.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagScope {
+    Resource,
+    Span,
+    Intrinsic,
+    Event,
+    Link,
+    Instrumentation,
+}
+
+/// Tag names grouped by scope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScopedTag {
+    pub scope: TagScope,
+    pub tags: Vec<String>,
+}
+
+/// One typed tag value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedValue {
+    pub type_: String,
+    pub value: String,
+}
+
+/// One `TraceQL` metrics series.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceMetricSeries {
+    pub labels: Vec<(String, String)>,
+    pub points: Vec<(i64, f64)>,
+}
+
+/// `TraceQL` metrics response.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceMetricsResponse {
+    pub series: Vec<TraceMetricSeries>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn span_ref_holds_typed_attributes() {
+        let s = SpanRef {
+            span_id: [1; 8],
+            parent_span_id: None,
+            name: "op".into(),
+            start_time_unix_nano: 1000,
+            duration_nanos: 42,
+            attributes: vec![
+                ("http.status_code".into(), AttrValue::Int(200)),
+                ("ok".into(), AttrValue::Bool(true)),
+            ],
+        };
+        assert!(s.attributes[0].1 == AttrValue::Int(200));
+        assert!(s.attributes[1].1 == AttrValue::Bool(true));
+    }
+
+    #[test]
+    fn search_response_nests_span_sets() {
+        let resp = SearchResponse {
+            traces: vec![TraceResult {
+                trace_id: [0xAB; 16],
+                root_service_name: "checkout".into(),
+                root_trace_name: "POST /pay".into(),
+                start_time_unix_nano: 5,
+                duration_ms: 12,
+                span_sets: vec![SpanSet {
+                    spans: vec![],
+                    matched: 3,
+                }],
+            }],
+        };
+        assert!(resp.traces[0].span_sets[0].matched == 3);
+        assert!(resp.traces[0].trace_id == [0xAB; 16]);
+    }
+
+    #[test]
+    fn tag_scope_is_copy() {
+        let s = TagScope::Span;
+        let c = s;
+        assert!(s == TagScope::Span);
+        assert!(c == TagScope::Span);
+    }
+}

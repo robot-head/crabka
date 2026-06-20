@@ -1,37 +1,33 @@
 [package]
-name = "crabka-blockstore"
+name = "crabka-traceql"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-description = "Signal-agnostic columnar block store for Crabka observability"
+description = "TraceQL engine for Crabka's Grafana-Tempo-equivalent traces backend"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
-documentation = "https://docs.rs/crabka-blockstore"
+documentation = "https://docs.rs/crabka-traceql"
 readme = "README.md"
-keywords = ["observability", "datafusion", "parquet", "object-store", "crabka"]
+keywords = ["observability", "tempo", "traceql", "datafusion", "crabka"]
 categories = ["database-implementations"]
 
 [lints]
 workspace = true
 
 [dependencies]
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 arrow = { workspace = true }
-parquet = { workspace = true }
 datafusion = { workspace = true }
-object_store = { workspace = true }
-url = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures = { workspace = true }
+regex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-regex = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
 proptest = { workspace = true }
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

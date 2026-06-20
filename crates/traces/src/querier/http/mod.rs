@@ -1,0 +1,580 @@
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use base64::Engine;
+use crabka_traceql::{
+    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlEngine,
+    TypedValue,
+};
+use serde_json::{Map, Value, json};
+
+const TENANT_HEADER: &str = "x-scope-orgid";
+
+struct AppState<S: SpanStore> {
+    engine: Arc<TraceqlEngine<S>>,
+}
+
+impl<S: SpanStore> Clone for AppState<S> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: Arc::clone(&self.engine),
+        }
+    }
+}
+
+pub fn router<S>(engine: Arc<TraceqlEngine<S>>) -> Router
+where
+    S: SpanStore + 'static,
+{
+    Router::new()
+        .route("/api/search", get(search::<S>))
+        .route("/api/search/tags", get(search_tags::<S>))
+        .route("/api/v2/search/tags", get(search_tags_v2::<S>))
+        .route("/api/search/tag/{tag}/values", get(search_tag_values::<S>))
+        .route(
+            "/api/v2/search/tag/{tag}/values",
+            get(search_tag_values_v2::<S>),
+        )
+        .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
+        .with_state(AppState { engine })
+}
+
+async fn search<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let Some(query) = query_param(&uri, "q") else {
+        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    };
+    let start_ns = query_param(&uri, "start")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let end_ns = query_param(&uri, "end")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MAX);
+    let limit = query_param(&uri, "limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    match state
+        .engine
+        .search(&tenant, &query, start_ns, end_ns, limit)
+        .await
+    {
+        Ok(resp) => Json(search_json(resp)).into_response(),
+        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+async fn search_tags<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = time_bounds(&uri);
+    let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
+    match state
+        .engine
+        .tag_names(&tenant, scope, start_ns, end_ns)
+        .await
+    {
+        Ok(tags) => Json(search_tags_json(&tags)).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn search_tags_v2<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = time_bounds(&uri);
+    match state
+        .engine
+        .tag_names(&tenant, None, start_ns, end_ns)
+        .await
+    {
+        Ok(tags) => Json(search_tags_v2_json(&tags)).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn search_tag_values<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = time_bounds(&uri);
+    match state
+        .engine
+        .tag_values(&tenant, &tag, start_ns, end_ns)
+        .await
+    {
+        Ok(values) => Json(search_tag_values_json(&values)).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn search_tag_values_v2<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = time_bounds(&uri);
+    match state
+        .engine
+        .tag_values(&tenant, &tag, start_ns, end_ns)
+        .await
+    {
+        Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn trace_by_id<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path(trace_id): Path<String>,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let Ok(trace_id) = decode_trace_id(&trace_id) else {
+        return (StatusCode::BAD_REQUEST, "trace id must be 32 hex chars").into_response();
+    };
+    let tenant = tenant(&headers);
+
+    match state.engine.trace_by_id(&tenant, &trace_id).await {
+        Ok(Some(trace)) => Json(trace_json(&trace)).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+fn tenant(headers: &HeaderMap) -> String {
+    headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("default")
+        .to_string()
+}
+
+fn query_param(uri: &Uri, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+fn time_bounds(uri: &Uri) -> (i64, i64) {
+    let start_ns = query_param(uri, "start")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let end_ns = query_param(uri, "end")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MAX);
+    (start_ns, end_ns)
+}
+
+fn parse_tag_scope(scope: &str) -> Option<TagScope> {
+    match scope {
+        "resource" => Some(TagScope::Resource),
+        "span" => Some(TagScope::Span),
+        "intrinsic" => Some(TagScope::Intrinsic),
+        "event" => Some(TagScope::Event),
+        "link" => Some(TagScope::Link),
+        "instrumentation" => Some(TagScope::Instrumentation),
+        _ => None,
+    }
+}
+
+fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
+    let mut out = [0; 16];
+    hex::decode_to_slice(trace_id, &mut out)?;
+    Ok(out)
+}
+
+fn search_json(resp: SearchResponse) -> Value {
+    let inspected = resp.traces.len();
+    json!({
+        "traces": resp.traces.into_iter().map(|trace| {
+            json!({
+                "traceID": hex::encode(trace.trace_id),
+                "rootServiceName": trace.root_service_name,
+                "rootTraceName": trace.root_trace_name,
+                "startTimeUnixNano": trace.start_time_unix_nano.to_string(),
+                "durationMs": trace.duration_ms,
+                "spanSets": trace.span_sets.into_iter().map(|set| {
+                    json!({
+                        "spans": set.spans.iter().map(search_span_json).collect::<Vec<_>>(),
+                        "matched": set.matched,
+                    })
+                }).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
+        "metrics": {
+            "totalBlocks": 0,
+            "inspectedTraces": inspected,
+            "inspectedBytes": 0,
+        },
+    })
+}
+
+fn search_tags_json(tags: &[ScopedTag]) -> Value {
+    json!({
+        "tagNames": tags.iter().flat_map(|scope| scope.tags.iter()).collect::<Vec<_>>(),
+        "metrics": {
+            "inspectedBytes": "0",
+        },
+    })
+}
+
+fn search_tags_v2_json(tags: &[ScopedTag]) -> Value {
+    json!({
+        "scopes": tags.iter().map(|scope| {
+            json!({
+                "name": tag_scope_name(scope.scope),
+                "tags": &scope.tags,
+            })
+        }).collect::<Vec<_>>(),
+        "metrics": {
+            "inspectedBytes": "0",
+        },
+    })
+}
+
+fn search_tag_values_json(values: &[TypedValue]) -> Value {
+    json!({
+        "tagValues": values.iter().map(|value| &value.value).collect::<Vec<_>>(),
+        "metrics": {
+            "inspectedBytes": "0",
+        },
+    })
+}
+
+fn search_tag_values_v2_json(values: &[TypedValue]) -> Value {
+    json!({
+        "tagValues": values.iter().map(|value| {
+            json!({
+                "type": &value.type_,
+                "value": &value.value,
+            })
+        }).collect::<Vec<_>>(),
+        "metrics": {
+            "inspectedBytes": "0",
+        },
+    })
+}
+
+fn tag_scope_name(scope: TagScope) -> &'static str {
+    match scope {
+        TagScope::Resource => "resource",
+        TagScope::Span => "span",
+        TagScope::Intrinsic => "intrinsic",
+        TagScope::Event => "event",
+        TagScope::Link => "link",
+        TagScope::Instrumentation => "instrumentation",
+    }
+}
+
+fn search_span_json(span: &SpanRef) -> Value {
+    json!({
+        "spanID": hex::encode(span.span_id),
+        "startTimeUnixNano": span.start_time_unix_nano.to_string(),
+        "durationNanos": span.duration_nanos.to_string(),
+        "attributes": attrs_json(&span.attributes),
+    })
+}
+
+fn trace_json(trace: &TraceSpans) -> Value {
+    json!({
+        "trace": {
+            "resourceSpans": [{
+                "resource": {
+                    "attributes": [{
+                        "key": "service.name",
+                        "value": {"stringValue": trace.root_service_name},
+                    }],
+                },
+                "scopeSpans": [{
+                    "scope": {},
+                    "spans": trace.spans.iter().map(|span| trace_span_json(trace.trace_id, span)).collect::<Vec<_>>(),
+                }],
+            }],
+        },
+        "status": "COMPLETE",
+        "message": "",
+    })
+}
+
+fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
+    let mut obj = Map::new();
+    obj.insert("traceId".into(), json!(base64(trace_id)));
+    obj.insert("spanId".into(), json!(base64(span.span_id)));
+    if let Some(parent_span_id) = span.parent_span_id {
+        obj.insert("parentSpanId".into(), json!(base64(parent_span_id)));
+    }
+    obj.insert("name".into(), json!(span.name));
+    obj.insert(
+        "startTimeUnixNano".into(),
+        json!(span.start_time_unix_nano.to_string()),
+    );
+    obj.insert(
+        "endTimeUnixNano".into(),
+        json!((span.start_time_unix_nano + span.duration_nanos).to_string()),
+    );
+    obj.insert("attributes".into(), attrs_json(&span.attributes));
+    Value::Object(obj)
+}
+
+fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
+    Value::Array(
+        attrs
+            .iter()
+            .map(|(key, value)| {
+                json!({
+                    "key": key,
+                    "value": attr_value_json(value),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn attr_value_json(value: &AttrValue) -> Value {
+    match value {
+        AttrValue::Str(v) => json!({"stringValue": v}),
+        AttrValue::Int(v) => json!({"intValue": v.to_string()}),
+        AttrValue::Float(v) => json!({"doubleValue": v}),
+        AttrValue::Bool(v) => json!({"boolValue": v}),
+    }
+}
+
+fn base64<const N: usize>(bytes: [u8; N]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use crabka_traceql::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine};
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    fn span(trace: u8, span: u8, parent: Option<u8>, svc: &str) -> InputSpan {
+        InputSpan {
+            trace_id: [trace; 16],
+            span_id: [span; 8],
+            parent_span_id: parent.map(|p| [p; 8]),
+            name: "span".into(),
+            kind: 0,
+            start_unix_nano: 1_000 + i64::from(span),
+            duration_nanos: 200,
+            status_code: 0,
+            status_message: String::new(),
+            attrs: vec![("svc".into(), AttrValue::Str(svc.into()))],
+        }
+    }
+
+    fn app() -> axum::Router {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        router(engine)
+    }
+
+    async fn get_json(uri: &str) -> (StatusCode, Value) {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn search_returns_tempo_search_shape() {
+        let (status, body) = get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "traces": [{
+                    "traceID": "09090909090909090909090909090909",
+                    "rootServiceName": "svc-a",
+                    "rootTraceName": "root-a",
+                    "startTimeUnixNano": "1001",
+                    "durationMs": 0,
+                    "spanSets": [{
+                        "spans": [{
+                            "spanID": "0202020202020202",
+                            "startTimeUnixNano": "1002",
+                            "durationNanos": "200",
+                            "attributes": [{"key": "svc", "value": {"stringValue": "b"}}]
+                        }],
+                        "matched": 1
+                    }]
+                }],
+                "metrics": {
+                    "totalBlocks": 0,
+                    "inspectedTraces": 1,
+                    "inspectedBytes": 0
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn by_id_returns_tempo_trace_shape() {
+        let (status, body) = get_json("/api/v2/traces/09090909090909090909090909090909").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "trace": {
+                    "resourceSpans": [{
+                        "resource": {
+                            "attributes": [{
+                                "key": "service.name",
+                                "value": {"stringValue": "svc-a"}
+                            }]
+                        },
+                        "scopeSpans": [{
+                            "scope": {},
+                            "spans": [
+                                {
+                                    "traceId": "CQkJCQkJCQkJCQkJCQkJCQ==",
+                                    "spanId": "AQEBAQEBAQE=",
+                                    "name": "span",
+                                    "startTimeUnixNano": "1001",
+                                    "endTimeUnixNano": "1201",
+                                    "attributes": [{"key": "svc", "value": {"stringValue": "a"}}]
+                                },
+                                {
+                                    "traceId": "CQkJCQkJCQkJCQkJCQkJCQ==",
+                                    "spanId": "AgICAgICAgI=",
+                                    "parentSpanId": "AQEBAQEBAQE=",
+                                    "name": "span",
+                                    "startTimeUnixNano": "1002",
+                                    "endTimeUnixNano": "1202",
+                                    "attributes": [{"key": "svc", "value": {"stringValue": "b"}}]
+                                }
+                            ]
+                        }]
+                    }]
+                },
+                "status": "COMPLETE",
+                "message": ""
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_returns_legacy_tempo_shape() {
+        let (status, body) = get_json("/api/search/tags?scope=span").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagNames": ["svc"],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_v2_returns_scoped_tempo_shape() {
+        let (status, body) = get_json("/api/v2/search/tags").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "scopes": [
+                    {
+                        "name": "resource",
+                        "tags": ["service.name"]
+                    },
+                    {
+                        "name": "span",
+                        "tags": ["svc"]
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_returns_legacy_tempo_shape() {
+        let (status, body) = get_json("/api/search/tag/service.name/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": ["svc-a"],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_returns_typed_tempo_shape() {
+        let (status, body) = get_json("/api/v2/search/tag/.svc/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [
+                    {
+                        "type": "string",
+                        "value": "a"
+                    },
+                    {
+                        "type": "string",
+                        "value": "b"
+                    }
+                ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+}
