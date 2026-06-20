@@ -22,6 +22,7 @@ pub struct IngestQuery {
     pub labels: Vec<(String, String)>,
     pub format: IngestFormat,
     pub sample_rate: u32,
+    pub units: String,
 }
 
 pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
@@ -29,6 +30,7 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
     let mut labels = Vec::new();
     let mut format = IngestFormat::Groups;
     let mut sample_rate = 100;
+    let mut units = "count".to_string();
 
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -47,6 +49,11 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
             "sampleRate" => {
                 sample_rate = value.parse().unwrap_or(100);
             }
+            "units" => {
+                if !value.is_empty() {
+                    units = value;
+                }
+            }
             _ => {}
         }
     }
@@ -60,6 +67,7 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
         labels,
         format,
         sample_rate,
+        units,
     })
 }
 
@@ -124,7 +132,7 @@ pub async fn decode_ingest_multipart(
             let raw = folded_bytes.ok_or_else(|| {
                 ProfilesError::Invalid("missing multipart folded `profile` part".to_string())
             })?;
-            folded_to_pprof(&query.name, &String::from_utf8_lossy(&raw))?
+            folded_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&raw))?
         }
         IngestFormat::Jfr => {
             let raw = jfr_bytes.ok_or_else(|| {
@@ -210,7 +218,7 @@ fn jfr_to_pprof(name: &str, raw: &[u8]) -> Result<PprofProfile, ProfilesError> {
     let body = std::str::from_utf8(raw).map_err(|err| {
         ProfilesError::Decode(format!("jfr payload is not UTF-8 collapsed stacks: {err}"))
     })?;
-    folded_to_pprof(name, body)
+    folded_to_pprof(name, "count", body)
 }
 
 fn binary_jfr_to_pprof(name: &str, raw: &[u8]) -> Result<PprofProfile, ProfilesError> {
@@ -302,7 +310,11 @@ fn parse_labels_part(raw: &[u8]) -> Result<Vec<(String, String)>, ProfilesError>
         .collect()
 }
 
-fn folded_to_pprof(name: &str, body: &str) -> Result<PprofProfile, ProfilesError> {
+fn folded_to_pprof(
+    name: &str,
+    sample_unit: &str,
+    body: &str,
+) -> Result<PprofProfile, ProfilesError> {
     let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
     for (line_no, raw_line) in body.lines().enumerate() {
         let line = raw_line.trim();
@@ -337,7 +349,7 @@ fn folded_to_pprof(name: &str, body: &str) -> Result<PprofProfile, ProfilesError
             "folded profile has no samples".to_string(),
         ));
     }
-    stacks_to_pprof(name, "samples", "count", stacks)
+    stacks_to_pprof(name, "samples", sample_unit, stacks)
 }
 
 fn stacks_to_pprof(
@@ -575,6 +587,30 @@ mod tests {
         assert!(raw.labels.get("__name__") == Some("myapp"));
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
         assert!(raw.profile.samples().len() == 2);
+    }
+
+    #[tokio::test]
+    async fn decode_multipart_folded_groups_applies_query_units() {
+        let query = parse_ingest_query("name=myapp&units=bytes").unwrap();
+        let boundary = "test-boundary";
+        let folded = "main;work 7\n";
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"profile\"\r\n");
+        body.extend_from_slice(b"Content-Type: text/plain\r\n\r\n");
+        body.extend_from_slice(folded.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let raw = decode_ingest_multipart(
+            &query,
+            &format!("multipart/form-data; boundary={boundary}"),
+            bytes::Bytes::from(body),
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string()));
     }
 
     #[tokio::test]
