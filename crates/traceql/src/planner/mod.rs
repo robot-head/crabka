@@ -67,13 +67,22 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
             Pipeline::Filter { op, value },
         ] => {
             let trace = selector::ident(COL_TRACE_ID);
-            let pred = count_filter_sql(*op, *value)?;
+            let pred = aggregate_filter_sql("COUNT(*)", *op, *value)?;
             Ok(format!(
                 "WITH matched AS ({spanset_sql}), \
                  passing AS (SELECT {trace} FROM matched GROUP BY {trace} HAVING {pred}) \
                  SELECT matched.* FROM matched JOIN passing ON matched.{trace} = passing.{trace}"
             ))
         }
+        [
+            Pipeline::Aggregate(
+                agg @ (Aggregate::Sum(_)
+                | Aggregate::Avg(_)
+                | Aggregate::Min(_)
+                | Aggregate::Max(_)),
+            ),
+            Pipeline::Filter { op, value },
+        ] => aggregate_filter_sql_query(spanset_sql, agg, *op, *value),
         [Pipeline::Aggregate(Aggregate::Count), Pipeline::By(by)]
         | [Pipeline::By(by), Pipeline::Aggregate(Aggregate::Count)] => {
             grouped_count_sql(spanset_sql, by, None)
@@ -112,7 +121,7 @@ fn grouped_count_sql(
         .map(|col| format!("matched.{col} = passing.{col}"))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let pred = count_filter_sql(op, value)?;
+    let pred = aggregate_filter_sql("COUNT(*)", op, value)?;
     Ok(format!(
         "WITH matched AS ({spanset_sql}), \
          passing AS (SELECT {group_exprs} FROM matched GROUP BY {group_exprs} HAVING {pred}) \
@@ -120,7 +129,41 @@ fn grouped_count_sql(
     ))
 }
 
-fn count_filter_sql(op: ComparisonOp, value: f64) -> Result<String> {
+fn aggregate_filter_sql_query(
+    spanset_sql: &str,
+    agg: &Aggregate,
+    op: ComparisonOp,
+    value: f64,
+) -> Result<String> {
+    let trace = selector::ident(COL_TRACE_ID);
+    let expr = aggregate_expr_sql(agg)?;
+    let pred = aggregate_filter_sql(&expr, op, value)?;
+    Ok(format!(
+        "WITH matched AS ({spanset_sql}), \
+         passing AS (SELECT {trace} FROM matched GROUP BY {trace} HAVING {pred}) \
+         SELECT matched.* FROM matched JOIN passing ON matched.{trace} = passing.{trace}"
+    ))
+}
+
+fn aggregate_expr_sql(agg: &Aggregate) -> Result<String> {
+    let (func, field) = match agg {
+        Aggregate::Sum(field) => ("SUM", field),
+        Aggregate::Avg(field) => ("AVG", field),
+        Aggregate::Min(field) => ("MIN", field),
+        Aggregate::Max(field) => ("MAX", field),
+        _ => {
+            return Err(TraceqlError::Unsupported(format!(
+                "aggregate {agg:?} is not supported in scalar filters"
+            )));
+        }
+    };
+    Ok(format!(
+        "{func}({})",
+        selector::ident(&selector::field_to_column(field)?)
+    ))
+}
+
+fn aggregate_filter_sql(expr: &str, op: ComparisonOp, value: f64) -> Result<String> {
     if !value.is_finite() {
         return Err(TraceqlError::Plan(
             "pipeline filter value is not finite".into(),
@@ -139,7 +182,7 @@ fn count_filter_sql(op: ComparisonOp, value: f64) -> Result<String> {
             ));
         }
     };
-    Ok(format!("COUNT(*) {op} {value}"))
+    Ok(format!("{expr} {op} {value}"))
 }
 
 fn spanset_to_sql(expr: &SpansetExpr, table: &str) -> Result<String> {
@@ -655,5 +698,61 @@ mod tests {
             .await
             .unwrap();
         assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn avg_filter_keeps_spans_from_passing_traces() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span_with_parent(
+                    1,
+                    None,
+                    [1; 16],
+                    "fast-a",
+                    20,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    2,
+                    None,
+                    [1; 16],
+                    "fast-b",
+                    40,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+            ],
+        );
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span_with_parent(
+                    3,
+                    None,
+                    [2; 16],
+                    "slow-a",
+                    200,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    4,
+                    None,
+                    [2; 16],
+                    "slow-b",
+                    400,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+            ],
+        );
+
+        let out = planned("{ .svc = \"api\" } | avg(span:duration) > 100", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
     }
 }
