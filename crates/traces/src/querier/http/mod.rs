@@ -395,6 +395,17 @@ fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
                 "points": series.points.iter()
                     .map(|(ts, value)| json!([ts.to_string(), *value]))
                     .collect::<Vec<_>>(),
+                "exemplars": series.exemplars.iter()
+                    .map(|exemplar| {
+                        json!({
+                            "labels": exemplar.labels.iter()
+                                .map(|(key, value)| (key.clone(), json!(value)))
+                                .collect::<Map<_, _>>(),
+                            "value": exemplar.value,
+                            "timestamp": exemplar.timestamp_ns.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
     })
@@ -577,17 +588,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_routes_return_plain_text_unsupported_until_traceql_metrics_land() {
-        let (status, body) =
-            get_text("/api/metrics/query_range?q=%7B%20%7D%20%7C%20rate()&start=0&end=60&step=60")
-                .await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "unsupported: traceql metrics: slice 3");
+    async fn metrics_routes_return_traceql_metrics_json() {
+        let (status, body) = get_json(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20rate()&start=0&end=1&step=1",
+        )
+        .await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "series": [{
+                    "labels": {},
+                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "exemplars": [{
+                        "labels": {
+                            "span_id": "0101010101010101",
+                            "trace_id": "09090909090909090909090909090909"
+                        },
+                        "timestamp": "1001",
+                        "value": 1.0
+                    }]
+                }]
+            })
+        );
 
-        let (status, body) =
-            get_text("/api/metrics/query?q=%7B%20%7D%20%7C%20rate()&time=60").await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "unsupported: traceql metrics: slice 3");
+        let (status, body) = get_json(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1",
+        )
+        .await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "series": [{
+                    "labels": {},
+                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "exemplars": [{
+                        "labels": {
+                            "span_id": "0101010101010101",
+                            "trace_id": "09090909090909090909090909090909"
+                        },
+                        "timestamp": "1001",
+                        "value": 1.0
+                    }]
+                }]
+            })
+        );
     }
 
     #[tokio::test]

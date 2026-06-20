@@ -8,12 +8,13 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
 
+use crate::ast::{Aggregate, Field, Intrinsic, Pipeline, Query, Scope};
 use crate::error::{Result, TraceqlError};
 use crate::parser::parse;
 use crate::planner::{PlannerContext, plan_query};
 use crate::result::{
-    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope, TraceMetricsResponse,
-    TraceResult, TraceSpans, TypedValue,
+    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope, TraceMetricExemplar,
+    TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 use crate::span_columns::{
     ATTR_PREFIX, COL_DURATION, COL_NAME, COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME,
@@ -26,6 +27,7 @@ pub struct EngineOpts {
     pub default_limit: usize,
     pub default_spss: usize,
     pub max_traces: usize,
+    pub max_exemplars: usize,
 }
 
 impl Default for EngineOpts {
@@ -34,6 +36,7 @@ impl Default for EngineOpts {
             default_limit: 20,
             default_spss: 3,
             max_traces: 1000,
+            max_exemplars: 1,
         }
     }
 }
@@ -90,14 +93,41 @@ impl<S: SpanStore> TraceqlEngine<S> {
 
     pub async fn query_range(
         &self,
-        _tenant: &str,
-        _query: &str,
-        _start_ns: i64,
-        _end_ns: i64,
-        _step_ns: i64,
+        tenant: &str,
+        query: &str,
+        start_ns: i64,
+        end_ns: i64,
+        step_ns: i64,
     ) -> Result<TraceMetricsResponse> {
-        std::future::ready(()).await;
-        Err(TraceqlError::Unsupported("traceql metrics: slice 3".into()))
+        let q = parse(query)?;
+        let metric = metric_plan(&q)?;
+        let planned = plan_query(
+            self.store.as_ref(),
+            &PlannerContext {
+                tenant: tenant.to_string(),
+                start_ns,
+                end_ns,
+            },
+            &Query {
+                root: q.root,
+                pipeline: Vec::new(),
+            },
+        )
+        .await?;
+        let batches = planned
+            .ctx
+            .execute_logical_plan(planned.plan)
+            .await?
+            .collect()
+            .await?;
+        assemble_metrics_response(
+            &batches,
+            start_ns,
+            end_ns,
+            step_ns,
+            &metric,
+            self.opts.max_exemplars,
+        )
     }
 
     pub async fn trace_by_id(
@@ -127,6 +157,428 @@ impl<S: SpanStore> TraceqlEngine<S> {
     ) -> Result<Vec<TypedValue>> {
         self.store.tag_values(tenant, tag, start_ns, end_ns).await
     }
+}
+
+#[derive(Clone, Copy)]
+enum MetricFunction {
+    Rate,
+    CountOverTime,
+    SumOverTime,
+    AvgOverTime,
+    MinOverTime,
+    MaxOverTime,
+    QuantileOverTime,
+}
+
+struct MetricPlan {
+    function: MetricFunction,
+    value: Option<Field>,
+    quantiles: Vec<f64>,
+    by: Vec<Field>,
+}
+
+fn metric_plan(q: &Query) -> Result<MetricPlan> {
+    match q.pipeline.as_slice() {
+        [Pipeline::Aggregate(aggregate)] => metric_plan_for(aggregate, Vec::new()),
+        [Pipeline::Aggregate(aggregate), Pipeline::By(by)] => {
+            metric_plan_for(aggregate, by.clone())
+        }
+        _ => Err(TraceqlError::Unsupported(
+            "traceql metrics: expected supported *_over_time() metric".into(),
+        )),
+    }
+}
+
+fn metric_plan_for(aggregate: &Aggregate, by: Vec<Field>) -> Result<MetricPlan> {
+    let (function, value, quantiles) = match aggregate {
+        Aggregate::Rate => (MetricFunction::Rate, None, Vec::new()),
+        Aggregate::CountOverTime => (MetricFunction::CountOverTime, None, Vec::new()),
+        Aggregate::SumOverTime(field) => {
+            (MetricFunction::SumOverTime, Some(field.clone()), Vec::new())
+        }
+        Aggregate::AvgOverTime(field) => {
+            (MetricFunction::AvgOverTime, Some(field.clone()), Vec::new())
+        }
+        Aggregate::MinOverTime(field) => {
+            (MetricFunction::MinOverTime, Some(field.clone()), Vec::new())
+        }
+        Aggregate::MaxOverTime(field) => {
+            (MetricFunction::MaxOverTime, Some(field.clone()), Vec::new())
+        }
+        Aggregate::QuantileOverTime { field, quantiles } => (
+            MetricFunction::QuantileOverTime,
+            Some(field.clone()),
+            quantiles.clone(),
+        ),
+        Aggregate::Count
+        | Aggregate::Avg(_)
+        | Aggregate::Sum(_)
+        | Aggregate::Min(_)
+        | Aggregate::Max(_) => {
+            return Err(TraceqlError::Unsupported(
+                "traceql metrics: expected supported *_over_time() metric".into(),
+            ));
+        }
+    };
+    Ok(MetricPlan {
+        function,
+        value,
+        quantiles,
+        by,
+    })
+}
+
+fn assemble_metrics_response(
+    batches: &[RecordBatch],
+    start_ns: i64,
+    end_ns: i64,
+    step_ns: i64,
+    metric: &MetricPlan,
+    max_exemplars: usize,
+) -> Result<TraceMetricsResponse> {
+    if step_ns <= 0 {
+        return Err(TraceqlError::Plan("metrics step must be positive".into()));
+    }
+    if end_ns < start_ns {
+        return Err(TraceqlError::Plan("metrics end must be >= start".into()));
+    }
+
+    let bucket_count = usize::try_from((end_ns - start_ns) / step_ns + 1)
+        .map_err(|e| TraceqlError::Plan(e.to_string()))?;
+    let mut buckets: BTreeMap<Vec<(String, String)>, Vec<MetricBucket>> = BTreeMap::new();
+    for batch in batches {
+        let starts = batch
+            .column_by_name(COL_START)
+            .ok_or_else(|| TraceqlError::Exec(format!("missing column {COL_START}")))?
+            .as_primitive::<arrow::datatypes::Int64Type>();
+        for row in 0..batch.num_rows() {
+            let ts = starts.value(row);
+            if ts < start_ns || ts > end_ns {
+                continue;
+            }
+            let idx = usize::try_from((ts - start_ns) / step_ns)
+                .map_err(|e| TraceqlError::Exec(e.to_string()))?;
+            let labels = metric_labels(batch, row, &metric.by)?;
+            let value = metric
+                .value
+                .as_ref()
+                .map(|field| metric_numeric_value(batch, row, field))
+                .transpose()?;
+            let exemplar = metric_exemplar(batch, row, ts, value.unwrap_or(1.0))?;
+            let series_buckets = buckets
+                .entry(labels)
+                .or_insert_with(|| vec![MetricBucket::default(); bucket_count]);
+            if let Some(bucket) = series_buckets.get_mut(idx) {
+                bucket.record(value, Some(exemplar));
+            }
+        }
+    }
+    if buckets.is_empty() {
+        buckets.insert(Vec::new(), vec![MetricBucket::default(); bucket_count]);
+    }
+
+    let step_seconds = f64_from_i64(step_ns)? / 1_000_000_000.0;
+    let series = buckets
+        .into_iter()
+        .map(|(labels, buckets)| {
+            metric_series_for_group(
+                labels,
+                buckets,
+                metric,
+                start_ns,
+                step_ns,
+                step_seconds,
+                max_exemplars,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(TraceMetricsResponse { series })
+}
+
+fn metric_series_for_group(
+    labels: Vec<(String, String)>,
+    buckets: Vec<MetricBucket>,
+    metric: &MetricPlan,
+    start_ns: i64,
+    step_ns: i64,
+    step_seconds: f64,
+    max_exemplars: usize,
+) -> Result<Vec<TraceMetricSeries>> {
+    let exemplars = metric_exemplars(&buckets, max_exemplars);
+    if matches!(metric.function, MetricFunction::QuantileOverTime) {
+        return metric
+            .quantiles
+            .iter()
+            .map(|quantile| {
+                let mut labels = labels.clone();
+                labels.insert(0, ("p".into(), quantile_label(*quantile)));
+                let points = buckets
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, bucket)| {
+                        let ts = start_ns + i64::try_from(idx).unwrap_or(i64::MAX) * step_ns;
+                        Ok((ts, bucket.quantile(*quantile)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(TraceMetricSeries {
+                    labels,
+                    points,
+                    exemplars: exemplars.clone(),
+                })
+            })
+            .collect();
+    }
+
+    let points = buckets
+        .into_iter()
+        .enumerate()
+        .map(|(idx, bucket)| {
+            let ts = start_ns + i64::try_from(idx).unwrap_or(i64::MAX) * step_ns;
+            let value = match metric.function {
+                MetricFunction::Rate => f64_from_u64(bucket.count)? / step_seconds,
+                MetricFunction::CountOverTime => f64_from_u64(bucket.count)?,
+                MetricFunction::SumOverTime => bucket.sum,
+                MetricFunction::AvgOverTime => bucket.average()?,
+                MetricFunction::MinOverTime => bucket.min.unwrap_or(0.0),
+                MetricFunction::MaxOverTime => bucket.max.unwrap_or(0.0),
+                MetricFunction::QuantileOverTime => unreachable!("handled above"),
+            };
+            Ok((ts, value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(vec![TraceMetricSeries {
+        labels,
+        points,
+        exemplars,
+    }])
+}
+
+#[derive(Clone, Default)]
+struct MetricBucket {
+    count: u64,
+    sum: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    values: Vec<f64>,
+    exemplars: Vec<TraceMetricExemplar>,
+}
+
+impl MetricBucket {
+    fn record(&mut self, value: Option<f64>, exemplar: Option<TraceMetricExemplar>) {
+        self.count += 1;
+        if let Some(exemplar) = exemplar
+            && self.exemplars.is_empty()
+        {
+            self.exemplars.push(exemplar);
+        }
+        let Some(value) = value else {
+            return;
+        };
+        self.sum += value;
+        self.min = Some(self.min.map_or(value, |min| min.min(value)));
+        self.max = Some(self.max.map_or(value, |max| max.max(value)));
+        self.values.push(value);
+    }
+
+    fn average(&self) -> Result<f64> {
+        if self.count == 0 {
+            Ok(0.0)
+        } else {
+            Ok(self.sum / f64_from_u64(self.count)?)
+        }
+    }
+
+    fn quantile(&self, quantile: f64) -> Result<f64> {
+        if self.values.is_empty() {
+            return Ok(0.0);
+        }
+        let mut values = self.values.clone();
+        values.sort_by(f64::total_cmp);
+        if values.len() == 1 {
+            return Ok(values[0]);
+        }
+        let rank = quantile * f64_from_usize(values.len() - 1)?;
+        let lower = usize_from_integer_f64(rank.floor())?;
+        let upper = usize_from_integer_f64(rank.ceil())?;
+        if lower == upper {
+            Ok(values[lower])
+        } else {
+            Ok(values[lower] + (values[upper] - values[lower]) * (rank - f64_from_usize(lower)?))
+        }
+    }
+}
+
+fn metric_exemplar(
+    batch: &RecordBatch,
+    row: usize,
+    timestamp_ns: i64,
+    value: f64,
+) -> Result<TraceMetricExemplar> {
+    Ok(TraceMetricExemplar {
+        labels: vec![
+            (
+                "trace_id".into(),
+                bytes_to_hex(&fixed_16(batch, COL_TRACE_ID, row)?),
+            ),
+            (
+                "span_id".into(),
+                bytes_to_hex(&fixed_8(batch, COL_SPAN_ID, row)?),
+            ),
+        ],
+        value,
+        timestamp_ns,
+    })
+}
+
+fn metric_exemplars(buckets: &[MetricBucket], max_exemplars: usize) -> Vec<TraceMetricExemplar> {
+    buckets
+        .iter()
+        .flat_map(|bucket| bucket.exemplars.iter().cloned())
+        .take(max_exemplars)
+        .collect()
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+fn quantile_label(quantile: f64) -> String {
+    let mut label = quantile.to_string();
+    if label.contains('.') {
+        while label.ends_with('0') {
+            label.pop();
+        }
+        if label.ends_with('.') {
+            label.push('0');
+        }
+    }
+    label
+}
+
+fn metric_labels(
+    batch: &RecordBatch,
+    row: usize,
+    fields: &[Field],
+) -> Result<Vec<(String, String)>> {
+    fields
+        .iter()
+        .map(|field| {
+            let column = metric_field_column(field)?;
+            let value = metric_label_value(batch, &column, row)?;
+            Ok((field.key.clone(), value))
+        })
+        .collect()
+}
+
+fn metric_field_column(field: &Field) -> Result<String> {
+    match field.scope {
+        Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
+        Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
+        Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
+        Scope::Intrinsic(Intrinsic::TraceRootService) => Ok(COL_ROOT_SERVICE_NAME.to_string()),
+        Scope::Intrinsic(Intrinsic::TraceRootName) => Ok(COL_ROOT_SPAN_NAME.to_string()),
+        _ => Err(TraceqlError::Unsupported(format!(
+            "metrics by() field {field:?} is not supported yet"
+        ))),
+    }
+}
+
+fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<String> {
+    let array = batch
+        .column_by_name(column)
+        .ok_or_else(|| TraceqlError::Exec(format!("missing column {column}")))?;
+    if array.is_null(row) {
+        return Ok(String::new());
+    }
+    match array.data_type() {
+        DataType::Utf8 => Ok(array.as_string::<i32>().value(row).to_string()),
+        DataType::Int64 => Ok(array
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(row)
+            .to_string()),
+        DataType::Float64 => Ok(array
+            .as_primitive::<arrow::datatypes::Float64Type>()
+            .value(row)
+            .to_string()),
+        DataType::Boolean => Ok(array.as_boolean().value(row).to_string()),
+        DataType::Int32 => Ok(array
+            .as_primitive::<arrow::datatypes::Int32Type>()
+            .value(row)
+            .to_string()),
+        other => Err(TraceqlError::Exec(format!(
+            "unsupported metrics label column type {other:?}"
+        ))),
+    }
+}
+
+fn metric_numeric_value(batch: &RecordBatch, row: usize, field: &Field) -> Result<f64> {
+    let column = metric_field_column(field)?;
+    let array = batch
+        .column_by_name(&column)
+        .ok_or_else(|| TraceqlError::Exec(format!("missing column {column}")))?;
+    if array.is_null(row) {
+        return Ok(0.0);
+    }
+    match array.data_type() {
+        DataType::Int64 => f64_from_i64(
+            array
+                .as_primitive::<arrow::datatypes::Int64Type>()
+                .value(row),
+        ),
+        DataType::Int32 => f64_from_i64(i64::from(
+            array
+                .as_primitive::<arrow::datatypes::Int32Type>()
+                .value(row),
+        )),
+        DataType::Float64 => Ok(array
+            .as_primitive::<arrow::datatypes::Float64Type>()
+            .value(row)),
+        other => Err(TraceqlError::Unsupported(format!(
+            "metrics fold field {field:?} has non-numeric type {other:?}"
+        ))),
+    }
+}
+
+fn f64_from_i64(value: i64) -> Result<f64> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| TraceqlError::Exec(e.to_string()))
+}
+
+fn f64_from_u64(value: u64) -> Result<f64> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| TraceqlError::Exec(e.to_string()))
+}
+
+fn f64_from_usize(value: usize) -> Result<f64> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: std::num::ParseFloatError| TraceqlError::Exec(e.to_string()))
+}
+
+fn usize_from_integer_f64(value: f64) -> Result<usize> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 {
+        return Err(TraceqlError::Exec(format!(
+            "expected non-negative integer float, got {value}"
+        )));
+    }
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: std::num::ParseIntError| TraceqlError::Exec(e.to_string()))
 }
 
 struct TraceAcc {
@@ -293,19 +745,22 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::TraceqlError;
     use crate::in_memory::InMemorySpanStore;
     use crate::result::AttrValue;
     use crate::span_columns::InputSpan;
 
     fn sp(tid: u8, id: u8, parent: Option<u8>, svc: &str) -> InputSpan {
+        sp_at(tid, id, parent, svc, 1000 + i64::from(id))
+    }
+
+    fn sp_at(tid: u8, id: u8, parent: Option<u8>, svc: &str, start_unix_nano: i64) -> InputSpan {
         InputSpan {
             trace_id: [tid; 16],
             span_id: [id; 8],
             parent_span_id: parent.map(|p| [p; 8]),
             name: format!("op-{id}"),
             kind: 0,
-            start_unix_nano: 1000 + i64::from(id),
+            start_unix_nano,
             duration_nanos: 200,
             status_code: 0,
             status_message: String::new(),
@@ -381,9 +836,252 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_range_is_unsupported_in_slice2() {
-        let e = engine();
-        let err = e.query_range("t", "{ } | rate()", 0, 100_000, 10_000).await;
-        assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
+    async fn count_over_time_counts_matched_spans_per_bucket() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "a", 0),
+                sp_at(1, 2, None, "a", 10_000),
+                sp_at(1, 3, None, "a", 60_000),
+                sp_at(1, 4, None, "b", 70_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"a\" } | count_over_time()",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].points == vec![(0, 2.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn rate_divides_bucket_count_by_step_seconds() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "a", 0),
+                sp_at(1, 2, None, "a", 10_000),
+                sp_at(1, 3, None, "a", 20_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"a\" } | rate()",
+                0,
+                10_000_000_000,
+                10_000_000_000,
+            )
+            .await
+            .unwrap();
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].points == vec![(0, 0.3), (10_000_000_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_attribute_emits_one_series_per_group() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+                sp_at(1, 4, None, "db", 70_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | by(span.svc)",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
+        assert!(got[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn avg_and_sum_over_time_fold_duration_per_bucket() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    duration_nanos: 100,
+                    ..sp_at(1, 1, None, "api", 0)
+                },
+                InputSpan {
+                    duration_nanos: 300,
+                    ..sp_at(1, 2, None, "api", 10_000)
+                },
+                InputSpan {
+                    duration_nanos: 50,
+                    ..sp_at(1, 3, None, "api", 70_000)
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let avg = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | avg_over_time(span:duration)",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(avg.series[0].points == vec![(0, 200.0), (60_000, 50.0), (120_000, 0.0)]);
+
+        let sum = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | sum_over_time(span:duration)",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(sum.series[0].points == vec![(0, 400.0), (60_000, 50.0), (120_000, 0.0)]);
+
+        let min = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | min_over_time(span:duration)",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(min.series[0].points == vec![(0, 100.0), (60_000, 50.0), (120_000, 0.0)]);
+
+        let max = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | max_over_time(span:duration)",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(max.series[0].points == vec![(0, 300.0), (60_000, 50.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn quantile_over_time_emits_per_quantile_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                InputSpan {
+                    duration_nanos: 100,
+                    ..sp_at(1, 1, None, "api", 0)
+                },
+                InputSpan {
+                    duration_nanos: 200,
+                    ..sp_at(1, 2, None, "api", 10_000)
+                },
+                InputSpan {
+                    duration_nanos: 300,
+                    ..sp_at(1, 3, None, "api", 20_000)
+                },
+                InputSpan {
+                    duration_nanos: 400,
+                    ..sp_at(1, 4, None, "api", 30_000)
+                },
+                InputSpan {
+                    duration_nanos: 500,
+                    ..sp_at(1, 5, None, "api", 40_000)
+                },
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | quantile_over_time(span:duration, .5, .9) | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.len() == 2);
+        assert!(series[0].labels == vec![("p".into(), "0.5".into()), ("svc".into(), "api".into())]);
+        assert!(series[0].points == vec![(0, 300.0), (60_000, 0.0)]);
+        assert!(series[1].labels == vec![("p".into(), "0.9".into()), ("svc".into(), "api".into())]);
+        assert!(series[1].points == vec![(0, 460.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_carries_trace_id_exemplars() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(0x11, 0x22, None, "api", 0),
+                sp_at(0x11, 0x33, None, "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].exemplars.len() == 1);
+        assert!(
+            got.series[0].exemplars[0].labels
+                == vec![
+                    ("trace_id".into(), "11111111111111111111111111111111".into()),
+                    ("span_id".into(), "2222222222222222".into())
+                ]
+        );
+        assert!(got.series[0].exemplars[0].timestamp_ns == 0);
+        assert!((got.series[0].exemplars[0].value - 1.0).abs() < f64::EPSILON);
     }
 }

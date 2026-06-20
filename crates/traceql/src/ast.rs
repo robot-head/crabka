@@ -122,9 +122,16 @@ pub enum Pipeline {
     Select(Vec<Field>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Aggregate {
     Count,
+    Rate,
+    CountOverTime,
+    SumOverTime(Field),
+    AvgOverTime(Field),
+    MinOverTime(Field),
+    MaxOverTime(Field),
+    QuantileOverTime { field: Field, quantiles: Vec<f64> },
     Sum(Field),
     Avg(Field),
     Max(Field),

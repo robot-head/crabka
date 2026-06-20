@@ -5,7 +5,7 @@ mod selector;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 
-use crate::ast::{Aggregate, ComparisonOp, Pipeline, Query, SpansetExpr, StructuralOp};
+use crate::ast::{Aggregate, ComparisonOp, Field, Pipeline, Query, SpansetExpr, StructuralOp};
 use crate::error::{Result, TraceqlError};
 use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
 use crate::store::SpanStore;
@@ -74,14 +74,50 @@ fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
                  SELECT matched.* FROM matched JOIN passing ON matched.{trace} = passing.{trace}"
             ))
         }
-        [Pipeline::By(_), Pipeline::Aggregate(Aggregate::Count)]
-        | [Pipeline::Aggregate(Aggregate::Count), Pipeline::By(_)] => Err(
-            TraceqlError::Unsupported("pipeline by() count grouping is not implemented yet".into()),
-        ),
+        [Pipeline::Aggregate(Aggregate::Count), Pipeline::By(by)]
+        | [Pipeline::By(by), Pipeline::Aggregate(Aggregate::Count)] => {
+            grouped_count_sql(spanset_sql, by, None)
+        }
+        [
+            Pipeline::Aggregate(Aggregate::Count),
+            Pipeline::By(by),
+            Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(Aggregate::Count),
+            Pipeline::Filter { op, value },
+        ] => grouped_count_sql(spanset_sql, by, Some((*op, *value))),
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
     }
+}
+
+fn grouped_count_sql(
+    spanset_sql: &str,
+    by: &[Field],
+    filter: Option<(ComparisonOp, f64)>,
+) -> Result<String> {
+    let Some((op, value)) = filter else {
+        return Ok(format!("SELECT * FROM ({spanset_sql}) AS q"));
+    };
+    let group_cols = by
+        .iter()
+        .map(|field| selector::field_to_column(field).map(|col| selector::ident(&col)))
+        .collect::<Result<Vec<_>>>()?;
+    let group_exprs = group_cols.join(", ");
+    let join_pred = group_cols
+        .iter()
+        .map(|col| format!("matched.{col} = passing.{col}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let pred = count_filter_sql(op, value)?;
+    Ok(format!(
+        "WITH matched AS ({spanset_sql}), \
+         passing AS (SELECT {group_exprs} FROM matched GROUP BY {group_exprs} HAVING {pred}) \
+         SELECT matched.* FROM matched JOIN passing ON {join_pred}"
+    ))
 }
 
 fn count_filter_sql(op: ComparisonOp, value: f64) -> Result<String> {
@@ -130,22 +166,36 @@ fn spanset_to_sql(expr: &SpansetExpr, table: &str) -> Result<String> {
         SpansetExpr::Structural { op, lhs, rhs } => {
             let b = spanset_to_sql(lhs, table)?;
             let a = spanset_to_sql(rhs, table)?;
+            let pred = structural_predicate_sql(structural_base_op(*op));
+            if structural_is_negated(*op) {
+                return Ok(format!(
+                    "SELECT DISTINCT b.* FROM ({b}) AS b LEFT JOIN ({a}) AS a ON {pred} \
+                     WHERE a.{} IS NULL",
+                    selector::ident(COL_SPAN_ID)
+                ));
+            }
+            if structural_is_union(*op) {
+                return Ok(format!(
+                    "(SELECT DISTINCT b.* FROM ({b}) AS b JOIN ({a}) AS a ON {pred}) \
+                     UNION \
+                     (SELECT DISTINCT a.* FROM ({b}) AS b JOIN ({a}) AS a ON {pred})"
+                ));
+            }
             Ok(format!(
-                "SELECT DISTINCT b.* FROM ({b}) AS b JOIN ({a}) AS a ON {}",
-                structural_predicate_sql(*op)?
+                "SELECT DISTINCT b.* FROM ({b}) AS b JOIN ({a}) AS a ON {pred}"
             ))
         }
     }
 }
 
-fn structural_predicate_sql(op: StructuralOp) -> Result<String> {
+fn structural_predicate_sql(op: StructuralOp) -> String {
     let trace = selector::ident(COL_TRACE_ID);
     let left = selector::ident(COL_NS_LEFT);
     let right = selector::ident(COL_NS_RIGHT);
     let parent = selector::ident(COL_PARENT_ID);
     let span_id = selector::ident(COL_SPAN_ID);
     let trace_eq = format!("b.{trace} = a.{trace}");
-    let pred = match op {
+    match op {
         StructuralOp::Descendant => {
             format!("{trace_eq} AND b.{left} > a.{left} AND b.{right} < a.{right}")
         }
@@ -165,13 +215,44 @@ fn structural_predicate_sql(op: StructuralOp) -> Result<String> {
         | StructuralOp::UnionAncestor
         | StructuralOp::UnionChild
         | StructuralOp::UnionParent
-        | StructuralOp::UnionSibling => {
-            return Err(TraceqlError::Unsupported(format!(
-                "structural operator {op:?} is not implemented yet"
-            )));
-        }
-    };
-    Ok(pred)
+        | StructuralOp::UnionSibling => unreachable!("mode variants are normalized first"),
+    }
+}
+
+fn structural_base_op(op: StructuralOp) -> StructuralOp {
+    match op {
+        StructuralOp::NegDescendant | StructuralOp::UnionDescendant => StructuralOp::Descendant,
+        StructuralOp::NegAncestor | StructuralOp::UnionAncestor => StructuralOp::Ancestor,
+        StructuralOp::NegChild | StructuralOp::UnionChild => StructuralOp::Child,
+        StructuralOp::NegParent | StructuralOp::UnionParent => StructuralOp::Parent,
+        StructuralOp::UnionSibling => StructuralOp::Sibling,
+        StructuralOp::Descendant
+        | StructuralOp::Ancestor
+        | StructuralOp::Child
+        | StructuralOp::Parent
+        | StructuralOp::Sibling => op,
+    }
+}
+
+fn structural_is_negated(op: StructuralOp) -> bool {
+    matches!(
+        op,
+        StructuralOp::NegDescendant
+            | StructuralOp::NegAncestor
+            | StructuralOp::NegChild
+            | StructuralOp::NegParent
+    )
+}
+
+fn structural_is_union(op: StructuralOp) -> bool {
+    matches!(
+        op,
+        StructuralOp::UnionDescendant
+            | StructuralOp::UnionAncestor
+            | StructuralOp::UnionChild
+            | StructuralOp::UnionParent
+            | StructuralOp::UnionSibling
+    )
 }
 
 #[cfg(test)]
@@ -520,5 +601,60 @@ mod tests {
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[6; 8]]);
+    }
+
+    #[tokio::test]
+    async fn negated_ancestor_returns_lhs_spans_without_anchor_match() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"b\" } !<< { .svc = \"c\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[3; 8]]);
+    }
+
+    #[tokio::test]
+    async fn negated_parent_uses_parent_id_anti_join() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"b\" } !< { .svc = \"c\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[3; 8]]);
+    }
+
+    #[tokio::test]
+    async fn union_descendant_returns_lhs_and_anchor_spans() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"c\" } &>> { .svc = \"b\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
+    }
+
+    #[tokio::test]
+    async fn union_sibling_deduplicates_spans_matching_both_sides() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"b\" } &~ { .svc = \"b\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+    }
+
+    #[tokio::test]
+    async fn count_by_filter_keeps_spans_from_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 1, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 1, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 1, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+        let out = planned("{ .svc != nil } | count() | by(span.svc) > 1", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 }

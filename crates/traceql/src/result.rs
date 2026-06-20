@@ -83,6 +83,15 @@ pub struct TypedValue {
 pub struct TraceMetricSeries {
     pub labels: Vec<(String, String)>,
     pub points: Vec<(i64, f64)>,
+    pub exemplars: Vec<TraceMetricExemplar>,
+}
+
+/// One Prometheus-style exemplar attached to a `TraceQL` metrics series.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceMetricExemplar {
+    pub labels: Vec<(String, String)>,
+    pub value: f64,
+    pub timestamp_ns: i64,
 }
 
 /// `TraceQL` metrics response.

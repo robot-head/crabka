@@ -32,6 +32,9 @@ impl Parser {
         let mut out = Vec::new();
         while self.eat(&Token::Pipe) {
             out.push(self.parse_pipeline_stage()?);
+            if let Some(by) = self.parse_adjacent_by()? {
+                out.push(by);
+            }
             if let Some((op, value)) = self.parse_numeric_filter()? {
                 out.push(Pipeline::Filter { op, value });
             }
@@ -46,6 +49,41 @@ impl Parser {
                 self.expect(&Token::LParen)?;
                 self.expect(&Token::RParen)?;
                 Ok(Pipeline::Aggregate(Aggregate::Count))
+            }
+            "rate" => {
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::Aggregate(Aggregate::Rate))
+            }
+            "count_over_time" => {
+                self.expect(&Token::LParen)?;
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::Aggregate(Aggregate::CountOverTime))
+            }
+            "sum_over_time" | "avg_over_time" | "min_over_time" | "max_over_time" => {
+                self.expect(&Token::LParen)?;
+                let field = self.parse_field()?;
+                self.expect(&Token::RParen)?;
+                let agg = match name.as_str() {
+                    "sum_over_time" => Aggregate::SumOverTime(field),
+                    "avg_over_time" => Aggregate::AvgOverTime(field),
+                    "min_over_time" => Aggregate::MinOverTime(field),
+                    _ => Aggregate::MaxOverTime(field),
+                };
+                Ok(Pipeline::Aggregate(agg))
+            }
+            "quantile_over_time" => {
+                self.expect(&Token::LParen)?;
+                let field = self.parse_field()?;
+                let mut quantiles = Vec::new();
+                while self.eat(&Token::Comma) {
+                    quantiles.push(self.parse_quantile()?);
+                }
+                self.expect(&Token::RParen)?;
+                Ok(Pipeline::Aggregate(Aggregate::QuantileOverTime {
+                    field,
+                    quantiles,
+                }))
             }
             "sum" | "avg" | "max" | "min" => {
                 self.expect(&Token::LParen)?;
@@ -75,6 +113,17 @@ impl Parser {
         }
     }
 
+    fn parse_adjacent_by(&mut self) -> Result<Option<Pipeline>> {
+        if !matches!(self.peek(), Token::Ident(name) if name == "by") {
+            return Ok(None);
+        }
+        self.pos += 1;
+        self.expect(&Token::LParen)?;
+        let fields = self.parse_field_list()?;
+        self.expect(&Token::RParen)?;
+        Ok(Some(Pipeline::By(fields)))
+    }
+
     fn parse_numeric_filter(&mut self) -> Result<Option<(ComparisonOp, f64)>> {
         let Some(op) = self.parse_comparison_op() else {
             return Ok(None);
@@ -100,6 +149,35 @@ impl Parser {
             fields.push(self.parse_field()?);
         }
         Ok(fields)
+    }
+
+    fn parse_quantile(&mut self) -> Result<f64> {
+        let value = if self.eat(&Token::Dot) {
+            let digits = match self.advance() {
+                Token::Int(v) => v.to_string(),
+                other => {
+                    return Err(Self::err(format!(
+                        "expected quantile digits, got {other:?}"
+                    )));
+                }
+            };
+            format!("0.{digits}")
+                .parse()
+                .map_err(|e: std::num::ParseFloatError| TraceqlError::Parse(e.to_string()))?
+        } else {
+            match self.advance() {
+                Token::Float(v) => v,
+                Token::Int(v) => v
+                    .to_string()
+                    .parse()
+                    .map_err(|e: std::num::ParseFloatError| TraceqlError::Parse(e.to_string()))?,
+                other => return Err(Self::err(format!("expected quantile, got {other:?}"))),
+            }
+        };
+        if !(0.0..=1.0).contains(&value) {
+            return Err(Self::err(format!("quantile out of range: {value}")));
+        }
+        Ok(value)
     }
 
     fn parse_spanset_or(&mut self) -> Result<SpansetExpr> {
@@ -465,6 +543,48 @@ mod tests {
                     value: 2.0,
                 }
         );
+    }
+
+    #[test]
+    fn pipeline_adjacent_by_parses_before_filter() {
+        let q = parse("{ .a = 1 } | count() by(span.svc) > 2").unwrap();
+        assert!(q.pipeline.len() == 3);
+        assert!(q.pipeline[0] == Pipeline::Aggregate(Aggregate::Count));
+        assert!(matches!(q.pipeline[1], Pipeline::By(_)));
+        assert!(
+            q.pipeline[2]
+                == Pipeline::Filter {
+                    op: ComparisonOp::Gt,
+                    value: 2.0,
+                }
+        );
+    }
+
+    #[test]
+    fn traceql_metrics_pipeline_functions_parse() {
+        let q = parse("{ .a = 1 } | rate()").unwrap();
+        assert!(q.pipeline == vec![Pipeline::Aggregate(Aggregate::Rate)]);
+
+        let q = parse("{ .a = 1 } | count_over_time()").unwrap();
+        assert!(q.pipeline == vec![Pipeline::Aggregate(Aggregate::CountOverTime)]);
+
+        let q = parse("{ .a = 1 } | avg_over_time(span:duration)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [Pipeline::Aggregate(Aggregate::AvgOverTime(_))]
+        ));
+
+        let q =
+            parse("{ .a = 1 } | quantile_over_time(span:duration, .5, 0.9) by(span.svc)").unwrap();
+        let [
+            Pipeline::Aggregate(Aggregate::QuantileOverTime { quantiles, .. }),
+            Pipeline::By(by),
+        ] = q.pipeline.as_slice()
+        else {
+            panic!("quantile pipeline")
+        };
+        assert!(*quantiles == vec![0.5, 0.9]);
+        assert!(by[0].key == "svc");
     }
 
     #[test]
