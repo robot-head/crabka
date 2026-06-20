@@ -296,10 +296,17 @@ impl SpanStore for InMemorySpanStore {
     ) -> Result<Vec<ScopedTag>> {
         let mut resource = BTreeSet::new();
         let mut span = BTreeSet::new();
+        let mut instrumentation = BTreeSet::new();
         for trace in self.traces_in_range(tenant, start_ns, end_ns) {
             resource.insert("service.name".to_string());
             for input in &trace.spans {
                 span.extend(input.attrs.iter().map(|(key, _)| key.clone()));
+                if !input.instrumentation_name.is_empty() {
+                    instrumentation.insert("instrumentation:name".to_string());
+                }
+                if !input.instrumentation_version.is_empty() {
+                    instrumentation.insert("instrumentation:version".to_string());
+                }
             }
         }
 
@@ -314,6 +321,12 @@ impl SpanStore for InMemorySpanStore {
             out.push(ScopedTag {
                 scope: TagScope::Span,
                 tags: span.into_iter().collect(),
+            });
+        }
+        if matches!(scope, None | Some(TagScope::Instrumentation)) && !instrumentation.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Instrumentation,
+                tags: instrumentation.into_iter().collect(),
             });
         }
         Ok(out)
@@ -595,6 +608,29 @@ mod tests {
         assert!(got[0].tags == vec!["service.name"]);
         assert!(got[1].scope == TagScope::Span);
         assert!(got[1].tags == vec!["svc"]);
+    }
+
+    #[tokio::test]
+    async fn tag_names_return_instrumentation_scope() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "svc",
+            "op",
+            vec![InputSpan {
+                instrumentation_name: "tracer".into(),
+                instrumentation_version: "1.2.3".into(),
+                ..span(1, None, "root", vec![("svc", AttrValue::Str("a".into()))])
+            }],
+        );
+
+        let got = s
+            .tag_names("t", Some(TagScope::Instrumentation), 0, 10_000)
+            .await
+            .unwrap();
+        assert!(got.len() == 1);
+        assert!(got[0].scope == TagScope::Instrumentation);
+        assert!(got[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
     }
 
     #[tokio::test]
