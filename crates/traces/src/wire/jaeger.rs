@@ -1,6 +1,6 @@
 //! Jaeger push-door decoding.
 
-use crate::span::{AttrValue, KeyValue, Span, SpanKind, StatusCode};
+use crate::span::{AttrValue, KeyValue, LinkRecord, Span, SpanKind, StatusCode};
 use crate::wire::WireError;
 
 const T_STOP: u8 = 0;
@@ -156,6 +156,19 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         .find(|reference| reference.ref_type == 0)
         .map(|reference| i64_bytes(reference.span_id))
         .or_else(|| (span.parent_span_id != 0).then(|| i64_bytes(span.parent_span_id)));
+    let links = span
+        .references
+        .iter()
+        .filter(|reference| reference.ref_type != 0)
+        .map(|reference| LinkRecord {
+            trace_id: trace_id(reference.trace_id_high, reference.trace_id_low),
+            span_id: i64_bytes(reference.span_id),
+            attrs: vec![KeyValue {
+                key: "ref.type".into(),
+                value: AttrValue::Str(ref_type_name(reference.ref_type).into()),
+            }],
+        })
+        .collect();
     Span {
         trace_id: trace_id(span.trace_id_high, span.trace_id_low),
         span_id: i64_bytes(span.span_id),
@@ -169,9 +182,17 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         resource_attrs,
         span_attrs: span.tags.clone(),
         events: Vec::new(),
-        links: Vec::new(),
+        links,
         instrumentation_scope: String::new(),
         instrumentation_version: String::new(),
+    }
+}
+
+fn ref_type_name(ref_type: i32) -> &'static str {
+    match ref_type {
+        0 => "child_of",
+        1 => "follows_from",
+        _ => "reference",
     }
 }
 
@@ -402,8 +423,9 @@ pub(crate) mod test_support {
         write_i64_field(out, 4, 0, &mut last);
         write_string_field(out, 5, "GET /", &mut last);
         write_field_header(out, 9, 6, &mut last);
-        write_list_header(out, 12, 1);
+        write_list_header(out, 12, 2);
         write_span_ref(out, 0, 2, 1, 4);
+        write_span_ref(out, 1, 5, 6, 7);
         write_i32_field(out, 7, 0, &mut last);
         write_i64_field(out, 8, 1_000, &mut last);
         write_i64_field(out, 9, 25, &mut last);
@@ -535,6 +557,9 @@ mod tests {
                 .any(|attr| attr.key == "http.method"
                     && attr.value == AttrValue::Str("GET".into()))
         );
+        assert!(span.links.len() == 1);
+        assert!(span.links[0].trace_id == [0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5]);
+        assert!(span.links[0].span_id == [0, 0, 0, 0, 0, 0, 0, 7]);
     }
 
     fn encode_sample_batch() -> Vec<u8> {
@@ -565,8 +590,9 @@ mod tests {
         write_i64_field(out, 4, 0, &mut last);
         write_string_field(out, 5, "GET /", &mut last);
         write_field_header(out, 9, 6, &mut last);
-        write_list_header(out, 12, 1);
+        write_list_header(out, 12, 2);
         write_span_ref(out, 0, 2, 1, 4);
+        write_span_ref(out, 1, 5, 6, 7);
         write_i32_field(out, 7, 0, &mut last);
         write_i64_field(out, 8, 1_000, &mut last);
         write_i64_field(out, 9, 25, &mut last);
