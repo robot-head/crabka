@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -212,11 +213,19 @@ where
 {
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
-    match state
-        .engine
-        .tag_values(&tenant, &tag, start_ns, end_ns)
-        .await
-    {
+    let values = if let Some(query) = query_param(&uri, "q") {
+        state
+            .engine
+            .search(&tenant, &query, start_ns, end_ns, 0)
+            .await
+            .map(|resp| tag_values_from_search(&resp, &tag))
+    } else {
+        state
+            .engine
+            .tag_values(&tenant, &tag, start_ns, end_ns)
+            .await
+    };
+    match values {
         Ok(values) => Json(search_tag_values_v2_json(&values)).into_response(),
         Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
@@ -587,6 +596,39 @@ fn search_tag_values_v2_json(values: &[TypedValue]) -> Value {
     })
 }
 
+fn tag_values_from_search(resp: &SearchResponse, tag: &str) -> Vec<TypedValue> {
+    let tag = tag.strip_prefix('.').unwrap_or(tag);
+    let mut values = BTreeSet::new();
+    for trace in &resp.traces {
+        if tag == "service.name" {
+            values.insert(("string".to_string(), trace.root_service_name.clone()));
+        }
+        for span_set in &trace.span_sets {
+            for span in &span_set.spans {
+                values.extend(
+                    span.attributes
+                        .iter()
+                        .filter(|(key, _)| key == tag)
+                        .map(|(_, value)| typed_value_parts(value)),
+                );
+            }
+        }
+    }
+    values
+        .into_iter()
+        .map(|(type_, value)| TypedValue { type_, value })
+        .collect()
+}
+
+fn typed_value_parts(value: &AttrValue) -> (String, String) {
+    match value {
+        AttrValue::Str(value) => ("string".into(), value.clone()),
+        AttrValue::Int(value) => ("int".into(), value.to_string()),
+        AttrValue::Float(value) => ("float".into(), value.to_string()),
+        AttrValue::Bool(value) => ("bool".into(), value.to_string()),
+    }
+}
+
 fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
     json!({
         "series": resp.series.iter().map(|series| {
@@ -755,6 +797,19 @@ mod tests {
     }
 
     fn span_at(trace: u8, span: u8, parent: Option<u8>, svc: &str, start_ns: i64) -> InputSpan {
+        span_at_with_attrs(trace, span, parent, svc, start_ns, Vec::new())
+    }
+
+    fn span_at_with_attrs(
+        trace: u8,
+        span: u8,
+        parent: Option<u8>,
+        svc: &str,
+        start_ns: i64,
+        attrs: Vec<(String, AttrValue)>,
+    ) -> InputSpan {
+        let mut all_attrs = vec![("svc".into(), AttrValue::Str(svc.into()))];
+        all_attrs.extend(attrs);
         InputSpan {
             trace_id: [trace; 16],
             span_id: [span; 8],
@@ -765,7 +820,7 @@ mod tests {
             duration_nanos: 200,
             status_code: 0,
             status_message: String::new(),
-            attrs: vec![("svc".into(), AttrValue::Str(svc.into()))],
+            attrs: all_attrs,
         }
     }
 
@@ -1288,6 +1343,65 @@ mod tests {
                         "value": "b"
                     }
                 ],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_respects_query_filter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![span_at_with_attrs(
+                1,
+                1,
+                None,
+                "a",
+                1_000,
+                vec![("env".into(), AttrValue::Str("prod".into()))],
+            )],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "b",
+                2_000,
+                vec![("env".into(), AttrValue::Str("dev".into()))],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/search/tag/.svc/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "a"
+                }],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
