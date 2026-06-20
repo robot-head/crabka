@@ -785,16 +785,7 @@ where
         )
         .await
     {
-        Ok(diff) => Json(json!({
-            "flamebearer": {
-                "names": diff.names,
-                "levels": diff.levels.into_iter().map(|level| level.values).collect::<Vec<_>>(),
-                "leftTicks": diff.left_ticks,
-                "rightTicks": diff.right_ticks,
-            },
-            "metadata": flamebearer_metadata("double", &left_type)
-        }))
-        .into_response(),
+        Ok(diff) => Json(flamebearer_diff_json(diff, &left_type)).into_response(),
         Err(err) => profile_error_response(err),
     }
 }
@@ -875,6 +866,28 @@ fn flamebearer_json(flamegraph: crabka_pprof::FlameGraph, profile_type: &str) ->
             "maxSelf": flamegraph.max_self,
         },
         "metadata": flamebearer_metadata("single", profile_type)
+    })
+}
+
+fn flamebearer_diff_json(
+    diff: crabka_pprof::FlameGraphDiff,
+    profile_type: &str,
+) -> serde_json::Value {
+    let max_self = diff
+        .levels
+        .iter()
+        .flat_map(|level| level.values.chunks_exact(7))
+        .fold(0_i64, |max_self, bar| max_self.max(bar[2]).max(bar[5]));
+    json!({
+        "flamebearer": {
+            "names": diff.names,
+            "levels": diff.levels.into_iter().map(|level| level.values).collect::<Vec<_>>(),
+            "numTicks": diff.left_ticks + diff.right_ticks,
+            "maxSelf": max_self,
+            "leftTicks": diff.left_ticks,
+            "rightTicks": diff.right_ticks,
+        },
+        "metadata": flamebearer_metadata("double", profile_type)
     })
 }
 
@@ -1271,6 +1284,53 @@ overrides:
 
         assert!(body.starts_with("digraph flamegraph"));
         assert!(body.contains("main.work"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn render_diff_flamebearer_includes_legacy_ticks_and_max_self() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("leftQuery", &format!(r#"{PT}{{service_name="api"}}"#))
+            .append_pair("rightQuery", &format!(r#"{PT}{{service_name="api"}}"#))
+            .append_pair("from", "0")
+            .append_pair("until", "100")
+            .finish();
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("http://{bound}/pyroscope/render-diff?{query}"))
+            .header("x-scope-orgid", "tenant-a")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            body.pointer("/metadata/format")
+                .and_then(serde_json::Value::as_str)
+                == Some("double"),
+            "{body}"
+        );
+        assert!(
+            body.pointer("/flamebearer/numTicks")
+                .and_then(serde_json::Value::as_i64)
+                == Some(14),
+            "{body}"
+        );
+        assert!(
+            body.pointer("/flamebearer/maxSelf")
+                .and_then(serde_json::Value::as_i64)
+                == Some(7),
+            "{body}"
+        );
     }
 
     #[tokio::test]
