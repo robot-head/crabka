@@ -1371,6 +1371,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_inter_brace_and_keeps_nested_selector_predicate() {
+        let mut event_span = sp(9, 1, None, "a");
+        event_span.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let peer = sp(9, 2, Some(1), "b");
+        let unrelated = sp(8, 1, None, "b");
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![event_span, peer]);
+        s.push_trace("t", "b", "root", vec![unrelated]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search(
+                "t",
+                "{ event:name = \"cache.miss\" } && { .svc = \"b\" }",
+                0,
+                100_000,
+                20,
+            )
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 2);
+        let spans = &r.traces[0].span_sets[0].spans;
+        assert!(spans.iter().any(|span| span.span_id == [1; 8]));
+        assert!(spans.iter().any(|span| span.span_id == [2; 8]));
+    }
+
+    #[tokio::test]
     async fn search_descendant_structural() {
         let e = engine();
         let r = e

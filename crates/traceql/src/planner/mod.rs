@@ -2,10 +2,16 @@
 
 mod selector;
 
+use std::sync::Arc;
+
+use arrow::record_batch::RecordBatch;
+use datafusion::catalog::MemTable;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 
-use crate::ast::{Aggregate, ComparisonOp, Field, Pipeline, Query, SpansetExpr, StructuralOp};
+use crate::ast::{
+    Aggregate, ComparisonOp, Field, FieldExpr, Pipeline, Query, SpansetExpr, StructuralOp,
+};
 use crate::error::{Result, TraceqlError};
 use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
 use crate::store::SpanStore;
@@ -46,7 +52,8 @@ async fn plan_spanset_sql<S: SpanStore>(
     let scan = store
         .scan(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns)
         .await?;
-    let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table))?;
+    let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
+    let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table), &nested_tables)?;
     let sql = pipeline_to_sql(&spanset_sql, pipeline)?;
     let df = scan.ctx.sql(&sql).await?;
     let plan = df.into_unoptimized_plan();
@@ -54,6 +61,67 @@ async fn plan_spanset_sql<S: SpanStore>(
         ctx: scan.ctx,
         plan,
     })
+}
+
+async fn register_nested_selector_tables<S: SpanStore>(
+    store: &S,
+    ctx: &PlannerContext,
+    target_ctx: &SessionContext,
+    root: &SpansetExpr,
+) -> Result<Vec<(FieldExpr, String)>> {
+    let mut selectors = Vec::new();
+    collect_nested_selectors(root, &mut selectors);
+
+    let mut tables = Vec::new();
+    for (idx, selector) in selectors.into_iter().enumerate() {
+        let table_name = format!("nested_selector_{idx}");
+        let scan = store
+            .scan(
+                &ctx.tenant,
+                &selector::field_expr_to_matchers(&selector),
+                ctx.start_ns,
+                ctx.end_ns,
+            )
+            .await?;
+        let batches = collect_table(&scan.ctx, &scan.span_table).await?;
+        register_batches(target_ctx, &table_name, batches)?;
+        tables.push((selector, table_name));
+    }
+    Ok(tables)
+}
+
+fn collect_nested_selectors(expr: &SpansetExpr, out: &mut Vec<FieldExpr>) {
+    match expr {
+        SpansetExpr::Selector(fe) if selector::has_nested_scope(fe) => {
+            if !out.iter().any(|existing| existing == fe.as_ref()) {
+                out.push((**fe).clone());
+            }
+        }
+        SpansetExpr::Selector(_) => {}
+        SpansetExpr::And(lhs, rhs)
+        | SpansetExpr::Or(lhs, rhs)
+        | SpansetExpr::Structural { lhs, rhs, .. } => {
+            collect_nested_selectors(lhs, out);
+            collect_nested_selectors(rhs, out);
+        }
+    }
+}
+
+async fn collect_table(ctx: &SessionContext, table: &str) -> Result<Vec<RecordBatch>> {
+    Ok(ctx.table(table).await?.collect().await?)
+}
+
+fn register_batches(
+    ctx: &SessionContext,
+    table_name: &str,
+    batches: Vec<RecordBatch>,
+) -> Result<()> {
+    let schema = batches
+        .first()
+        .map_or_else(crate::span_columns::span_schema, RecordBatch::schema);
+    let table = MemTable::try_new(schema, vec![batches])?;
+    ctx.register_table(table_name, Arc::new(table))?;
+    Ok(())
 }
 
 fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
@@ -370,17 +438,32 @@ fn aggregate_filter_sql(expr: &str, op: ComparisonOp, value: f64) -> Result<Stri
     Ok(format!("{expr} {op} {value}"))
 }
 
-fn spanset_to_sql(expr: &SpansetExpr, table: &str) -> Result<String> {
+fn spanset_to_sql(
+    expr: &SpansetExpr,
+    table: &str,
+    nested_tables: &[(FieldExpr, String)],
+) -> Result<String> {
     match expr {
+        SpansetExpr::Selector(fe) if selector::has_nested_scope(fe) => {
+            let Some((_, table_name)) = nested_tables
+                .iter()
+                .find(|(candidate, _)| candidate == fe.as_ref())
+            else {
+                return Err(TraceqlError::Plan(
+                    "nested selector table was not registered".into(),
+                ));
+            };
+            Ok(format!("SELECT * FROM {}", selector::ident(table_name)))
+        }
         SpansetExpr::Selector(fe) => selector::selector_sql(table, fe),
         SpansetExpr::Or(lhs, rhs) => Ok(format!(
             "({}) UNION ({})",
-            spanset_to_sql(lhs, table)?,
-            spanset_to_sql(rhs, table)?
+            spanset_to_sql(lhs, table, nested_tables)?,
+            spanset_to_sql(rhs, table, nested_tables)?
         )),
         SpansetExpr::And(lhs, rhs) => {
-            let l = spanset_to_sql(lhs, table)?;
-            let r = spanset_to_sql(rhs, table)?;
+            let l = spanset_to_sql(lhs, table, nested_tables)?;
+            let r = spanset_to_sql(rhs, table, nested_tables)?;
             let trace = selector::ident(COL_TRACE_ID);
             Ok(format!(
                 "(SELECT l.* FROM ({l}) AS l WHERE EXISTS (SELECT 1 FROM ({r}) AS r WHERE r.{trace} = l.{trace})) \
@@ -389,8 +472,8 @@ fn spanset_to_sql(expr: &SpansetExpr, table: &str) -> Result<String> {
             ))
         }
         SpansetExpr::Structural { op, lhs, rhs } => {
-            let b = spanset_to_sql(lhs, table)?;
-            let a = spanset_to_sql(rhs, table)?;
+            let b = spanset_to_sql(lhs, table, nested_tables)?;
+            let a = spanset_to_sql(rhs, table, nested_tables)?;
             let pred = structural_predicate_sql(structural_base_op(*op));
             if structural_is_negated(*op) {
                 return Ok(format!(

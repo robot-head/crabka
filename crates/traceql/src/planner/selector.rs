@@ -165,7 +165,7 @@ pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
     }
 }
 
-fn has_nested_scope(fe: &FieldExpr) -> bool {
+pub(crate) fn has_nested_scope(fe: &FieldExpr) -> bool {
     match fe {
         FieldExpr::Comparison { lhs, .. } | FieldExpr::Field(lhs) => {
             matches!(lhs.scope, Scope::Event | Scope::Link)
