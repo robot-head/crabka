@@ -13,6 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use crabka_profiles::distributor::{self, DistributorState, WalSink};
 use crabka_profiles::hot_store::WalTailProfileStore;
 use crabka_profiles::ingest::TenantLimitConfig;
+use crabka_profiles::limits::OverridesProvider;
 use crabka_profiles::query::{self, QuerierState};
 use crabka_profiles::{ProfileRecord, ProfilesError};
 use reqwest::StatusCode;
@@ -263,6 +264,8 @@ async fn start_crabka_pair(
     let distributor_state = Arc::new(DistributorState {
         sink: Arc::new(sink),
         limits: TenantLimitConfig::default(),
+        profile_overrides: OverridesProvider::new(Default::default()),
+        active_series: Default::default(),
         relabel: Vec::new(),
         max_decompressed: 16 * 1024 * 1024,
     });

@@ -71,6 +71,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.target {
         Target::Distributor => {
             let limits = load_tenant_limits_config(cli.tenant_limits_config.as_deref())?;
+            let profile_overrides = load_profiles_limits_overrides_config(
+                cli.profiles_limits_overrides_config.as_deref(),
+            )?;
             let producer = Producer::builder()
                 .bootstrap(&cli.bootstrap)
                 .build()
@@ -78,6 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let state = Arc::new(DistributorState {
                 sink: Arc::new(KafkaSink::new(Arc::new(producer))),
                 limits,
+                profile_overrides,
+                active_series: Default::default(),
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: 1 << 24,
             });
@@ -281,6 +286,22 @@ mod tests {
             "crabka-profiles",
             "--target",
             "query-frontend",
+            "--profiles-limits-overrides-config",
+            "overrides.yaml",
+        ])
+        .unwrap();
+
+        assert!(
+            cli.profiles_limits_overrides_config.as_deref() == Some(Path::new("overrides.yaml"))
+        );
+    }
+
+    #[test]
+    fn parses_distributor_profiles_limits_overrides_config() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "distributor",
             "--profiles-limits-overrides-config",
             "overrides.yaml",
         ])

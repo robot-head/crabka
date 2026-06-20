@@ -1,9 +1,9 @@
 //! Distributor role: decode ingress doors, split profiles, and append WAL records.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
 use axum::extract::RawQuery;
@@ -21,6 +21,7 @@ use crate::ingest::{
     decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
     split_sample_types,
 };
+use crate::limits::{Limits, OverridesProvider};
 use crate::wal::{
     PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
     WalSymbolSet, partition_key,
@@ -68,6 +69,8 @@ impl WalSink for KafkaSink {
 pub struct DistributorState {
     pub sink: Arc<dyn WalSink>,
     pub limits: TenantLimitConfig,
+    pub profile_overrides: OverridesProvider,
+    pub active_series: Mutex<HashMap<String, BTreeSet<u64>>>,
     pub relabel: Vec<RelabelConfig>,
     pub max_decompressed: usize,
 }
@@ -77,14 +80,15 @@ pub async fn process_raw(
     tenant: &str,
     raws: Vec<crate::ingest::RawProfile>,
 ) -> Result<(), ProfilesError> {
+    let mut pending = Vec::new();
     for mut raw in raws {
         if !apply_relabel(&mut raw.labels, &state.relabel) {
             continue;
         }
         require_service_name(&mut raw.labels);
-        let limits = state.limits.for_tenant(tenant);
+        let limits = ingest_limits_for_tenant(state, tenant);
         cap_session_id(&mut raw.labels, limits.session_id_buckets);
-        enforce_limits(&raw.labels, limits)?;
+        enforce_limits(&raw.labels, &limits)?;
 
         let symbols = extract_symbols(&raw.profile)?;
         for profile in split_sample_types(&raw)? {
@@ -109,10 +113,98 @@ pub async fn process_raw(
                     .collect(),
                 symbols: symbols.clone(),
             };
-            state.sink.append(rec).await?;
+            pending.push(rec);
         }
     }
 
+    enforce_max_series(state, tenant, &pending)?;
+    for rec in pending {
+        let fingerprint = rec.series_fingerprint();
+        state.sink.append(rec).await?;
+        record_active_series(state, tenant, fingerprint)?;
+    }
+
+    Ok(())
+}
+
+fn ingest_limits_for_tenant(state: &DistributorState, tenant: &str) -> crate::ingest::TenantLimits {
+    let base = state.limits.for_tenant(tenant);
+    if !state.profile_overrides.has_tenant_override(tenant) {
+        return base.clone();
+    }
+    let overrides = state.profile_overrides.for_tenant(tenant);
+    merge_ingest_limits(base, overrides)
+}
+
+fn merge_ingest_limits(
+    base: &crate::ingest::TenantLimits,
+    overrides: &Limits,
+) -> crate::ingest::TenantLimits {
+    crate::ingest::TenantLimits {
+        max_label_name_len: usize::try_from(overrides.max_label_name_length)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(base.max_label_name_len),
+        max_label_names_per_series: usize::try_from(overrides.max_label_names_per_series)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(base.max_label_names_per_series),
+        max_label_value_len: usize::try_from(overrides.max_label_value_length)
+            .ok()
+            .filter(|limit| *limit > 0)
+            .unwrap_or(base.max_label_value_len),
+        session_id_buckets: if overrides.max_session_id_cardinality > 0 {
+            overrides.max_session_id_cardinality
+        } else {
+            base.session_id_buckets
+        },
+    }
+}
+
+fn enforce_max_series(
+    state: &DistributorState,
+    tenant: &str,
+    records: &[ProfileRecord],
+) -> Result<(), ProfilesError> {
+    let limit = state.profile_overrides.for_tenant(tenant).max_series;
+    if limit == 0 {
+        return Ok(());
+    }
+    let mut observed = {
+        let active = state
+            .active_series
+            .lock()
+            .map_err(|_| ProfilesError::Invalid("active series lock poisoned".to_string()))?;
+        active.get(tenant).cloned().unwrap_or_default()
+    };
+    for rec in records {
+        observed.insert(rec.series_fingerprint());
+    }
+    if u64::try_from(observed.len()).unwrap_or(u64::MAX) > limit {
+        return Err(ProfilesError::Invalid(
+            crate::limits::LimitError::MaxSeries {
+                limit,
+                observed: u64::try_from(observed.len()).unwrap_or(u64::MAX),
+            }
+            .message(),
+        ));
+    }
+    Ok(())
+}
+
+fn record_active_series(
+    state: &DistributorState,
+    tenant: &str,
+    fingerprint: u64,
+) -> Result<(), ProfilesError> {
+    let mut active = state
+        .active_series
+        .lock()
+        .map_err(|_| ProfilesError::Invalid("active series lock poisoned".to_string()))?;
+    active
+        .entry(tenant.to_string())
+        .or_default()
+        .insert(fingerprint);
     Ok(())
 }
 
@@ -343,6 +435,7 @@ mod tests {
     use super::*;
     use crate::error::ProfilesError;
     use crate::ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits};
+    use crate::limits::OverridesProvider;
     use crate::wal::ProfileRecord;
 
     #[derive(Default)]
@@ -360,6 +453,8 @@ mod tests {
         Arc::new(DistributorState {
             sink,
             limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::new(Default::default()),
+            active_series: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         })
@@ -463,6 +558,8 @@ mod tests {
         let state = Arc::new(DistributorState {
             sink: sink.clone(),
             limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::new(Default::default()),
+            active_series: Default::default(),
             relabel: vec![RelabelConfig {
                 source_labels: vec!["__name__".to_string()],
                 regex: "process_cpu".to_string(),
@@ -491,6 +588,8 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            profile_overrides: OverridesProvider::new(Default::default()),
+            active_series: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
         });
@@ -511,5 +610,73 @@ mod tests {
         .unwrap();
 
         assert!(err.to_string().contains("value exceeds"));
+    }
+
+    #[tokio::test]
+    async fn pyroscope_overrides_drive_ingest_label_limits() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink,
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    max_label_value_length: 3
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap_err();
+        process_raw(
+            &state,
+            "tenant-b",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap();
+
+        assert!(err.to_string().contains("value exceeds"));
+    }
+
+    #[tokio::test]
+    async fn pyroscope_overrides_enforce_max_series_without_partial_writes() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink: sink.clone(),
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    max_series: 1
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_2types()],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("max series exceeded"), "{err}");
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 }

@@ -42,6 +42,11 @@ impl OverridesProvider {
     pub fn for_tenant(&self, tenant: &str) -> &Limits {
         self.per_tenant.get(tenant).unwrap_or(&self.defaults)
     }
+
+    #[must_use]
+    pub fn has_tenant_override(&self, tenant: &str) -> bool {
+        self.per_tenant.contains_key(tenant)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,5 +164,7 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
 
         assert!(*provider.for_tenant("tenant-z") == Limits::default());
+        assert!(!provider.has_tenant_override("tenant-z"));
+        assert!(provider.has_tenant_override("tenant-a"));
     }
 }
