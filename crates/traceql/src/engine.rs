@@ -1261,6 +1261,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_matches_resource_service_name() {
+        let e = engine();
+        let r = e
+            .search("t", "{ resource.service.name = \"a\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].root_service_name == "a");
+    }
+
+    #[tokio::test]
     async fn search_limit_uses_default_for_zero_and_caps_result_count() {
         let e = engine();
         let r = e

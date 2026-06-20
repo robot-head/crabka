@@ -60,6 +60,7 @@ pub(crate) fn field_to_column(field: &Field) -> Result<String> {
                 )));
             }
         },
+        Scope::Resource if field.key == "service.name" => COL_ROOT_SERVICE_NAME,
         Scope::Both
         | Scope::Span
         | Scope::Resource
