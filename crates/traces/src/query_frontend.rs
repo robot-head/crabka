@@ -322,8 +322,8 @@ fn build_querier_request(
                 pairs.append_pair(&key, &value);
             }
         }
-        pairs.append_pair("start", &(shard.start_ns / 1_000_000_000).to_string());
-        pairs.append_pair("end", &(shard.end_ns / 1_000_000_000).to_string());
+        pairs.append_pair("start", &format_ns_as_seconds(shard.start_ns));
+        pairs.append_pair("end", &format_ns_as_seconds(shard.end_ns));
     }
 
     let mut req = state.http.get(url);
@@ -391,7 +391,36 @@ fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
-    value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+    if let Ok(seconds) = value.parse::<i64>() {
+        return seconds.checked_mul(1_000_000_000);
+    }
+
+    let (whole, frac) = value.split_once('.')?;
+    if frac.is_empty() || frac.len() > 9 || !frac.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let whole = whole.parse::<i64>().ok()?;
+    if whole < 0 {
+        return None;
+    }
+    let mut nanos = frac.parse::<i64>().ok()?;
+    for _ in frac.len()..9 {
+        nanos = nanos.checked_mul(10)?;
+    }
+    whole.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+fn format_ns_as_seconds(ns: i64) -> String {
+    let seconds = ns / 1_000_000_000;
+    let nanos = ns % 1_000_000_000;
+    if nanos == 0 {
+        return seconds.to_string();
+    }
+    let mut frac = format!("{nanos:09}");
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    format!("{seconds}.{frac}")
 }
 
 #[cfg(test)]
@@ -421,5 +450,11 @@ mod tests {
                     { "spanID": "02" },
                 ])
         );
+    }
+
+    #[test]
+    fn parses_fractional_epoch_seconds_to_nanoseconds() {
+        assert!(parse_seconds_to_ns("1.4") == Some(1_400_000_000));
+        assert!(parse_seconds_to_ns("1.000000001") == Some(1_000_000_001));
     }
 }
