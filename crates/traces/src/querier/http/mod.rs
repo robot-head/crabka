@@ -323,9 +323,10 @@ where
     let Some(query) = query_param(&uri, "q") else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
-    let ts_ns = query_param(&uri, "time")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(0);
+    let ts_ns = match optional_seconds_param(&uri, "time") {
+        Ok(value) => value.unwrap_or(0),
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let include_exemplars = include_exemplars(&uri);
 
     match state
@@ -1306,6 +1307,17 @@ mod tests {
             body["series"][0]["points"]
                 == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_query_rejects_invalid_time() {
+        let (status, body) = get_text(
+            "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&time=bogus",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter time");
     }
 
     #[tokio::test]
