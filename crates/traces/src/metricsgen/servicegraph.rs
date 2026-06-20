@@ -24,7 +24,7 @@ impl ConnectionType {
     #[must_use]
     pub fn as_label(self) -> &'static str {
         match self {
-            Self::Unset => "",
+            Self::Unset => "unset",
             Self::VirtualNode => "virtual_node",
             Self::MessagingSystem => "messaging_system",
             Self::Database => "database",
@@ -473,7 +473,7 @@ mod tests {
         assert!(
             req.labels
                 .iter()
-                .any(|(k, v)| k == "connection_type" && v.is_empty())
+                .any(|(k, v)| k == "connection_type" && v == "unset")
         );
         assert!(
             (histogram_sum(&out, "traces_service_graph_request_client_seconds") - 0.010).abs()
@@ -482,6 +482,38 @@ mod tests {
         assert!(
             (histogram_sum(&out, "traces_service_graph_request_server_seconds") - 0.008).abs()
                 < 1e-9
+        );
+    }
+
+    #[test]
+    fn unset_connection_type_is_labeled_explicitly() {
+        let mut store = EdgeStore::new(&MetricsGenConfig::default());
+        let client = span(
+            "frontend",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        let server = span(
+            "backend",
+            [0xB; 8],
+            [0xA; 8],
+            SpanKind::Server,
+            StatusCode::Ok,
+            1,
+        );
+
+        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_request_total");
+        assert!(
+            labels
+                .iter()
+                .any(|(k, v)| k == "connection_type" && v == "unset")
         );
     }
 
@@ -560,7 +592,7 @@ mod tests {
             labels
                 == [
                     ("client".to_string(), "frontend".to_string()),
-                    ("connection_type".to_string(), String::new()),
+                    ("connection_type".to_string(), "unset".to_string()),
                     ("server".to_string(), String::new()),
                 ]
         );
