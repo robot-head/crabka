@@ -13,6 +13,7 @@ use crate::ingest::RawProfile;
 pub enum IngestFormat {
     Pprof,
     Jfr,
+    Lines,
     Groups,
 }
 
@@ -47,6 +48,7 @@ pub fn parse_ingest_query(query: &str) -> Result<IngestQuery, ProfilesError> {
                 format = match value.as_str() {
                     "pprof" => IngestFormat::Pprof,
                     "jfr" => IngestFormat::Jfr,
+                    "lines" => IngestFormat::Lines,
                     _ => IngestFormat::Groups,
                 };
             }
@@ -117,7 +119,9 @@ pub async fn decode_ingest_multipart(
             "sample_type_config" if query.format == IngestFormat::Pprof => {
                 sample_type_config = Some(parse_sample_type_config(&data)?);
             }
-            "profile" | "groups" | "folded" if query.format == IngestFormat::Groups => {
+            "profile" | "groups" | "folded"
+                if matches!(query.format, IngestFormat::Groups | IngestFormat::Lines) =>
+            {
                 folded_bytes = Some(data.to_vec());
             }
             "jfr" if query.format == IngestFormat::Jfr => jfr_bytes = Some(data.to_vec()),
@@ -149,6 +153,12 @@ pub async fn decode_ingest_multipart(
                 ProfilesError::Invalid("missing multipart folded `profile` part".to_string())
             })?;
             folded_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&raw))?
+        }
+        IngestFormat::Lines => {
+            let raw = folded_bytes.ok_or_else(|| {
+                ProfilesError::Invalid("missing multipart lines `profile` part".to_string())
+            })?;
+            lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&raw))?
         }
         IngestFormat::Jfr => {
             let raw = jfr_bytes.ok_or_else(|| {
@@ -191,6 +201,9 @@ pub async fn decode_ingest_body(
     let profile = match query.format {
         IngestFormat::Groups => {
             folded_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
+        }
+        IngestFormat::Lines => {
+            lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
         }
         IngestFormat::Pprof => {
             return Err(ProfilesError::Invalid(
@@ -451,6 +464,39 @@ fn folded_to_pprof(
     if stacks.is_empty() {
         return Err(ProfilesError::Decode(
             "folded profile has no samples".to_string(),
+        ));
+    }
+    stacks_to_pprof(name, "samples", sample_unit, stacks)
+}
+
+fn lines_to_pprof(
+    name: &str,
+    sample_unit: &str,
+    body: &str,
+) -> Result<PprofProfile, ProfilesError> {
+    let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+    for (line_no, raw_line) in body.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let frames = line
+            .split(';')
+            .filter(|frame| !frame.is_empty())
+            .map(|frame| (frame.to_string(), 0))
+            .collect::<Vec<_>>();
+        if frames.is_empty() {
+            return Err(ProfilesError::Decode(format!(
+                "lines profile line {} has empty stack",
+                line_no + 1
+            )));
+        }
+        *stacks.entry(frames).or_default() += 1;
+    }
+
+    if stacks.is_empty() {
+        return Err(ProfilesError::Decode(
+            "lines profile has no samples".to_string(),
         ));
     }
     stacks_to_pprof(name, "samples", sample_unit, stacks)
@@ -717,6 +763,33 @@ mod tests {
         .unwrap();
 
         assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string()));
+    }
+
+    #[tokio::test]
+    async fn decode_plain_lines_counts_repeated_stack_lines() {
+        let query = parse_ingest_query("name=myapp&format=lines&units=samples").unwrap();
+        let body = "main;work\nmain;work\nmain;idle\nmain;work\n";
+
+        let raw = decode_ingest_body(
+            &query,
+            Some("text/plain"),
+            bytes::Bytes::from(body),
+            1 << 20,
+        )
+        .await
+        .unwrap();
+
+        let mut values = raw
+            .profile
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value[0])
+            .collect::<Vec<_>>();
+        values.sort_unstable();
+
+        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
+        assert!(values == vec![1, 3]);
     }
 
     #[tokio::test]
