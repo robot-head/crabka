@@ -63,6 +63,13 @@ pub struct TraceqlEngine<S: SpanStore> {
     opts: EngineOpts,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    pub limit: usize,
+    pub spss: usize,
+    pub search_limit: Option<usize>,
+}
+
 impl<S: SpanStore> TraceqlEngine<S> {
     #[must_use]
     pub fn new(store: Arc<S>, opts: EngineOpts) -> Self {
@@ -74,6 +81,16 @@ impl<S: SpanStore> TraceqlEngine<S> {
         &self.store
     }
 
+    #[must_use]
+    pub fn effective_search_limit(&self, limit: usize) -> usize {
+        if limit == 0 {
+            self.opts.default_limit
+        } else {
+            limit
+        }
+        .min(self.opts.max_traces)
+    }
+
     pub async fn search(
         &self,
         tenant: &str,
@@ -82,8 +99,17 @@ impl<S: SpanStore> TraceqlEngine<S> {
         end_ns: i64,
         limit: usize,
     ) -> Result<SearchResponse> {
-        self.search_with_spss(tenant, query, start_ns, end_ns, limit, 0)
-            .await
+        self.search_with_options(
+            tenant,
+            query,
+            start_ns,
+            end_ns,
+            SearchOptions {
+                limit,
+                ..SearchOptions::default()
+            },
+        )
+        .await
     }
 
     pub async fn search_with_spss(
@@ -94,6 +120,28 @@ impl<S: SpanStore> TraceqlEngine<S> {
         end_ns: i64,
         limit: usize,
         spss: usize,
+    ) -> Result<SearchResponse> {
+        self.search_with_options(
+            tenant,
+            query,
+            start_ns,
+            end_ns,
+            SearchOptions {
+                limit,
+                spss,
+                search_limit: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn search_with_options(
+        &self,
+        tenant: &str,
+        query: &str,
+        start_ns: i64,
+        end_ns: i64,
+        options: SearchOptions,
     ) -> Result<SearchResponse> {
         let q = parse(query)?;
         let planned = plan_query(
@@ -112,18 +160,17 @@ impl<S: SpanStore> TraceqlEngine<S> {
             .await?
             .collect()
             .await?;
-        let effective_limit = if limit == 0 {
-            self.opts.default_limit
-        } else {
-            limit
-        }
-        .min(self.opts.max_traces);
-        let effective_spss = if spss == 0 {
+        let effective_limit = self.effective_search_limit(options.limit);
+        let search_limit = options
+            .search_limit
+            .unwrap_or(effective_limit)
+            .min(self.opts.max_traces);
+        let effective_spss = if options.spss == 0 {
             self.opts.default_spss
         } else {
-            spss
+            options.spss
         };
-        assemble_search_response(&batches, effective_limit, effective_spss)
+        assemble_search_response(&batches, search_limit, effective_spss)
     }
 
     pub async fn query_range(

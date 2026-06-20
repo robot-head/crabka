@@ -21,7 +21,7 @@ pub use ast::{
     Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
     StructuralOp, Value,
 };
-pub use engine::{EngineOpts, TraceqlEngine};
+pub use engine::{EngineOpts, SearchOptions, TraceqlEngine};
 pub use error::TraceqlError;
 pub use in_memory::InMemorySpanStore;
 pub use lexer::{Token, lex};

@@ -7,8 +7,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use crabka_traceql::{
-    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanStore, TagScope, TraceMetricsResponse,
-    TraceSpans, TraceqlEngine, TypedValue,
+    AttrValue, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore, TagScope,
+    TraceMetricsResponse, TraceSpans, TraceqlEngine, TypedValue,
 };
 use serde_json::{Map, Value, json};
 
@@ -107,17 +107,37 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
+    let duration_filtered = min_duration_ns.is_some() || max_duration_ns.is_some();
+    let search_limit = duration_filtered.then_some(usize::MAX);
+
     match state
         .engine
-        .search_with_spss(&tenant, &query, start_ns, end_ns, limit, spss)
+        .search_with_options(
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            SearchOptions {
+                limit,
+                spss,
+                search_limit,
+            },
+        )
         .await
     {
-        Ok(resp) => Json(search_json(filter_search_duration(
-            resp,
-            min_duration_ns,
-            max_duration_ns,
-        )))
-        .into_response(),
+        Ok(resp) => {
+            let resp = if duration_filtered {
+                filter_search_duration(
+                    resp,
+                    min_duration_ns,
+                    max_duration_ns,
+                    state.engine.effective_search_limit(limit),
+                )
+            } else {
+                resp
+            };
+            Json(search_json(resp)).into_response()
+        }
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
@@ -489,6 +509,7 @@ fn filter_search_duration(
     mut resp: SearchResponse,
     min_duration_ns: Option<u64>,
     max_duration_ns: Option<u64>,
+    limit: usize,
 ) -> SearchResponse {
     if min_duration_ns.is_none() && max_duration_ns.is_none() {
         return resp;
@@ -498,6 +519,7 @@ fn filter_search_duration(
         min_duration_ns.is_none_or(|min| duration_ns >= min)
             && max_duration_ns.is_none_or(|max| duration_ns <= max)
     });
+    resp.traces.truncate(limit);
     resp
 }
 
@@ -950,6 +972,45 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
         assert!(body["traces"][0]["rootTraceName"] == "short");
+    }
+
+    #[tokio::test]
+    async fn search_applies_duration_filter_before_limit() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "short",
+            vec![span_at(1, 1, None, "a", 1_000_000_000)],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "long",
+            vec![
+                span_at(2, 1, None, "b", 2_000_000_000),
+                span_at(2, 2, Some(1), "b", 5_000_000_000),
+            ],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&minDuration=2s&limit=1")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["traces"][0]["rootTraceName"] == "long");
     }
 
     #[tokio::test]
