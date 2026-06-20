@@ -112,6 +112,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     .await?;
     assert_select_merge_stacktraces_has_symbol(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_select_series_has_points(&client, &crabka.querier_base, Some(TENANT)).await?;
+    assert_select_heatmap_has_slots(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_diff_has_ticks(&client, &crabka.querier_base, Some(TENANT)).await?;
 
     crabka.shutdown();
@@ -531,6 +532,45 @@ async fn assert_select_series_has_points(
     });
     if !has_point {
         return Err(format!("SelectSeries had no positive points: {response}").into());
+    }
+    Ok(())
+}
+
+async fn assert_select_heatmap_has_slots(
+    client: &reqwest::Client,
+    base: &str,
+    tenant: Option<&str>,
+) -> TestResult {
+    let response = connect_json(
+        client,
+        base,
+        tenant,
+        "SelectHeatmap",
+        json!({
+            "profileTypeID": PROFILE_TYPE,
+            "labelSelector": SELECTOR,
+            "start": query_start_ms(),
+            "end": query_end_ms(),
+            "step": 10.0,
+            "groupBy": ["env"],
+            "queryType": "HEATMAP_QUERY_TYPE_INDIVIDUAL",
+            "exemplarType": "EXEMPLAR_TYPE_NONE",
+            "limit": 10,
+        }),
+    )
+    .await?;
+    let series = response
+        .get("series")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("SelectHeatmap response missing series: {response}"))?;
+    let has_slot = series.iter().any(|series| {
+        series
+            .get("slots")
+            .and_then(Value::as_array)
+            .is_some_and(|slots| !slots.is_empty())
+    });
+    if !has_slot {
+        return Err(format!("SelectHeatmap had no slots: {response}").into());
     }
     Ok(())
 }

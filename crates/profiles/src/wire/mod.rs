@@ -325,4 +325,44 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn heatmap_messages_use_upstream_shape() {
+        assert_eq!(
+            pb::querier::v1::HeatmapQueryType::Individual.as_str_name(),
+            "HEATMAP_QUERY_TYPE_INDIVIDUAL"
+        );
+        let request = pb::querier::v1::SelectHeatmapRequest {
+            profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
+            label_selector: "{}".to_string(),
+            start: 10,
+            end: 20,
+            step: 5.0,
+            group_by: vec!["env".to_string()],
+            query_type: pb::querier::v1::HeatmapQueryType::Individual as i32,
+            exemplar_type: pb::querier::v1::ExemplarType::None as i32,
+            limit: 10,
+        };
+        let response = pb::querier::v1::SelectHeatmapResponse {
+            series: vec![pb::querier::v1::HeatmapSeries {
+                labels: vec![pb::querier::v1::LabelPair {
+                    name: "env".to_string(),
+                    value: "prod".to_string(),
+                }],
+                slots: vec![pb::querier::v1::HeatmapSlot {
+                    timestamp: 15,
+                    y_min: vec![0.0, 10.0],
+                    counts: vec![1, 2],
+                    exemplars: Vec::new(),
+                }],
+            }],
+        };
+
+        let request_bytes = request.encode_to_vec();
+        let response_bytes = response.encode_to_vec();
+
+        assert!(request_bytes.contains(&0x29)); // step, field 5, fixed64 wire type
+        assert!(!response_bytes.is_empty());
+        assert_eq!(response.series[0].slots[0].counts, vec![1, 2]);
+    }
 }

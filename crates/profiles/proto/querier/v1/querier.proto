@@ -173,26 +173,48 @@ message SelectHeatmapRequest {
   string label_selector = 2;
   int64 start = 3;
   int64 end = 4;
-  uint32 time_buckets = 5;
-  uint32 value_buckets = 6;
+  double step = 5;
+  repeated string group_by = 6;
+  HeatmapQueryType query_type = 7;
+  ExemplarType exemplar_type = 8;
+  int64 limit = 9;
 }
 
 message SelectHeatmapResponse {
-  Heatmap heatmap = 1;
+  repeated HeatmapSeries series = 1;
 }
 
-message Heatmap {
-  int64 start = 1;
-  int64 end = 2;
-  uint32 time_buckets = 3;
-  uint32 value_buckets = 4;
-  int64 min_value = 5;
-  int64 max_value = 6;
-  repeated HeatmapRow counts = 7;
+enum HeatmapQueryType {
+  HEATMAP_QUERY_TYPE_UNSPECIFIED = 0;
+  HEATMAP_QUERY_TYPE_INDIVIDUAL = 1;
+  HEATMAP_QUERY_TYPE_SPAN = 2;
 }
 
-message HeatmapRow {
-  repeated uint64 values = 1;
+enum ExemplarType {
+  EXEMPLAR_TYPE_UNSPECIFIED = 0;
+  EXEMPLAR_TYPE_NONE = 1;
+  EXEMPLAR_TYPE_INDIVIDUAL = 2;
+  EXEMPLAR_TYPE_SPAN = 3;
+}
+
+message Exemplar {
+  int64 timestamp = 1;
+  string profile_id = 2;
+  string span_id = 3;
+  int64 value = 4;
+  repeated LabelPair labels = 5;
+}
+
+message HeatmapSeries {
+  repeated LabelPair labels = 1;
+  repeated HeatmapSlot slots = 2;
+}
+
+message HeatmapSlot {
+  int64 timestamp = 1;
+  repeated double y_min = 2;
+  repeated int32 counts = 3;
+  repeated Exemplar exemplars = 4;
 }
 
 message DiffRequest {

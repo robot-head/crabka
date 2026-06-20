@@ -20,6 +20,9 @@ use tokio::net::TcpListener;
 use crate::query_frontend::{FrontendConfig, split_inclusive_range};
 use crate::wire::pb;
 
+const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
+const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
+
 pub type DefaultStore = InMemoryProfileStore;
 
 pub struct QuerierState<S: ProfileStore = DefaultStore> {
@@ -488,14 +491,14 @@ where
             &req.label_selector,
             req.start,
             req.end,
-            usize::try_from(req.time_buckets).expect("u32 fits usize"),
-            usize::try_from(req.value_buckets).expect("u32 fits usize"),
+            heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?,
+            DEFAULT_HEATMAP_VALUE_BUCKETS,
         )
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
         pb::querier::v1::SelectHeatmapResponse {
-            heatmap: Some(heatmap.into()),
+            series: vec![heatmap.into()],
         },
     ))
 }
@@ -735,6 +738,22 @@ fn parse_span_selectors(selectors: &[String]) -> Result<Vec<u64>, ProfileError> 
         .map_err(|err| ProfileError::Plan(format!("invalid span_selector: {err}")))
 }
 
+fn heatmap_time_buckets(start_ms: i64, end_ms: i64, step_secs: f64) -> Result<usize, ProfileError> {
+    if start_ms >= end_ms {
+        return Err(ProfileError::Plan(
+            "heatmap start must be before end".to_string(),
+        ));
+    }
+    if !step_secs.is_finite() || step_secs <= 0.0 {
+        return Err(ProfileError::Plan(
+            "heatmap step must be positive seconds".to_string(),
+        ));
+    }
+    let step_ms = step_secs * 1000.0;
+    let span_ms = (end_ms - start_ms) as f64;
+    Ok(((span_ms / step_ms).ceil().max(1.0) as usize).min(MAX_HEATMAP_TIME_BUCKETS))
+}
+
 fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
     params
         .iter()
@@ -826,22 +845,44 @@ impl From<crabka_pprof::FlameGraphDiff> for pb::querier::v1::FlameGraphDiff {
     }
 }
 
-impl From<crabka_pprof::Heatmap> for pb::querier::v1::Heatmap {
+impl From<crabka_pprof::Heatmap> for pb::querier::v1::HeatmapSeries {
     fn from(value: crabka_pprof::Heatmap) -> Self {
+        let step_ms = if value.time_buckets == 0 {
+            0
+        } else {
+            (value.end_ms - value.start_ms)
+                / i64::try_from(value.time_buckets).expect("bucket count fits i64")
+        };
+        let y_min = heatmap_y_mins(value.min_value, value.max_value, value.value_buckets);
         Self {
-            start: value.start_ms,
-            end: value.end_ms,
-            time_buckets: u32::try_from(value.time_buckets).unwrap_or(u32::MAX),
-            value_buckets: u32::try_from(value.value_buckets).unwrap_or(u32::MAX),
-            min_value: value.min_value,
-            max_value: value.max_value,
-            counts: value
+            labels: Vec::new(),
+            slots: value
                 .counts
                 .into_iter()
-                .map(|values| pb::querier::v1::HeatmapRow { values })
+                .enumerate()
+                .map(|(bucket, counts)| pb::querier::v1::HeatmapSlot {
+                    timestamp: value.start_ms
+                        + (i64::try_from(bucket).expect("bucket index fits i64") + 1) * step_ms,
+                    y_min: y_min.clone(),
+                    counts: counts
+                        .into_iter()
+                        .map(|count| i32::try_from(count).unwrap_or(i32::MAX))
+                        .collect(),
+                    exemplars: Vec::new(),
+                })
                 .collect(),
         }
     }
+}
+
+fn heatmap_y_mins(min_value: i64, max_value: i64, value_buckets: usize) -> Vec<f64> {
+    if value_buckets == 0 {
+        return Vec::new();
+    }
+    let span = (max_value - min_value).max(0) as f64;
+    (0..value_buckets)
+        .map(|bucket| min_value as f64 + span * bucket as f64 / value_buckets as f64)
+        .collect()
 }
 
 #[cfg(test)]
@@ -887,5 +928,36 @@ mod tests {
     #[test]
     fn parse_span_selectors_rejects_bad_span() {
         assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
+    }
+
+    #[test]
+    fn heatmap_time_buckets_ceil_from_step_seconds() {
+        assert!(heatmap_time_buckets(0, 21_000, 10.0).unwrap() == 3);
+        assert!(heatmap_time_buckets(0, 1, 0.0).is_err());
+        assert!(heatmap_time_buckets(1, 1, 1.0).is_err());
+    }
+
+    #[test]
+    fn heatmap_time_buckets_caps_large_ranges() {
+        assert!(heatmap_time_buckets(0, i64::MAX, 10.0).unwrap() == MAX_HEATMAP_TIME_BUCKETS);
+    }
+
+    #[test]
+    fn heatmap_series_projects_slots() {
+        let series = pb::querier::v1::HeatmapSeries::from(crabka_pprof::Heatmap {
+            start_ms: 0,
+            end_ms: 20,
+            time_buckets: 2,
+            value_buckets: 2,
+            min_value: 10,
+            max_value: 30,
+            counts: vec![vec![1, 0], vec![0, 2]],
+        });
+
+        assert!(series.labels.is_empty());
+        assert!(series.slots[0].timestamp == 10);
+        assert!(series.slots[1].timestamp == 20);
+        assert!(series.slots[0].y_min == vec![10.0, 20.0]);
+        assert!(series.slots[1].counts == vec![0, 2]);
     }
 }
