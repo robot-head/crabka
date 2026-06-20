@@ -334,7 +334,7 @@ fn collect_intrinsic_value(
                 int32_value(batch, COL_NS_LEFT, row)?.to_string(),
             ));
         }
-        "span:nestedSetParent" => {
+        "span:nestedSetParent" | "span:Parent" => {
             values.insert((
                 "int".to_string(),
                 int32_value(batch, COL_PARENT_ID, row)?.to_string(),

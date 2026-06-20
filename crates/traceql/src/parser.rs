@@ -506,7 +506,7 @@ fn intrinsic(scope: &str, key: &str) -> Result<Intrinsic> {
         ("instrumentation", "version") => Ok(Intrinsic::InstrumentationVersion),
         ("span", "nestedSetLeft") => Ok(Intrinsic::NestedSetLeft),
         ("span", "nestedSetRight") => Ok(Intrinsic::NestedSetRight),
-        ("span", "nestedSetParent") => Ok(Intrinsic::NestedSetParent),
+        ("span", "nestedSetParent" | "Parent") => Ok(Intrinsic::NestedSetParent),
         _ => Err(TraceqlError::Parse(format!(
             "unknown intrinsic {scope}:{key}"
         ))),

@@ -437,7 +437,7 @@ fn collect_span_intrinsic_values(
                 values.insert(("int".to_string(), nested.left.to_string()));
             }
         }
-        "span:nestedSetParent" => {
+        "span:nestedSetParent" | "span:Parent" => {
             if let Some(nested) = nested {
                 values.insert(("int".to_string(), nested.parent_id.to_string()));
             }

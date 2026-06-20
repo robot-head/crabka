@@ -1364,6 +1364,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_selector_matches_nested_set_parent_alias() {
+        let e = engine();
+        let r = e
+            .search("t", "{ span:Parent = 1 }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].trace_id == [9; 16]);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
     async fn search_selector_matches_status_enum_value() {
         let mut s = InMemorySpanStore::new();
         s.push_trace(
