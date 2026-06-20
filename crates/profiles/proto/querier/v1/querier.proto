@@ -3,6 +3,8 @@ package querier.v1;
 // Minimal vendored-compatible subset of Grafana Pyroscope querier.v1.
 // Covers the datasource health/query path: profile types, labels, merge, series, and diff.
 
+import "types/v1/types.proto";
+
 service QuerierService {
   rpc ProfileTypes(ProfileTypesRequest) returns (ProfileTypesResponse) {}
   rpc LabelNames(LabelNamesRequest) returns (LabelNamesResponse) {}
@@ -146,7 +148,9 @@ message SelectSeriesRequest {
   repeated string group_by = 5;
   double step = 6;
   SeriesAggregationType aggregation = 7;
+  types.v1.StackTraceSelector stack_trace_selector = 8;
   int64 limit = 9;
+  ExemplarType exemplar_type = 10;
 }
 
 enum SeriesAggregationType {
@@ -166,6 +170,8 @@ message ProfileSeries {
 message Point {
   double value = 1;
   int64 timestamp = 2;
+  repeated types.v1.ProfileAnnotation annotations = 3;
+  repeated types.v1.Exemplar exemplars = 4;
 }
 
 message SelectHeatmapRequest {

@@ -244,6 +244,8 @@ mod tests {
         let point = pb::querier::v1::Point {
             timestamp: 42,
             value: 1.5,
+            annotations: Vec::new(),
+            exemplars: Vec::new(),
         };
 
         let bytes = point.encode_to_vec();
@@ -255,6 +257,33 @@ mod tests {
                 0x10, 42, // timestamp = 42, field 2
             ]
         );
+    }
+
+    #[test]
+    fn querier_point_carries_upstream_annotations_and_exemplars() {
+        let point = pb::querier::v1::Point {
+            value: 1.5,
+            timestamp: 42,
+            annotations: vec![pb::types::v1::ProfileAnnotation {
+                key: "source".to_string(),
+                value: "agent".to_string(),
+            }],
+            exemplars: vec![pb::types::v1::Exemplar {
+                timestamp: 42,
+                profile_id: "profile-1".to_string(),
+                span_id: "span-1".to_string(),
+                value: 7,
+                labels: vec![pb::types::v1::LabelPair {
+                    name: "pod".to_string(),
+                    value: "api-0".to_string(),
+                }],
+            }],
+        };
+
+        let bytes = point.encode_to_vec();
+
+        assert!(bytes.contains(&0x1a)); // annotations, field 3
+        assert!(bytes.contains(&0x22)); // exemplars, field 4
     }
 
     #[test]
@@ -292,6 +321,39 @@ mod tests {
             pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32,
             1
         );
+        assert_eq!(pb::querier::v1::ExemplarType::None as i32, 1);
+        assert_eq!(
+            pb::querier::v1::ExemplarType::Span.as_str_name(),
+            "EXEMPLAR_TYPE_SPAN"
+        );
+    }
+
+    #[test]
+    fn select_series_request_uses_upstream_optional_fields() {
+        let request = pb::querier::v1::SelectSeriesRequest {
+            profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
+            label_selector: "{}".to_string(),
+            start: 10,
+            end: 20,
+            group_by: vec!["env".to_string()],
+            step: 5.0,
+            aggregation: pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeSum
+                as i32,
+            stack_trace_selector: Some(pb::types::v1::StackTraceSelector {
+                call_site: vec![pb::types::v1::Location {
+                    name: "main".to_string(),
+                }],
+                go_pgo: None,
+            }),
+            limit: 10,
+            exemplar_type: pb::querier::v1::ExemplarType::Individual as i32,
+        };
+
+        let bytes = request.encode_to_vec();
+
+        assert!(bytes.contains(&0x42)); // stack_trace_selector, field 8
+        assert!(bytes.contains(&0x48)); // limit, field 9
+        assert!(bytes.contains(&0x50)); // exemplar_type, field 10
     }
 
     #[test]

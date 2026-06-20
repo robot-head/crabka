@@ -11,7 +11,7 @@ use axum::{Extension, Json, Router, routing::get};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
 use crabka_pprof::{
     EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore, ProfileError, ProfileStore,
-    ProfileType, Series, SeriesAgg, parse_label_selector,
+    ProfileType, Series, SeriesAgg, parse_label_selector, step_ms_from_secs,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -407,7 +407,12 @@ where
             points: series
                 .points
                 .into_iter()
-                .map(|(timestamp, value)| pb::querier::v1::Point { timestamp, value })
+                .map(|(timestamp, value)| pb::querier::v1::Point {
+                    timestamp,
+                    value,
+                    annotations: Vec::new(),
+                    exemplars: Vec::new(),
+                })
                 .collect(),
         })
         .collect();
@@ -744,12 +749,7 @@ fn heatmap_time_buckets(start_ms: i64, end_ms: i64, step_secs: f64) -> Result<us
             "heatmap start must be before end".to_string(),
         ));
     }
-    if !step_secs.is_finite() || step_secs <= 0.0 {
-        return Err(ProfileError::Plan(
-            "heatmap step must be positive seconds".to_string(),
-        ));
-    }
-    let step_ms = step_secs * 1000.0;
+    let step_ms = step_ms_from_secs(step_secs)? as f64;
     let span_ms = (end_ms - start_ms) as f64;
     Ok(((span_ms / step_ms).ceil().max(1.0) as usize).min(MAX_HEATMAP_TIME_BUCKETS))
 }
@@ -935,6 +935,14 @@ mod tests {
         assert!(heatmap_time_buckets(0, 21_000, 10.0).unwrap() == 3);
         assert!(heatmap_time_buckets(0, 1, 0.0).is_err());
         assert!(heatmap_time_buckets(1, 1, 1.0).is_err());
+    }
+
+    #[test]
+    fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
+        assert!(heatmap_time_buckets(0, 1, 0.0001).is_err());
+        assert!(heatmap_time_buckets(0, 1, 0.0005).is_err());
+        assert!(heatmap_time_buckets(0, 1, 0.0009999).is_err());
+        assert!(heatmap_time_buckets(0, 1, 0.001).unwrap() == 1);
     }
 
     #[test]

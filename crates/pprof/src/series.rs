@@ -27,6 +27,9 @@ pub fn step_ms_from_secs(step_secs: f64) -> Result<i64, ProfileError> {
             "step must be a positive finite number of seconds, got {step_secs}"
         )));
     }
+    if step_secs * 1000.0 < 1.0 {
+        return Err(ProfileError::Plan("step must be >= 1ms".to_string()));
+    }
     #[allow(clippy::cast_possible_truncation)]
     Ok((step_secs * 1000.0).round() as i64)
 }
@@ -67,6 +70,14 @@ mod tests {
         assert!(step_ms_from_secs(0.5).unwrap() == 500);
         assert!(step_ms_from_secs(0.0).is_err());
         assert!(step_ms_from_secs(-1.0).is_err());
+    }
+
+    #[test]
+    fn step_secs_rejects_sub_millisecond_values() {
+        assert!(step_ms_from_secs(0.0001).is_err());
+        assert!(step_ms_from_secs(0.0005).is_err());
+        assert!(step_ms_from_secs(0.0009999).is_err());
+        assert!(step_ms_from_secs(0.001).unwrap() == 1);
     }
 
     #[test]
