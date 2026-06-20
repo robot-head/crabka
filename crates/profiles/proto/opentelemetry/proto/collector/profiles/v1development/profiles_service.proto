@@ -1,0 +1,25 @@
+syntax = "proto3";
+package opentelemetry.proto.collector.profiles.v1development;
+// Minimal vendored subset from open-telemetry/opentelemetry-proto
+// opentelemetry/proto/collector/profiles/v1development/profiles_service.proto
+// @ 023f8cd36cc946617caa9a9e2e9868186f6d22dd.
+
+import "opentelemetry/proto/profiles/v1development/profiles.proto";
+
+service ProfilesService {
+  rpc Export(ExportProfilesServiceRequest) returns (ExportProfilesServiceResponse) {}
+}
+
+message ExportProfilesServiceRequest {
+  repeated opentelemetry.proto.profiles.v1development.ResourceProfiles resource_profiles = 1;
+  opentelemetry.proto.profiles.v1development.ProfilesDictionary dictionary = 2;
+}
+
+message ExportProfilesServiceResponse {
+  ExportProfilesPartialSuccess partial_success = 1;
+}
+
+message ExportProfilesPartialSuccess {
+  int64 rejected_profiles = 1;
+  string error_message = 2;
+}

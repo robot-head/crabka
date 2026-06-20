@@ -1,0 +1,27 @@
+syntax = "proto3";
+package push.v1;
+// Minimal vendored subset from grafana/pyroscope api/push/v1/push.proto
+// @ 506c6f3f00694163876a89a9d1fe91e857f04397.
+
+import "types/v1/types.proto";
+
+service PusherService {
+  rpc Push(PushRequest) returns (PushResponse) {}
+}
+
+message PushResponse {}
+
+message PushRequest {
+  repeated RawProfileSeries series = 1;
+}
+
+message RawProfileSeries {
+  repeated types.v1.LabelPair labels = 1;
+  repeated RawSample samples = 2;
+  repeated types.v1.ProfileAnnotation annotations = 3;
+}
+
+message RawSample {
+  bytes raw_profile = 1;
+  string ID = 2;
+}

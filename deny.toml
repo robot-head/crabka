@@ -21,6 +21,10 @@ ignore = [
     # unmaintained notice, not a vulnerability. Pulled in transitively via
     # `polars-utils` (the `polars` columnar-streams feature).
     "RUSTSEC-2025-0141",
+    # paste is unmaintained. Pulled in transitively by the pinned DataFusion
+    # dependency used by the new internal profiles crates; no fixed release is
+    # available through that DataFusion revision.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]
@@ -67,7 +71,11 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Our sspi fork (SASL/GSSAPI Kerberos work) until it lands upstream;
 # see Devolutions/sspi-rs#681 and `[patch.crates-io]` in Cargo.toml.
-allow-git = ["https://github.com/robot-head/sspi-rs"]
+allow-git = [
+    "https://github.com/robot-head/sspi-rs",
+    # Temporary DataFusion pin for profile query support.
+    "https://github.com/apache/datafusion",
+]
 
 [[licenses.clarify]]
 name = "cfg_block"

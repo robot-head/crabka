@@ -1,0 +1,36 @@
+syntax = "proto3";
+package types.v1;
+// Minimal vendored subset from grafana/pyroscope api/types/v1/types.proto
+// @ 506c6f3f00694163876a89a9d1fe91e857f04397.
+
+message LabelPair {
+  string name = 1;
+  string value = 2;
+}
+
+message ProfileAnnotation {
+  string key = 1;
+  string value = 2;
+}
+
+message Exemplar {
+  int64 timestamp = 1;
+  string profile_id = 2;
+  string span_id = 3;
+  int64 value = 4;
+  repeated LabelPair labels = 5;
+}
+
+message StackTraceSelector {
+  repeated Location call_site = 1;
+  GoPGO go_pgo = 2;
+}
+
+message Location {
+  string name = 1;
+}
+
+message GoPGO {
+  uint32 keep_locations = 1;
+  bool aggregate_callees = 2;
+}

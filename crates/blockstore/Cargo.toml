@@ -1,0 +1,38 @@
+[package]
+name = "crabka-blockstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Signal-agnostic columnar block store (Parquet on object storage + label/series index + DataFusion query) for Crabka observability"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-blockstore"
+readme = "README.md"
+keywords = ["observability", "datafusion", "parquet", "object-store", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow = { workspace = true }
+parquet = { workspace = true }
+datafusion = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
