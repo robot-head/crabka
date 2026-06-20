@@ -9,12 +9,13 @@ use crabka_blockstore::{LabelMatcher, MatchOp};
 
 use crate::{
     FlameGraph, FlameGraphDiff, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, Tree,
-    diff_trees, tree_to_pprof,
+    diff_trees,
     samples::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION,
         PCOL_TOTAL_VALUE, PCOL_VALUE,
     },
     series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
+    tree_to_pprof,
 };
 
 /// Engine configuration.
@@ -215,7 +216,13 @@ impl<S: ProfileStore> FlameEngine<S> {
     ) -> Result<Vec<u8>, ProfileError> {
         let profile_type = ProfileType::parse(profile_type)?;
         let tree = self
-            .merge_to_tree(tenant, &profile_type.to_string(), label_selector, start_ms, end_ms)
+            .merge_to_tree(
+                tenant,
+                &profile_type.to_string(),
+                label_selector,
+                start_ms,
+                end_ms,
+            )
             .await?;
         Ok(tree_to_pprof(&tree, &profile_type).encode())
     }

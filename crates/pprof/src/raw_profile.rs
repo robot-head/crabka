@@ -48,10 +48,26 @@ impl PprofBuilder {
             ..Default::default()
         };
         let mut strings = HashMap::from([(String::new(), 0)]);
-        let sample_type = intern_string(&mut profile.string_table, &mut strings, &profile_type.sample_type);
-        let sample_unit = intern_string(&mut profile.string_table, &mut strings, &profile_type.sample_unit);
-        let period_type = intern_string(&mut profile.string_table, &mut strings, &profile_type.period_type);
-        let period_unit = intern_string(&mut profile.string_table, &mut strings, &profile_type.period_unit);
+        let sample_type = intern_string(
+            &mut profile.string_table,
+            &mut strings,
+            &profile_type.sample_type,
+        );
+        let sample_unit = intern_string(
+            &mut profile.string_table,
+            &mut strings,
+            &profile_type.sample_unit,
+        );
+        let period_type = intern_string(
+            &mut profile.string_table,
+            &mut strings,
+            &profile_type.period_type,
+        );
+        let period_unit = intern_string(
+            &mut profile.string_table,
+            &mut strings,
+            &profile_type.period_unit,
+        );
         profile.sample_type.push(ValueType {
             r#type: sample_type,
             unit: sample_unit,
