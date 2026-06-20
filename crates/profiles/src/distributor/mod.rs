@@ -14,6 +14,7 @@ use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectRespon
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
+use prost::Message;
 use tokio::net::TcpListener;
 
 use crate::error::ProfilesError;
@@ -281,6 +282,7 @@ pub fn router(state: Arc<DistributorState>) -> Router {
 
     Router::new()
         .route("/ingest", post(ingest_handler))
+        .route("/v1development/profiles", post(otlp_http_handler))
         .merge(push)
         .merge(otlp)
         .layer(Extension(state))
@@ -332,6 +334,37 @@ async fn export_handler(
             partial_success: None,
         },
     ))
+}
+
+async fn otlp_http_handler(
+    Extension(state): Extension<Arc<DistributorState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let tenant = tenant_from_headers(&headers);
+    let result = async {
+        let req = pb::otlp_profiles::ExportProfilesServiceRequest::decode(body)
+            .map_err(|err| ProfilesError::Decode(format!("OTLP profiles decode: {err}")))?;
+        let raws = decode_otlp(&req)?;
+        process_raw(&state, &tenant, raws).await?;
+        Ok::<_, ProfilesError>(
+            pb::otlp_profiles::ExportProfilesServiceResponse {
+                partial_success: None,
+            }
+            .encode_to_vec(),
+        )
+    }
+    .await;
+
+    match result {
+        Ok(body) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/x-protobuf")],
+            Bytes::from(body),
+        )
+            .into_response(),
+        Err(err) => profiles_error_response(err),
+    }
 }
 
 async fn ingest_handler(
@@ -517,6 +550,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use assert2::assert;
+    use prost::Message;
 
     use super::*;
     use crate::error::ProfilesError;
@@ -545,6 +579,79 @@ mod tests {
             relabel: vec![],
             max_decompressed: 1 << 24,
         })
+    }
+
+    fn otlp_export_request() -> pb::otlp_profiles::ExportProfilesServiceRequest {
+        use pb::opentelemetry::proto::common::v1::{AnyValue, KeyValue, any_value::Value};
+        use pb::opentelemetry::proto::resource::v1::Resource;
+        use pb::otlp_profiles::{
+            Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
+            ScopeProfiles, Stack, ValueType,
+        };
+
+        let dictionary = ProfilesDictionary {
+            string_table: vec![
+                String::new(),
+                "samples".to_string(),
+                "count".to_string(),
+                "main".to_string(),
+            ],
+            function_table: vec![Function {
+                name_strindex: 3,
+                ..Default::default()
+            }],
+            location_table: vec![Location {
+                address: 0x40,
+                lines: vec![Line {
+                    function_index: 0,
+                    line: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            stack_table: vec![Stack {
+                location_indices: vec![0],
+            }],
+            ..Default::default()
+        };
+        let profile = Profile {
+            sample_type: Some(ValueType {
+                type_strindex: 1,
+                unit_strindex: 2,
+            }),
+            period_type: Some(ValueType {
+                type_strindex: 1,
+                unit_strindex: 2,
+            }),
+            samples: vec![Sample {
+                stack_index: 0,
+                values: vec![7],
+                timestamps_unix_nano: vec![1_700_000_000_000_000_000],
+                ..Default::default()
+            }],
+            time_unix_nano: 1_700_000_000_000_000_000,
+            ..Default::default()
+        };
+
+        pb::otlp_profiles::ExportProfilesServiceRequest {
+            resource_profiles: vec![ResourceProfiles {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(Value::StringValue("api".to_string())),
+                        }),
+                    }],
+                    ..Default::default()
+                }),
+                scope_profiles: vec![ScopeProfiles {
+                    profiles: vec![profile],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            dictionary: Some(dictionary),
+        }
     }
 
     #[tokio::test]
@@ -870,6 +977,36 @@ overrides:
             err.message()
                 .is_some_and(|message| message.contains("max series exceeded"))
         );
+    }
+
+    #[tokio::test]
+    async fn otlp_http_profiles_path_appends_records() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let body = otlp_export_request().encode_to_vec();
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{bound}/v1development/profiles"))
+            .header("content-type", "application/x-protobuf")
+            .header("x-scope-orgid", "tenant-a")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK, "{response:?}");
+        let recs = sink.0.lock().unwrap();
+        assert!(recs.len() == 1);
+        assert!(recs[0].tenant == "tenant-a");
+        assert!(recs[0].labels.iter().any(|(name, value)| {
+            name == "__profile_type__" && value == "samples:samples:count:samples:count"
+        }));
     }
 
     #[tokio::test]
