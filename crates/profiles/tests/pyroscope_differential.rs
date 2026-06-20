@@ -101,6 +101,9 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     assert!(flame_names(&crabka_render).contains("runtime/pprof.profileWriter"));
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
+    assert_profile_types_match(&client, &pyroscope_base, &crabka.querier_base).await?;
+    assert_label_values_match(&client, &pyroscope_base, &crabka.querier_base, "env").await?;
+
     assert_profile_types_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_names_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_values_contain(
@@ -499,6 +502,65 @@ async fn assert_label_values_contain(
     Ok(())
 }
 
+async fn assert_profile_types_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+) -> TestResult {
+    let pyroscope = connect_json_until(
+        client,
+        pyroscope_base,
+        None,
+        "ProfileTypes",
+        json_time_range(),
+        |value| canonical_profile_type(value, PROFILE_TYPE).is_ok(),
+    )
+    .await?;
+    let crabka = connect_json_until(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "ProfileTypes",
+        json_time_range(),
+        |value| canonical_profile_type(value, PROFILE_TYPE).is_ok(),
+    )
+    .await?;
+
+    assert_canonical_json_equal(
+        "ProfileTypes",
+        canonical_profile_type(&pyroscope, PROFILE_TYPE)?,
+        canonical_profile_type(&crabka, PROFILE_TYPE)?,
+    )
+}
+
+async fn assert_label_values_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+    name: &str,
+) -> TestResult {
+    let body = json!({
+        "name": name,
+        "start": query_start_ms(),
+        "end": query_end_ms(),
+    });
+    let pyroscope = connect_json(client, pyroscope_base, None, "LabelValues", body.clone()).await?;
+    let crabka = connect_json(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "LabelValues",
+        body.clone(),
+    )
+    .await?;
+
+    assert_canonical_json_equal(
+        &format!("LabelValues({name})"),
+        canonical_string_list(&pyroscope, "names")?,
+        canonical_string_list(&crabka, "names")?,
+    )
+}
+
 async fn assert_select_series_has_points(
     client: &reqwest::Client,
     base: &str,
@@ -712,6 +774,42 @@ fn string_array<'a>(value: &'a Value, key: &str) -> TestResult<BTreeSet<&'a str>
         .collect())
 }
 
+fn canonical_profile_type(value: &Value, expected_id: &str) -> TestResult<Value> {
+    let profile_types = value
+        .get("profileTypes")
+        .or_else(|| value.get("profile_types"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("ProfileTypes response missing profileTypes: {value}"))?;
+    let profile_type = profile_types
+        .iter()
+        .find(|profile_type| {
+            profile_type
+                .get("ID")
+                .or_else(|| profile_type.get("id"))
+                .and_then(Value::as_str)
+                == Some(expected_id)
+        })
+        .ok_or_else(|| format!("ProfileTypes response missing {expected_id}: {value}"))?;
+
+    Ok(json!({
+        "id": profile_type
+            .get("ID")
+            .or_else(|| profile_type.get("id"))
+            .and_then(Value::as_str),
+        "name": profile_type.get("name").and_then(Value::as_str),
+        "sampleType": profile_type.get("sampleType").and_then(Value::as_str),
+        "sampleUnit": profile_type.get("sampleUnit").and_then(Value::as_str),
+        "periodType": profile_type.get("periodType").and_then(Value::as_str),
+        "periodUnit": profile_type.get("periodUnit").and_then(Value::as_str),
+    }))
+}
+
+fn canonical_string_list(value: &Value, key: &str) -> TestResult<Value> {
+    Ok(json!({
+        key: string_array(value, key)?.into_iter().collect::<Vec<_>>()
+    }))
+}
+
 fn point_value(point: &Value) -> f64 {
     point
         .get("value")
@@ -787,6 +885,41 @@ fn assert_flamebearer_equal(expected: &Value, actual: &Value) -> TestResult {
     Ok(())
 }
 
+fn assert_canonical_json_equal(method: &str, expected: Value, actual: Value) -> TestResult {
+    let expected = canonical_json(expected);
+    let actual = canonical_json(actual);
+    if expected != actual {
+        return Err(format!("{method} mismatch: expected {expected}, got {actual}").into());
+    }
+    Ok(())
+}
+
+fn canonical_json(value: Value) -> Value {
+    match value {
+        Value::Array(values)
+            if values
+                .iter()
+                .all(|value| value.as_str().is_some() || value.as_i64().is_some()) =>
+        {
+            let mut values = values.into_iter().map(canonical_json).collect::<Vec<_>>();
+            values.sort_by_key(ToString::to_string);
+            Value::Array(values)
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonical_json).collect()),
+        Value::Object(object) => {
+            let mut entries = object.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
+}
+
 fn canonical_flamebearer(value: &Value) -> TestResult<Value> {
     let flamebearer = value
         .get("flamebearer")
@@ -851,4 +984,13 @@ fn flamebearer_differential_rejects_shape_drift() {
 
     let err = assert_flamebearer_equal(&expected, &actual).unwrap_err();
     assert!(err.to_string().contains("flamebearer mismatch"));
+}
+
+#[test]
+fn connect_differential_rejects_canonical_response_drift() {
+    let expected = json!({ "names": ["__name__", "env"] });
+    let actual = json!({ "names": ["__name__", "service_name"] });
+
+    let err = assert_canonical_json_equal("LabelNames", expected, actual).unwrap_err();
+    assert!(err.to_string().contains("LabelNames mismatch"));
 }
