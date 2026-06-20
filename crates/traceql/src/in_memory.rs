@@ -122,6 +122,8 @@ fn span_ref(span: &InputSpan, nested: &NestedSet) -> SpanRef {
         instrumentation_name: span.instrumentation_name.clone(),
         instrumentation_version: span.instrumentation_version.clone(),
         attributes: span.attrs.clone(),
+        events: span.events.clone(),
+        links: span.links.clone(),
     }
 }
 
@@ -554,6 +556,8 @@ mod tests {
             instrumentation_name: String::new(),
             instrumentation_version: String::new(),
             attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            events: Vec::new(),
+            links: Vec::new(),
         }
     }
 

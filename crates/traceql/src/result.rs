@@ -9,6 +9,22 @@ pub enum AttrValue {
     Bool(bool),
 }
 
+/// One span event attached to a returned span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EventRef {
+    pub time_since_start_nano: u64,
+    pub name: String,
+    pub attributes: Vec<(String, AttrValue)>,
+}
+
+/// One linked span reference attached to a returned span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkRef {
+    pub trace_id: [u8; 16],
+    pub span_id: [u8; 8],
+    pub attributes: Vec<(String, AttrValue)>,
+}
+
 /// One matched span in a result span set.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpanRef {
@@ -26,6 +42,8 @@ pub struct SpanRef {
     pub instrumentation_name: String,
     pub instrumentation_version: String,
     pub attributes: Vec<(String, AttrValue)>,
+    pub events: Vec<EventRef>,
+    pub links: Vec<LinkRef>,
 }
 
 /// A matched span set.
@@ -133,6 +151,8 @@ mod tests {
                 ("http.status_code".into(), AttrValue::Int(200)),
                 ("ok".into(), AttrValue::Bool(true)),
             ],
+            events: Vec::new(),
+            links: Vec::new(),
         };
         assert!(s.attributes[0].1 == AttrValue::Int(200));
         assert!(s.attributes[1].1 == AttrValue::Bool(true));

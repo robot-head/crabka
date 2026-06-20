@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
-use crate::result::AttrValue;
+use crate::result::{AttrValue, EventRef, LinkRef};
 
 pub const COL_TRACE_ID: &str = "trace_id";
 pub const COL_SPAN_ID: &str = "span_id";
@@ -42,6 +42,8 @@ pub struct InputSpan {
     pub instrumentation_name: String,
     pub instrumentation_version: String,
     pub attrs: Vec<(String, AttrValue)>,
+    pub events: Vec<EventRef>,
+    pub links: Vec<LinkRef>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +180,8 @@ mod tests {
             instrumentation_name: String::new(),
             instrumentation_version: String::new(),
             attrs: vec![],
+            events: Vec::new(),
+            links: Vec::new(),
         }
     }
 

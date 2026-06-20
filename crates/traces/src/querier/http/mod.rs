@@ -797,6 +797,8 @@ fn tag_values_from_traces(traces: &[TraceSpans], tag: &str) -> Vec<TypedValue> {
         }
         for span in &trace.spans {
             collect_span_intrinsic_values(span, &trace.spans, tag, &mut values);
+            collect_event_values(span, tag, &mut values);
+            collect_link_values(span, tag, &mut values);
             values.extend(
                 span.attributes
                     .iter()
@@ -905,6 +907,37 @@ fn collect_span_intrinsic_values(
             values.insert(("string".to_string(), span.instrumentation_version.clone()));
         }
         _ => {}
+    }
+}
+
+fn collect_event_values(span: &SpanRef, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for event in &span.events {
+        match tag {
+            "event:name" => {
+                values.insert(("string".to_string(), event.name.clone()));
+            }
+            "event:timeSinceStart" => {
+                values.insert((
+                    "duration".to_string(),
+                    event.time_since_start_nano.to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_link_values(span: &SpanRef, tag: &str, values: &mut BTreeSet<(String, String)>) {
+    for link in &span.links {
+        match tag {
+            "link:traceID" => {
+                values.insert(("string".to_string(), hex::encode(link.trace_id)));
+            }
+            "link:spanID" => {
+                values.insert(("string".to_string(), hex::encode(link.span_id)));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1144,7 +1177,9 @@ mod tests {
     use assert2::assert;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use crabka_traceql::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine};
+    use crabka_traceql::{
+        AttrValue, EngineOpts, EventRef, InMemorySpanStore, InputSpan, LinkRef, TraceqlEngine,
+    };
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use tower::ServiceExt;
@@ -1182,6 +1217,8 @@ mod tests {
             instrumentation_name: String::new(),
             instrumentation_version: String::new(),
             attrs: all_attrs,
+            events: Vec::new(),
+            links: Vec::new(),
         }
     }
 
@@ -2420,6 +2457,91 @@ mod tests {
                 "tagValues": [{
                     "type": "string",
                     "value": "tracer"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_returns_event_and_link_values() {
+        let mut store = InMemorySpanStore::new();
+        let mut root = span_at_with_attrs(
+            1,
+            1,
+            None,
+            "root-svc",
+            1_000,
+            vec![("env".into(), AttrValue::Str("prod".into()))],
+        );
+        root.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "exception".into(),
+            attributes: Vec::new(),
+        }];
+        root.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: Vec::new(),
+        }];
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![root]);
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/event:name/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "exception"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/link:traceID/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "09090909090909090909090909090909"
                 }],
                 "metrics": {
                     "inspectedBytes": "0"

@@ -353,6 +353,8 @@ fn trace_from_batches(
                 instrumentation_name: string_value(&batch, COL_INSTRUMENTATION_NAME, row)?,
                 instrumentation_version: string_value(&batch, COL_INSTRUMENTATION_VERSION, row)?,
                 attributes: attr_values(&batch, row)?,
+                events: Vec::new(),
+                links: Vec::new(),
             });
         }
     }

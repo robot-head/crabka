@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::TracesError;
 use crate::querier::live::{LiveSource, Result as LiveResult};
-use crate::span::{AttrValue, KeyValue, Span, batch::span_batch, nested_set};
+use crate::span::{
+    AttrValue, EventRecord, KeyValue, LinkRecord, Span, batch::span_batch, nested_set,
+};
 use crate::wal::SpanRecord;
 
 const INTRINSIC_TAGS: &[&str] = &[
@@ -377,6 +379,40 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
             .resource_attrs
             .iter()
             .chain(&span.span_attrs)
+            .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
+            .collect(),
+        events: span
+            .events
+            .iter()
+            .map(|event| event_ref(span, event))
+            .collect(),
+        links: span.links.iter().map(link_ref).collect(),
+    }
+}
+
+fn event_ref(span: &Span, event: &EventRecord) -> crabka_traceql::EventRef {
+    crabka_traceql::EventRef {
+        time_since_start_nano: event
+            .time_unix_nano
+            .saturating_sub(span.start_ns)
+            .try_into()
+            .unwrap_or(0),
+        name: event.name.clone(),
+        attributes: event
+            .attrs
+            .iter()
+            .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
+            .collect(),
+    }
+}
+
+fn link_ref(link: &LinkRecord) -> crabka_traceql::LinkRef {
+    crabka_traceql::LinkRef {
+        trace_id: link.trace_id,
+        span_id: link.span_id,
+        attributes: link
+            .attrs
+            .iter()
             .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
             .collect(),
     }

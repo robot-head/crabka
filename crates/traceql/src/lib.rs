@@ -27,8 +27,8 @@ pub use in_memory::InMemorySpanStore;
 pub use lexer::{Token, lex};
 pub use parser::parse;
 pub use result::{
-    AttrValue, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope, TraceMetricSeries,
-    TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
+    AttrValue, EventRef, LinkRef, ScopedTag, SearchResponse, SpanRef, SpanSet, TagScope,
+    TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 pub use span_columns::{
     ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,

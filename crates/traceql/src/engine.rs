@@ -1028,6 +1028,8 @@ pub(crate) fn assemble_search_response(
                 instrumentation_version: string_value(batch, COL_INSTRUMENTATION_VERSION, row)
                     .unwrap_or_default(),
                 attributes: row_attrs(batch, row)?,
+                events: Vec::new(),
+                links: Vec::new(),
             };
             traces
                 .entry(trace_id)
@@ -1206,6 +1208,8 @@ mod tests {
             instrumentation_name: "tracer".into(),
             instrumentation_version: String::new(),
             attrs: vec![("svc".into(), AttrValue::Str(svc.into()))],
+            events: Vec::new(),
+            links: Vec::new(),
         }
     }
 

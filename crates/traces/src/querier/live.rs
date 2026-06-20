@@ -174,6 +174,8 @@ mod tests {
                 instrumentation_name: String::new(),
                 instrumentation_version: String::new(),
                 attributes: vec![("svc".into(), AttrValue::Str("api".into()))],
+                events: Vec::new(),
+                links: Vec::new(),
             }],
         }
     }
