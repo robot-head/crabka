@@ -32,6 +32,14 @@ const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
 const PROFILE_ID_LABEL: &str = "__profile_id__";
 
+/// Labels stored internally for span/exemplar lookups that Pyroscope does not
+/// expose through the label-enumeration APIs (`LabelNames`, `LabelValues`,
+/// series counting). `__profile_id__` is attached per profile, so surfacing it
+/// would leak per-profile cardinality that real Pyroscope never reports.
+fn is_internal_label(name: &str) -> bool {
+    name == PROFILE_ID_LABEL
+}
+
 pub type DefaultStore = InMemoryProfileStore;
 type SeriesKey = Vec<(String, String)>;
 type SpanExemplarsBySeries = BTreeMap<SeriesKey, BTreeMap<i64, Vec<pb::types::v1::Exemplar>>>;
@@ -1151,11 +1159,12 @@ where
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
-    let names = state
+    let mut names = state
         .store
         .label_names(&tenant, &matchers, req.0.start, req.0.end)
         .await
         .map_err(connect_error)?;
+    names.retain(|name| !is_internal_label(name));
     Ok(ConnectResponse::new(pb::querier::v1::LabelNamesResponse {
         names,
     }))
@@ -1174,6 +1183,11 @@ where
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
+    if is_internal_label(&req.0.name) {
+        return Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
+            names: Vec::new(),
+        }));
+    }
     let names = state
         .store
         .label_values(&tenant, &req.0.name, &matchers, req.0.start, req.0.end)
@@ -1662,11 +1676,12 @@ where
     let (profile_type, selector) = parse_render_query(&req.query).map_err(connect_error)?;
     let selector = merge_profile_type_selector(&selector, &profile_type).map_err(connect_error)?;
     let matchers = parse_label_selector(&selector).map_err(connect_error)?;
-    let label_names = state
+    let mut label_names = state
         .store
         .label_names(&tenant, &matchers, req.start, req.end)
         .await
         .map_err(connect_error)?;
+    label_names.retain(|name| !is_internal_label(name));
     let series_count = state
         .store
         .series(&tenant, &matchers, &label_names, req.start, req.end)

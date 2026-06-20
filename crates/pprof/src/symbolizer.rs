@@ -311,6 +311,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use assert2::assert;
+    // Only used by the ELF/DWARF self-symbolization tests below, which run on Linux.
+    #[cfg(target_os = "linux")]
     use object::{Object, ObjectSymbol};
 
     use super::*;
@@ -398,6 +400,9 @@ mod tests {
         assert!(resolver.calls.load(Ordering::Relaxed) == 0);
     }
 
+    // Reads DWARF embedded in the test binary itself. Only Linux ships DWARF in
+    // the executable; macOS keeps it in a separate .dSYM and Windows in a PDB.
+    #[cfg(target_os = "linux")]
     #[test]
     fn object_symbol_resolver_reads_dwarf_from_local_elf() {
         let _ = object_symbol_anchor();
@@ -435,6 +440,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn byte_backed_object_symbol_resolver_reads_dwarf_locations() {
         let _ = object_symbol_anchor();
@@ -469,6 +475,7 @@ mod tests {
         }));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn debuginfod_resolver_fetches_and_caches_build_id_artifact() {
         let _ = object_symbol_anchor();
@@ -558,6 +565,8 @@ mod tests {
         assert!(fixed.calls.load(Ordering::Relaxed) == 1);
     }
 
+    // Anchor symbol the Linux-only DWARF tests locate in the test binary.
+    #[cfg(target_os = "linux")]
     #[inline(never)]
     fn object_symbol_anchor() -> u64 {
         42
