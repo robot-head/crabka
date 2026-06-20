@@ -105,6 +105,7 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     assert_label_values_match(&client, &pyroscope_base, &crabka.querier_base, "env").await?;
     assert_select_merge_stacktraces_match(&client, &pyroscope_base, &crabka.querier_base).await?;
     assert_select_series_match(&client, &pyroscope_base, &crabka.querier_base).await?;
+    assert_diff_match(&client, &pyroscope_base, &crabka.querier_base).await?;
 
     assert_profile_types_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
     assert_label_names_contain(&client, &crabka.querier_base, Some(TENANT)).await?;
@@ -783,6 +784,34 @@ async fn assert_diff_has_ticks(
     Ok(())
 }
 
+async fn assert_diff_match(
+    client: &reqwest::Client,
+    pyroscope_base: &str,
+    crabka_base: &str,
+) -> TestResult {
+    let body = diff_body();
+    let pyroscope = connect_json_until(
+        client,
+        pyroscope_base,
+        None,
+        "Diff",
+        body.clone(),
+        diff_has_positive_ticks,
+    )
+    .await?;
+    let crabka = connect_json_until(
+        client,
+        crabka_base,
+        Some(TENANT),
+        "Diff",
+        body,
+        diff_has_positive_ticks,
+    )
+    .await?;
+
+    assert_diff_equal(&pyroscope, &crabka)
+}
+
 fn select_merge_stacktraces_body() -> Value {
     json!({
         "profileTypeID": PROFILE_TYPE,
@@ -791,6 +820,14 @@ fn select_merge_stacktraces_body() -> Value {
         "end": query_end_ms(),
         "maxNodes": 1024,
         "format": "PROFILE_FORMAT_FLAMEGRAPH",
+    })
+}
+
+fn diff_body() -> Value {
+    let query = select_merge_stacktraces_body();
+    json!({
+        "left": query,
+        "right": query,
     })
 }
 
@@ -876,6 +913,23 @@ fn select_series_has_positive_point(value: &Value) -> bool {
                     .is_some_and(|points| points.iter().any(|point| point_value(point) > 0.0))
             })
         })
+}
+
+fn diff_has_positive_ticks(value: &Value) -> bool {
+    value.get("flamegraph").is_some_and(|flamegraph| {
+        flamegraph
+            .get("leftTicks")
+            .or_else(|| flamegraph.get("left_ticks"))
+            .and_then(json_i64)
+            .unwrap_or_default()
+            > 0
+            && flamegraph
+                .get("rightTicks")
+                .or_else(|| flamegraph.get("right_ticks"))
+                .and_then(json_i64)
+                .unwrap_or_default()
+                > 0
+    })
 }
 
 fn canonical_profile_type(value: &Value, expected_id: &str) -> TestResult<Value> {
@@ -1012,6 +1066,62 @@ fn assert_select_series_equal(expected: &Value, actual: &Value) -> TestResult {
         canonical_select_series(expected)?,
         canonical_select_series(actual)?,
     )
+}
+
+fn assert_diff_equal(expected: &Value, actual: &Value) -> TestResult {
+    assert_canonical_json_equal("Diff", canonical_diff(expected)?, canonical_diff(actual)?)
+}
+
+fn canonical_diff(value: &Value) -> TestResult<Value> {
+    let flamegraph = value
+        .get("flamegraph")
+        .ok_or_else(|| format!("Diff response missing flamegraph object: {value}"))?;
+    let names = flamegraph
+        .get("names")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("Diff flamegraph missing names array: {value}"))?;
+    let level_values = flamegraph
+        .get("levels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("Diff flamegraph missing levels array: {value}"))?;
+    let mut levels = Vec::with_capacity(level_values.len());
+    for level in level_values {
+        levels.push(
+            level
+                .get("values")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| format!("Diff flamegraph level missing values array: {value}"))?,
+        );
+    }
+    let total = flamegraph
+        .get("total")
+        .and_then(json_i64)
+        .ok_or_else(|| format!("Diff flamegraph missing total: {value}"))?;
+    let max_self = flamegraph
+        .get("maxSelf")
+        .or_else(|| flamegraph.get("max_self"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("Diff flamegraph missing maxSelf: {value}"))?;
+    let left_ticks = flamegraph
+        .get("leftTicks")
+        .or_else(|| flamegraph.get("left_ticks"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("Diff flamegraph missing leftTicks: {value}"))?;
+    let right_ticks = flamegraph
+        .get("rightTicks")
+        .or_else(|| flamegraph.get("right_ticks"))
+        .and_then(json_i64)
+        .ok_or_else(|| format!("Diff flamegraph missing rightTicks: {value}"))?;
+
+    Ok(json!({
+        "names": names,
+        "levels": levels,
+        "total": total,
+        "maxSelf": max_self,
+        "leftTicks": left_ticks,
+        "rightTicks": right_ticks,
+    }))
 }
 
 fn canonical_select_series(value: &Value) -> TestResult<Value> {
@@ -1241,4 +1351,31 @@ fn connect_series_differential_rejects_point_drift() {
 
     let err = assert_select_series_equal(&expected, &actual).unwrap_err();
     assert!(err.to_string().contains("SelectSeries mismatch"));
+}
+
+#[test]
+fn connect_diff_differential_rejects_tick_drift() {
+    let expected = json!({
+        "flamegraph": {
+            "names": ["total", "main"],
+            "levels": [{ "values": [0, 7, 0, 0, 7, 0, 0] }],
+            "total": 14,
+            "maxSelf": 0,
+            "leftTicks": 7,
+            "rightTicks": 7
+        }
+    });
+    let actual = json!({
+        "flamegraph": {
+            "names": ["total", "main"],
+            "levels": [{ "values": [0, 7, 0, 0, 8, 0, 0] }],
+            "total": 15,
+            "maxSelf": 0,
+            "leftTicks": 7,
+            "rightTicks": 8
+        }
+    });
+
+    let err = assert_diff_equal(&expected, &actual).unwrap_err();
+    assert!(err.to_string().contains("Diff mismatch"));
 }
