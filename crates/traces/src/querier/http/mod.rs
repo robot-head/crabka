@@ -219,13 +219,18 @@ where
     let step_ns = query_param(&uri, "step")
         .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(1_000_000_000);
+    let include_exemplars = include_exemplars(&uri);
 
     match state
         .engine
         .query_range(&tenant, &query, start_ns, end_ns, step_ns)
         .await
     {
-        Ok(resp) => Json(trace_metrics_json(&resp)).into_response(),
+        Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
+            resp,
+            include_exemplars,
+        )))
+        .into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
@@ -245,13 +250,18 @@ where
     let ts_ns = query_param(&uri, "time")
         .and_then(|v| parse_seconds_to_ns(&v))
         .unwrap_or(0);
+    let include_exemplars = include_exemplars(&uri);
 
     match state
         .engine
         .query_range(&tenant, &query, ts_ns, ts_ns, 1_000_000_000)
         .await
     {
-        Ok(resp) => Json(trace_metrics_json(&resp)).into_response(),
+        Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
+            resp,
+            include_exemplars,
+        )))
+        .into_response(),
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
@@ -338,6 +348,13 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     value.parse::<i64>().ok()?.checked_mul(1_000_000_000)
+}
+
+fn include_exemplars(uri: &Uri) -> bool {
+    !matches!(
+        query_param(uri, "exemplars").as_deref(),
+        Some("false" | "0")
+    )
 }
 
 fn duration_param(uri: &Uri, key: &str) -> Result<Option<u64>, String> {
@@ -554,6 +571,18 @@ fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
             })
         }).collect::<Vec<_>>(),
     })
+}
+
+fn filter_metrics_exemplars(
+    mut resp: TraceMetricsResponse,
+    include_exemplars: bool,
+) -> TraceMetricsResponse {
+    if !include_exemplars {
+        for series in &mut resp.series {
+            series.exemplars.clear();
+        }
+    }
+    resp
 }
 
 fn tag_scope_name(scope: TagScope) -> &'static str {
@@ -804,6 +833,17 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_can_disable_exemplars() {
+        let (status, body) = get_json(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1&exemplars=false",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        assert!(body["series"][0]["exemplars"] == json!([]));
     }
 
     #[tokio::test]
