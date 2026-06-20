@@ -175,6 +175,49 @@ impl<S: ProfileStore> QuerierState<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    async fn select_merge_stacktraces_tree_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        stack_trace_call_sites: &[String],
+    ) -> Result<Vec<u8>, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(tenant, max_nodes);
+        match &self.execution {
+            QueryExecution::Direct => {
+                self.engine
+                    .select_merge_stacktraces_tree_with_stack_trace_selector(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        start_ms,
+                        end_ms,
+                        max_nodes,
+                        stack_trace_call_sites,
+                    )
+                    .await
+            }
+            QueryExecution::Sharded(config) => {
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                self.engine
+                    .select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        &shards,
+                        max_nodes,
+                        stack_trace_call_sites,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn select_series(
         &self,
         tenant: &str,
@@ -253,6 +296,49 @@ impl<S: ProfileStore> QuerierState<S> {
                 let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
                 self.engine
                     .select_merge_span_profile_sharded(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        span_ids,
+                        &shards,
+                        max_nodes,
+                    )
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn select_merge_span_profile_tree(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_ids: &[u64],
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<Vec<u8>, ProfileError> {
+        self.validate_query_range(tenant, start_ms, end_ms)?;
+        let max_nodes = self.effective_max_nodes(tenant, max_nodes);
+        match &self.execution {
+            QueryExecution::Direct => {
+                self.engine
+                    .select_merge_span_profile_tree(
+                        tenant,
+                        profile_type,
+                        label_selector,
+                        span_ids,
+                        start_ms,
+                        end_ms,
+                        max_nodes,
+                    )
+                    .await
+            }
+            QueryExecution::Sharded(config) => {
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                self.engine
+                    .select_merge_span_profile_tree_sharded(
                         tenant,
                         profile_type,
                         label_selector,
@@ -453,29 +539,63 @@ where
         .map_err(connect_error)?;
     let stack_trace_call_sites =
         stack_trace_call_sites_from_json(&req.stack_trace_selector).map_err(connect_error)?;
-    let flamegraph = state
-        .select_merge_stacktraces_with_stack_trace_selector(
-            &tenant,
-            &req.profile_type_id,
-            &label_selector,
-            req.start,
-            req.end,
-            req.max_nodes,
-            &stack_trace_call_sites,
-        )
-        .await
-        .map_err(connect_error)?;
-    let response = if req.format == pb::querier::v1::ProfileFormat::Dot as i32 {
-        pb::querier::v1::SelectMergeStacktracesResponse {
-            flamegraph: None,
-            tree: Vec::new(),
-            dot: flamegraph_dot(&flamegraph),
+    let response = match req.format {
+        format if format == pb::querier::v1::ProfileFormat::Tree as i32 => {
+            let tree = state
+                .select_merge_stacktraces_tree_with_stack_trace_selector(
+                    &tenant,
+                    &req.profile_type_id,
+                    &label_selector,
+                    req.start,
+                    req.end,
+                    req.max_nodes,
+                    &stack_trace_call_sites,
+                )
+                .await
+                .map_err(connect_error)?;
+            pb::querier::v1::SelectMergeStacktracesResponse {
+                flamegraph: None,
+                tree,
+                dot: String::new(),
+            }
         }
-    } else {
-        pb::querier::v1::SelectMergeStacktracesResponse {
-            flamegraph: Some(flamegraph.into()),
-            tree: Vec::new(),
-            dot: String::new(),
+        format if format == pb::querier::v1::ProfileFormat::Dot as i32 => {
+            let flamegraph = state
+                .select_merge_stacktraces_with_stack_trace_selector(
+                    &tenant,
+                    &req.profile_type_id,
+                    &label_selector,
+                    req.start,
+                    req.end,
+                    req.max_nodes,
+                    &stack_trace_call_sites,
+                )
+                .await
+                .map_err(connect_error)?;
+            pb::querier::v1::SelectMergeStacktracesResponse {
+                flamegraph: None,
+                tree: Vec::new(),
+                dot: flamegraph_dot(&flamegraph),
+            }
+        }
+        _ => {
+            let flamegraph = state
+                .select_merge_stacktraces_with_stack_trace_selector(
+                    &tenant,
+                    &req.profile_type_id,
+                    &label_selector,
+                    req.start,
+                    req.end,
+                    req.max_nodes,
+                    &stack_trace_call_sites,
+                )
+                .await
+                .map_err(connect_error)?;
+            pb::querier::v1::SelectMergeStacktracesResponse {
+                flamegraph: Some(flamegraph.into()),
+                tree: Vec::new(),
+                dot: String::new(),
+            }
         }
     };
     Ok(ConnectResponse::new(response))
@@ -545,24 +665,42 @@ where
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
     let span_ids = parse_span_selectors(&req.span_selector).map_err(connect_error)?;
-    let flamegraph = state
-        .select_merge_span_profile(
-            &tenant,
-            &req.profile_type_id,
-            &req.label_selector,
-            &span_ids,
-            req.start,
-            req.end,
-            req.max_nodes,
-        )
-        .await
-        .map_err(connect_error)?;
-    Ok(ConnectResponse::new(
+    let response = if req.format == pb::querier::v1::ProfileFormat::Tree as i32 {
+        let tree = state
+            .select_merge_span_profile_tree(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &span_ids,
+                req.start,
+                req.end,
+                req.max_nodes,
+            )
+            .await
+            .map_err(connect_error)?;
+        pb::querier::v1::SelectMergeSpanProfileResponse {
+            flamegraph: None,
+            tree,
+        }
+    } else {
+        let flamegraph = state
+            .select_merge_span_profile(
+                &tenant,
+                &req.profile_type_id,
+                &req.label_selector,
+                &span_ids,
+                req.start,
+                req.end,
+                req.max_nodes,
+            )
+            .await
+            .map_err(connect_error)?;
         pb::querier::v1::SelectMergeSpanProfileResponse {
             flamegraph: Some(flamegraph.into()),
             tree: Vec::new(),
-        },
-    ))
+        }
+    };
+    Ok(ConnectResponse::new(response))
 }
 
 async fn select_merge_profile_handler<S>(
@@ -1350,6 +1488,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
+    use base64::Engine;
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
     use super::*;
@@ -1383,6 +1522,38 @@ mod tests {
             stacktrace,
             7,
             10,
+        );
+        store
+    }
+
+    fn store_with_span_frame(name: &str, span_id: u64) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string(name);
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            stacktrace,
+            7,
+            7,
+            10,
+            span_id,
         );
         store
     }
@@ -1766,6 +1937,97 @@ overrides:
                 .is_none_or(str::is_empty),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn select_merge_stacktraces_tree_format_returns_pyroscope_tree_bytes() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeStacktraces"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "format": "PROFILE_FORMAT_TREE",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(response.get("flamegraph").is_none(), "{response}");
+        assert!(
+            response
+                .get("dot")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty),
+            "{response}"
+        );
+        let tree = response
+            .get("tree")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
+            .unwrap();
+
+        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
+    }
+
+    #[tokio::test]
+    async fn select_merge_span_profile_tree_format_returns_pyroscope_tree_bytes() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_span_frame(
+            "main.work",
+            111,
+        ))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeSpanProfile"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "spanSelector": ["111"],
+                "start": 0,
+                "end": 100,
+                "format": "PROFILE_FORMAT_TREE",
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(response.get("flamegraph").is_none(), "{response}");
+        let tree = response
+            .get("tree")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
+            .unwrap();
+
+        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
     }
 
     #[tokio::test]

@@ -102,6 +102,36 @@ impl<S: ProfileStore> FlameEngine<S> {
         Ok(tree.to_flamegraph(max_nodes))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_stacktraces_tree_with_stack_trace_selector(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+        call_sites: &[String],
+    ) -> Result<Vec<u8>, ProfileError> {
+        let tree = self
+            .merge_to_tree(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                None,
+                call_sites,
+            )
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_pyroscope_tree_bytes(max_nodes))
+    }
+
     pub async fn select_merge_stacktraces_sharded(
         &self,
         tenant: &str,
@@ -175,6 +205,44 @@ impl<S: ProfileStore> FlameEngine<S> {
             self.opts.default_max_nodes
         };
         Ok(merged.to_flamegraph(max_nodes))
+    }
+
+    pub async fn select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        ranges: &[(i64, i64)],
+        max_nodes: i64,
+        call_sites: &[String],
+    ) -> Result<Vec<u8>, ProfileError> {
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded stacktrace query requires at least one time range".to_string(),
+            ));
+        }
+        let mut merged = Tree::new();
+        for (start_ms, end_ms) in ranges {
+            validate_range(*start_ms, *end_ms)?;
+            let tree = self
+                .merge_to_tree(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    *start_ms,
+                    *end_ms,
+                    None,
+                    call_sites,
+                )
+                .await?;
+            merged.merge(tree);
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(merged.to_pyroscope_tree_bytes(max_nodes))
     }
 
     pub(crate) async fn merge_to_tree(
@@ -518,6 +586,36 @@ impl<S: ProfileStore> FlameEngine<S> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_span_profile_tree(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_selector: &[u64],
+        start_ms: i64,
+        end_ms: i64,
+        max_nodes: i64,
+    ) -> Result<Vec<u8>, ProfileError> {
+        let tree = self
+            .merge_to_tree(
+                tenant,
+                profile_type,
+                label_selector,
+                start_ms,
+                end_ms,
+                Some(span_selector),
+                &[],
+            )
+            .await?;
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(tree.to_pyroscope_tree_bytes(max_nodes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn select_merge_span_profile_sharded(
         &self,
         tenant: &str,
@@ -559,6 +657,50 @@ impl<S: ProfileStore> FlameEngine<S> {
             self.opts.default_max_nodes
         };
         Ok(merged.to_flamegraph(max_nodes))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn select_merge_span_profile_tree_sharded(
+        &self,
+        tenant: &str,
+        profile_type: &str,
+        label_selector: &str,
+        span_selector: &[u64],
+        ranges: &[(i64, i64)],
+        max_nodes: i64,
+    ) -> Result<Vec<u8>, ProfileError> {
+        if matches!(span_selector, []) {
+            return Err(ProfileError::Plan(
+                "span selector must contain at least one span id".to_string(),
+            ));
+        }
+        if ranges.is_empty() {
+            return Err(ProfileError::Plan(
+                "sharded span profile query requires at least one time range".to_string(),
+            ));
+        }
+        let mut merged = Tree::new();
+        for (start_ms, end_ms) in ranges {
+            validate_range(*start_ms, *end_ms)?;
+            let tree = self
+                .merge_to_tree(
+                    tenant,
+                    profile_type,
+                    label_selector,
+                    *start_ms,
+                    *end_ms,
+                    Some(span_selector),
+                    &[],
+                )
+                .await?;
+            merged.merge(tree);
+        }
+        let max_nodes = if max_nodes > 0 {
+            max_nodes
+        } else {
+            self.opts.default_max_nodes
+        };
+        Ok(merged.to_pyroscope_tree_bytes(max_nodes))
     }
 
     #[allow(clippy::too_many_arguments)]

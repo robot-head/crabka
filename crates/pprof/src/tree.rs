@@ -182,6 +182,32 @@ impl Tree {
         }
     }
 
+    #[must_use]
+    pub fn to_pyroscope_tree_bytes(self, max_nodes: i64) -> Vec<u8> {
+        if self.nodes[self.root].children.is_empty() {
+            return Vec::new();
+        }
+        let keep = self.keep_set(max_nodes);
+        let mut out = Vec::new();
+        let root = Bar {
+            node: Some(self.root),
+            name: String::new(),
+            total: self.nodes[self.root].total,
+            self_: 0,
+            x_start: 0,
+            level: 0,
+        };
+        let mut stack = vec![root];
+        while let Some(parent) = stack.pop() {
+            write_pyroscope_tree_node(&mut out, &parent.name, parent.self_);
+            let mut children = Vec::new();
+            append_children(&self, &keep, &parent, &mut children);
+            write_uvarint(&mut out, children.len() as u64);
+            stack.extend(children);
+        }
+        out
+    }
+
     fn keep_set(&self, max_nodes: i64) -> HashSet<usize> {
         let max_nodes = usize::try_from(max_nodes.max(1)).unwrap_or(usize::MAX);
         if self.nodes.len() <= max_nodes {
@@ -343,6 +369,20 @@ fn sorted_child_position(children: &[usize], nodes: &[Node], name: &str) -> usiz
         .unwrap_or_else(|pos| pos)
 }
 
+fn write_pyroscope_tree_node(out: &mut Vec<u8>, name: &str, self_: i64) {
+    write_uvarint(out, name.len() as u64);
+    out.extend_from_slice(name.as_bytes());
+    write_uvarint(out, self_ as u64);
+}
+
+fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -447,6 +487,16 @@ mod tests {
         let fg = tree.to_flamegraph(4);
         assert!(fg.names.iter().any(|name| name == "other"));
         assert!(fg.total == 10);
+    }
+
+    #[test]
+    fn to_pyroscope_tree_bytes_uses_virtual_root_and_function_nodes() {
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["work", "main"]), 7);
+
+        let bytes = tree.to_pyroscope_tree_bytes(2048);
+
+        assert!(bytes == b"\x00\x00\x01\x04main\x00\x01\x04work\x07\x00");
     }
 
     fn names_index(fg: &FlameGraph, name: &str) -> i64 {
