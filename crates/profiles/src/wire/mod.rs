@@ -466,4 +466,40 @@ mod tests {
         assert!(!response_bytes.is_empty());
         assert_eq!(response.series[0].slots[0].counts, vec![1, 2]);
     }
+
+    #[test]
+    fn analyze_query_messages_use_upstream_shape() {
+        let request = pb::querier::v1::AnalyzeQueryRequest {
+            start: 10,
+            end: 20,
+            query: "process_cpu:cpu:nanoseconds:cpu:nanoseconds{}".to_string(),
+        };
+        let response = pb::querier::v1::AnalyzeQueryResponse {
+            query_scopes: vec![pb::querier::v1::QueryScope {
+                component_type: "Long term storage".to_string(),
+                component_count: 1,
+                block_count: 2,
+                series_count: 3,
+                profile_count: 4,
+                sample_count: 5,
+                index_bytes: 6,
+                profile_bytes: 7,
+                symbol_bytes: 8,
+            }],
+            query_impact: Some(pb::querier::v1::QueryImpact {
+                total_bytes_in_time_range: 9,
+                total_queried_series: 10,
+                deduplication_needed: false,
+            }),
+        };
+
+        let request_bytes = request.encode_to_vec();
+        let response_bytes = response.encode_to_vec();
+
+        assert_eq!(request_bytes[0], 0x10); // start, field 2
+        assert_eq!(request_bytes[2], 0x18); // end, field 3
+        assert!(request_bytes.contains(&0x22)); // query, field 4
+        assert!(response_bytes.contains(&0x0a)); // query_scopes, field 1
+        assert!(response_bytes.contains(&0x12)); // query_impact, field 2
+    }
 }

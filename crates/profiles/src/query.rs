@@ -862,25 +862,48 @@ where
 }
 
 async fn analyze_query_handler<S>(
-    _state: Extension<Arc<QuerierState<S>>>,
+    Extension(state): Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
 ) -> Result<ConnectResponse<pb::querier::v1::AnalyzeQueryResponse>, ConnectError>
 where
     S: ProfileStore,
 {
+    let tenant = tenant_from_headers(&headers);
     let req = req.0;
-    let result = ProfileType::parse(&req.profile_type_id)
-        .map(|_| ())
-        .and_then(|()| parse_label_selector(&req.label_selector).map(|_| ()));
-    let response = match result {
-        Ok(()) => pb::querier::v1::AnalyzeQueryResponse {
-            valid: true,
-            error: String::new(),
-        },
-        Err(err) => pb::querier::v1::AnalyzeQueryResponse {
-            valid: false,
-            error: err.to_string(),
-        },
+    state
+        .validate_query_range(&tenant, req.start, req.end)
+        .map_err(connect_error)?;
+    let (_profile_type, selector) = parse_render_query(&req.query).map_err(connect_error)?;
+    let matchers = parse_label_selector(&selector).map_err(connect_error)?;
+    let label_names = state
+        .store
+        .label_names(&tenant, &matchers, req.start, req.end)
+        .await
+        .map_err(connect_error)?;
+    let series_count = state
+        .store
+        .series(&tenant, &matchers, &label_names, req.start, req.end)
+        .await
+        .map_err(connect_error)?
+        .len() as u64;
+    let response = pb::querier::v1::AnalyzeQueryResponse {
+        query_scopes: vec![pb::querier::v1::QueryScope {
+            component_type: "Long term storage".to_string(),
+            component_count: u64::from(series_count > 0),
+            block_count: 0,
+            series_count,
+            profile_count: 0,
+            sample_count: 0,
+            index_bytes: 0,
+            profile_bytes: 0,
+            symbol_bytes: 0,
+        }],
+        query_impact: Some(pb::querier::v1::QueryImpact {
+            total_bytes_in_time_range: 0,
+            total_queried_series: series_count,
+            deduplication_needed: false,
+        }),
     };
     Ok(ConnectResponse::new(response))
 }
@@ -2472,6 +2495,61 @@ overrides:
                         .and_then(serde_json::Value::as_str)
                         == Some("worker")
             }),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_query_returns_scope_and_impact_for_matching_series() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_leaf_frames(&[
+            ("hot.path", 7),
+            ("cold.path", 10),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/AnalyzeQuery"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "start": 0,
+                "end": 100,
+                "query": format!(r#"{PT}{{service_name="api"}}"#),
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(response.get("valid").is_none(), "{response}");
+        assert!(
+            response
+                .pointer("/queryImpact/totalQueriedSeries")
+                .and_then(json_i64)
+                == Some(1),
+            "{response}"
+        );
+        assert!(
+            response
+                .pointer("/queryScopes/0/componentType")
+                .and_then(serde_json::Value::as_str)
+                == Some("Long term storage"),
+            "{response}"
+        );
+        assert!(
+            response
+                .pointer("/queryScopes/0/seriesCount")
+                .and_then(json_i64)
+                == Some(1),
             "{response}"
         );
     }
