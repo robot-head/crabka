@@ -10,7 +10,9 @@ use arrow::array::{
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    BlockIndex, BlockStore, SCOL_EVENTS, SCOL_LINKS, TraceIndex, span_block_schema,
+    BlockIndex, BlockStore, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
+    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_EVENTS, SCOL_LINKS, TraceIndex,
+    span_block_schema,
 };
 use crabka_traceql::{
     ATTR_PREFIX, AttrValue, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
@@ -528,7 +530,168 @@ fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue
         };
         out.push((key.to_string(), value));
     }
+    out.extend(block_attr_values(batch, row)?);
     Ok(out)
+}
+
+fn block_attr_values(
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
+    let Some(keys) = optional_list_column(batch, SCOL_ATTR_KEYS)? else {
+        return Ok(Vec::new());
+    };
+    if keys.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let key_values = keys.value(row);
+    let key_values = key_values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TraceqlError::Store("attr_keys row is not Utf8".into()))?;
+    let str_values = optional_list_column(batch, SCOL_ATTR_VALUE)?;
+    let int_values = optional_list_column(batch, SCOL_ATTR_VALUE_INT)?;
+    let double_values = optional_list_column(batch, SCOL_ATTR_VALUE_DOUBLE)?;
+    let bool_values = optional_list_column(batch, SCOL_ATTR_VALUE_BOOL)?;
+
+    let mut out = Vec::new();
+    for attr_idx in 0..key_values.len() {
+        if key_values.is_null(attr_idx) {
+            continue;
+        }
+        let Some(value) = block_attr_value(
+            str_values,
+            int_values,
+            double_values,
+            bool_values,
+            row,
+            attr_idx,
+        )?
+        else {
+            continue;
+        };
+        out.push((key_values.value(attr_idx).to_string(), value));
+    }
+    Ok(out)
+}
+
+fn block_attr_value(
+    str_values: Option<&ListArray>,
+    int_values: Option<&ListArray>,
+    double_values: Option<&ListArray>,
+    bool_values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+) -> Result<Option<AttrValue>, TraceqlError> {
+    if let Some(value) = first_string_attr_value(str_values, row, attr_idx, SCOL_ATTR_VALUE)? {
+        return Ok(Some(AttrValue::Str(value)));
+    }
+    if let Some(value) = first_i64_attr_value(int_values, row, attr_idx, SCOL_ATTR_VALUE_INT)? {
+        return Ok(Some(AttrValue::Int(value)));
+    }
+    if let Some(value) = first_f64_attr_value(double_values, row, attr_idx, SCOL_ATTR_VALUE_DOUBLE)?
+    {
+        return Ok(Some(AttrValue::Float(value)));
+    }
+    first_bool_attr_value(bool_values, row, attr_idx, SCOL_ATTR_VALUE_BOOL)
+        .map(|value| value.map(AttrValue::Bool))
+}
+
+fn row_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<arrow::array::ArrayRef>, TraceqlError> {
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    if values.is_null(row) {
+        return Ok(None);
+    }
+    let row_values = values.value(row);
+    let row_values = row_values
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| {
+            TraceqlError::Store(format!("attribute column `{name}` row is not a list"))
+        })?;
+    if attr_idx >= row_values.len() || row_values.is_null(attr_idx) {
+        return Ok(None);
+    }
+    Ok(Some(row_values.value(attr_idx)))
+}
+
+fn first_string_attr_value(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<String>, TraceqlError> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(None);
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Utf8")))?;
+    Ok((0..values.len())
+        .find(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx).to_string()))
+}
+
+fn first_i64_attr_value(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<i64>, TraceqlError> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(None);
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Int64")))?;
+    Ok((0..values.len())
+        .find(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx)))
+}
+
+fn first_f64_attr_value(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<f64>, TraceqlError> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(None);
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Float64")))?;
+    Ok((0..values.len())
+        .find(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx)))
+}
+
+fn first_bool_attr_value(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<bool>, TraceqlError> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(None);
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| TraceqlError::Store(format!("attribute column `{name}` is not Boolean")))?;
+    Ok((0..values.len())
+        .find(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx)))
 }
 
 fn event_values(batch: &RecordBatch, row: usize) -> Result<Vec<EventRef>, TraceqlError> {
@@ -1256,7 +1419,16 @@ mod tests {
                 key: "service.name".into(),
                 value: SpanAttrValue::Str("api".into()),
             }],
-            span_attrs: Vec::new(),
+            span_attrs: vec![
+                KeyValue {
+                    key: "http.status_code".into(),
+                    value: SpanAttrValue::Int(504),
+                },
+                KeyValue {
+                    key: "retryable".into(),
+                    value: SpanAttrValue::Bool(true),
+                },
+            ],
             events: vec![EventRecord {
                 time_unix_nano: 1_050,
                 name: "exception".into(),
@@ -1322,6 +1494,14 @@ mod tests {
             .unwrap();
 
         assert!(trace.spans.len() == 1);
+        assert!(
+            trace.spans[0].attributes
+                == vec![
+                    ("service.name".into(), AttrValue::Str("api".into())),
+                    ("http.status_code".into(), AttrValue::Int(504)),
+                    ("retryable".into(), AttrValue::Bool(true)),
+                ]
+        );
         assert!(
             trace.spans[0].events
                 == vec![EventRef {
