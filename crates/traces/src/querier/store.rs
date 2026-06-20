@@ -5,17 +5,20 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, StringArray, StringViewArray,
+    LargeStringArray, ListArray, StringArray, StringViewArray, StructArray,
 };
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
-use crabka_blockstore::{BlockIndex, BlockStore, TraceIndex, span_block_schema};
+use crabka_blockstore::{
+    BlockIndex, BlockStore, SCOL_EVENTS, SCOL_LINKS, TraceIndex, span_block_schema,
+};
 use crabka_traceql::{
     ATTR_PREFIX, AttrValue, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
     COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
-    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, ScanResult, ScopedTag,
-    SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
+    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EventRef, LinkRef,
+    ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
+    TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -353,8 +356,8 @@ fn trace_from_batches(
                 instrumentation_name: string_value(&batch, COL_INSTRUMENTATION_NAME, row)?,
                 instrumentation_version: string_value(&batch, COL_INSTRUMENTATION_VERSION, row)?,
                 attributes: attr_values(&batch, row)?,
-                events: Vec::new(),
-                links: Vec::new(),
+                events: event_values(&batch, row)?,
+                links: link_values(&batch, row)?,
             });
         }
     }
@@ -528,6 +531,190 @@ fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue
     Ok(out)
 }
 
+fn event_values(batch: &RecordBatch, row: usize) -> Result<Vec<EventRef>, TraceqlError> {
+    let Some(events) = optional_list_column(batch, SCOL_EVENTS)? else {
+        return Ok(Vec::new());
+    };
+    if events.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let row_events = events.value(row);
+    let row_events = row_events
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            TraceqlError::Store(format!("nested column `{SCOL_EVENTS}` row is not a struct"))
+        })?;
+    let names = struct_string_field(row_events, 0, SCOL_EVENTS)?;
+    let times = struct_int64_field(row_events, 1, SCOL_EVENTS)?;
+    let attr_keys = struct_list_field(row_events, 2, SCOL_EVENTS)?;
+    let attr_values = struct_list_field(row_events, 3, SCOL_EVENTS)?;
+
+    let mut out = Vec::new();
+    for idx in 0..row_events.len() {
+        if row_events.is_null(idx) {
+            continue;
+        }
+        let name = if names.is_null(idx) {
+            String::new()
+        } else {
+            string_array_value(names, idx)?
+        };
+        let time_since_start_nano = if times.is_null(idx) {
+            0
+        } else {
+            u64::try_from(times.value(idx)).unwrap_or(0)
+        };
+        out.push(EventRef {
+            time_since_start_nano,
+            name,
+            attributes: nested_string_attrs(attr_keys, attr_values, idx)?,
+        });
+    }
+    Ok(out)
+}
+
+fn link_values(batch: &RecordBatch, row: usize) -> Result<Vec<LinkRef>, TraceqlError> {
+    let Some(links) = optional_list_column(batch, SCOL_LINKS)? else {
+        return Ok(Vec::new());
+    };
+    if links.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let row_links = links.value(row);
+    let row_links = row_links
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            TraceqlError::Store(format!("nested column `{SCOL_LINKS}` row is not a struct"))
+        })?;
+    let trace_ids = struct_fixed_field(row_links, 0, SCOL_LINKS)?;
+    let span_ids = struct_fixed_field(row_links, 1, SCOL_LINKS)?;
+    let attr_keys = struct_list_field(row_links, 2, SCOL_LINKS)?;
+    let attr_values = struct_list_field(row_links, 3, SCOL_LINKS)?;
+
+    let mut out = Vec::new();
+    for idx in 0..row_links.len() {
+        if row_links.is_null(idx) {
+            continue;
+        }
+        out.push(LinkRef {
+            trace_id: fixed_array_value::<16>(trace_ids, idx, SCOL_LINKS)?,
+            span_id: fixed_array_value::<8>(span_ids, idx, SCOL_LINKS)?,
+            attributes: nested_string_attrs(attr_keys, attr_values, idx)?,
+        });
+    }
+    Ok(out)
+}
+
+fn optional_list_column<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<Option<&'a ListArray>, TraceqlError> {
+    batch
+        .column_by_name(name)
+        .map(|col| {
+            col.as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| TraceqlError::Store(format!("nested column `{name}` is not a list")))
+        })
+        .transpose()
+}
+
+fn struct_string_field<'a>(
+    values: &'a StructArray,
+    field: usize,
+    name: &str,
+) -> Result<&'a dyn Array, TraceqlError> {
+    values
+        .columns()
+        .get(field)
+        .map(std::convert::AsRef::as_ref)
+        .ok_or_else(|| TraceqlError::Store(format!("nested column `{name}` missing string field")))
+}
+
+fn struct_int64_field<'a>(
+    values: &'a StructArray,
+    field: usize,
+    name: &str,
+) -> Result<&'a Int64Array, TraceqlError> {
+    values
+        .columns()
+        .get(field)
+        .and_then(|col| col.as_any().downcast_ref::<Int64Array>())
+        .ok_or_else(|| TraceqlError::Store(format!("nested column `{name}` missing int64 field")))
+}
+
+fn struct_fixed_field<'a>(
+    values: &'a StructArray,
+    field: usize,
+    name: &str,
+) -> Result<&'a FixedSizeBinaryArray, TraceqlError> {
+    values
+        .columns()
+        .get(field)
+        .and_then(|col| col.as_any().downcast_ref::<FixedSizeBinaryArray>())
+        .ok_or_else(|| {
+            TraceqlError::Store(format!("nested column `{name}` missing fixed binary field"))
+        })
+}
+
+fn struct_list_field<'a>(
+    values: &'a StructArray,
+    field: usize,
+    name: &str,
+) -> Result<&'a ListArray, TraceqlError> {
+    values
+        .columns()
+        .get(field)
+        .and_then(|col| col.as_any().downcast_ref::<ListArray>())
+        .ok_or_else(|| TraceqlError::Store(format!("nested column `{name}` missing list field")))
+}
+
+fn nested_string_attrs(
+    keys: &ListArray,
+    values: &ListArray,
+    row: usize,
+) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
+    if keys.is_null(row) || values.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let key_values = keys.value(row);
+    let key_values = key_values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TraceqlError::Store("nested attribute keys are not strings".into()))?;
+    let value_lists = values.value(row);
+    let value_lists = value_lists
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| {
+            TraceqlError::Store("nested attribute values are not string lists".into())
+        })?;
+
+    let mut out = Vec::new();
+    for idx in 0..key_values.len().min(value_lists.len()) {
+        if key_values.is_null(idx) || value_lists.is_null(idx) {
+            continue;
+        }
+        let scalar_values = value_lists.value(idx);
+        let scalar_values = scalar_values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                TraceqlError::Store("nested attribute scalar values are not strings".into())
+            })?;
+        if scalar_values.is_empty() || scalar_values.is_null(0) {
+            continue;
+        }
+        out.push((
+            key_values.value(idx).to_string(),
+            AttrValue::Str(scalar_values.value(0).to_string()),
+        ));
+    }
+    Ok(out)
+}
+
 fn fixed<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a FixedSizeBinaryArray, TraceqlError> {
     batch
         .column_by_name(name)
@@ -541,6 +728,20 @@ fn fixed_value<const N: usize>(
     row: usize,
 ) -> Result<[u8; N], TraceqlError> {
     fixed(batch, name)?
+        .value(row)
+        .try_into()
+        .map_err(|_| TraceqlError::Store(format!("bad fixed binary width for `{name}`")))
+}
+
+fn fixed_array_value<const N: usize>(
+    values: &FixedSizeBinaryArray,
+    row: usize,
+    name: &str,
+) -> Result<[u8; N], TraceqlError> {
+    if values.is_null(row) {
+        return Ok([0; N]);
+    }
+    values
         .value(row)
         .try_into()
         .map_err(|_| TraceqlError::Store(format!("bad fixed binary width for `{name}`")))
@@ -659,15 +860,22 @@ mod tests {
     use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use assert2::assert;
-    use crabka_blockstore::{ShardedTraceBloom, TraceBlockStats};
+    use crabka_blockstore::{
+        BlockWriter, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SummaryColumns,
+        TraceBlockStats, span_block_decl,
+    };
     use crabka_traceql::{
         COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
-        TraceqlEngine,
+        EventRef, LinkRef, TraceqlEngine,
     };
     use object_store::memory::InMemory;
     use url::Url;
 
     use crate::querier::live::LiveSource;
+    use crate::span::{
+        AttrValue as SpanAttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind, StatusCode,
+        batch::span_batch,
+    };
 
     use super::*;
 
@@ -1029,6 +1237,105 @@ mod tests {
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "exception".into(),
+                }]
+        );
+    }
+
+    fn span_with_nested_refs() -> Span {
+        Span {
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: "GET /users".into(),
+            kind: SpanKind::Server,
+            start_ns: 1_000,
+            duration_ns: 500,
+            status: StatusCode::Ok,
+            status_message: String::new(),
+            resource_attrs: vec![KeyValue {
+                key: "service.name".into(),
+                value: SpanAttrValue::Str("api".into()),
+            }],
+            span_attrs: Vec::new(),
+            events: vec![EventRecord {
+                time_unix_nano: 1_050,
+                name: "exception".into(),
+                attrs: vec![KeyValue {
+                    key: "exception.type".into(),
+                    value: SpanAttrValue::Str("timeout".into()),
+                }],
+            }],
+            links: vec![LinkRecord {
+                trace_id: [9; 16],
+                span_id: [8; 8],
+                attrs: vec![KeyValue {
+                    key: "link.kind".into(),
+                    value: SpanAttrValue::Str("retry".into()),
+                }],
+            }],
+            instrumentation_scope: "otel-rust".into(),
+            instrumentation_version: "1.2.3".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cold_trace_by_id_projects_events_and_links_from_span_blocks() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/spans.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let trace = store
+            .trace_by_id("tenant", &span.trace_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(trace.spans.len() == 1);
+        assert!(
+            trace.spans[0].events
+                == vec![EventRef {
+                    time_since_start_nano: 50,
+                    name: "exception".into(),
+                    attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
+                }]
+        );
+        assert!(
+            trace.spans[0].links
+                == vec![LinkRef {
+                    trace_id: [9; 16],
+                    span_id: [8; 8],
+                    attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
                 }]
         );
     }
