@@ -51,6 +51,13 @@ struct JaegerSpan {
     start_time_micros: i64,
     duration_micros: i64,
     tags: Vec<KeyValue>,
+    logs: Vec<JaegerLog>,
+}
+
+#[derive(Default)]
+struct JaegerLog {
+    timestamp_micros: i64,
+    fields: Vec<KeyValue>,
 }
 
 #[derive(Default)]
@@ -101,6 +108,20 @@ fn read_span(input: &mut CompactInput<'_>) -> Result<JaegerSpan, WireError> {
             (8, T_I64) => out.start_time_micros = input.read_i64()?,
             (9, T_I64) => out.duration_micros = input.read_i64()?,
             (10, T_LIST) => out.tags = input.read_struct_list(read_key_value)?,
+            (11, T_LIST) => out.logs = input.read_struct_list(read_log)?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_log(input: &mut CompactInput<'_>) -> Result<JaegerLog, WireError> {
+    let mut out = JaegerLog::default();
+    let mut last = 0;
+    while let Some((field_type, field_id)) = input.read_field(&mut last)? {
+        match (field_id, field_type) {
+            (1, T_I64) => out.timestamp_micros = input.read_i64()?,
+            (2, T_LIST) => out.fields = input.read_struct_list(read_key_value)?,
             _ => input.skip(field_type)?,
         }
     }
@@ -181,11 +202,36 @@ fn jaeger_span_to_internal(span: &JaegerSpan, process: &JaegerProcess) -> Span {
         status_message: String::new(),
         resource_attrs,
         span_attrs: span.tags.clone(),
-        events: Vec::new(),
+        events: span_logs_to_events(&span.logs),
         links,
         instrumentation_scope: String::new(),
         instrumentation_version: String::new(),
     }
+}
+
+fn span_logs_to_events(logs: &[JaegerLog]) -> Vec<crate::span::EventRecord> {
+    logs.iter()
+        .map(|log| {
+            let name = log
+                .fields
+                .iter()
+                .find_map(|field| {
+                    if field.key != "event" {
+                        return None;
+                    }
+                    match &field.value {
+                        AttrValue::Str(value) if !value.is_empty() => Some(value.clone()),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| "log".to_string());
+            crate::span::EventRecord {
+                time_unix_nano: log.timestamp_micros.saturating_mul(1_000),
+                name,
+                attrs: log.fields.clone(),
+            }
+        })
+        .collect()
 }
 
 fn ref_type_name(ref_type: i32) -> &'static str {
@@ -434,6 +480,9 @@ pub(crate) mod test_support {
         write_key_value_string(out, "span.kind", "server");
         write_key_value_string(out, "http.method", "GET");
         write_key_value_bool(out, "error", true);
+        write_field_header(out, 9, 11, &mut last);
+        write_list_header(out, 12, 1);
+        write_log(out);
         out.push(0);
     }
 
@@ -443,6 +492,16 @@ pub(crate) mod test_support {
         write_i64_field(out, 2, low, &mut last);
         write_i64_field(out, 3, high, &mut last);
         write_i64_field(out, 4, span_id, &mut last);
+        out.push(0);
+    }
+
+    fn write_log(out: &mut Vec<u8>) {
+        let mut last = 0;
+        write_i64_field(out, 1, 1_005, &mut last);
+        write_field_header(out, 9, 2, &mut last);
+        write_list_header(out, 12, 2);
+        write_key_value_string(out, "event", "cache.miss");
+        write_key_value_string(out, "cache.key", "users");
         out.push(0);
     }
 
@@ -560,6 +619,16 @@ mod tests {
         assert!(span.links.len() == 1);
         assert!(span.links[0].trace_id == [0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5]);
         assert!(span.links[0].span_id == [0, 0, 0, 0, 0, 0, 0, 7]);
+        assert!(span.events.len() == 1);
+        assert!(span.events[0].time_unix_nano == 1_005_000);
+        assert!(span.events[0].name == "cache.miss");
+        assert!(
+            span.events[0]
+                .attrs
+                .iter()
+                .any(|attr| attr.key == "cache.key"
+                    && attr.value == AttrValue::Str("users".into()))
+        );
     }
 
     fn encode_sample_batch() -> Vec<u8> {
@@ -601,6 +670,9 @@ mod tests {
         write_key_value_string(out, "span.kind", "server");
         write_key_value_string(out, "http.method", "GET");
         write_key_value_bool(out, "error", true);
+        write_field_header(out, 9, 11, &mut last);
+        write_list_header(out, 12, 1);
+        write_log(out);
         out.push(0);
     }
 
@@ -610,6 +682,16 @@ mod tests {
         write_i64_field(out, 2, low, &mut last);
         write_i64_field(out, 3, high, &mut last);
         write_i64_field(out, 4, span_id, &mut last);
+        out.push(0);
+    }
+
+    fn write_log(out: &mut Vec<u8>) {
+        let mut last = 0;
+        write_i64_field(out, 1, 1_005, &mut last);
+        write_field_header(out, 9, 2, &mut last);
+        write_list_header(out, 12, 2);
+        write_key_value_string(out, "event", "cache.miss");
+        write_key_value_string(out, "cache.key", "users");
         out.push(0);
     }
 
