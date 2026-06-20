@@ -286,6 +286,7 @@ impl<S: ProfileStore> QuerierState<S> {
         step_secs: f64,
         start_ms: i64,
         end_ms: i64,
+        call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
         self.validate_query_range(tenant, start_ms, end_ms)?;
         let step_ms = step_ms_from_secs(step_secs)?;
@@ -309,7 +310,7 @@ impl<S: ProfileStore> QuerierState<S> {
                 .store
                 .select(tenant, profile_type, &matchers, start_ms, end_ms)
                 .await?;
-            let exemplars = span_exemplars_from_scan(&scan, step_ms, &labels).await?;
+            let exemplars = span_exemplars_from_scan(&scan, step_ms, &labels, call_sites).await?;
             if !exemplars.is_empty() {
                 out.insert(labels, exemplars);
             }
@@ -617,6 +618,79 @@ impl<S: ProfileStore> QuerierState<S> {
 }
 
 async fn span_exemplars_from_scan(
+    scan: &crabka_pprof::ProfileScan,
+    step_ms: i64,
+    labels: &[(String, String)],
+    call_sites: &[String],
+) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
+    if call_sites.is_empty() {
+        return span_exemplars_from_totals(scan, step_ms, labels).await;
+    }
+    let sql = format!(
+        "SELECT {timestamp}, {fingerprint}, {span}, {partition}, {stacktrace}, SUM({value}) AS v \
+         FROM {table} WHERE {span} IS NOT NULL \
+         GROUP BY {timestamp}, {fingerprint}, {span}, {partition}, {stacktrace} \
+         ORDER BY {timestamp}, {fingerprint}, {span}, {partition}, {stacktrace}",
+        timestamp = COL_TIMESTAMP,
+        fingerprint = COL_FINGERPRINT,
+        span = PCOL_SPAN_ID,
+        partition = PCOL_STACKTRACE_PARTITION,
+        stacktrace = PCOL_STACKTRACE_ID,
+        value = PCOL_VALUE,
+        table = scan.samples_table,
+    );
+    let batches = scan
+        .ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| ProfileError::Plan(err.to_string()))?
+        .collect()
+        .await
+        .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let mut per_span: BTreeMap<(i64, u64, u64), i64> = BTreeMap::new();
+    for batch in batches {
+        let timestamps = batch.column(0).as_primitive::<Int64Type>();
+        let fingerprints = batch.column(1).as_primitive::<UInt64Type>();
+        let span_ids = batch.column(2).as_primitive::<UInt64Type>();
+        let partitions = batch.column(3).as_primitive::<UInt64Type>();
+        let stacktrace_ids = batch.column(4).as_primitive::<UInt64Type>();
+        let values = batch.column(5).as_primitive::<Int64Type>();
+        for row in 0..batch.num_rows() {
+            if span_ids.is_null(row) {
+                continue;
+            }
+            let partition = partitions.value(row);
+            let stacktrace_id = u32::try_from(stacktrace_ids.value(row)).map_err(|err| {
+                ProfileError::Symbolize(format!("stacktrace id does not fit u32: {err}"))
+            })?;
+            let frames = scan.symbols.resolve(partition, stacktrace_id);
+            if frames_match_call_sites(&frames, call_sites) {
+                *per_span
+                    .entry((
+                        timestamps.value(row),
+                        fingerprints.value(row),
+                        span_ids.value(row),
+                    ))
+                    .or_default() += values.value(row);
+            }
+        }
+    }
+    let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
+    for ((timestamp, _fingerprint, span_id), value) in per_span {
+        out.entry(step_bucket_ms(timestamp, step_ms))
+            .or_default()
+            .push(pb::types::v1::Exemplar {
+                timestamp,
+                profile_id: String::new(),
+                span_id: format!("{span_id:x}"),
+                value,
+                labels: types_label_pairs(labels.to_vec()),
+            });
+    }
+    Ok(out)
+}
+
+async fn span_exemplars_from_totals(
     scan: &crabka_pprof::ProfileScan,
     step_ms: i64,
     labels: &[(String, String)],
@@ -1210,6 +1284,7 @@ where
                 req.step,
                 req.start,
                 req.end,
+                &stack_trace_call_sites,
             )
             .await
             .map_err(connect_error)?,
@@ -2265,6 +2340,40 @@ mod tests {
         store
     }
 
+    fn store_with_span_leaf_frames(frames: &[(&str, u64, i64)]) -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        for (name, span_id, value) in frames {
+            let name_ref = store.symbols_mut().intern_string(name);
+            let function_id = store.symbols_mut().intern_function(FunctionRec {
+                name: name_ref,
+                system_name: name_ref,
+                filename: 0,
+                start_line: 0,
+            });
+            let location_id = store.symbols_mut().intern_location(LocationRec {
+                address: 0,
+                mapping_id: 0,
+                lines: vec![LineRec {
+                    function_id,
+                    line: 1,
+                }],
+            });
+            let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+            store.push_sample_with_total_and_span(
+                "tenant-a",
+                PT,
+                vec![("service_name".to_string(), "api".to_string())],
+                0,
+                stacktrace,
+                *value,
+                *value,
+                10,
+                *span_id,
+            );
+        }
+        store
+    }
+
     fn store_with_frame_samples(name: &str, samples: &[(i64, i64)]) -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name_ref = store.symbols_mut().intern_string(name);
@@ -3244,6 +3353,56 @@ overrides:
         assert!(exemplar.get("spanId").and_then(serde_json::Value::as_str) == Some("2a"));
         assert!(exemplar.get("timestamp").and_then(json_i64) == Some(10));
         assert!(exemplar.get("value").and_then(json_i64) == Some(7));
+    }
+
+    #[tokio::test]
+    async fn select_series_span_exemplar_honors_stack_trace_selector() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_span_leaf_frames(&[
+            ("hot.path", 0x2a, 5),
+            ("cold.path", 0x2b, 7),
+        ]))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectSeries"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "start": 0,
+                "end": 100,
+                "groupBy": ["service_name"],
+                "step": 60.0,
+                "stackTraceSelector": {
+                    "callSite": [{ "name": "hot.path" }]
+                },
+                "exemplarType": "EXEMPLAR_TYPE_SPAN"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let exemplars = response
+            .pointer("/series/0/points/0/exemplars")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or_else(|| panic!("missing span exemplars: {response}"));
+        let span_ids: Vec<_> = exemplars
+            .iter()
+            .filter_map(|exemplar| exemplar.get("spanId").and_then(serde_json::Value::as_str))
+            .collect();
+
+        assert!(span_ids == vec!["2a"], "{response}");
     }
 
     #[tokio::test]
