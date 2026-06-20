@@ -233,6 +233,9 @@ impl SpanStore for CrabkaSpanStore {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
+        if is_nested_intrinsic_tag(tag) {
+            return self.live_tag_values(tenant, tag, start_ns, end_ns).await;
+        }
         if is_intrinsic_tag(tag) {
             let scan = self.scan(tenant, &[], start_ns, end_ns).await?;
             let batches = collect_table(&scan.ctx, &scan.span_table).await?;
@@ -244,6 +247,30 @@ impl SpanStore for CrabkaSpanStore {
             .into_iter()
             .map(|value| ("string".to_string(), value))
             .collect();
+        if let Some(live) = &self.live {
+            values.extend(
+                live.tag_values(tenant, tag, start_ns, end_ns)
+                    .await?
+                    .into_iter()
+                    .map(|value| (value.type_, value.value)),
+            );
+        }
+        Ok(values
+            .into_iter()
+            .map(|(type_, value)| TypedValue { type_, value })
+            .collect())
+    }
+}
+
+impl CrabkaSpanStore {
+    async fn live_tag_values(
+        &self,
+        tenant: &str,
+        tag: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Vec<TypedValue>, TraceqlError> {
+        let mut values = BTreeSet::new();
         if let Some(live) = &self.live {
             values.extend(
                 live.tag_values(tenant, tag, start_ns, end_ns)
@@ -332,6 +359,13 @@ fn trace_from_batches(
 
 fn is_intrinsic_tag(tag: &str) -> bool {
     tag.contains(':')
+}
+
+fn is_nested_intrinsic_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "event:name" | "event:timeSinceStart" | "link:traceID" | "link:spanID"
+    )
 }
 
 fn intrinsic_values_from_batches(
@@ -622,7 +656,59 @@ mod tests {
     use object_store::memory::InMemory;
     use url::Url;
 
+    use crate::querier::live::LiveSource;
+
     use super::*;
+
+    #[derive(Default)]
+    struct FakeLiveSource {
+        values: Vec<TypedValue>,
+        frontier_ns: i64,
+    }
+
+    #[async_trait::async_trait]
+    impl LiveSource for FakeLiveSource {
+        async fn span_batches(
+            &self,
+            _tenant: &str,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<RecordBatch>, TraceqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn trace_spans(
+            &self,
+            _tenant: &str,
+            _trace_id: &[u8; 16],
+        ) -> Result<Option<TraceSpans>, TraceqlError> {
+            Ok(None)
+        }
+
+        async fn tag_names(
+            &self,
+            _tenant: &str,
+            _scope: Option<TagScope>,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<ScopedTag>, TraceqlError> {
+            Ok(Vec::new())
+        }
+
+        async fn tag_values(
+            &self,
+            _tenant: &str,
+            _tag: &str,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<TypedValue>, TraceqlError> {
+            Ok(self.values.clone())
+        }
+
+        fn block_builder_frontier_ns(&self, _tenant: &str) -> i64 {
+            self.frontier_ns
+        }
+    }
 
     fn test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -834,6 +920,35 @@ mod tests {
             .unwrap();
         assert!(instrumentation.len() == 1);
         assert!(instrumentation[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+    }
+
+    #[tokio::test]
+    async fn live_nested_intrinsic_values_are_returned_by_store() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let live = LiveTier::new(Arc::new(FakeLiveSource {
+            values: vec![TypedValue {
+                type_: "string".into(),
+                value: "cache.miss".into(),
+            }],
+            frontier_ns: 0,
+        }));
+        let store = CrabkaSpanStore::new(blocks, Arc::new(TraceIndex::new()), Some(live));
+
+        let values = store
+            .tag_values("tenant", "event:name", 0, 10)
+            .await
+            .unwrap();
+
+        assert!(
+            values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "cache.miss".into(),
+                }]
+        );
     }
 
     #[tokio::test]
