@@ -26,9 +26,14 @@ pub fn decode_otlp(
                 let sample_timestamps_ns = otlp_sample_timestamps(profile)?;
                 let (sample_span_ids, sample_trace_ids) = otlp_sample_links(profile, dict)?;
                 let profile_labels = profile_labels(profile, dict)?;
+                let profile_id =
+                    (!profile.profile_id.is_empty()).then(|| hex_lower(&profile.profile_id));
                 let profile = otlp_profile_to_pprof(profile, dict)?;
                 let mut labels = Labels::new();
                 labels.insert("service_name", service_name.clone());
+                if let Some(profile_id) = profile_id {
+                    labels.insert("__profile_id__", profile_id);
+                }
                 for (name, value) in profile_labels {
                     labels.insert(name, value);
                 }
@@ -212,6 +217,16 @@ fn intern_string(strings: &mut Vec<String>, value: &str) -> i64 {
     idx
 }
 
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
 fn otlp_sample_timestamps(
     profile: &pb::otlp_profiles::Profile,
 ) -> Result<Vec<Vec<i64>>, ProfilesError> {
@@ -390,6 +405,7 @@ mod tests {
             }],
             time_unix_nano: 1_700_000_000_000_000_000,
             attribute_indices: vec![1],
+            profile_id: vec![0xab, 0xcd],
             ..Default::default()
         };
         let req = pb::otlp_profiles::ExportProfilesServiceRequest {
@@ -408,6 +424,7 @@ mod tests {
         assert!(out.len() == 1);
         assert!(out[0].labels.get("__name__") == Some("samples"));
         assert!(out[0].labels.get("env") == Some("prod"));
+        assert!(out[0].labels.get("__profile_id__") == Some("abcd"));
         assert!(!out[0].profile.sample_types().is_empty());
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
         assert!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);

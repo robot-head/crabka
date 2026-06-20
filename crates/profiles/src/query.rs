@@ -23,6 +23,7 @@ use crate::wire::pb;
 
 const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
+const PROFILE_ID_LABEL: &str = "__profile_id__";
 
 pub type DefaultStore = InMemoryProfileStore;
 
@@ -423,11 +424,13 @@ where
 {
     let tenant = tenant_from_headers(&headers);
     let req = req.0;
+    let label_selector = merge_profile_id_selector(&req.label_selector, &req.profile_id_selector)
+        .map_err(connect_error)?;
     let flamegraph = state
         .select_merge_stacktraces(
             &tenant,
             &req.profile_type_id,
-            &req.label_selector,
+            &label_selector,
             req.start,
             req.end,
             req.max_nodes,
@@ -623,6 +626,12 @@ where
     state
         .validate_query_range(&tenant, right.start, right.end)
         .map_err(connect_error)?;
+    let left_label_selector =
+        merge_profile_id_selector(&left.label_selector, &left.profile_id_selector)
+            .map_err(connect_error)?;
+    let right_label_selector =
+        merge_profile_id_selector(&right.label_selector, &right.profile_id_selector)
+            .map_err(connect_error)?;
     let max_nodes = state.effective_max_nodes(&tenant, left.max_nodes.max(right.max_nodes));
     let flamegraph = state
         .engine
@@ -630,13 +639,13 @@ where
             &tenant,
             (
                 &left.profile_type_id,
-                &left.label_selector,
+                &left_label_selector,
                 left.start,
                 left.end,
             ),
             (
                 &right.profile_type_id,
-                &right.label_selector,
+                &right_label_selector,
                 right.start,
                 right.end,
             ),
@@ -1097,6 +1106,65 @@ fn dot_escape(value: &str) -> String {
         .collect()
 }
 
+fn merge_profile_id_selector(
+    label_selector: &str,
+    profile_ids: &[String],
+) -> Result<String, ProfileError> {
+    if profile_ids.is_empty() {
+        return Ok(label_selector.to_string());
+    }
+
+    let matcher = if profile_ids.len() == 1 {
+        format!(
+            r#"{PROFILE_ID_LABEL}="{}""#,
+            label_matcher_value_escape(&profile_ids[0])
+        )
+    } else {
+        let regex = profile_ids
+            .iter()
+            .map(|value| regex::escape(value))
+            .collect::<Vec<_>>()
+            .join("|");
+        format!(
+            r#"{PROFILE_ID_LABEL}=~"^(?:{})$""#,
+            label_matcher_value_escape(&regex)
+        )
+    };
+
+    let trimmed = label_selector.trim();
+    let merged = if trimmed.is_empty() || trimmed == "{}" {
+        format!("{{{matcher}}}")
+    } else if let Some(inner) = trimmed.strip_prefix('{') {
+        let inner = inner
+            .strip_suffix('}')
+            .ok_or_else(|| ProfileError::Plan("unclosed label selector".to_string()))?
+            .trim();
+        if inner.is_empty() {
+            format!("{{{matcher}}}")
+        } else {
+            format!("{{{inner},{matcher}}}")
+        }
+    } else {
+        format!("{{{trimmed},{matcher}}}")
+    };
+
+    parse_label_selector(&merged)?;
+    Ok(merged)
+}
+
+fn label_matcher_value_escape(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            _ => vec![ch],
+        })
+        .collect()
+}
+
 fn profile_error_response(err: ProfileError) -> Response {
     (StatusCode::BAD_REQUEST, err.to_string()).into_response()
 }
@@ -1321,6 +1389,47 @@ mod tests {
             );
         }
         store
+    }
+
+    fn store_with_profile_ids() -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        for (profile_id, value) in [("profile-a", 5), ("profile-b", 7)] {
+            store.push_sample(
+                "tenant-a",
+                PT,
+                vec![
+                    ("service_name".to_string(), "api".to_string()),
+                    ("__profile_id__".to_string(), profile_id.to_string()),
+                ],
+                0,
+                stacktrace,
+                value,
+                10,
+            );
+        }
+        store
+    }
+
+    fn json_i64(value: &serde_json::Value) -> Option<i64> {
+        value
+            .as_i64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
     }
 
     #[tokio::test]
@@ -1597,6 +1706,43 @@ overrides:
                 .is_none_or(str::is_empty),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn select_merge_stacktraces_profile_id_selector_filters_profiles() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_profile_ids())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/SelectMergeStacktraces"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({
+                "profileTypeID": PT,
+                "labelSelector": r#"{service_name="api"}"#,
+                "profileIdSelector": ["profile-a"],
+                "start": 0,
+                "end": 100,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        let total = response
+            .get("flamegraph")
+            .and_then(|flamegraph| flamegraph.get("total"))
+            .and_then(json_i64);
+        assert!(total == Some(5), "{response}");
     }
 
     #[tokio::test]
