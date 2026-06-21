@@ -3348,6 +3348,42 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_errors() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let query = r#"{app="api"}"#;
+
+    for (endpoint, query) in [
+        ("detected_labels", None),
+        ("detected_fields", Some(query)),
+        ("detected_field/status/values", Some(query)),
+    ] {
+        let loki_error =
+            loki_detected_endpoint_range_error(&http, &loki_base, endpoint, query).await;
+        let crabka_error =
+            crabka_detected_endpoint_range_error(querier.clone(), endpoint, query).await;
+        assert!(crabka_error == loki_error);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5114,6 +5150,58 @@ async fn crabka_detected_fields_query_error(
         "/loki/api/v1/{endpoint}?query={}&start=0&end=1000000000",
         percent_encode_component(query)
     );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
+async fn loki_detected_endpoint_range_error(
+    http: &reqwest::Client,
+    base: &str,
+    endpoint: &str,
+    query: Option<&str>,
+) -> Value {
+    let mut params = vec![
+        ("start", "0".to_string()),
+        ("end", "2595601000000000".to_string()),
+    ];
+    if let Some(query) = query {
+        params.push(("query", query.to_string()));
+    }
+    let response = http
+        .get(format!("{base}/loki/api/v1/{endpoint}"))
+        .query(&params)
+        .header("X-Scope-OrgID", "tenant-a")
+        .send()
+        .await
+        .expect("query Loki detected endpoint");
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .expect("Loki detected endpoint range error response body");
+    stable_loki_error(status, &body)
+}
+
+async fn crabka_detected_endpoint_range_error(
+    app: axum::Router,
+    endpoint: &str,
+    query: Option<&str>,
+) -> Value {
+    let query_param = query
+        .map(|query| format!("&query={}", percent_encode_component(query)))
+        .unwrap_or_default();
+    let uri = format!("/loki/api/v1/{endpoint}?start=0&end=2595601000000000{query_param}");
     let response = app
         .oneshot(
             Request::builder()

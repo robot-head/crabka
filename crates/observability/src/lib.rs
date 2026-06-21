@@ -9957,6 +9957,8 @@ async fn execute_detected_labels_query(
     raw_query: Option<&str>,
 ) -> Result<Value, HttpQueryError> {
     let params = parse_detected_labels_params(raw_query)?;
+    let time_range = TimeRange::new(params.start, params.end)?;
+    validate_loki_volume_query_range_limit(time_range)?;
     if let Some(query) = &params.query {
         validate_query_length_limit(state, query)?;
     }
@@ -10020,6 +10022,7 @@ async fn collect_detected_fields(
 ) -> Result<BTreeMap<String, DetectedFieldStats>, HttpQueryError> {
     let tenant = authorized_tenant(state, headers).await?;
     let time_range = TimeRange::new(params.start, params.end)?;
+    validate_loki_volume_query_range_limit(time_range)?;
     validate_query_range_limit(state, time_range)?;
     validate_query_length_limit(state, &params.query)?;
     let state = state.with_request_tenant_index(tenant, time_range).await?;
