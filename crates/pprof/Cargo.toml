@@ -35,7 +35,7 @@ wincode = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+protox = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

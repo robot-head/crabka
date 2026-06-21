@@ -1,6 +1,10 @@
 //! Generates Connect-RPC server stubs + prost message types from the vendored
-//! `push.v1`, `querier.v1`, and OTLP `profiles/v1development` protos. Prefers a system `protoc`;
-//! falls back to a vendored fetch only when none is found.
+//! `push.v1`, `querier.v1`, and OTLP `profiles/v1development` protos.
+//!
+//! Drives codegen through a vendored `protoc` binary (`protoc-bin-vendored`) so
+//! the build is hermetic — no system `protoc` and no network fetch. The Connect
+//! generator (connectrpc-axum-build) always invokes a `protoc` binary, so the
+//! vendored one is supplied via `prost-build`'s `protoc_executable`.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protos = [
@@ -10,11 +14,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/opentelemetry/proto/collector/profiles/v1development/profiles_service.proto",
     ];
     let includes = ["proto"];
-    let mut builder = connectrpc_axum_build::compile_protos(&protos, &includes);
-    if !system_protoc_available() {
-        builder = builder.fetch_protoc(None, None)?;
-    }
-    builder.compile()?;
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    connectrpc_axum_build::compile_protos(&protos, &includes)
+        .with_prost_config(move |config| {
+            config.protoc_executable(protoc.clone());
+        })
+        .compile()?;
     for path in [
         "proto/types/v1/types.proto",
         "proto/google/v1/profile.proto",
@@ -28,14 +33,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={path}");
     }
     Ok(())
-}
-
-fn system_protoc_available() -> bool {
-    if std::env::var_os("PROTOC").is_some() {
-        return true;
-    }
-    std::process::Command::new("protoc")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
 }

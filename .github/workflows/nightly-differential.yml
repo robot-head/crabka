@@ -26,10 +26,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: nightly-differential
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

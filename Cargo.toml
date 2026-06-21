@@ -162,6 +162,11 @@ connectrpc-axum = "0.1"
 connectrpc-axum-build = "0.1"
 prost = "0.14"
 prost-build = "0.14"
+# Pure-Rust protobuf compiler — lets crates that drive `prost-build` directly
+# generate code without a `protoc` binary. The Connect crates still need a
+# binary (connectrpc-axum-build always shells out to protoc), so they use the
+# vendored one below.
+protox = "0.9"
 protoc-bin-vendored = "3.2"
 pbjson = "0.9"
 prometheus-client = "0.25"
