@@ -11,7 +11,10 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
 
-use crate::ast::{Aggregate, Field, Intrinsic, Pipeline, Query, QueryHints, Scope};
+use crate::ast::{
+    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
+    SpansetExpr, Value,
+};
 use crate::error::{Result, TraceqlError};
 use crate::parser::parse;
 use crate::planner::{PlannerContext, plan_query};
@@ -251,7 +254,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 scan_options,
             },
             &Query {
-                root: q.root,
+                root: metric_scan_root(q.root, &metric),
                 pipeline: Vec::new(),
                 hints: QueryHints::default(),
             },
@@ -291,7 +294,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             .scan_start
             .checked_sub(range.step)
             .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
-        let root = q.root;
+        let root = metric_scan_root(q.root, &metric);
         let current = self
             .metrics_for_range(
                 tenant,
@@ -477,6 +480,45 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
     } else {
         metric_plan_for(parts.aggregate, parts.by, parts.filter, parts.rank)
     }
+}
+
+fn metric_scan_root(root: SpansetExpr, metric: &MetricPlan) -> SpansetExpr {
+    metric_nested_presence_fields(metric)
+        .into_iter()
+        .fold(root, |root, field| {
+            SpansetExpr::And(
+                Box::new(root),
+                Box::new(SpansetExpr::Selector(Box::new(FieldExpr::Comparison {
+                    lhs: field,
+                    op: ComparisonOp::Neq,
+                    rhs: Value::Nil,
+                }))),
+            )
+        })
+}
+
+fn metric_nested_presence_fields(metric: &MetricPlan) -> Vec<Field> {
+    let mut out = Vec::new();
+    for field in metric.by.iter().chain(metric.value.iter()) {
+        if is_nested_metric_field(field) && !out.contains(field) {
+            out.push(field.clone());
+        }
+    }
+    out
+}
+
+fn is_nested_metric_field(field: &Field) -> bool {
+    matches!(
+        field.scope,
+        Scope::Event
+            | Scope::Link
+            | Scope::Intrinsic(
+                Intrinsic::EventName
+                    | Intrinsic::EventTimeSinceStart
+                    | Intrinsic::LinkTraceId
+                    | Intrinsic::LinkSpanId
+            )
+    )
 }
 
 struct MetricPipelineParts<'a> {
@@ -2613,6 +2655,44 @@ mod tests {
             got[0].labels == vec![("traceID".into(), "09090909090909090909090909090909".into())]
         );
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_link_span_id_counts_each_link_without_link_selector() {
+        let mut span = sp_at(1, 1, None, "api", 0);
+        span.links = vec![
+            LinkRef {
+                trace_id: [9; 16],
+                span_id: [8; 8],
+                attributes: Vec::new(),
+            },
+            LinkRef {
+                trace_id: [7; 16],
+                span_id: [6; 8],
+                attributes: Vec::new(),
+            },
+        ];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![span]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(link:spanID)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("spanID".into(), "0606060606060606".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("spanID".into(), "0808080808080808".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]

@@ -3551,6 +3551,11 @@ mod tests {
                 }],
             },
         ];
+        split_events.links.push(LinkRecord {
+            trace_id: [7; 16],
+            span_id: [6; 8],
+            attrs: Vec::new(),
+        });
         let mut no_event = span_with_nested_refs();
         no_event.trace_id = [5; 16];
         no_event.span_id = [6; 8];
@@ -3698,6 +3703,23 @@ mod tests {
             .find(|series| series.labels == vec![("name".into(), "cache.hit".into())])
             .unwrap();
         assert!(cache_hit.points == vec![(0, 2.0), (10_000, 0.0)]);
+
+        let mut series = engine
+            .query_range(
+                "tenant",
+                "{ span:name = \"GET /users\" } | count_over_time() | by(link:spanID)",
+                0,
+                10_000,
+                10_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.iter().any(|series| series.labels
+            == vec![("spanID".into(), "0606060606060606".into())]
+            && series.points == vec![(0, 1.0), (10_000, 0.0)]));
     }
 
     #[tokio::test]
