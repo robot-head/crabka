@@ -423,6 +423,82 @@ async fn loki_push_endpoint_treats_non_json_content_type_as_snappy_protobuf() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_malformed_content_type_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json; charset")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                },
+                                "values": [
+                                    ["19", "api error"]
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(&json_body(response).await, "bad_data", "invalid media");
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
+async fn loki_push_endpoint_accepts_json_content_type_parameters() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json; charset=utf-8")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                },
+                                "values": [
+                                    ["19", "api error"]
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(records[0].line == "api error");
+}
+
+#[tokio::test]
 async fn deprecated_api_prom_push_endpoint_writes_wal_records() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
