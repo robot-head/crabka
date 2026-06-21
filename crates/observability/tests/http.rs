@@ -7745,6 +7745,31 @@ async fn query_range_endpoint_line_format_applies_template_variable_assignments(
 }
 
 #[tokio::test]
+async fn query_range_endpoint_line_format_reassigns_template_variables() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/query_range")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api"} |= "error" | line_format `{{ $line := __line__ }}{{ $line = print "seen=" $line }}{{ $line }}`&start=0&end=30"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "seen=api error"]])));
+}
+
+#[tokio::test]
 async fn query_range_endpoint_keep_stage_suppresses_detected_level_fallback() {
     let state = fixture();
     let app = loki_router(state);
