@@ -70,6 +70,8 @@ struct Cli {
     query_queue_depth: usize,
     #[arg(long, default_value_t = usize::MAX)]
     max_trace_spans: usize,
+    #[arg(long, default_value_t = 1000)]
+    max_search_traces: usize,
     #[arg(long, default_value_t = 10_000)]
     max_spans_per_request: usize,
     #[arg(long, default_value_t = 64 * 1024)]
@@ -260,7 +262,13 @@ async fn build_querier_router(
     );
     let blocks = Arc::new(BlockStore::new(configured.store, configured.root));
     let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, None));
-    let engine = Arc::new(TraceqlEngine::new(store, EngineOpts::default()));
+    let engine = Arc::new(TraceqlEngine::new(
+        store,
+        EngineOpts {
+            max_traces: cli.max_search_traces,
+            ..EngineOpts::default()
+        },
+    ));
     Ok(trace_querier::http::router_with_config(
         engine,
         HttpConfig {
@@ -535,6 +543,22 @@ mod tests {
 
         assert!(matches!(cli.target, Target::Querier));
         assert!(cli.max_trace_spans == 100);
+        assert!(build_querier_router(&cli).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn parses_querier_search_trace_limit() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--max-search-traces",
+            "42",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Querier));
+        assert!(cli.max_search_traces == 42);
         assert!(build_querier_router(&cli).await.is_ok());
     }
 

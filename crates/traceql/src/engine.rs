@@ -102,6 +102,11 @@ impl<S: SpanStore> TraceqlEngine<S> {
         .min(self.opts.max_traces)
     }
 
+    #[must_use]
+    pub fn max_traces(&self) -> usize {
+        self.opts.max_traces
+    }
+
     pub async fn search(
         &self,
         tenant: &str,

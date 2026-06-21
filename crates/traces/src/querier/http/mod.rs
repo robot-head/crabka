@@ -138,6 +138,13 @@ where
         Ok(value) => value.unwrap_or(0),
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if limit > state.engine.max_traces() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "max traces per search exceeded",
+        )
+            .into_response();
+    }
     let spss = match optional_usize_param(&uri, "spss") {
         Ok(value) => value.unwrap_or(0),
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -1723,6 +1730,13 @@ mod tests {
     }
 
     fn app() -> axum::Router {
+        app_with_opts(EngineOpts {
+            max_exemplars: 1,
+            ..EngineOpts::default()
+        })
+    }
+
+    fn app_with_opts(opts: EngineOpts) -> axum::Router {
         let mut store = InMemorySpanStore::new();
         store.push_trace(
             "tenant-a",
@@ -1730,13 +1744,7 @@ mod tests {
             "root-a",
             vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
         );
-        let engine = Arc::new(TraceqlEngine::new(
-            Arc::new(store),
-            EngineOpts {
-                max_exemplars: 1,
-                ..EngineOpts::default()
-            },
-        ));
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), opts));
         router(engine)
     }
 
@@ -1758,6 +1766,22 @@ mod tests {
 
     async fn get_text(uri: &str) -> (StatusCode, String) {
         let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn get_text_with_app(app: axum::Router, uri: &str) -> (StatusCode, String) {
+        let resp = app
             .oneshot(
                 Request::builder()
                     .uri(uri)
@@ -2054,6 +2078,22 @@ mod tests {
                 .await;
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "invalid query parameter spss");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_limit_above_max_traces() {
+        let app = app_with_opts(EngineOpts {
+            max_traces: 1,
+            ..EngineOpts::default()
+        });
+        let (status, body) = get_text_with_app(
+            app,
+            "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=2",
+        )
+        .await;
+
+        assert!(status == StatusCode::TOO_MANY_REQUESTS);
+        assert!(body == "max traces per search exceeded");
     }
 
     #[tokio::test]
