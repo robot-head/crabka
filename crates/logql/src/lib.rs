@@ -907,8 +907,15 @@ struct TemplateAssignment {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum TemplateRangeBinding {
+    Dot,
+    Value(String),
+    IndexValue { index: String, value: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateRange {
-    variable: Option<String>,
+    binding: TemplateRangeBinding,
     expression: TemplateExpression,
     parts: Vec<TemplatePart>,
     else_parts: Vec<TemplatePart>,
@@ -924,12 +931,22 @@ impl TemplateRange {
             return render_template_parts(&self.else_parts, context);
         }
         let mut rendered = String::new();
-        for value in values {
+        for (index, value) in values.into_iter().enumerate() {
             let value = TemplateRuntimeValue::Json(value);
-            let child_context = if let Some(variable) = &self.variable {
-                context.with_variable(variable.clone(), value)
-            } else {
-                context.with_current_dot(value)
+            let child_context = match &self.binding {
+                TemplateRangeBinding::Dot => context.with_current_dot(value),
+                TemplateRangeBinding::Value(variable) => {
+                    context.with_variable(variable.clone(), value)
+                }
+                TemplateRangeBinding::IndexValue {
+                    index: index_variable,
+                    value: value_variable,
+                } => context
+                    .with_variable(
+                        index_variable.clone(),
+                        TemplateRuntimeValue::Integer(index as i64),
+                    )
+                    .with_variable(value_variable.clone(), value),
             };
             rendered.push_str(&render_template_parts(&self.parts, &child_context));
         }
@@ -1367,7 +1384,7 @@ fn parse_template_range(
     body_start: usize,
     range_expression: &str,
 ) -> Result<(TemplateRange, usize), ParseError> {
-    let (variable, expression) = parse_template_range_expression(range_expression)?;
+    let (binding, expression) = parse_template_range_expression(range_expression)?;
     let Some((control_body, control_expression, control_next)) =
         find_template_control_action(template, body_start)?
     else {
@@ -1377,7 +1394,7 @@ fn parse_template_range(
     if control_expression == "end" {
         return Ok((
             TemplateRange {
-                variable,
+                binding,
                 expression,
                 parts,
                 else_parts: Vec::new(),
@@ -1400,7 +1417,7 @@ fn parse_template_range(
     let else_parts = parse_template_parts(&template[control_next..end_body])?;
     Ok((
         TemplateRange {
-            variable,
+            binding,
             expression,
             parts,
             else_parts,
@@ -1456,17 +1473,26 @@ fn parse_template_with(
 
 fn parse_template_range_expression(
     range_expression: &str,
-) -> Result<(Option<String>, TemplateExpression), ParseError> {
-    let Some((variable, expression)) = range_expression.split_once(":=") else {
-        return Ok((None, TemplateExpression::parse(range_expression.trim())?));
+) -> Result<(TemplateRangeBinding, TemplateExpression), ParseError> {
+    let Some((variables, expression)) = range_expression.split_once(":=") else {
+        return Ok((
+            TemplateRangeBinding::Dot,
+            TemplateExpression::parse(range_expression.trim())?,
+        ));
     };
-    Ok((
-        Some(parse_template_variable_name(
-            variable.trim(),
+    let variables = variables.split(',').map(str::trim).collect::<Vec<_>>();
+    let binding = match variables.as_slice() {
+        [variable] => TemplateRangeBinding::Value(parse_template_variable_name(
+            variable,
             "expected template range variable",
         )?),
-        TemplateExpression::parse(expression.trim())?,
-    ))
+        [index, value] => TemplateRangeBinding::IndexValue {
+            index: parse_template_variable_name(index, "expected template range variable")?,
+            value: parse_template_variable_name(value, "expected template range variable")?,
+        },
+        _ => return Err(template_parse_error("expected template range variable")),
+    };
+    Ok((binding, TemplateExpression::parse(expression.trim())?))
 }
 
 fn parse_template_variable_name(
