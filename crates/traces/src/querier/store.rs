@@ -165,10 +165,14 @@ impl SpanStore for CrabkaSpanStore {
                     trace_id: live_trace.trace_id,
                     root_service_name: live_trace.root_service_name.clone(),
                     root_trace_name: live_trace.root_trace_name.clone(),
+                    resource_attributes: live_trace.resource_attributes.clone(),
                     spans: Vec::new(),
                 });
             }
             if let Some(out) = &mut spans {
+                if out.resource_attributes.is_empty() {
+                    out.resource_attributes = live_trace.resource_attributes;
+                }
                 out.spans.extend(live_trace.spans);
                 out.spans.sort_by_key(|span| span.start_time_unix_nano);
             }
@@ -915,6 +919,7 @@ fn trace_from_batches(
 ) -> Result<Option<TraceSpans>, TraceqlError> {
     let mut root_service_name = String::new();
     let mut root_trace_name = String::new();
+    let mut resource_attributes = Vec::new();
     let mut spans = Vec::new();
 
     for batch in batches {
@@ -928,6 +933,9 @@ fn trace_from_batches(
             }
             if root_trace_name.is_empty() {
                 root_trace_name = string_value(&batch, COL_ROOT_SPAN_NAME, row)?;
+            }
+            if resource_attributes.is_empty() {
+                resource_attributes = resource_attr_values(&batch, row)?;
             }
             spans.push(SpanRef {
                 span_id: fixed_value::<8>(&batch, COL_SPAN_ID, row)?,
@@ -956,6 +964,7 @@ fn trace_from_batches(
         trace_id: *trace_id,
         root_service_name,
         root_trace_name,
+        resource_attributes,
         spans,
     }))
 }
@@ -1100,6 +1109,19 @@ fn insert_i64_value(
 
 fn attr_values(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
     attr_values_with_resource(batch, row, false)
+}
+
+fn resource_attr_values(
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
+    Ok(attr_values_with_resource(batch, row, true)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix(RESOURCE_ATTR_PREFIX)
+                .map(|key| (key.to_string(), value))
+        })
+        .collect())
 }
 
 fn attr_values_with_resource(
@@ -2405,6 +2427,22 @@ mod tests {
             .await
             .unwrap();
         assert!(resource_attr.traces.len() == 1);
+
+        let trace = engine
+            .trace_by_id("tenant", &span.trace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(trace.resource_attributes.contains(&(
+            "cloud.region".into(),
+            crabka_traceql::AttrValue::Str("us-east-1".into())
+        )));
+        assert!(
+            !trace
+                .resource_attributes
+                .iter()
+                .any(|(key, _)| key == "__resource.cloud.region")
+        );
 
         let bare_attr = engine
             .search("tenant", "{ .cloud.region = \"us-east-1\" }", 0, 10_000, 10)

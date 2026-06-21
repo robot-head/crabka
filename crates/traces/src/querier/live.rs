@@ -159,6 +159,7 @@ mod tests {
             trace_id: [1; 16],
             root_service_name: "api".into(),
             root_trace_name: "GET /".into(),
+            resource_attributes: vec![("service.name".into(), AttrValue::Str("api".into()))],
             spans: vec![SpanRef {
                 span_id: [2; 8],
                 parent_span_id: None,

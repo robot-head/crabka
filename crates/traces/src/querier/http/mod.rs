@@ -888,9 +888,11 @@ fn scoped_tags_from_traces(traces: &[TraceSpans], scope: Option<TagScope>) -> Ve
     if matches!(scope, None | Some(TagScope::Resource)) {
         let mut tags = BTreeSet::new();
         for trace in traces {
-            if !trace.root_service_name.is_empty() {
-                tags.insert("service.name".to_string());
-            }
+            tags.extend(
+                trace_resource_attributes(trace)
+                    .into_iter()
+                    .map(|(key, _)| key),
+            );
         }
         if !tags.is_empty() {
             out.push(ScopedTag {
@@ -957,9 +959,12 @@ fn tag_values_from_traces(traces: &[TraceSpans], tag: &str) -> Vec<TypedValue> {
     let mut values = BTreeSet::new();
     for trace in traces {
         collect_trace_intrinsic_values(trace, tag, &mut values);
-        if tag == "service.name" {
-            values.insert(("string".to_string(), trace.root_service_name.clone()));
-        }
+        values.extend(
+            trace_resource_attributes(trace)
+                .into_iter()
+                .filter(|(key, _)| key == tag)
+                .map(|(_, value)| typed_value_parts(&value)),
+        );
         for span in &trace.spans {
             collect_span_intrinsic_values(span, &trace.spans, tag, &mut values);
             collect_event_values(span, tag, &mut values);
@@ -1206,6 +1211,23 @@ fn search_span_json(span: &SpanRef) -> Value {
     })
 }
 
+fn trace_resource_attributes(trace: &TraceSpans) -> Vec<(String, AttrValue)> {
+    let mut seen = BTreeSet::new();
+    let mut attrs = Vec::new();
+    for (key, value) in &trace.resource_attributes {
+        if seen.insert(key.clone()) {
+            attrs.push((key.clone(), value.clone()));
+        }
+    }
+    if !trace.root_service_name.is_empty() && seen.insert("service.name".into()) {
+        attrs.push((
+            "service.name".into(),
+            AttrValue::Str(trace.root_service_name.clone()),
+        ));
+    }
+    attrs
+}
+
 fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
     let total_spans = trace.spans.len();
     let returned_spans = total_spans.min(max_trace_spans);
@@ -1224,10 +1246,7 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
         "trace": {
             "resourceSpans": [{
                 "resource": {
-                    "attributes": [{
-                        "key": "service.name",
-                        "value": {"stringValue": trace.root_service_name},
-                    }],
+                    "attributes": attrs_json(&trace_resource_attributes(trace)),
                 },
                 "scopeSpans": scope_spans_json(trace, returned_spans),
             }],
@@ -1241,13 +1260,11 @@ fn trace_protobuf(
     trace: &TraceSpans,
     max_trace_spans: usize,
 ) -> Result<Vec<u8>, prost::EncodeError> {
+    let resource_attributes = trace_resource_attributes(trace);
     let data = OtlpTracesData {
         resource_spans: vec![OtlpResourceSpans {
             resource: Some(OtlpResource {
-                attributes: vec![otlp_kv(
-                    "service.name",
-                    &AttrValue::Str(trace.root_service_name.clone()),
-                )],
+                attributes: otlp_attrs(&resource_attributes),
                 ..OtlpResource::default()
             }),
             scope_spans: otlp_scope_spans(trace, trace.spans.len().min(max_trace_spans)),
@@ -2220,6 +2237,49 @@ mod tests {
                 "status": "COMPLETE",
                 "message": ""
             })
+        );
+    }
+
+    #[test]
+    fn trace_json_includes_resource_attributes() {
+        let trace = TraceSpans {
+            trace_id: [9; 16],
+            root_service_name: "svc-a".into(),
+            root_trace_name: "root-a".into(),
+            resource_attributes: vec![
+                ("service.name".into(), AttrValue::Str("svc-a".into())),
+                ("cloud.region".into(), AttrValue::Str("us-east-1".into())),
+            ],
+            spans: vec![SpanRef {
+                span_id: [1; 8],
+                parent_span_id: None,
+                name: "root-a".into(),
+                kind: 0,
+                nested_set_left: 1,
+                nested_set_right: 2,
+                nested_set_parent: 0,
+                start_time_unix_nano: 1_001,
+                duration_nanos: 200,
+                status_code: 0,
+                status_message: String::new(),
+                instrumentation_name: String::new(),
+                instrumentation_version: String::new(),
+                attributes: Vec::new(),
+                events: Vec::new(),
+                links: Vec::new(),
+            }],
+        };
+
+        let body = trace_json(&trace, 10);
+
+        assert!(
+            body["trace"]["resourceSpans"][0]["resource"]["attributes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "key": "cloud.region",
+                    "value": {"stringValue": "us-east-1"}
+                }))
         );
     }
 

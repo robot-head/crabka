@@ -306,6 +306,14 @@ impl SpanStore for InMemorySpanStore {
             trace_id: trace.trace_id,
             root_service_name: trace.root_service_name.clone(),
             root_trace_name: trace.root_span_name.clone(),
+            resource_attributes: if trace.root_service_name.is_empty() {
+                Vec::new()
+            } else {
+                vec![(
+                    "service.name".to_string(),
+                    AttrValue::Str(trace.root_service_name.clone()),
+                )]
+            },
             spans: trace
                 .spans
                 .iter()

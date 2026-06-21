@@ -352,6 +352,14 @@ fn trace_spans(trace_id: &[u8; 16], spans: &[Span]) -> crabka_traceql::TraceSpan
             .and_then(|span| attr_string(&span.resource_attrs, "service.name"))
             .unwrap_or_default(),
         root_trace_name: root.map(|span| span.name.clone()).unwrap_or_default(),
+        resource_attributes: root
+            .map(|span| {
+                span.resource_attrs
+                    .iter()
+                    .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         spans: spans
             .iter()
             .zip(nested_set::assign_nested_set(spans))
