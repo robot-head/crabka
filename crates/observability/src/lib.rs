@@ -9951,24 +9951,64 @@ fn parse_loki_duration_query_param(
 }
 
 fn parse_prometheus_duration(value: &str) -> Option<i64> {
-    let (amount, multiplier) = [
-        ("ms", 1_000_000_i128),
-        ("us", 1_000_i128),
-        ("ns", 1_i128),
-        ("s", 1_000_000_000_i128),
-        ("m", 60_000_000_000_i128),
-        ("h", 3_600_000_000_000_i128),
-        ("d", 86_400_000_000_000_i128),
-        ("w", 604_800_000_000_000_i128),
-        ("y", 31_536_000_000_000_000_i128),
-    ]
-    .into_iter()
-    .find_map(|(unit, multiplier)| value.strip_suffix(unit).map(|amount| (amount, multiplier)))?;
-    if amount.is_empty() || !amount.bytes().all(|byte| byte.is_ascii_digit()) {
+    let mut pos = 0;
+    let mut parsed_chunk = false;
+    let mut previous_unit_order = None;
+    let mut seen_units = 0_u16;
+    let mut total_ns = 0_i128;
+
+    while pos < value.len() {
+        let amount_start = pos;
+        while value.as_bytes().get(pos).is_some_and(u8::is_ascii_digit) {
+            pos += 1;
+        }
+        if pos == amount_start {
+            return None;
+        }
+        let amount = value[amount_start..pos].parse::<i128>().ok()?;
+
+        let unit_start = pos;
+        while value
+            .as_bytes()
+            .get(pos)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            pos += 1;
+        }
+        let (unit_order, unit_bit, multiplier) = prometheus_duration_unit(&value[unit_start..pos])?;
+        if seen_units & unit_bit != 0 {
+            return None;
+        }
+        if previous_unit_order.is_some_and(|previous| unit_order <= previous) {
+            return None;
+        }
+
+        let chunk_ns = amount.checked_mul(multiplier)?;
+        total_ns = total_ns.checked_add(chunk_ns)?;
+        seen_units |= unit_bit;
+        previous_unit_order = Some(unit_order);
+        parsed_chunk = true;
+    }
+
+    if !parsed_chunk {
         return None;
     }
-    let duration_ns = amount.parse::<i128>().ok()?.checked_mul(multiplier)?;
-    i64::try_from(duration_ns).ok()
+    i64::try_from(total_ns).ok()
+}
+
+fn prometheus_duration_unit(unit: &str) -> Option<(u8, u16, i128)> {
+    match unit {
+        "y" => Some((0, 1 << 0, 31_536_000_000_000_000)),
+        "w" => Some((1, 1 << 1, 604_800_000_000_000)),
+        "d" => Some((2, 1 << 2, 86_400_000_000_000)),
+        "h" => Some((3, 1 << 3, 3_600_000_000_000)),
+        "m" => Some((4, 1 << 4, 60_000_000_000)),
+        "s" => Some((5, 1 << 5, 1_000_000_000)),
+        "ms" => Some((6, 1 << 6, 1_000_000)),
+        "us" => Some((7, 1 << 7, 1_000)),
+        "ns" => Some((8, 1 << 8, 1)),
+        _ => None,
+    }
 }
 
 fn parse_decimal_seconds_timestamp(value: &str) -> Option<i64> {

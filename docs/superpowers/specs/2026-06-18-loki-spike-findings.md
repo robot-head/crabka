@@ -551,7 +551,10 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
   label-name, label-value, and stream-series exploration before executing the
   query through Grafana's backend `/api/ds/query` path, which is closer to
   Explore/panel execution and sends millisecond duration steps such as
-  `1000ms`; Crabka accepts those Loki duration query parameters.
+  `1000ms`; Crabka accepts those Loki duration query parameters. HTTP query
+  duration parameters now also accept ordered Prometheus-style compound
+  durations such as `1m30s`, aligning `step`, `since`, and `interval` parsing
+  with the LogQL range-selector duration parser.
   Crabka also accepts Loki's `vector(s)` scalar-vector function for instant
   query vectors and stepped query_range matrices, including arithmetic
   operators (`+`, `-`, `*`, `/`, `%`, `^`), parenthesized arithmetic groups,

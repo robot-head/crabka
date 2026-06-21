@@ -8107,6 +8107,47 @@ async fn query_range_endpoint_accepts_duration_step_for_count_over_time_matrix_j
 }
 
 #[tokio::test]
+async fn query_range_endpoint_accepts_compound_duration_step_for_grafana() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30s%5D%29&start=20&end=90000000020&step=1m30s")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod"
+                            },
+                            "values": [
+                                [0.00000002, "1"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(1819, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_accepts_millisecond_duration_step_for_grafana() {
     let state = fixture();
     let app = loki_router(state);
