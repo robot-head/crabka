@@ -6769,7 +6769,7 @@ async fn query_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6790,7 +6790,7 @@ async fn api_prom_query_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6811,7 +6811,7 @@ async fn query_range_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -11380,16 +11380,30 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
         let value = decode_form_component(value)?;
 
         match key.as_str() {
-            "query" => query = Some(value),
-            "time" => time = Some(parse_loki_timestamp_query_param("time", &value)?),
-            "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
-            "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
-            "since" => since = Some(parse_loki_duration_query_param("since", &value)?),
-            "step" => step = Some(parse_loki_duration_query_param("step", &value)?),
-            "interval" => interval = Some(parse_loki_duration_query_param("interval", &value)?),
-            "limit" => limit = Some(parse_usize_query_param("limit", &value)?),
-            "direction" => direction = Some(value),
-            "delay_for" => delay_for = Some(parse_loki_tail_delay_for_query_param(&value)?),
+            "query" if query.is_none() => query = Some(value),
+            "time" if time.is_none() => {
+                time = Some(parse_loki_timestamp_query_param("time", &value)?);
+            }
+            "start" if start.is_none() => {
+                start = Some(parse_loki_timestamp_query_param("start", &value)?);
+            }
+            "end" if end.is_none() => {
+                end = Some(parse_loki_timestamp_query_param("end", &value)?);
+            }
+            "since" if since.is_none() => {
+                since = Some(parse_loki_duration_query_param("since", &value)?);
+            }
+            "step" if step.is_none() => {
+                step = Some(parse_loki_duration_query_param("step", &value)?);
+            }
+            "interval" if interval.is_none() => {
+                interval = Some(parse_loki_duration_query_param("interval", &value)?);
+            }
+            "limit" if limit.is_none() => limit = Some(parse_usize_query_param("limit", &value)?),
+            "direction" if direction.is_none() => direction = Some(value),
+            "delay_for" if delay_for.is_none() => {
+                delay_for = Some(parse_loki_tail_delay_for_query_param(&value)?);
+            }
             _ => {}
         }
     }

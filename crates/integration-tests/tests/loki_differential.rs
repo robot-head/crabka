@@ -2708,6 +2708,39 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    let raw_query = "query=vector%281%29&query=vector%282%29";
+    let loki_result = loki_raw_query_result(&http, &loki_base, raw_query).await;
+    let crabka_result = crabka_raw_query_result(querier.clone(), raw_query).await;
+    assert!(crabka_result == loki_result);
+
+    let raw_query = "query=vector%281%29&time=1&time=2";
+    let loki_result = loki_raw_query_result(&http, &loki_base, raw_query).await;
+    let crabka_result = crabka_raw_query_result(querier, raw_query).await;
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -4595,6 +4628,35 @@ async fn crabka_query_result(app: axum::Router, query: &str, time_ns: i64) -> Va
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
+}
+
+async fn loki_raw_query_result(http: &reqwest::Client, base: &str, raw_query: &str) -> Value {
+    let body: Value = http
+        .get(format!("{base}/loki/api/v1/query?{raw_query}"))
+        .send()
+        .await
+        .expect("query Loki raw query")
+        .json()
+        .await
+        .expect("Loki raw query JSON response");
+    stable_scalar_or_vector_result(&body)
+}
+
+async fn crabka_raw_query_result(app: axum::Router, raw_query: &str) -> Value {
+    let uri = format!("/loki/api/v1/query?{raw_query}");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_scalar_or_vector_result(&serde_json::from_slice(&body).unwrap())
 }
 
 async fn crabka_api_prom_query_result(app: axum::Router, query: &str, time_ns: i64) -> Value {
@@ -6726,6 +6788,32 @@ fn stable_loki_result(body: &Value) -> Value {
     json!({
         "resultType": body["data"]["resultType"].clone(),
         "result": body["data"]["result"].clone()
+    })
+}
+
+fn stable_scalar_or_vector_result(body: &Value) -> Value {
+    let mut result = body["data"]["result"].clone();
+    if let Some(series) = result.as_array_mut() {
+        for series in series {
+            if let Some(value) = series.get_mut("value").and_then(Value::as_array_mut)
+                && value.len() == 2
+            {
+                value[0] = json!("<timestamp>");
+            }
+            if let Some(values) = series.get_mut("values").and_then(Value::as_array_mut) {
+                for value in values {
+                    if let Some(value) = value.as_array_mut()
+                        && value.len() == 2
+                    {
+                        value[0] = json!("<timestamp>");
+                    }
+                }
+            }
+        }
+    }
+    json!({
+        "resultType": body["data"]["resultType"].clone(),
+        "result": result
     })
 }
 
