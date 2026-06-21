@@ -63,6 +63,8 @@ struct Cli {
     enable_target_info: bool,
     #[arg(long)]
     enable_status_message: bool,
+    #[arg(long)]
+    enable_messaging_system_latency: bool,
     #[arg(long, default_value_t = 0)]
     compaction_start_ns: i64,
     #[arg(long, default_value_t = i64::MAX)]
@@ -419,6 +421,7 @@ async fn run_metrics_generator(
     cfg.remote_write_url = cli.remote_write_url.clone();
     cfg.enable_target_info |= cli.enable_target_info;
     cfg.enable_status_message |= cli.enable_status_message;
+    cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
 
     let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator").await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
@@ -620,11 +623,13 @@ mod tests {
             "metrics-generator",
             "--enable-target-info",
             "--enable-status-message",
+            "--enable-messaging-system-latency",
         ])
         .unwrap();
 
         assert!(cli.enable_target_info);
         assert!(cli.enable_status_message);
+        assert!(cli.enable_messaging_system_latency);
     }
 
     #[tokio::test]
