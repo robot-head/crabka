@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMeta;
-use crate::block_index::BlockIndex;
+use crate::block_index::SignalBlockIndex;
 use crate::error::{BlockStoreError, Result};
 use crate::labels::{Labels, SeriesFingerprint};
 use crate::matcher::{LabelMatcher, MatchOp};
@@ -333,7 +333,7 @@ impl SeriesIndex {
     }
 }
 
-impl BlockIndex for SeriesIndex {
+impl SignalBlockIndex for SeriesIndex {
     fn add_block(&mut self, meta: &BlockMeta) {
         Self::add_block(self, meta);
     }
@@ -427,7 +427,8 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::{BlockMeta, Labels};
+    use crate::BlockMeta;
+    use crate::labels::Labels;
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         Labels::from_pairs(pairs.iter().copied())
@@ -536,8 +537,8 @@ mod tests {
             row_count: 1,
             fingerprints: vec![],
         });
-        assert!(BlockIndex::candidate_blocks(&index, "t", 50, 60) == vec!["b1.parquet"]);
-        assert!(BlockIndex::block_count(&index, "t") == 1);
+        assert!(SignalBlockIndex::candidate_blocks(&index, "t", 50, 60) == vec!["b1.parquet"]);
+        assert!(SignalBlockIndex::block_count(&index, "t") == 1);
     }
 
     #[test]
@@ -585,6 +586,6 @@ mod tests {
             }],
         );
 
-        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 30) == vec!["new.parquet"]);
+        assert!(SignalBlockIndex::candidate_blocks(&index, "t", 0, 30) == vec!["new.parquet"]);
     }
 }

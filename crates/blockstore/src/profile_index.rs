@@ -12,7 +12,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMeta;
-use crate::block_index::BlockIndex;
+use crate::block_index::SignalBlockIndex;
 use crate::error::Result;
 use crate::index::SeriesIndex;
 use crate::labels::{Labels, SeriesFingerprint};
@@ -326,17 +326,17 @@ impl ProfileIndex {
     }
 }
 
-impl BlockIndex for ProfileIndex {
+impl SignalBlockIndex for ProfileIndex {
     fn add_block(&mut self, meta: &BlockMeta) {
-        BlockIndex::add_block(&mut self.series, meta);
+        SignalBlockIndex::add_block(&mut self.series, meta);
     }
 
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
-        BlockIndex::candidate_blocks(&self.series, tenant, min_ts, max_ts)
+        SignalBlockIndex::candidate_blocks(&self.series, tenant, min_ts, max_ts)
     }
 
     fn block_count(&self, tenant: &str) -> usize {
-        BlockIndex::block_count(&self.series, tenant)
+        SignalBlockIndex::block_count(&self.series, tenant)
     }
 }
 
@@ -345,7 +345,8 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::{LabelMatcher, Labels, MatchOp};
+    use crate::labels::Labels;
+    use crate::matcher::{LabelMatcher, MatchOp};
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         Labels::from_pairs(pairs.iter().copied())
@@ -461,7 +462,7 @@ mod tests {
 
         assert!(index.stacktrace_partitions("old.parquet").is_empty());
         assert!(index.stacktrace_partitions("new.parquet") == vec![99]);
-        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
+        assert!(SignalBlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
     }
 
     #[tokio::test]

@@ -3,8 +3,9 @@
 use arrow::datatypes::Schema;
 use serde::{Deserialize, Serialize};
 
+use crate::SeriesFingerprint;
 use crate::block_index::{BlockSchema, series_block_schema};
-use crate::{BlockStoreError, Result, SeriesFingerprint};
+use crate::error::{BlockStoreError, Result};
 
 /// Mandatory logs/metrics block column: series fingerprint (`UInt64`).
 pub const COL_FINGERPRINT: &str = "series_fingerprint";

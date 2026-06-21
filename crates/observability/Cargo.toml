@@ -1,0 +1,50 @@
+[package]
+name = "crabka-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Role-selectable observability service for Crabka's Loki-compatible logs path"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-observability"
+readme = "../../README.md"
+keywords = ["observability", "loki", "logs", "crabka"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["http2", "json", "query", "ws"] }
+clap = { workspace = true }
+crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
+crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
+crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
+crabka-logql = { version = "0.3.7", path = "../logql" }
+datafusion.workspace = true
+flate2 = { workspace = true }
+object_store.workspace = true
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "logs"] }
+prost.workspace = true
+regex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snap.workspace = true
+thiserror = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["parsing"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tonic.workspace = true
+url = "2"
+
+[dev-dependencies]
+assert2 = { workspace = true }
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true

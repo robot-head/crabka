@@ -44,7 +44,7 @@ pub fn series_block_schema() -> BlockSchema {
 }
 
 /// Shared surface every per-signal block index exposes to `BlockStore`.
-pub trait BlockIndex: Default + Serialize + DeserializeOwned {
+pub trait SignalBlockIndex: Default + Serialize + DeserializeOwned {
     fn add_block(&mut self, meta: &BlockMeta);
 
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String>;
