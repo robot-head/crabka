@@ -9545,6 +9545,7 @@ struct TailStream {
     frontier: CompactionFrontierSource,
     delete_filters: Vec<ActiveLogDeleteFilter>,
     limit: Option<usize>,
+    delay_for: i64,
 }
 
 async fn prepare_http_tail(
@@ -9554,9 +9555,8 @@ async fn prepare_http_tail(
 ) -> Result<TailStream, HttpQueryError> {
     let tenant = authorized_tenant(state, headers).await?;
     let time_range = optional_start_end_range(params.start, params.since, params.end)?;
-    if let Some(delay_for) = params.delay_for {
-        validate_loki_tail_delay_for(delay_for)?;
-    }
+    let delay_for = params.delay_for.unwrap_or(0);
+    validate_loki_tail_delay_for(delay_for)?;
     validate_query_length_limit(state, &params.query)?;
     let query = parse_query(&params.query).map_err(|source| HttpQueryError::LokiParse {
         query: params.query.clone(),
@@ -9584,6 +9584,7 @@ async fn prepare_http_tail(
         frontier,
         delete_filters,
         limit: Some(params.limit.unwrap_or(LOKI_DEFAULT_TAIL_LIMIT)),
+        delay_for,
     })
 }
 
@@ -9600,22 +9601,38 @@ async fn send_tail_stream(mut socket: WebSocket, tail: TailStream) {
             sent_records = 0;
         }
         if records.len() > sent_records {
-            let frontier = tail.frontier.snapshot();
-            let frame = execute_tail_query_with_frontier_and_deletes(
-                &tail.plan,
-                &records[sent_records..],
-                &frontier,
-                &tail.delete_filters,
-            );
-            sent_records = records.len();
-            let frame = apply_loki_tail_frame_limit(frame, tail.limit);
-            if !tail_frame_is_empty(&frame) && !send_tail_frame(&mut socket, frame).await {
-                return;
+            let eligible = eligible_tail_record_count(&records[sent_records..], tail.delay_for);
+            if eligible > 0 {
+                let eligible_end = sent_records + eligible;
+                let frontier = tail.frontier.snapshot();
+                let frame = execute_tail_query_with_frontier_and_deletes(
+                    &tail.plan,
+                    &records[sent_records..eligible_end],
+                    &frontier,
+                    &tail.delete_filters,
+                );
+                sent_records = eligible_end;
+                let frame = apply_loki_tail_frame_limit(frame, tail.limit);
+                if !tail_frame_is_empty(&frame) && !send_tail_frame(&mut socket, frame).await {
+                    return;
+                }
             }
         }
 
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn eligible_tail_record_count(records: &[WalLogRecord], delay_for: i64) -> usize {
+    if delay_for <= 0 {
+        return records.len();
+    }
+
+    let cutoff = current_unix_time_ns().saturating_sub(delay_for);
+    records
+        .iter()
+        .take_while(|record| record.timestamp_ns <= cutoff)
+        .count()
 }
 
 async fn send_tail_frame(socket: &mut WebSocket, frame: Value) -> bool {
