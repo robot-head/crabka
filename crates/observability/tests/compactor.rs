@@ -1035,6 +1035,56 @@ async fn compactor_runtime_retries_object_store_errors_before_committing_offsets
 }
 
 #[tokio::test]
+async fn compactor_runtime_retries_shard_catalog_write_errors_before_committing_offsets() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FailingPutObjectStore::fail_first_matching_put(
+        LocalFileSystem::new_with_prefix(dir.path()).unwrap(),
+        "shards/manifest.json",
+    );
+    let config = compactor_config("observability/logs");
+    let dependencies =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "api ok"),
+                6,
+                42,
+            )],
+            vec![kafka_wal_record(
+                &wal_record_without_position(10, "api ok"),
+                6,
+                42,
+            )],
+            Vec::new(),
+        ]));
+
+    let descriptors = tokio::time::timeout(
+        Duration::from_millis(500),
+        run_compactor_until_shutdown(&config, dependencies, Some(&store), async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(descriptors.len() == 1);
+    assert!(store.failed_put_count() == 1);
+
+    let prefix = ObjectPath::from("observability/logs");
+    let key = BlockKey::new("tenant-a", 6, 42, 42, TimeRange::new(10, 10).unwrap());
+    let rows = read_log_block_from_object_store(&store, &prefix, &key)
+        .await
+        .unwrap();
+    assert!(rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>() == vec!["api ok"]);
+
+    let shard_ranges =
+        read_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
+            .await
+            .unwrap();
+    assert!(shard_ranges == vec![key.time_range]);
+}
+
+#[tokio::test]
 async fn compactor_runtime_retries_compaction_frontier_write_errors_after_committing_offsets() {
     let dir = tempfile::tempdir().unwrap();
     let store = FailingPutObjectStore::fail_first_matching_put(
