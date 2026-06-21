@@ -591,6 +591,21 @@ fn query_evaluator_line_format_ranges_with_current_dot_over_from_json_arrays() {
 }
 
 #[test]
+fn query_evaluator_line_format_ranges_can_reference_root_fields() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | line_format `{{ range fromJson "[{\"method\":\"POST\"}]" }}inner={{ .method }} root={{ $.method }}{{ end }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let output = query
+        .evaluate_with_fields(&labels, r#"method=GET msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(output.line == "inner=POST root=GET");
+}
+
+#[test]
 fn query_evaluator_line_format_ranges_with_index_and_value_variables() {
     let query = parse_query(
         r#"{app="api"} | json queries="queries" | line_format `{{ range $i, $q := fromJson .queries }}{{ $i }}:{{ $q.query }}={{ $q.duration }};{{ end }}` |= "0:rate=30;1:sum=15;""#,
@@ -933,6 +948,21 @@ fn query_evaluator_line_format_applies_with_template_blocks() {
 
     check!(present.line == "method=GET");
     check!(absent.line == "missing");
+}
+
+#[test]
+fn query_evaluator_line_format_with_can_reference_root_fields() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | line_format `{{ with fromJson "{\"method\":\"POST\"}" }}inner={{ .method }} root={{ $.method }}{{ end }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let output = query
+        .evaluate_with_fields(&labels, r#"method=GET msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(output.line == "inner=POST root=GET");
 }
 
 #[test]
