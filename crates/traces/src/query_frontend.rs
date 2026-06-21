@@ -731,7 +731,7 @@ fn merge_metric_series(series: &mut Vec<Value>, next: Value) {
     if let Some(next_points) = next.get("points").and_then(Value::as_array)
         && let Some(existing_points) = existing.get_mut("points").and_then(Value::as_array_mut)
     {
-        existing_points.extend(next_points.iter().cloned());
+        merge_metric_points(existing_points, next_points);
     }
     if let Some(next_exemplars) = next.get("exemplars").and_then(Value::as_array)
         && let Some(existing_exemplars) =
@@ -739,6 +739,50 @@ fn merge_metric_series(series: &mut Vec<Value>, next: Value) {
     {
         existing_exemplars.extend(next_exemplars.iter().cloned());
     }
+}
+
+fn merge_metric_points(existing_points: &mut Vec<Value>, next_points: &[Value]) {
+    for next in next_points {
+        let Some(next_ts) = metric_point_timestamp(next) else {
+            existing_points.push(next.clone());
+            continue;
+        };
+        let Some(next_value) = metric_point_value(next) else {
+            existing_points.push(next.clone());
+            continue;
+        };
+        let Some(existing) = existing_points
+            .iter_mut()
+            .find(|point| metric_point_timestamp(point).as_deref() == Some(next_ts.as_str()))
+        else {
+            existing_points.push(next.clone());
+            continue;
+        };
+        let Some(existing_value) = metric_point_value(existing) else {
+            existing_points.push(next.clone());
+            continue;
+        };
+        existing[1] = json!(existing_value + next_value);
+    }
+    existing_points.sort_by(metric_point_cmp);
+}
+
+fn metric_point_timestamp(point: &Value) -> Option<String> {
+    point.as_array()?.first()?.as_str().map(ToString::to_string)
+}
+
+fn metric_point_value(point: &Value) -> Option<f64> {
+    point.as_array()?.get(1)?.as_f64()
+}
+
+fn metric_point_cmp(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
+    metric_point_sort_key(lhs).cmp(&metric_point_sort_key(rhs))
+}
+
+fn metric_point_sort_key(point: &Value) -> (i128, String) {
+    let ts = metric_point_timestamp(point).unwrap_or_default();
+    let parsed = ts.parse::<i128>().unwrap_or(i128::MAX);
+    (parsed, ts)
 }
 
 fn merge_trace(traces: &mut Vec<Value>, trace: Value) {
@@ -1163,6 +1207,24 @@ mod tests {
                     "inspectedBytes": 18,
                 })
         );
+    }
+
+    #[test]
+    fn merge_metric_series_sums_points_with_the_same_timestamp() {
+        let mut series = vec![json!({
+            "labels": { "svc": "api" },
+            "points": [["1000", 2.0], ["2000", 4.0]],
+            "exemplars": [],
+        })];
+        let next = json!({
+            "labels": { "svc": "api" },
+            "points": [["1000", 3.0], ["3000", 5.0]],
+            "exemplars": [],
+        });
+
+        merge_metric_series(&mut series, next);
+
+        assert!(series[0]["points"] == json!([["1000", 5.0], ["2000", 4.0], ["3000", 5.0],]));
     }
 
     fn backend_block(object_key: &str, min_time_ns: i64, max_time_ns: i64) -> BackendBlock {
