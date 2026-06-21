@@ -883,9 +883,17 @@ fn merge_metrics(metrics: &mut Value, next: Option<&Value>) {
         return;
     };
     for key in ["totalBlocks", "inspectedTraces", "inspectedBytes"] {
-        let lhs = current.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let rhs = next.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let lhs = metric_u64(current.get(key)).unwrap_or(0);
+        let rhs = metric_u64(next.get(key)).unwrap_or(0);
         current.insert(key.to_string(), json!(lhs + rhs));
+    }
+}
+
+fn metric_u64(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::Number(number) => number.as_u64(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
     }
 }
 
@@ -1092,6 +1100,31 @@ mod tests {
                     json!({"type": "string", "value": "alpha"}),
                     json!({"type": "string", "value": "zeta"}),
                 ]
+        );
+    }
+
+    #[test]
+    fn merge_metrics_adds_string_encoded_tempo_values() {
+        let mut metrics = json!({
+            "totalBlocks": 2,
+            "inspectedTraces": 3,
+            "inspectedBytes": 5,
+        });
+        let next = json!({
+            "totalBlocks": "7",
+            "inspectedTraces": "11",
+            "inspectedBytes": "13",
+        });
+
+        merge_metrics(&mut metrics, Some(&next));
+
+        assert!(
+            metrics
+                == json!({
+                    "totalBlocks": 9,
+                    "inspectedTraces": 14,
+                    "inspectedBytes": 18,
+                })
         );
     }
 
