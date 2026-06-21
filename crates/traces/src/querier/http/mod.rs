@@ -12,8 +12,8 @@ use crabka_traceql::{
     TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
 };
 use opentelemetry_proto::tonic::common::v1::{
-    AnyValue as OtlpAnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
-    any_value::Value as OtlpValue,
+    AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
+    KeyValue as OtlpKeyValue, any_value::Value as OtlpValue,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource as OtlpResource;
 use opentelemetry_proto::tonic::trace::v1::{
@@ -1440,24 +1440,35 @@ fn otlp_status(code: i32, message: &str) -> Option<OtlpStatus> {
 }
 
 fn otlp_attrs(attrs: &[(String, AttrValue)]) -> Vec<OtlpKeyValue> {
-    attrs
-        .iter()
-        .map(|(key, value)| otlp_kv(key, value))
+    group_attrs(attrs)
+        .into_iter()
+        .map(|(key, values)| OtlpKeyValue {
+            key: key.to_string(),
+            value: Some(otlp_values(&values)),
+            ..OtlpKeyValue::default()
+        })
         .collect()
 }
 
-fn otlp_kv(key: &str, value: &AttrValue) -> OtlpKeyValue {
-    OtlpKeyValue {
-        key: key.to_string(),
-        value: Some(OtlpAnyValue {
-            value: Some(match value {
-                AttrValue::Str(value) => OtlpValue::StringValue(value.clone()),
-                AttrValue::Int(value) => OtlpValue::IntValue(*value),
-                AttrValue::Float(value) => OtlpValue::DoubleValue(*value),
-                AttrValue::Bool(value) => OtlpValue::BoolValue(*value),
-            }),
+fn otlp_values(values: &[&AttrValue]) -> OtlpAnyValue {
+    if let [value] = values {
+        return otlp_value(value);
+    }
+    OtlpAnyValue {
+        value: Some(OtlpValue::ArrayValue(OtlpArrayValue {
+            values: values.iter().map(|value| otlp_value(value)).collect(),
+        })),
+    }
+}
+
+fn otlp_value(value: &AttrValue) -> OtlpAnyValue {
+    OtlpAnyValue {
+        value: Some(match value {
+            AttrValue::Str(value) => OtlpValue::StringValue(value.clone()),
+            AttrValue::Int(value) => OtlpValue::IntValue(*value),
+            AttrValue::Float(value) => OtlpValue::DoubleValue(*value),
+            AttrValue::Bool(value) => OtlpValue::BoolValue(*value),
         }),
-        ..OtlpKeyValue::default()
     }
 }
 
@@ -1605,6 +1616,20 @@ fn span_status_json(code: i32, message: &str) -> Option<Value> {
 }
 
 fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
+    Value::Array(
+        group_attrs(attrs)
+            .into_iter()
+            .map(|(key, values)| {
+                json!({
+                    "key": key,
+                    "value": attr_values_json(&values),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn group_attrs(attrs: &[(String, AttrValue)]) -> Vec<(&str, Vec<&AttrValue>)> {
     let mut grouped: Vec<(&str, Vec<&AttrValue>)> = Vec::new();
     for (key, value) in attrs {
         if let Some((_, values)) = grouped
@@ -1616,18 +1641,7 @@ fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
             grouped.push((key.as_str(), vec![value]));
         }
     }
-
-    Value::Array(
-        grouped
-            .into_iter()
-            .map(|(key, values)| {
-                json!({
-                    "key": key,
-                    "value": attr_values_json(&values),
-                })
-            })
-            .collect(),
-    )
+    grouped
 }
 
 fn attr_values_json(values: &[&AttrValue]) -> Value {
@@ -2589,6 +2603,64 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn trace_protobuf_projects_repeated_resource_attributes_as_arrays() {
+        let trace = TraceSpans {
+            trace_id: [9; 16],
+            root_service_name: "api".into(),
+            root_trace_name: "GET /".into(),
+            resource_attributes: vec![
+                ("deployment.zone".into(), AttrValue::Str("a".into())),
+                ("deployment.zone".into(), AttrValue::Str("b".into())),
+            ],
+            spans: vec![SpanRef {
+                span_id: [1; 8],
+                parent_span_id: None,
+                name: "api".into(),
+                kind: 0,
+                nested_set_left: 1,
+                nested_set_right: 2,
+                nested_set_parent: 0,
+                start_time_unix_nano: 1_001,
+                duration_nanos: 200,
+                status_code: 0,
+                status_message: String::new(),
+                instrumentation_name: String::new(),
+                instrumentation_version: String::new(),
+                resource_attributes: Vec::new(),
+                attributes: Vec::new(),
+                events: Vec::new(),
+                links: Vec::new(),
+            }],
+        };
+
+        let bytes = trace_protobuf(&trace, 10).unwrap();
+        let data = TracesData::decode(bytes.as_slice()).unwrap();
+        let attrs = &data.resource_spans[0].resource.as_ref().unwrap().attributes;
+
+        assert!(attrs.len() == 2);
+        assert!(attrs[0].key == "deployment.zone");
+        let Some(OtlpValue::ArrayValue(array)) = attrs[0]
+            .value
+            .as_ref()
+            .and_then(|value| value.value.as_ref())
+        else {
+            panic!("expected deployment.zone array value");
+        };
+        assert!(
+            array
+                .values
+                .iter()
+                .map(|value| value.value.as_ref())
+                .collect::<Vec<_>>()
+                == vec![
+                    Some(&OtlpValue::StringValue("a".into())),
+                    Some(&OtlpValue::StringValue("b".into())),
+                ]
+        );
+        assert!(attrs[1].key == "service.name");
     }
 
     #[tokio::test]
