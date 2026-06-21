@@ -7639,6 +7639,37 @@ async fn query_range_endpoint_line_format_applies_conditional_template_blocks() 
 }
 
 #[tokio::test]
+async fn query_range_endpoint_line_format_applies_json_template_truthiness() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/query_range")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api"} |= "error" | line_format `{{ if fromJson "[]" }}array{{ else }}empty-array{{ end }}|{{ if fromJson "{}" }}object{{ else }}empty-object{{ end }}|{{ if fromJson "0" }}number{{ else }}empty-number{{ end }}|{{ with fromJson "{\"method\":\"GET\"}" }}{{ .method }}{{ else }}missing{{ end }}`&start=0&end=30"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        body.pointer("/data/result/0/values")
+            == Some(&json!([[
+                "19",
+                "empty-array|empty-object|empty-number|GET"
+            ]]))
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_line_format_applies_boolean_template_combinators() {
     let state = fixture();
     let app = loki_router(state);
