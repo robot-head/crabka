@@ -444,7 +444,8 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
 
     match pipeline {
         [Pipeline::Aggregate(aggregate)] => metric_plan_for(aggregate, Vec::new(), None),
-        [Pipeline::Aggregate(aggregate), Pipeline::By(by)] => {
+        [Pipeline::Aggregate(aggregate), Pipeline::By(by)]
+        | [Pipeline::By(by), Pipeline::Aggregate(aggregate)] => {
             metric_plan_for(aggregate, by.clone(), None)
         }
         [
@@ -2983,6 +2984,41 @@ mod tests {
         assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
         assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
         assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn by_before_count_over_time_groups_metric_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | by(span.svc) | count_over_time()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+
+        assert!(series.len() == 2);
+        assert!(series[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(series[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
