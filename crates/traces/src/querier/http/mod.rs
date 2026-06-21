@@ -956,31 +956,46 @@ fn scoped_tags_from_traces(traces: &[TraceSpans], scope: Option<TagScope>) -> Ve
 
 fn tag_values_from_traces(traces: &[TraceSpans], tag: &str) -> Vec<TypedValue> {
     let tag = tag.strip_prefix('.').unwrap_or(tag);
+    let (attr_tag, attr_scope) = scoped_attribute_tag(tag);
     let mut values = BTreeSet::new();
     for trace in traces {
         collect_trace_intrinsic_values(trace, tag, &mut values);
-        values.extend(
-            trace_resource_attributes(trace)
-                .into_iter()
-                .filter(|(key, _)| key == tag)
-                .map(|(_, value)| typed_value_parts(&value)),
-        );
+        if matches!(attr_scope, None | Some(TagScope::Resource)) {
+            values.extend(
+                trace_resource_attributes(trace)
+                    .into_iter()
+                    .filter(|(key, _)| key == attr_tag)
+                    .map(|(_, value)| typed_value_parts(&value)),
+            );
+        }
         for span in &trace.spans {
             collect_span_intrinsic_values(span, &trace.spans, tag, &mut values);
             collect_event_values(span, tag, &mut values);
             collect_link_values(span, tag, &mut values);
-            values.extend(
-                span.attributes
-                    .iter()
-                    .filter(|(key, _)| key == tag)
-                    .map(|(_, value)| typed_value_parts(value)),
-            );
+            if matches!(attr_scope, None | Some(TagScope::Span)) {
+                values.extend(
+                    span.attributes
+                        .iter()
+                        .filter(|(key, _)| key == attr_tag)
+                        .map(|(_, value)| typed_value_parts(value)),
+                );
+            }
         }
     }
     values
         .into_iter()
         .map(|(type_, value)| TypedValue { type_, value })
         .collect()
+}
+
+fn scoped_attribute_tag(tag: &str) -> (&str, Option<TagScope>) {
+    if let Some(tag) = tag.strip_prefix("resource.") {
+        (tag, Some(TagScope::Resource))
+    } else if let Some(tag) = tag.strip_prefix("span.") {
+        (tag, Some(TagScope::Span))
+    } else {
+        (tag, None)
+    }
 }
 
 fn collect_trace_intrinsic_values(
@@ -3213,6 +3228,68 @@ mod tests {
                 "tagValues": [{
                     "type": "string",
                     "value": "kept"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_query_filter_accepts_resource_scope_prefix() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![span_at_with_attrs(
+                1,
+                1,
+                None,
+                "span-svc",
+                1_000,
+                vec![("env".into(), AttrValue::Str("prod".into()))],
+            )],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "dropped-svc",
+                2_000,
+                vec![("env".into(), AttrValue::Str("dev".into()))],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/resource.service.name/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "svc-a"
                 }],
                 "metrics": {
                     "inspectedBytes": "0"
