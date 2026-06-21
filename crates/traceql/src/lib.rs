@@ -16,6 +16,7 @@ mod planner;
 mod result;
 mod span_columns;
 mod store;
+pub mod testkit;
 
 pub use ast::{
     Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,

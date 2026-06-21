@@ -1,0 +1,24 @@
+name: count_filter_keeps_trace
+kind: search
+query: { .svc = "b" } | count() > 1
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: count_filter_drops_trace
+kind: search
+query: { .svc = "b" } | count() > 5
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: count_over_time_metric
+kind: metrics
+query: { .svc = "b" } | count_over_time()
+expect_series_count: 1
+
+---
+name: count_over_time_by_span_attr
+kind: metrics
+query: { .svc != nil } | count_over_time() | by(span.svc)
+expect_series_count: 5

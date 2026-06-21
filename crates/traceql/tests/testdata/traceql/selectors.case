@@ -1,0 +1,26 @@
+name: selector_http_method
+kind: search
+query: { .http.method = "GET" }
+expect_trace_ids: 1
+expect_span_ids: 1
+
+---
+name: selector_intrinsic_duration
+kind: search
+query: { span:duration > 150 }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: single_span_rule
+kind: search
+query: { .a = 1 && .b = 2 }
+expect_trace_ids: 2
+expect_span_ids: 1
+
+---
+name: inter_brace_and_allows_different_spans
+kind: search
+query: { .a = 1 } && { .b = 2 }
+expect_trace_ids: 1,2
+expect_span_ids: 1,1,2
