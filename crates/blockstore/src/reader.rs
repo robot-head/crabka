@@ -11,6 +11,13 @@ use parquet::arrow::async_reader::ParquetObjectReader;
 
 use crate::error::Result;
 
+/// Minimal row-group metadata used by query frontends to shard block scans.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RowGroupMeta {
+    pub index: usize,
+    pub compressed_bytes: u64,
+}
+
 /// Read every record batch from the Parquet block at `object_key`.
 pub async fn read_block(store: Arc<dyn ObjectStore>, object_key: &str) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
@@ -21,6 +28,27 @@ pub async fn read_block(store: Arc<dyn ObjectStore>, object_key: &str) -> Result
         .build()?;
     let batches = stream.try_collect::<Vec<_>>().await?;
     Ok(batches)
+}
+
+/// Read row-group sizes from Parquet metadata without scanning row data.
+pub async fn read_row_group_metadata(
+    store: Arc<dyn ObjectStore>,
+    object_key: &str,
+) -> Result<Vec<RowGroupMeta>> {
+    let path = Path::from(object_key);
+    let meta = store.head(&path).await?;
+    let reader = ParquetObjectReader::new(store, path).with_file_size(meta.size);
+    let builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
+    Ok(builder
+        .metadata()
+        .row_groups()
+        .iter()
+        .enumerate()
+        .map(|(index, row_group)| RowGroupMeta {
+            index,
+            compressed_bytes: u64::try_from(row_group.compressed_size()).unwrap_or(0),
+        })
+        .collect())
 }
 
 /// Read selected row groups from a Parquet block.

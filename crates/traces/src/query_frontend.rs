@@ -7,6 +7,9 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use crabka_blockstore::{
+    BlockStore, Result as BlockStoreResult, TraceIndex, read_row_group_metadata,
+};
 use reqwest::Url;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -179,6 +182,34 @@ pub fn plan_query_shards(
         }
     }
     out
+}
+
+pub async fn backend_blocks_from_trace_index(
+    blocks: &BlockStore,
+    index: &TraceIndex,
+    tenant: &str,
+) -> BlockStoreResult<Vec<BackendBlock>> {
+    let mut out = Vec::new();
+    for block in index.trace_blocks(tenant) {
+        let row_groups = read_row_group_metadata(blocks.object_store(), &block.object_key)
+            .await?
+            .into_iter()
+            .filter_map(|row_group| {
+                let index = u32::try_from(row_group.index).ok()?;
+                Some(BackendRowGroup {
+                    index,
+                    compressed_bytes: row_group.compressed_bytes,
+                })
+            })
+            .collect();
+        out.push(BackendBlock {
+            object_key: block.object_key.clone(),
+            min_time_ns: block.min_ts,
+            max_time_ns: block.max_ts,
+            row_groups,
+        });
+    }
+    Ok(out)
 }
 
 fn plan_block_jobs(
@@ -903,9 +934,21 @@ fn format_ns_as_seconds(ns: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use crabka_blockstore::{
+        BlockStore, ShardedTraceBloom, SpanKind, SpanRow, StatusCode as BlockStatusCode,
+        TraceBlockStats, TraceIndex, encode_span_rows, span_block_schema,
+    };
     use http_body_util::BodyExt as _;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use parquet::arrow::AsyncArrowWriter;
+    use parquet::arrow::async_writer::ParquetObjectWriter;
+    use parquet::file::properties::WriterProperties;
     use serde_json::json;
     use tower::ServiceExt as _;
 
@@ -971,6 +1014,81 @@ mod tests {
                     json!({"type": "string", "value": "zeta"}),
                 ]
         );
+    }
+
+    #[tokio::test]
+    async fn backend_blocks_from_trace_index_reads_parquet_row_group_metadata() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = BlockStore::new(object_store.clone(), Url::parse("memory:///").unwrap());
+        let first = encode_span_rows(&[frontend_span_row(1)]).unwrap();
+        let second = encode_span_rows(&[frontend_span_row(2)]).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_write_batch_size(1)
+            .build();
+        let object_writer =
+            ParquetObjectWriter::new(object_store.clone(), Path::from("blocks/frontend.parquet"));
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), Some(props)).unwrap();
+        writer.write(&first).await.unwrap();
+        writer.write(&second).await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant-a",
+            TraceBlockStats {
+                object_key: "blocks/frontend.parquet".into(),
+                min_ts: 10,
+                max_ts: 20,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+
+        let blocks = backend_blocks_from_trace_index(&blocks, &index, "tenant-a")
+            .await
+            .unwrap();
+
+        assert!(blocks.len() == 1);
+        assert!(blocks[0].object_key == "blocks/frontend.parquet");
+        assert!(blocks[0].min_time_ns == 10);
+        assert!(blocks[0].max_time_ns == 20);
+        assert!(blocks[0].row_groups.len() == 2);
+        assert!(blocks[0].row_groups[0].index == 0);
+        assert!(blocks[0].row_groups[0].compressed_bytes > 0);
+        assert!(blocks[0].row_groups[1].index == 1);
+        assert!(blocks[0].row_groups[1].compressed_bytes > 0);
+    }
+
+    fn frontend_span_row(id: u8) -> SpanRow {
+        SpanRow {
+            trace_id: [id; 16],
+            span_id: [id; 8],
+            parent_span_id: None,
+            nested_set: crabka_blockstore::NestedSet {
+                nested_set_left: 1,
+                nested_set_right: 2,
+                parent_id: 0,
+            },
+            child_count: 0,
+            root_service_name: Some("api".into()),
+            root_span_name: Some("root".into()),
+            trace_start_unix_nano: i64::from(id) * 10,
+            trace_duration_nanos: 1,
+            name: Some("span".into()),
+            kind: SpanKind::Server,
+            start_unix_nano: i64::from(id) * 10,
+            duration_nanos: 1,
+            status_code: BlockStatusCode::Ok,
+            status_message: None,
+            instrumentation_name: None,
+            instrumentation_version: None,
+            attrs: Vec::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+        }
     }
 
     #[test]

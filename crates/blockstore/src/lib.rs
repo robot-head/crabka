@@ -32,7 +32,7 @@ pub use index::Index;
 pub use labels::{Labels, SeriesFingerprint};
 pub use matcher::{LabelMatcher, MatchOp};
 pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
-pub use reader::{read_block, read_block_row_groups};
+pub use reader::{RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata};
 pub use span_block::{AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows};
 pub use span_schema::{
     SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,

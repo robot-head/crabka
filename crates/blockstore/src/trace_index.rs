@@ -48,6 +48,13 @@ impl TraceIndex {
         tenant_index.blocks.push(stats);
     }
 
+    #[must_use]
+    pub fn trace_blocks(&self, tenant: &str) -> &[TraceBlockStats] {
+        self.tenants
+            .get(tenant)
+            .map_or(&[], |tenant_index| tenant_index.blocks.as_slice())
+    }
+
     pub fn replace_trace_blocks(
         &mut self,
         tenant: &str,

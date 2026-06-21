@@ -43,6 +43,11 @@ impl BlockStore {
         &self.index
     }
 
+    #[must_use]
+    pub fn object_store(&self) -> Arc<dyn ObjectStore> {
+        self.store.clone()
+    }
+
     pub fn index_mut(&mut self) -> &mut Index {
         &mut self.index
     }

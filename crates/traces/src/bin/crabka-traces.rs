@@ -18,7 +18,7 @@ use crabka_traces::{
         SystemClock,
     },
     querier::{self as trace_querier, http::HttpConfig, store::CrabkaSpanStore},
-    query_frontend::{self, QueryFrontendConfig},
+    query_frontend::{self, QueryFrontendConfig, backend_blocks_from_trace_index},
 };
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -68,6 +68,8 @@ struct Cli {
     live_frontier_ns: Option<i64>,
     #[arg(long, default_value_t = 128)]
     query_queue_depth: usize,
+    #[arg(long, default_value_t = 0)]
+    target_bytes_per_job: u64,
     #[arg(long, default_value_t = usize::MAX)]
     max_trace_spans: usize,
     #[arg(long, default_value_t = 1000)]
@@ -291,7 +293,7 @@ async fn run_query_frontend(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
-    let router = build_query_frontend_router(&cli)?;
+    let router = build_query_frontend_router(&cli).await?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(%bound, "traces query-frontend listening");
@@ -303,12 +305,24 @@ async fn run_query_frontend(
     Ok(())
 }
 
-fn build_query_frontend_router(
+async fn build_query_frontend_router(
     cli: &Cli,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
     let mut cfg = QueryFrontendConfig::new(&cli.querier_url)?;
     cfg.live_frontier_ns = cli.live_frontier_ns;
     cfg.max_queue_depth = cli.query_queue_depth;
+    cfg.target_bytes_per_job = cli.target_bytes_per_job;
+    if cli.target_bytes_per_job > 0 {
+        let configured = build_object_store(cli)?;
+        let trace_index_key = configured.object_key(&cli.trace_index_key);
+        let trace_index = TraceIndex::load(&configured.store, &trace_index_key)
+            .await
+            .unwrap_or_else(|_| TraceIndex::new());
+        let blocks = BlockStore::new(configured.store, configured.root);
+        cfg.backend_blocks = backend_blocks_from_trace_index(&blocks, &trace_index, "anonymous")
+            .await
+            .unwrap_or_default();
+    }
     Ok(query_frontend::router(cfg))
 }
 
@@ -644,8 +658,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_query_frontend_options_and_builds_router() {
+    #[tokio::test]
+    async fn parses_query_frontend_options_and_builds_router() {
         let cli = Cli::try_parse_from([
             "crabka-traces",
             "--target",
@@ -656,6 +670,8 @@ mod tests {
             "60000000000",
             "--query-queue-depth",
             "4",
+            "--target-bytes-per-job",
+            "4096",
         ])
         .unwrap();
 
@@ -663,6 +679,7 @@ mod tests {
         assert!(cli.querier_url == "http://querier.example:3200");
         assert!(cli.live_frontier_ns == Some(60_000_000_000));
         assert!(cli.query_queue_depth == 4);
-        assert!(build_query_frontend_router(&cli).is_ok());
+        assert!(cli.target_bytes_per_job == 4096);
+        assert!(build_query_frontend_router(&cli).await.is_ok());
     }
 }
