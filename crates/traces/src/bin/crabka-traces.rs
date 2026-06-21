@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, ValueEnum};
+use clap::{ArgAction, Parser, ValueEnum};
 use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
@@ -17,7 +17,12 @@ use crabka_traces::{
         KafkaSpanSource, MetricsGenConfig, MetricsGenService, PrometheusRemoteWriteSink,
         SystemClock,
     },
-    querier::{self as trace_querier, http::HttpConfig, store::CrabkaSpanStore},
+    querier::{
+        self as trace_querier,
+        http::HttpConfig,
+        live::{LiveSource, LiveTier},
+        store::CrabkaSpanStore,
+    },
     query_frontend::{self, QueryFrontendConfig, backend_blocks_by_tenant_from_trace_index},
     span::batch::RESOURCE_ATTR_PREFIX,
 };
@@ -28,6 +33,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 #[derive(Debug, Parser)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "The role-selectable service CLI intentionally exposes independent feature flags"
+)]
 #[command(name = "crabka-traces")]
 #[command(about = "Tempo-compatible traces service for Crabka")]
 struct Cli {
@@ -51,6 +60,8 @@ struct Cli {
     bootstrap: String,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
     retention_ns: i64,
+    #[arg(long, action = ArgAction::SetTrue)]
+    querier_live_store: bool,
     #[arg(long, default_value = "index/traces.json")]
     trace_index_key: String,
     #[arg(long, default_value = "memory:///")]
@@ -262,7 +273,20 @@ async fn run_querier(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
-    let router = build_querier_router(&cli).await?;
+    let live_store = cli
+        .querier_live_store
+        .then(|| Arc::new(RwLock::new(LiveStore::new(cli.retention_ns))));
+    let router = build_querier_router_with_live(&cli, live_store.clone()).await?;
+    if let Some(live_store) = live_store {
+        let consumer =
+            wal_consumer(cli.bootstrap.clone(), "crabka-traces-querier-live-store").await?;
+        let live_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(err) = livestore::run(consumer, live_store, live_shutdown).await {
+                tracing::warn!(error = %err, "traces querier embedded live-store error");
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(%bound, "traces querier listening");
@@ -274,8 +298,16 @@ async fn run_querier(
     Ok(())
 }
 
+#[cfg(test)]
 async fn build_querier_router(
     cli: &Cli,
+) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+    build_querier_router_with_live(cli, None).await
+}
+
+async fn build_querier_router_with_live(
+    cli: &Cli,
+    live_store: Option<Arc<RwLock<LiveStore>>>,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
@@ -285,7 +317,13 @@ async fn build_querier_router(
             .unwrap_or_else(|_| TraceIndex::new()),
     );
     let blocks = Arc::new(BlockStore::new(configured.store, configured.root));
-    let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, None));
+    let live = live_store.map(|store| {
+        LiveTier::new(Arc::new(IndexedLiveSource::new(
+            store,
+            Arc::clone(&trace_index),
+        )))
+    });
+    let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, live));
     let engine = Arc::new(TraceqlEngine::new(
         store,
         EngineOpts {
@@ -299,6 +337,70 @@ async fn build_querier_router(
             max_trace_spans: cli.max_trace_spans,
         },
     ))
+}
+
+struct IndexedLiveSource {
+    store: Arc<RwLock<LiveStore>>,
+    trace_index: Arc<TraceIndex>,
+}
+
+impl IndexedLiveSource {
+    fn new(store: Arc<RwLock<LiveStore>>, trace_index: Arc<TraceIndex>) -> Self {
+        Self { store, trace_index }
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveSource for IndexedLiveSource {
+    async fn span_batches(
+        &self,
+        tenant: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> crabka_traces::querier::live::Result<Vec<arrow::record_batch::RecordBatch>> {
+        let guard = self.store.read().await;
+        guard.span_batches(tenant, start_ns, end_ns).await
+    }
+
+    async fn trace_spans(
+        &self,
+        tenant: &str,
+        trace_id: &[u8; 16],
+    ) -> crabka_traces::querier::live::Result<Option<crabka_traceql::TraceSpans>> {
+        let guard = self.store.read().await;
+        guard.trace_spans(tenant, trace_id).await
+    }
+
+    async fn tag_names(
+        &self,
+        tenant: &str,
+        scope: Option<crabka_traceql::TagScope>,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> crabka_traces::querier::live::Result<Vec<crabka_traceql::ScopedTag>> {
+        let guard = self.store.read().await;
+        guard.tag_names(tenant, scope, start_ns, end_ns).await
+    }
+
+    async fn tag_values(
+        &self,
+        tenant: &str,
+        tag: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> crabka_traces::querier::live::Result<Vec<crabka_traceql::TypedValue>> {
+        let guard = self.store.read().await;
+        guard.tag_values(tenant, tag, start_ns, end_ns).await
+    }
+
+    fn block_builder_frontier_ns(&self, tenant: &str) -> i64 {
+        self.trace_index
+            .trace_blocks(tenant)
+            .iter()
+            .map(|block| block.max_ts.saturating_add(1))
+            .max()
+            .unwrap_or_default()
+    }
 }
 
 async fn run_query_frontend(
@@ -600,6 +702,57 @@ mod tests {
         .unwrap();
         assert!(matches!(cli.target, Target::LiveStore));
         assert!(cli.retention_ns == 42);
+    }
+
+    #[test]
+    fn parses_querier_live_store_option() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--querier-live-store",
+            "--retention-ns",
+            "42",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Querier));
+        assert!(cli.querier_live_store);
+        assert!(cli.retention_ns == 42);
+    }
+
+    #[tokio::test]
+    async fn indexed_live_source_uses_trace_index_max_timestamp_as_frontier() {
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant-a",
+            crabka_blockstore::TraceBlockStats {
+                object_key: "blocks/a.parquet".into(),
+                min_ts: 100,
+                max_ts: 499,
+                bloom: crabka_blockstore::ShardedTraceBloom::new(1, 1, 0.01),
+                tag_names: std::collections::BTreeSet::default(),
+                tag_values: std::collections::BTreeMap::default(),
+            },
+        );
+        index.add_trace_block(
+            "tenant-a",
+            crabka_blockstore::TraceBlockStats {
+                object_key: "blocks/b.parquet".into(),
+                min_ts: 500,
+                max_ts: 750,
+                bloom: crabka_blockstore::ShardedTraceBloom::new(1, 1, 0.01),
+                tag_names: std::collections::BTreeSet::default(),
+                tag_values: std::collections::BTreeMap::default(),
+            },
+        );
+        let source = IndexedLiveSource::new(
+            Arc::new(RwLock::new(LiveStore::new(i64::MAX))),
+            Arc::new(index),
+        );
+
+        assert!(source.block_builder_frontier_ns("tenant-a") == 751);
+        assert!(source.block_builder_frontier_ns("tenant-b") == 0);
     }
 
     #[test]
