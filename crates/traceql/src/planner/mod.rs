@@ -477,8 +477,8 @@ fn spanset_to_sql(
             ))
         }
         SpansetExpr::Structural { op, lhs, rhs } => {
-            let b = spanset_to_sql(lhs, table, nested_tables)?;
-            let a = spanset_to_sql(rhs, table, nested_tables)?;
+            let b = spanset_to_sql(rhs, table, nested_tables)?;
+            let a = spanset_to_sql(lhs, table, nested_tables)?;
             let pred = structural_predicate_sql(structural_base_op(*op));
             if structural_is_negated(*op) {
                 return Ok(format!(
@@ -867,18 +867,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structural_descendant_returns_lhs_descendant_spans() {
+    async fn structural_descendant_returns_rhs_descendant_spans() {
         let store = structural_store();
-        let out = planned("{ .svc = \"c\" } >> { .svc = \"a\" }", &store)
+        let out = planned("{ .svc = \"a\" } >> { .svc = \"c\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[4; 8]]);
     }
 
     #[tokio::test]
-    async fn structural_child_uses_parent_id_eq_anchor_left() {
+    async fn structural_child_returns_rhs_direct_children() {
         let store = structural_store();
-        let out = planned("{ .svc = \"b\" } > { .svc = \"a\" }", &store)
+        let out = planned("{ .svc = \"a\" } > { .svc = \"b\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
@@ -894,9 +894,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structural_ancestor_returns_lhs_ancestor_spans() {
+    async fn structural_ancestor_returns_rhs_ancestor_spans() {
         let store = structural_store();
-        let out = planned("{ .svc = \"a\" } << { .svc = \"c\" }", &store)
+        let out = planned("{ .svc = \"c\" } << { .svc = \"a\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[1; 8]]);
@@ -905,7 +905,7 @@ mod tests {
     #[tokio::test]
     async fn structural_parent_returns_direct_parent_only() {
         let store = structural_store();
-        let out = planned("{ .svc = \"b\" } < { .svc = \"c\" }", &store)
+        let out = planned("{ .svc = \"c\" } < { .svc = \"b\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[2; 8]]);
@@ -914,16 +914,16 @@ mod tests {
     #[tokio::test]
     async fn structural_join_is_trace_isolated() {
         let store = structural_store();
-        let out = planned("{ .svc = \"d\" } >> { .svc = \"a\" }", &store)
+        let out = planned("{ .svc = \"a\" } >> { .svc = \"d\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[6; 8]]);
     }
 
     #[tokio::test]
-    async fn negated_ancestor_returns_lhs_spans_without_anchor_match() {
+    async fn negated_ancestor_returns_rhs_spans_without_anchor_match() {
         let store = structural_store();
-        let out = planned("{ .svc = \"b\" } !<< { .svc = \"c\" }", &store)
+        let out = planned("{ .svc = \"c\" } !<< { .svc = \"b\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[3; 8]]);
@@ -932,16 +932,16 @@ mod tests {
     #[tokio::test]
     async fn negated_parent_uses_parent_id_anti_join() {
         let store = structural_store();
-        let out = planned("{ .svc = \"b\" } !< { .svc = \"c\" }", &store)
+        let out = planned("{ .svc = \"c\" } !< { .svc = \"b\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[3; 8]]);
     }
 
     #[tokio::test]
-    async fn union_descendant_returns_lhs_and_anchor_spans() {
+    async fn union_descendant_returns_rhs_and_anchor_spans() {
         let store = structural_store();
-        let out = planned("{ .svc = \"c\" } &>> { .svc = \"b\" }", &store)
+        let out = planned("{ .svc = \"b\" } &>> { .svc = \"c\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);

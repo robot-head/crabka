@@ -160,16 +160,16 @@ async fn single_span_and_differs_from_inter_brace_and() {
 
 #[tokio::test]
 async fn structural_operators_return_right_hand_spans() {
-    assert!(span_ids(&query("{ .svc = \"c\" } >> { .svc = \"a\" }").await) == vec![4]);
-    assert!(span_ids(&query("{ .svc = \"a\" } << { .svc = \"c\" }").await) == vec![1]);
-    assert!(span_ids(&query("{ .svc = \"b\" } > { .svc = \"a\" }").await) == vec![2, 3]);
-    assert!(span_ids(&query("{ .svc = \"b\" } < { .svc = \"c\" }").await) == vec![2]);
+    assert!(span_ids(&query("{ .svc = \"a\" } >> { .svc = \"c\" }").await) == vec![4]);
+    assert!(span_ids(&query("{ .svc = \"c\" } << { .svc = \"a\" }").await) == vec![1]);
+    assert!(span_ids(&query("{ .svc = \"a\" } > { .svc = \"b\" }").await) == vec![2, 3]);
+    assert!(span_ids(&query("{ .svc = \"c\" } < { .svc = \"b\" }").await) == vec![2]);
     assert!(span_ids(&query("{ .svc = \"b\" } ~ { .svc = \"b\" }").await) == vec![2, 3]);
 }
 
 #[tokio::test]
 async fn structural_join_is_trace_isolated() {
-    let resp = query("{ .svc = \"d\" } >> { .svc = \"a\" }").await;
+    let resp = query("{ .svc = \"a\" } >> { .svc = \"d\" }").await;
     assert!(trace_ids(&resp) == vec![3]);
     assert!(span_ids(&resp) == vec![2]);
 }
