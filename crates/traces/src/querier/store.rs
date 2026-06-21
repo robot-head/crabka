@@ -174,7 +174,7 @@ impl SpanStore for CrabkaSpanStore {
                     out.resource_attributes = live_trace.resource_attributes;
                 }
                 out.spans.extend(live_trace.spans);
-                out.spans.sort_by_key(|span| span.start_time_unix_nano);
+                deduplicate_trace_spans(&mut out.spans);
             }
         }
 
@@ -967,7 +967,7 @@ fn trace_from_batches(
         }
     }
 
-    spans.sort_by_key(|span| span.start_time_unix_nano);
+    deduplicate_trace_spans(&mut spans);
     Ok((!spans.is_empty()).then_some(TraceSpans {
         trace_id: *trace_id,
         root_service_name,
@@ -975,6 +975,12 @@ fn trace_from_batches(
         resource_attributes,
         spans,
     }))
+}
+
+fn deduplicate_trace_spans(spans: &mut Vec<SpanRef>) {
+    spans.sort_by_key(|span| span.span_id);
+    spans.dedup_by_key(|span| span.span_id);
+    spans.sort_by_key(|span| (span.start_time_unix_nano, span.span_id));
 }
 
 fn is_intrinsic_tag(tag: &str) -> bool {
@@ -1683,6 +1689,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeLiveSource {
+        trace: Option<TraceSpans>,
         values: Vec<TypedValue>,
         frontier_ns: i64,
     }
@@ -1703,7 +1710,7 @@ mod tests {
             _tenant: &str,
             _trace_id: &[u8; 16],
         ) -> Result<Option<TraceSpans>, TraceqlError> {
-            Ok(None)
+            Ok(self.trace.clone())
         }
 
         async fn tag_names(
@@ -1989,6 +1996,7 @@ mod tests {
                 value: "cache.miss".into(),
             }],
             frontier_ns: 0,
+            ..FakeLiveSource::default()
         }));
         let store = CrabkaSpanStore::new(blocks, Arc::new(TraceIndex::new()), Some(live));
 
@@ -2089,6 +2097,28 @@ mod tests {
         }
     }
 
+    fn span_ref_from_span(span: &Span) -> SpanRef {
+        SpanRef {
+            span_id: span.span_id,
+            parent_span_id: span.parent_span_id,
+            name: span.name.clone(),
+            kind: span.kind as i32,
+            nested_set_left: 1,
+            nested_set_right: 2,
+            nested_set_parent: 0,
+            start_time_unix_nano: u64::try_from(span.start_ns).unwrap_or_default(),
+            duration_nanos: u64::try_from(span.duration_ns).unwrap_or_default(),
+            status_code: span.status as i32,
+            status_message: span.status_message.clone(),
+            instrumentation_name: span.instrumentation_scope.clone(),
+            instrumentation_version: span.instrumentation_version.clone(),
+            resource_attributes: vec![],
+            attributes: vec![],
+            events: vec![],
+            links: vec![],
+        }
+    }
+
     fn assert_cloud_region_resource_attr(attrs: &[(String, AttrValue)]) {
         assert!(attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))));
         assert!(
@@ -2165,6 +2195,64 @@ mod tests {
                     attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
                 }]
         );
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_deduplicates_spans_present_in_cold_and_live_tiers() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/dedup.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let live = LiveTier::new(Arc::new(FakeLiveSource {
+            trace: Some(TraceSpans {
+                trace_id: span.trace_id,
+                root_service_name: "api".into(),
+                root_trace_name: "GET /users".into(),
+                resource_attributes: vec![],
+                spans: vec![span_ref_from_span(&span)],
+            }),
+            values: vec![],
+            frontier_ns: 1_000,
+        }));
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), Some(live));
+
+        let trace = store
+            .trace_by_id("tenant", &span.trace_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(trace.spans.len() == 1);
+        assert!(trace.spans[0].span_id == span.span_id);
     }
 
     #[tokio::test]

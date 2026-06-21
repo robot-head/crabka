@@ -1125,8 +1125,7 @@ pub(crate) fn assemble_search_response(
     let mut out: Vec<TraceResult> = traces
         .into_iter()
         .map(|(trace_id, mut acc)| {
-            acc.spans
-                .sort_by_key(|s| (s.start_time_unix_nano, s.span_id));
+            deduplicate_search_spans(&mut acc.spans);
             let matched = u32::try_from(acc.spans.len()).unwrap_or(u32::MAX);
             let spans = acc.spans.into_iter().take(spss).collect();
             TraceResult {
@@ -1155,6 +1154,12 @@ pub(crate) fn assemble_search_response(
         traces: out,
         inspected_traces,
     })
+}
+
+fn deduplicate_search_spans(spans: &mut Vec<SpanRef>) {
+    spans.sort_by_key(|span| span.span_id);
+    spans.dedup_by_key(|span| span.span_id);
+    spans.sort_by_key(|span| (span.start_time_unix_nano, span.span_id));
 }
 
 fn fixed_16(batch: &RecordBatch, col: &str, row: usize) -> Result<[u8; 16]> {
@@ -1519,6 +1524,24 @@ mod tests {
         assert!(r.traces[0].root_service_name == "a");
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_deduplicates_same_span_returned_by_multiple_tiers() {
+        let mut s = InMemorySpanStore::new();
+        let span = sp(9, 1, None, "a");
+        s.push_trace("t", "a", "root", vec![span.clone(), span]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ .svc = \"a\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+
+        assert!(r.traces.len() == 1);
+        assert!(r.traces[0].span_sets[0].matched == 1);
+        assert!(r.traces[0].span_sets[0].spans.len() == 1);
+        assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
