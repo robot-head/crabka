@@ -99,6 +99,8 @@ impl EdgeStore {
         let Some(key) = edge_key(span) else {
             return RecordOutcome::Ignored;
         };
+        self.expire(now_ns);
+
         let connection_type = classify(span);
         let failed = span.status == StatusCode::Error;
         let latency_ns = span.duration_ns.max(0);
@@ -631,6 +633,39 @@ mod tests {
 
         let out = store.drain(1_000);
         assert!((counter(&out, "traces_service_graph_dropped_spans_total") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn expired_half_edges_do_not_consume_store_capacity() {
+        let cfg = MetricsGenConfig {
+            edge_store_max_items: 1,
+            edge_ttl: Duration::from_secs(10),
+            ..MetricsGenConfig::default()
+        };
+        let mut store = EdgeStore::new(&cfg);
+        let stale = span(
+            "stale-client",
+            [0x1; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        let fresh = span(
+            "fresh-client",
+            [0x2; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+
+        assert!(store.record_span(&stale, 0) == RecordOutcome::Recorded);
+        assert!(store.record_span(&fresh, 10_000_000_000) == RecordOutcome::Recorded);
+
+        let out = store.drain(1_000);
+        assert!((counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9);
+        assert!(counter(&out, "traces_service_graph_dropped_spans_total").abs() < 1e-9);
     }
 
     #[test]
