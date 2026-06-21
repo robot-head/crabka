@@ -71,7 +71,7 @@ The two churn-prone surfaces — the **traces WAL consumer** (`crabka-client-con
 **Interfaces:**
 - Produces: a compiling `metricsgen` module + `crate::metricsgen::contract` re-exporting (or locally defining) `SpanRecord`, `SpanKind`, `StatusCode`, `TRACES_WAL_TOPIC`, `NativeHistogram`, `BucketSpan`.
 
-- [ ] **Step 1: Add deps to `crates/traces/Cargo.toml`**
+- [x] **Step 1: Add deps to `crates/traces/Cargo.toml`**
 
 ```toml
 [dependencies]
@@ -95,7 +95,7 @@ tempfile = { workspace = true }
 
 > **Verify-note (workspace deps):** `serde`, `reqwest`, `prost`, `tokio`, `tracing`, `thiserror`, `async-trait`, `tempfile`, `assert2` are already `[workspace.dependencies]` (confirmed in root `Cargo.toml`, used by the metrics slices). If `reqwest`/`prost` are not yet workspace deps, add them mirroring the metrics Slice-4 manifest: `reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-tls"] }`, `prost = "0.13"`. Use `default-features = false` + `rustls-tls` to match the workspace's rustls-everywhere posture (no native-tls/openssl).
 
-- [ ] **Step 2: Create the `contract` shim + module decls**
+- [x] **Step 2: Create the `contract` shim + module decls**
 
 Create `crates/traces/src/metricsgen/mod.rs`:
 
@@ -210,20 +210,20 @@ pub use contract::{BucketSpan, NativeHistogram, SpanKind, SpanRecord, StatusCode
 
 > **Re-export-swap note:** the metrics-generator is a `metricsgen` module **inside the same `crabka-traces` crate** that Slice 4 builds (the `SpanRecord`/`SpanKind`/`StatusCode`/`TRACES_WAL_TOPIC` come from `crate::wal` + `crate::span`, not an external crate). The moment Slice 4 lands, replace the matching bodies of `contract` with `pub use crate::wal::TRACES_WAL_TOPIC; pub use crate::span::{SpanKind, StatusCode};` (these match Slice 4's definitions verbatim — identical variant order, identical topic literal) and `pub use crabka_metrics::{NativeHistogram, BucketSpan};` once the metrics crate lands. **`SpanRecord` is the exception:** Slice 4's real `SpanRecord` is `{ tenant: String, span: Span }` (the span fields are nested under `span`), whereas this role's `contract::SpanRecord` is a **flattened projection** the processors read (`service_name`, `kind`, `status`, `duration_ns`, `size_bytes`, span attrs). So `contract::SpanRecord` stays a local type, and the **`SpanSource` adapter** (Task 7 / the real impl in Task 12) decodes `crate::wal::SpanRecord` → this projection — adapt that one decode site, never the processor logic. No other `metricsgen` file references the upstream types directly — they all go through `contract`, so this stays a one-file swap (plus the `SpanSource` decode).
 
-- [ ] **Step 3: Wire into `lib.rs`**
+- [x] **Step 3: Wire into `lib.rs`**
 
 Add `pub mod metricsgen;` to `crates/traces/src/lib.rs`.
 
-- [ ] **Step 4: Stub the remaining module files**
+- [x] **Step 4: Stub the remaining module files**
 
 Create empty-but-compiling `clock.rs`, `config.rs`, `series.rs`, `spanmetrics.rs`, `servicegraph.rs`, `sink.rs`, `remotewrite.rs`, `checkpoint.rs`, `processor.rs`, `service.rs` each with a `//!` doc line. (Each fills in its own Task below; they must exist for `mod.rs` to compile.)
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 Run: `cargo build -p crabka-traces`
 Expected: compiles (empty modules + contract shim).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -245,7 +245,7 @@ git commit -m "feat(traces): scaffold metrics-generator module + contract shim +
   - `struct SystemClock;` (`Clock` via `SystemTime::now()`).
   - `struct MockClock { ... }` with `new(start_ns: i64)`, `advance(&self, ns: i64)`, `set(&self, ns: i64)` (interior-mutable, `Clock`-impl, `Clone`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/clock.rs`:
 
@@ -268,12 +268,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::clock`
 Expected: FAIL — `cannot find type MockClock`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Injectable clock so TTL edge-expiry and interval flushes are testable without
@@ -325,14 +325,14 @@ impl Clock for MockClock {
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::clock`
 Expected: PASS.
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use clock::{Clock, MockClock, SystemClock};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use clock::{Clock, MockClock, SystemClock};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -354,7 +354,7 @@ git commit -m "feat(traces): metrics-generator injectable clock (SystemClock + M
   - `impl Default for MetricsGenConfig` — Tempo-equivalent defaults: `collection_interval = 15s`, `latency_native_schema = 8`, `max_exemplars_per_series = 0` (off until configured), `edge_ttl = 10s`, `edge_store_max_items = 10_000`, `enable_target_info = false`, `enable_messaging_system_latency = false`.
   - `const DEFAULT_LATENCY_BUCKETS_NS: &[f64]` — the classic `_seconds` histogram bucket edges (Tempo's defaults) expressed in **nanoseconds** (the dimension spans are in ns; remote_write `_bucket` `le` labels are rendered in seconds at encode time).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/config.rs`:
 
@@ -392,12 +392,12 @@ mod tests {
 
 > **serde-shape note:** `Duration` has no natural YAML form, so the serde representation uses scalar `*_secs`/`*_ns` fields (see the `#[serde(...)]` mapping in the impl). The `serde_yaml` dep is already a workspace dep (used by the metrics ruler slice). Add `serde_yaml = { workspace = true }` to `[dev-dependencies]` if config-from-YAML is test-only here, or `[dependencies]` if the binary loads a config file (it does — Task 12), so put it in `[dependencies]`.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::config`
 Expected: FAIL — `cannot find type MetricsGenConfig`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Metrics-generator configuration (collection interval, latency buckets,
@@ -477,14 +477,14 @@ mod secs {
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::config`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use config::{DEFAULT_LATENCY_BUCKETS_NS, MetricsGenConfig};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use config::{DEFAULT_LATENCY_BUCKETS_NS, MetricsGenConfig};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -510,7 +510,7 @@ This is the boundary between the two processors and the remote_write encoder: bo
   - `struct SeriesPayload { pub tenant: String, pub series: Vec<Series> }`.
   - `fn sorted_labels(pairs: Vec<(String, String)>) -> Vec<(String, String)>` — stable label ordering helper used by both processors.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/series.rs`:
 
@@ -549,12 +549,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::series`
 Expected: FAIL — `cannot find function sorted_labels`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Neutral output model produced by both processors and consumed by
@@ -614,14 +614,14 @@ pub fn sorted_labels(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> 
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::series`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use series::{Exemplar, Series, SeriesPayload, SeriesSample, sorted_labels};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use series::{Exemplar, Series, SeriesPayload, SeriesSample, sorted_labels};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -648,7 +648,7 @@ This is the first headline: a pure fold that turns each span into RED series. Th
   - `fn dimension_labels(span: &SpanRecord) -> Vec<(String, String)>` — `service`/`span_name`/`span_kind`/`status_code` (the §7.1 dimension set).
   - internal `struct LatencyHistogram { bucket_counts: Vec<u64>, sum_ns: f64, count: u64 }` accumulating into the configured `histogram_buckets_ns`.
 
-- [ ] **Step 1: Write the failing tests (RED values + exemplar attachment)**
+- [x] **Step 1: Write the failing tests (RED values + exemplar attachment)**
 
 In `crates/traces/src/metricsgen/spanmetrics.rs`:
 
@@ -770,12 +770,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::spanmetrics`
 Expected: FAIL — `cannot find type SpanMetricsRegistry`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Span-metrics (RED): per-`(service, span_name, span_kind, status_code)`
@@ -983,14 +983,14 @@ fn hex8(b: &[u8; 8]) -> String {
 > 2. **Histogram bucket placement** — `observe` uses `value <= edge` (Prometheus `le` semantics: a value lands in the first bucket whose upper bound is `>= value`). The `latency_histogram_buckets_and_sum` test pins the 8ms boundary. If a differential test vs Tempo shows off-by-one bucketing, this is the line to check.
 > 3. **Native vs classic latency** — this slice emits the latency as a **classic** histogram (`_bucket`/`_sum`/`_count`) for remote_write v1 compatibility and the simplest exemplar attachment. The spec mentions the native-histogram codec on the output edge; native latency is a flagged Slice-8 option (`SeriesSample::NativeHistogram` already exists in the model — Task 6's encoder handles it for service-graphs, so the path is proven). Classic is what Grafana's span-metrics panels read by default.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::spanmetrics`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use spanmetrics::SpanMetricsRegistry;`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use spanmetrics::SpanMetricsRegistry;`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1027,7 +1027,7 @@ This is the second and most-prominent headline: the bounded, TTL'd edge store th
 - `expire(now)` → any half-edge with `now - first_seen_ns >= edge_ttl` is dropped and counted as `unpaired` (the partner never arrived).
 - If inserting a new key would exceed `edge_store_max_items` → the span is `Dropped` (counted as `dropped`), the store is left unchanged.
 
-- [ ] **Step 1: Write the failing tests (pairing + expiry + store-full)**
+- [x] **Step 1: Write the failing tests (pairing + expiry + store-full)**
 
 In `crates/traces/src/metricsgen/servicegraph.rs`:
 
@@ -1163,12 +1163,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::servicegraph`
 Expected: FAIL — `cannot find type EdgeStore`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Service-graphs: pair a client-kind span with the server-kind span of the
@@ -1482,14 +1482,14 @@ use super::series::Series;
 > 2. **`_seconds` histograms** — emitted here as `_sum`/`_count`-only degenerate histograms (`buckets: vec![]`). The encoder (Task 8) renders `_sum`/`_count` and a single `le="+Inf"` bucket. Real bucketed service-graph latency (with the configured edges) is a flagged Slice-8 refinement; `_sum`/`_count` already drive Grafana's edge-latency tooltip.
 > 3. **`connection_type` empty-string label** — Tempo emits `connection_type=""` (unset) as an *empty* label value, present on the series. The `pairs_client_then_server` test pins the empty value. Confirm Tempo doesn't *omit* the label entirely for unset; if it omits, drop the `connection_type` pair when `Unset` in `drain` + the test together.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::servicegraph`
 Expected: PASS (6 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use servicegraph::{ConnectionType, EdgeStore, RecordOutcome};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use servicegraph::{ConnectionType, EdgeStore, RecordOutcome};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1513,7 +1513,7 @@ git commit -m "feat(traces): service-graph TTL'd edge-pairing state machine + RE
   - `struct MockRemoteWriteSink` (`Default`, `Clone`) recording all written `SeriesPayload`s; `writes() -> Vec<SeriesPayload>`; `fail_next()` forcing one `Transport` error.
   - `struct MockSpanSource` (`Default`, `Clone`) returning scripted batches; `push_batch(Vec<SpanRecord>)`; records `commit()` calls; `commits() -> usize`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/sink.rs`:
 
@@ -1579,12 +1579,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::sink`
 Expected: FAIL — `cannot find type MockRemoteWriteSink`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! The two boundary surfaces, behind narrow traits with deterministic mocks.
@@ -1688,14 +1688,14 @@ impl SpanSource for MockSpanSource {
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::sink`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use sink::{MockRemoteWriteSink, MockSpanSource, RemoteWriteSink, SinkError, SpanSource};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use sink::{MockRemoteWriteSink, MockSpanSource, RemoteWriteSink, SinkError, SpanSource};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1721,7 +1721,7 @@ git commit -m "feat(traces): metrics-generator RemoteWriteSink/SpanSource traits
 
 **The prost encode + HTTP send is the churn-prone part; the flat-row transform is pinned by a pure test.** Don't unit-test the network call — test `to_timeseries` exhaustively, leave the `pb`-encode + `reqwest` send behind a verify-note + an `#[ignore]` integration smoke.
 
-- [ ] **Step 1: Write the failing test (the pure transform)**
+- [x] **Step 1: Write the failing test (the pure transform)**
 
 In `crates/traces/src/metricsgen/remotewrite.rs`:
 
@@ -1811,12 +1811,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::remotewrite`
 Expected: FAIL — `cannot find function to_timeseries`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Prometheus remote_write encoder. The flat `Series` → `TimeSeries` transform
@@ -1979,14 +1979,14 @@ fn encode_write_request(_rows: &[WireTimeSeries]) -> Result<Vec<u8>, String> {
 > 3. **Native histograms (remote_write v2)** — emitting the latency as a native histogram requires the v2 `pb::v2::Request` + symbol-table interning. `to_timeseries` deliberately skips `NativeHistogram` (classic is the default path); the v2 native encode is a flagged Slice-8 option, structured by the `NativeHistogram` contract type already in scope.
 > 4. **Integration smoke** — add `crates/traces/tests/remote_write_smoke.rs` behind `#[ignore]` that POSTs a real `WriteRequest` to a testcontainers Prometheus/Mimir and asserts `2xx` + a follow-up query returns the series. Run manually / in a dedicated CI lane; the unit suite never depends on a live endpoint.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::remotewrite`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use remotewrite::{PrometheusRemoteWriteSink, WireTimeSeries, le_label, to_timeseries};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use remotewrite::{PrometheusRemoteWriteSink, WireTimeSeries, le_label, to_timeseries};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2010,7 +2010,7 @@ git commit -m "feat(traces): metrics-generator remote_write encoder + pure times
 
 > **Rationale note:** the metrics-generator holds *no* durable state — edges are rebuildable from WAL offsets (spec §9). The checkpoint is a pure **optimization** (avoid re-deriving in-flight half-edges after a restart by replaying only since the last checkpoint). This task defines the wire shape + trait so the optimization can land in Slice 8 without reshaping the processor; the in-memory impl is the test substrate.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/checkpoint.rs`:
 
@@ -2047,12 +2047,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::checkpoint`
 Expected: FAIL — `cannot find function encode_checkpoint_key`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! Edge-state checkpoint (optional optimization; the metrics-generator holds no
@@ -2149,14 +2149,14 @@ impl EdgeCheckpointStore for InMemoryCheckpointStore {
 
 > **Dep-note:** `bytes` is a workspace dep (used across the broker). Add `bytes = { workspace = true }` to `crates/traces/Cargo.toml` `[dependencies]` if absent.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::checkpoint`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore, encode_checkpoint_key, parse_checkpoint_key};`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore, encode_checkpoint_key, parse_checkpoint_key};`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2182,7 +2182,7 @@ This composes the two processors behind one `process(SpanRecord)` + `collect()` 
   - `fn collect(&mut self, timestamp_ms: i64) -> Vec<SeriesPayload>` — for each tenant: `EdgeStore::expire(clock.now_ns())`, drain span-metrics + service-graph series into one `SeriesPayload`; returns one payload per tenant with non-empty series.
   - internal `struct TenantState { span_metrics: SpanMetricsRegistry, edges: EdgeStore }`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/processor.rs`:
 
@@ -2254,12 +2254,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::processor`
 Expected: FAIL — `cannot find type MetricsGenerator`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! `MetricsGenerator` — composes the span-metrics + service-graph processors per
@@ -2321,14 +2321,14 @@ impl MetricsGenerator {
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::processor`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use processor::MetricsGenerator;`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use processor::MetricsGenerator;`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2352,7 +2352,7 @@ git commit -m "feat(traces): MetricsGenerator processor — per-tenant span-metr
   - `async fn collect_once(&self) -> Result<usize, SinkError>` — drain the generator at `clock.now_ns()/1e6`, `sink.write` each payload, then `source.commit()`; returns payloads flushed (write-then-commit crash-safety order).
   - `async fn run(self, shutdown: CancellationToken)` — interleaves polling with a `collection_interval` ticker; **thin glue over `poll_once`/`collect_once`** (tested directly + a tick-driven test with `tokio::time::pause`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/metricsgen/service.rs`:
 
@@ -2435,12 +2435,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::service`
 Expected: FAIL — `cannot find type MetricsGenService`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 //! `MetricsGenService` — owns the source, processors, sink, and clock; runs the
@@ -2551,14 +2551,14 @@ where
 
 > **Loop-fidelity verify-note:** `run` interleaves a continuous poll future with the interval ticker via `select!`. The *correctness* (RED derivation, edge pairing, write-then-commit) is fully in `poll_once`/`collect_once` and fully tested; the precise poll/flush interleaving + backpressure tuning are Slice-8 refinements (flagged). The real `SpanSource` impl wraps `crabka-client-consumer` (`Consumer::poll(Duration)` → decode each `ConsumerRecord.value` via the Slice-4 `SpanRecord` decoder → `Vec<SpanRecord>`; `commit()` → `Consumer::commit_sync()`); that wrapping is Task 12's binary concern, kept out of the tested service via the `SpanSource` seam.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib metricsgen::service`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use service::MetricsGenService;`).
+- [x] **Step 5: Add re-exports** in `metricsgen/mod.rs` (`pub use service::MetricsGenService;`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2579,7 +2579,7 @@ git commit -m "feat(traces): MetricsGenService poll/collect loop + write-then-co
 - Produces: a binary that parses `--target metrics-generator` + flags (`--bootstrap`, `--remote-write-url`, `--collection-interval`, `--config`), builds a `MetricsGenService` with the real Kafka `SpanSource` (over `crabka-client-consumer`, `group_id = "crabka-traces-metrics-generator"`, subscribing `TRACES_WAL_TOPIC`) + the real `PrometheusRemoteWriteSink`, and spawns `service.run(shutdown)`.
 - The **e2e test** is the headline: drives the whole pipeline with mocks end-to-end — feed a scripted batch of client+server spans through `poll_once`, advance the clock past the collection interval, `collect_once`, and assert the mock remote_write sink received `traces_spanmetrics_calls_total` + `traces_service_graph_request_total` with the right labels/exemplars — proving the wiring (source → processors → sink) composes.
 
-- [ ] **Step 1: Write the failing e2e test**
+- [x] **Step 1: Write the failing e2e test**
 
 Create `crates/traces/tests/metrics_generator_e2e.rs`:
 
@@ -2664,12 +2664,12 @@ async fn metrics_generator_end_to_end_red_and_service_graph() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --test metrics_generator_e2e`
 Expected: FAIL — module paths unresolved until the binary/exports are wired (and `metricsgen` mod must be `pub`).
 
-- [ ] **Step 3: Implement the binary + ensure `pub` exports**
+- [x] **Step 3: Implement the binary + ensure `pub` exports**
 
 Ensure `crates/traces/src/lib.rs` has `pub mod metricsgen;` and `metricsgen/mod.rs` makes its submodules `pub`. Create `crates/traces/src/bin/metrics_generator.rs`:
 
@@ -2762,17 +2762,17 @@ mod placeholder {
 > 3. The placeholder `EmptySpanSource` is **binary-only** so the role binary compiles and runs the loop before Slice 4 merges. It never appears in library code or the e2e test (which uses `MockSpanSource`). Replace it + wire `PrometheusRemoteWriteSink::write`'s `encode_write_request` (Task 8 TODO) when the `crabka-metrics` pb module is a dep.
 > 4. `clap` is a workspace dep (used by the other role binaries). Confirm `clap = { workspace = true, features = ["derive"] }` is in `crates/traces/Cargo.toml`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --test metrics_generator_e2e`
 Expected: PASS.
 
-- [ ] **Step 5: Whole-crate gate**
+- [x] **Step 5: Whole-crate gate**
 
 Run: `cargo test -p crabka-traces && cargo clippy -p crabka-traces --all-targets && cargo fmt -p crabka-traces --check`
 Expected: all PASS, no warnings, formatting clean.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/traces/

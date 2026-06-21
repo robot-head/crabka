@@ -1,6 +1,6 @@
 # Crabka as a Grafana Observability Backend — Traces Signal (Grafana-Tempo Replacement)
 
-**Status:** Design / approved for planning
+**Status:** Implemented (all 8 slices) — see §14 for as-built notes
 **Date:** 2026-06-18
 **Scope of this spec:** the **traces** signal — a *full* Grafana-Tempo-equivalent
 distributed-tracing backend (not an MVP). Covers OTLP/Jaeger/Zipkin ingest, the
@@ -640,3 +640,55 @@ datasource correlation (no Tempo endpoint), all keyed by `trace_id`.
   sizes.
 - **TraceQL metrics maturity gating** — which TraceQL-metrics functions to ship
   behind an experimental flag, mirroring Tempo's per-version maturity.
+
+## 14. As-built notes (implementation deviations)
+
+The traces signal is implemented across `crates/blockstore`, `crates/traceql`, and
+`crates/traces` and is green (build + unit/integration tests; the
+differential-vs-Tempo and Grafana legs are `#[ignore]`, Docker-gated). The
+implementation honors the spec's *contracts* (TraceQL semantics, Tempo API shapes,
+the nested-set structural model, the `trace_id`-partitioned WAL dedup-avoidance
+invariant). The following deliberate deviations from the original design/plans
+stand as-built:
+
+- **`BlockIndex` seam without a generic `BlockStore`.** The pluggable per-signal
+  index trait (`BlockIndex`) exists and the logs/metrics index (`Index`) and
+  `TraceIndex` both implement it — this is the load-bearing generalization the spec
+  required (and that profiles will reuse). The concrete index type was **not**
+  renamed to `SeriesIndex`, and `BlockStore` is **not** parameterized over
+  `BlockIndex`: the traces write/read path uses `BlockWriter` + `TraceIndex` +
+  declared `span_block_decl()` schema validation directly, so a generic `BlockStore<I>`
+  facade was unnecessary and would have churned the shared logs/metrics path for no
+  functional gain.
+- **TraceQL-metrics maturity flag omitted (open question resolved).** Per the
+  project rule against default-off feature gates for new behavior, the
+  "experimental" TraceQL-metrics functions (`histogram_over_time`, `compare`,
+  `topk`/`bottomk`, the `quantile`/`avg`/`min`/`max_over_time` family) ship
+  **always-on** rather than behind a cargo feature. Closes the §13 maturity-gating
+  open question: no gate.
+- **Query-frontend is a single-module JSON-merge proxy.** Instead of the planned
+  `frontend/` module tree with a `QuerierBackend`/`BlockCatalog` trait abstraction
+  over typed `crabka-traceql` result types, the frontend
+  (`crates/traces/src/query_frontend.rs`) shards (time → tier → block → row-group),
+  fans out concurrently (`JoinSet` + a `Semaphore` admission queue), and merges raw
+  Tempo JSON. Post-merge it enforces `limit` (newest-first trace cap) and `spss`
+  (spanSets-per-trace cap). Trace-by-id is proxied to a querier rather than
+  fan-out-assembled at the frontend, because queriers read object storage directly
+  and already reassemble a trace across blocks (a valid Tempo topology).
+- **SQL-string planner.** `crabka-traceql` lowers to DataFusion by emitting SQL
+  (incl. the nested-set structural self-join predicate algebra) rather than building
+  `LogicalPlan`s programmatically; the structural predicates match the spec exactly.
+- **Tempo HTTP API in one module.** The querier serves the full Tempo surface from a
+  single `querier/http/mod.rs` rather than split `json`/`traces`/`search`/`metrics`
+  files. Same wire surface.
+- **Conformance-corpus harness limits.** The `.case` golden-corpus DSL covers
+  selectors, typed comparisons, structural (core/negated/union), pipelines, and the
+  TraceQL-metrics families. Tag-discovery and array any/none semantics are exercised
+  by inline `#[cfg(test)]` unit tests but not by the `.case` corpus (the DSL has no
+  `tag_names`/`tag_values` case kind and the shared fixture has no repeated-value
+  attributes); extending the harness is the only way to fold those into the corpus.
+- **Service Graph differential leg.** The `#[ignore]` Grafana test provisions a
+  Prometheus datasource and asserts the metrics-generator emits
+  `traces_service_graph_request_total` with the right edge labels, but the live
+  metrics-generator → Prometheus `remote_write` → Grafana round-trip is not stood up
+  in-container (documented in the test, not faked).

@@ -1,5 +1,27 @@
 # crabka-traces Slice 6 — Query-frontend (search sharding + job queueing + fan-out + spanSet/trace merge)
 
+> **COMPLETION STATUS (as-built):** The query-frontend is implemented and green, but
+> with a **different architecture than this plan prescribes**, so the per-step boxes
+> below are intentionally left unchecked (checking "create `frontend/wire.rs`" etc.
+> would be false — those files do not exist). The functional deliverables are met in
+> a single module `crates/traces/src/query_frontend.rs` (+ tests
+> `crates/traces/tests/query_frontend.rs`):
+> - **Sharding** time → tier → block → row-group (`plan_time_shards`/
+>   `plan_query_shards`, `target_bytes_per_job`).
+> - **Bounded fan-out** via `JoinSet` + a `Semaphore` admission queue (instead of
+>   `futures::buffer_unordered` + a `QuerierBackend`/`MockQuerier` trait).
+> - **Cross-shard merge** over raw Tempo JSON (`merge_trace`/`merge_span_sets`,
+>   `matched`-count preserving) with **post-merge `limit` (newest-first) + `spss`
+>   enforcement** (`apply_search_limits`).
+> - **Role binary** `crabka-traces --target query-frontend` and the full axum Tempo
+>   surface (`/api/echo`, `/api/search`, `/api/v2/traces/{id}`,
+>   `/api/v2/search/tags`, `tag/{tag}/values`, `/api/metrics/query_range`+`query`).
+>
+> **By-id is proxied to a querier** rather than fan-out-assembled at the frontend,
+> because queriers read object storage directly and already reassemble a trace across
+> blocks (a valid Tempo topology). Accepted deviation — see design spec §14. Treat
+> the steps below as the original design-of-record, not a to-do list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the `query-frontend` role for `crabka-traces` — an axum server that sits in front of N queriers (Slice 5) and (1) **shards** the trace search space into bounded jobs (time: recent live-store vs backend blocks; then per-block; then per-row-group sized ~`target_bytes_per_job`), (2) **queues** those jobs and **fans** them across queriers in parallel through a trait-abstracted `QuerierBackend` with bounded concurrency, (3) **merges** the per-job partials back into one Tempo JSON response while respecting `limit` (traces) and `spss` (spans-per-spanset), and (4) accumulates the `metrics{}` job-accounting block (`totalJobs`/`completedJobs`/`inspectedTraces`/`inspectedBytes`/`totalBlocks`) — all while preserving the Tempo HTTP byte-shapes the querier (Slice 5) exposes. `trace_by_id` fans the same job model (one job per candidate block) and assembles the single trace.

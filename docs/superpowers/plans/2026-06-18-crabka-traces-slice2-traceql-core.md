@@ -181,7 +181,7 @@ The `span_table` registered by `SpanStore::scan` has **one row per span**, sorte
 **Interfaces:**
 - Produces: a compiling `crabka-traceql` crate with `pub fn crate_smoke() -> bool` (placeholder, removed in A2).
 
-- [ ] **Step 1: Create `crates/traceql/Cargo.toml`**
+- [x] **Step 1: Create `crates/traceql/Cargo.toml`**
 
 ```toml
 [package]
@@ -221,7 +221,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 > If `crabka-blockstore`/`datafusion`/`arrow`/`regex` are not yet present in `[workspace.dependencies]` (blockstore/Slice 1 not landed in this tree), add them exactly as the blockstore plan specifies. The first build fetches + compiles DataFusion from git — slow (several minutes), normal.
 
-- [ ] **Step 2: Create `crates/traceql/src/lib.rs` with a placeholder**
+- [x] **Step 2: Create `crates/traceql/src/lib.rs` with a placeholder**
 
 ```rust
 //! TraceQL engine for Crabka's Grafana-Tempo-equivalent traces backend.
@@ -249,12 +249,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Build and test**
+- [x] **Step 3: Build and test**
 
 Run: `cargo test -p crabka-traceql`
 Expected: compiles and `smoke` PASSES. If the build fails with an arrow major mismatch (`expected struct arrow::... found struct arrow::...`), the datafusion rev is wrong — re-confirm the pinned rev tracks arrow 59.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cargo fmt -p crabka-traceql
@@ -277,7 +277,7 @@ git commit -m "feat(traceql): scaffold crabka-traceql crate"
   - `impl From<datafusion::error::DataFusionError> for TraceqlError` → `Exec`
   - `pub type Result<T> = std::result::Result<T, TraceqlError>` (internal alias)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traceql/src/error.rs`:
 
@@ -302,12 +302,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib error`
 Expected: FAIL — `cannot find type TraceqlError`.
 
-- [ ] **Step 3: Implement `error.rs`**
+- [x] **Step 3: Implement `error.rs`**
 
 Prepend above the `tests` module:
 
@@ -345,7 +345,7 @@ impl From<datafusion::error::DataFusionError> for TraceqlError {
 }
 ```
 
-- [ ] **Step 4: Wire into `lib.rs`**
+- [x] **Step 4: Wire into `lib.rs`**
 
 Replace the placeholder body of `lib.rs` (remove `crate_smoke` + its test) with:
 
@@ -356,12 +356,12 @@ pub use error::TraceqlError;
 pub(crate) use error::Result;
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traceql --lib error`
 Expected: PASS (2 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traceql
@@ -391,7 +391,7 @@ git commit -m "feat(traceql): TraceqlError type + DataFusion conversion"
   - `pub struct TypedValue { pub type_: String, pub value: String }`
   - `pub struct TraceMetricsResponse { pub series: Vec<TraceMetricSeries> }` + `pub struct TraceMetricSeries { pub labels: Vec<(String, String)>, pub points: Vec<(i64, f64)> }` (bodies populated in Slice 3; types frozen here)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traceql/src/result.rs`:
 
@@ -441,12 +441,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib result`
 Expected: FAIL — `cannot find type SpanRef`.
 
-- [ ] **Step 3: Implement `result.rs`**
+- [x] **Step 3: Implement `result.rs`**
 
 Prepend above the `tests` module:
 
@@ -544,7 +544,7 @@ pub struct TraceMetricsResponse {
 }
 ```
 
-- [ ] **Step 4: Wire into `lib.rs`**
+- [x] **Step 4: Wire into `lib.rs`**
 
 Add `mod result;` and:
 ```rust
@@ -554,12 +554,12 @@ pub use result::{
 };
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traceql --lib result`
 Expected: PASS (3 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traceql
@@ -586,7 +586,7 @@ git commit -m "feat(traceql): Tempo-shaped result model + tag-discovery types"
   - `pub enum MatchValue { Str(String), Int(i64), Float(f64), Bool(bool), Nil }`
   - `#[async_trait::async_trait] pub trait SpanStore: Send + Sync { ... }` with exactly the four methods from the Shared cross-slice contract.
 
-- [ ] **Step 1: Write the failing test** (a trivial in-test impl proves the trait is object-shaped and the signatures compile)
+- [x] **Step 1: Write the failing test** (a trivial in-test impl proves the trait is object-shaped and the signatures compile)
 
 Create `crates/traceql/src/store.rs`:
 
@@ -647,12 +647,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib store`
 Expected: FAIL — `cannot find type SpanStore`.
 
-- [ ] **Step 3: Implement `store.rs`**
+- [x] **Step 3: Implement `store.rs`**
 
 Prepend above the `tests` module:
 
@@ -771,16 +771,16 @@ pub trait SpanStore: Send + Sync {
 }
 ```
 
-- [ ] **Step 4: Wire into `lib.rs`**
+- [x] **Step 4: Wire into `lib.rs`**
 
 Add `mod store;` and `pub use store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traceql --lib store`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traceql
@@ -806,7 +806,7 @@ git commit -m "feat(traceql): SpanStore trait + ScanResult + SpanMatcher"
   - `pub struct InputSpan { pub trace_id: [u8;16], pub span_id: [u8;8], pub parent_span_id: Option<[u8;8]>, pub name: String, pub kind: i32, pub start_unix_nano: i64, pub duration_nanos: i64, pub status_code: i32, pub status_message: String, pub attrs: Vec<(String, AttrValue)> }`
   - `pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet>` where `pub struct NestedSet { pub left: i32, pub right: i32, pub parent_id: i32 }` — the **DFS pre-order** assignment over one trace's span tree (built from `parent_span_id`), identical to the block-builder's (Slice 1). Roots get `parent_id = 0`.
 
-- [ ] **Step 1: Write the failing nested-set test** (known-value, hand-built tree)
+- [x] **Step 1: Write the failing nested-set test** (known-value, hand-built tree)
 
 Create `crates/traceql/src/span_columns.rs`:
 
@@ -854,12 +854,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib span_columns`
 Expected: FAIL — `cannot find function assign_nested_set`.
 
-- [ ] **Step 3: Implement `span_columns.rs`**
+- [x] **Step 3: Implement `span_columns.rs`**
 
 Prepend above the `tests` module. The DFS: build a `span_id -> children` map from `parent_span_id`, find roots (no/absent parent), and walk pre-order assigning a monotonically increasing counter to `left` on entry and `right` on exit; `parent_id = parent.left` (or `0` for roots).
 
@@ -1002,12 +1002,12 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
 
 > **Why a sentinel `parent_id = 0`:** `nested_set_left` starts at `1`, so `0` can never collide with a real parent's `left`. Two roots both carry `parent_id = 0`, which makes them siblings of each other under the sibling lowering — matching Tempo (spec §6.3).
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 Run: `cargo test -p crabka-traceql --lib span_columns`
 Expected: PASS.
 
-- [ ] **Step 5: Wire `lib.rs` + commit**
+- [x] **Step 5: Wire `lib.rs` + commit**
 
 Add `mod span_columns;` and `pub use span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema};` (+ the `COL_*` constants the planner needs; re-export the full set).
 
@@ -1033,7 +1033,7 @@ git commit -m "feat(traceql): span-table column contract + nested-set DFS pre-or
 
 > **Time semantics:** a trace is in range if its `trace_start_unix_nano` ∈ `[start_ns, end_ns]` (Tempo's coarse trace-time filter; per-span time is exact in the planner). Promote **every** attribute key seen across the pushed spans to an `attr_<key>` column so selector pushdown has a column to hit; null where a span lacks it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traceql/src/in_memory.rs`:
 
@@ -1112,12 +1112,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib in_memory`
 Expected: FAIL — `cannot find type InMemorySpanStore`.
 
-- [ ] **Step 3: Implement `in_memory.rs`**
+- [x] **Step 3: Implement `in_memory.rs`**
 
 Prepend above the `tests` module. Hold per-tenant traces (`Vec<StoredTrace>`); per scan, collect the in-range traces' spans into Arrow arrays whose column order matches `span_schema(...)`, build a `MemTable`, register it. Build the promoted `attr_<key>` columns from the union of attribute keys, choosing the column's arrow type from the first value's `AttrValue` variant.
 
@@ -1405,16 +1405,16 @@ fn stor(e: arrow::error::ArrowError) -> TraceqlError {
 
 > **Arrow-builder note:** `FixedSizeBinaryBuilder::with_capacity(item_count, byte_width)` + `append_value(&[u8])` returning `Result`, and the `StringBuilder`/`Int32Builder`/`Int64Builder`/`Float64Builder`/`BooleanBuilder` `append_value`/`append_null` conventions are arrow-59 API. If a constructor signature differs at the pin, align to arrow 59 — keep the asserted behavior (the test's `count(*) == 2`, the `parent_id` sentinel/root-left values).
 
-- [ ] **Step 4: Wire into `lib.rs`**
+- [x] **Step 4: Wire into `lib.rs`**
 
 Add `mod in_memory;` and `pub use in_memory::InMemorySpanStore;`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traceql --lib in_memory`
 Expected: PASS (2 tests).
 
-- [ ] **Step 6: Phase A gate + commit**
+- [x] **Step 6: Phase A gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
@@ -1441,7 +1441,7 @@ git commit -m "feat(traceql): InMemorySpanStore building span DataFusion tables 
 
 > **Maximal-munch ordering is correctness-critical.** `!>>` must beat `!>` must beat `!` (and `!~`); `&>>`/`&>`/`&~`/`&&` must be disambiguated; `>>`/`>=`/`>` and `<<`/`<=`/`<`; `=~`/`=`. The lexer scans longest-token-first at each position. **There is no `==`** — two `=` in a row is a lex error (or `=` then `=`, which the parser rejects). `=~`/`!~` regex anchoring is applied later (parser/planner), not in the lexer.
 
-- [ ] **Step 1: Write the failing token tests**
+- [x] **Step 1: Write the failing token tests**
 
 Create `crates/traceql/src/lexer.rs`:
 
@@ -1503,16 +1503,16 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traceql --lib lexer`
 Expected: FAIL — `cannot find type Token`.
 
-- [ ] **Step 3: Implement `lexer.rs`** — a single-pass scanner over `char` indices. At each non-whitespace position, try the multi-char operators **longest-first** (`!>>`/`&>>`/`!<<`/`&<<` → `>>`/`<<`/`!>`/`!<`/`&>`/`&<`/`&~`/`&&`/`||`/`>=`/`<=`/`=~`/`!~` → single `=`/`<`/`>`/`~`/`!`/`&`-error/`+`/`-`/`*`/`/`/`%`/`^`/`.`/`:`/`,`/`(`/`)`/`{`/`}`/`|`), then string literals (`"..."` with `\"` escapes), then numbers (int/float), then identifiers/keywords (`nil`/`true`/`false` recognized as their own tokens; everything else an `Ident`, including duration literals like `100ms` and dotted attribute keys like `http.status` — actually emit `Dot`-separated `Ident`s and let the parser join, EXCEPT a leading bare-`.` scope which is its own `Dot`). Provide the full real scanner code (plain Rust — no churn surface). Map any unexpected char to `TraceqlError::Parse`.
+- [x] **Step 3: Implement `lexer.rs`** — a single-pass scanner over `char` indices. At each non-whitespace position, try the multi-char operators **longest-first** (`!>>`/`&>>`/`!<<`/`&<<` → `>>`/`<<`/`!>`/`!<`/`&>`/`&<`/`&~`/`&&`/`||`/`>=`/`<=`/`=~`/`!~` → single `=`/`<`/`>`/`~`/`!`/`&`-error/`+`/`-`/`*`/`/`/`%`/`^`/`.`/`:`/`,`/`(`/`)`/`{`/`}`/`|`), then string literals (`"..."` with `\"` escapes), then numbers (int/float), then identifiers/keywords (`nil`/`true`/`false` recognized as their own tokens; everything else an `Ident`, including duration literals like `100ms` and dotted attribute keys like `http.status` — actually emit `Dot`-separated `Ident`s and let the parser join, EXCEPT a leading bare-`.` scope which is its own `Dot`). Provide the full real scanner code (plain Rust — no churn surface). Map any unexpected char to `TraceqlError::Parse`.
 
 > **Identifier vs dotted-key decision (pin in a comment):** the lexer emits `Dot` + `Ident` separately (`.http.status` → `Dot Ident("http") Dot Ident("status")`); the **parser** (B3) joins the post-scope dotted segments into a single attribute key (`http.status`). Exception captured in the test above: an attribute key with no internal structure (`http.status`) — the test `single_equals_no_double` expects the lexer to coalesce a dotted key **after** a leading scope `Dot` into one `Ident("http.status")`. Choose ONE convention and make both the lexer and B3's parser agree; the snapshot tests in B1/B3 pin whichever you pick. (Recommended: lexer coalesces a dotted identifier run into one `Ident`, and a *leading* `.`/`span.`/`resource.` scope is a separate `Dot`/scope token — that is what the tests above assume.)
 
-- [ ] **Step 4: Run + wire + commit**
+- [x] **Step 4: Run + wire + commit**
 
 `cargo test -p crabka-traceql --lib lexer` → PASS. Add `mod lexer;` + `pub use lexer::{Token, lex};`.
 
@@ -1544,7 +1544,7 @@ git commit -m "feat(traceql): TraceQL lexer (maximal-munch operators, single-=, 
   - `pub enum Pipeline { Aggregate(Aggregate), Filter { op: ComparisonOp, value: f64 }, By(Vec<Field>), Select(Vec<Field>) }`
   - `pub enum Aggregate { Count, Sum(Field), Avg(Field), Max(Field), Min(Field) }`
 
-- [ ] **Step 1: Write the failing test** — construct a `Query` for `{ .foo = 1 } | count()` by hand and assert its shape (a pure data-structure test; no parser yet).
+- [x] **Step 1: Write the failing test** — construct a `Query` for `{ .foo = 1 } | count()` by hand and assert its shape (a pure data-structure test; no parser yet).
 
 ```rust
 #[cfg(test)]
@@ -1568,11 +1568,11 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find type Query`.
+- [x] **Step 2: Run to verify it fails** — `cannot find type Query`.
 
-- [ ] **Step 3: Implement `ast.rs`** — the enums/structs above with the derives. Provide the full real definitions (plain data types — no churn surface).
+- [x] **Step 3: Implement `ast.rs`** — the enums/structs above with the derives. Provide the full real definitions (plain data types — no churn surface).
 
-- [ ] **Step 4: Run + wire + commit** — add `mod ast;` + `pub use ast::{Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr, StructuralOp, Value};`.
+- [x] **Step 4: Run + wire + commit** — add `mod ast;` + `pub use ast::{Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr, StructuralOp, Value};`.
 
 ```bash
 cargo fmt -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets
@@ -1594,7 +1594,7 @@ git commit -m "feat(traceql): TraceQL AST node types"
   - `pub fn parse(query: &str) -> Result<Query, TraceqlError>` — lex then recursive-descent.
 - Grammar (precedence, low→high): pipeline `|` splits the trailing aggregations from the spanset; spanset `||` then `&&` then the structural operators (`>>`/`<<`/`>`/`<`/`~` + negated/union) then a braced `{ field_expr }`; inside braces field-expr `||` then `&&` then `!` then a comparison/presence. Scopes: a leading `.`→`Both`, `span.`/`resource.`/`parent.`/`event.`/`link.`/`instrumentation.`→that scope, `span:`/`trace:`/`event:`/`link:`/`instrumentation:` `<intrinsic>`→`Scope::Intrinsic(..)`. Regex values keep their raw pattern (anchoring is applied at planning). Duration literals (`5m`/`200ms`) parse to `Value::Duration(nanos)` **only in a numeric-comparison context** against `span:duration`/`trace:duration`; otherwise `100ms`-style idents are plain strings.
 
-- [ ] **Step 1: Write the failing parser tests** (AST snapshots — the format-quality bar's "token-level + AST snapshots")
+- [x] **Step 1: Write the failing parser tests** (AST snapshots — the format-quality bar's "token-level + AST snapshots")
 
 ```rust
 #[cfg(test)]
@@ -1660,11 +1660,11 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function parse`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function parse`.
 
-- [ ] **Step 3: Implement `parser.rs`** — a `Parser { tokens: Vec<Token>, pos: usize }` with `peek`/`advance`/`expect`. Recursion: `parse_query` → `parse_pipeline` (parses the spanset, then `|`-separated aggregations/filters/`by`/`select`) → `parse_spanset_or` → `parse_spanset_and` → `parse_structural` (left-assoc over the structural tokens) → `parse_braced` (`{` field-expr `}` or `(` spanset `)`). Inside braces: `parse_field_or` → `parse_field_and` → `parse_field_not` → `parse_comparison` (parse a `Field` via `parse_scope` + key, then optional comparison op + value; a bare field is a presence check). `parse_scope` consumes the leading `.`/scope-ident-`.`/intrinsic-ident-`:`. Duration parsing: when the RHS of a comparison against `span:duration`/`trace:duration`/`event:timeSinceStart` is an ident matching `^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$`, convert to `Value::Duration(nanos)`. Reject `=` immediately followed by `=` (the `double_equals_is_rejected` test). Provide the full real recursive-descent code (plain Rust — no churn surface).
+- [x] **Step 3: Implement `parser.rs`** — a `Parser { tokens: Vec<Token>, pos: usize }` with `peek`/`advance`/`expect`. Recursion: `parse_query` → `parse_pipeline` (parses the spanset, then `|`-separated aggregations/filters/`by`/`select`) → `parse_spanset_or` → `parse_spanset_and` → `parse_structural` (left-assoc over the structural tokens) → `parse_braced` (`{` field-expr `}` or `(` spanset `)`). Inside braces: `parse_field_or` → `parse_field_and` → `parse_field_not` → `parse_comparison` (parse a `Field` via `parse_scope` + key, then optional comparison op + value; a bare field is a presence check). `parse_scope` consumes the leading `.`/scope-ident-`.`/intrinsic-ident-`:`. Duration parsing: when the RHS of a comparison against `span:duration`/`trace:duration`/`event:timeSinceStart` is an ident matching `^\d+(\.\d+)?(ns|us|µs|ms|s|m|h)$`, convert to `Value::Duration(nanos)`. Reject `=` immediately followed by `=` (the `double_equals_is_rejected` test). Provide the full real recursive-descent code (plain Rust — no churn surface).
 
-- [ ] **Step 4: Phase B gate + commit**
+- [x] **Step 4: Phase B gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
@@ -1691,13 +1691,13 @@ git commit -m "feat(traceql): recursive-descent parser (single-span rule, scopes
   - `pub(crate) struct PlannedSpanset { pub ctx: SessionContext, pub plan: LogicalPlan }` — a logical plan over the registered span table whose output rows are the **matched spans** (carrying `trace_id`/`span_id`/the intrinsic + attr columns the result assembler needs).
   - `pub(crate) async fn plan_query<S: SpanStore>(store: &S, ctx: &PlannerContext, q: &Query) -> Result<PlannedSpanset, TraceqlError>` — dispatch on `q.root` (Selector→C2, And/Or→Phase D combinator, Structural→Phase D structural), then apply `q.pipeline` (Phase E). Unwired arms return `TraceqlError::Unsupported` until those phases land.
 
-- [ ] **Step 1: Write the failing test** — `plan_query` over an `InMemorySpanStore` with a single `{ .a = 1 }` selector returns a `PlannedSpanset` whose plan, when executed, yields the matching spans. (Drive via a tiny `execute(planned)` test helper that `collect`s the plan against `planned.ctx`.)
+- [x] **Step 1: Write the failing test** — `plan_query` over an `InMemorySpanStore` with a single `{ .a = 1 }` selector returns a `PlannedSpanset` whose plan, when executed, yields the matching spans. (Drive via a tiny `execute(planned)` test helper that `collect`s the plan against `planned.ctx`.)
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function plan_query`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function plan_query`.
 
-- [ ] **Step 3: Implement `planner/mod.rs`** — the context/structs, the `plan_query` dispatch (matching on `SpansetExpr` variants; `Selector` → `selector::plan_selector`; others → `Unsupported` until D), and the `execute` test helper (`ctx.execute_logical_plan(plan).collect()` — **verify the execution entry point against datafusion rev `0838a4d`**). Provide the full real scaffold; stub D/E delegations with `Unsupported` returns so the crate compiles.
+- [x] **Step 3: Implement `planner/mod.rs`** — the context/structs, the `plan_query` dispatch (matching on `SpansetExpr` variants; `Selector` → `selector::plan_selector`; others → `Unsupported` until D), and the `execute` test helper (`ctx.execute_logical_plan(plan).collect()` — **verify the execution entry point against datafusion rev `0838a4d`**). Provide the full real scaffold; stub D/E delegations with `Unsupported` returns so the crate compiles.
 
-- [ ] **Step 4: Wire `lib.rs` (`mod planner;`) + run + commit** (`feat(traceql): planner scaffold + PlannedSpanset dispatch`).
+- [x] **Step 4: Wire `lib.rs` (`mod planner;`) + run + commit** (`feat(traceql): planner scaffold + PlannedSpanset dispatch`).
 
 ---
 
@@ -1716,17 +1716,17 @@ git commit -m "feat(traceql): recursive-descent parser (single-span rule, scopes
 
 > **Array semantics (spec §4.1/§6.4):** an attribute may be array-valued. In this slice the promoted column is scalar (single-element); the array-list column form is wired in Slice 1's block schema and exercised in Slice 3. Here implement the scalar path; the `=`/`=~` "any element matches", `!=`/`!~` "no element matches" rules are flagged for Slice 3 (the column is scalar, so any/no collapse to the scalar comparison). The **AND fast path** (spec §6.4) is the intra-brace all-`&&` case lowering to a single `Filter` with an `AND` chain over referenced columns — exactly what `plan_selector` builds; record this in a comment.
 
-- [ ] **Step 1: Write the failing tests** — over an `InMemorySpanStore`:
+- [x] **Step 1: Write the failing tests** — over an `InMemorySpanStore`:
   - `{ .http.method = "GET" }` matches only the spans with that attr value.
   - `{ span:duration > 100 }` matches by the intrinsic duration column.
   - `{ .a = 1 && .b = 2 }` matches only a span where **both** hold (build a trace where one span has `a=1` and a *different* span has `b=2`, and a third span has both — assert only the third matches: the single-span rule).
   - `{ .name =~ "ab.*" }` anchors fully (so `"xabc"` does **not** match).
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function plan_selector`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function plan_selector`.
 
-- [ ] **Step 3: Implement `selector.rs`** — `field_to_column` mapping table, `comparison_to_expr` (use `datafusion::prelude::{col, lit}` + `Expr` operators; regex via the `regexp_match`/`~` expr — **verify the exact regex-predicate constructor against datafusion rev `0838a4d`**; anchor the pattern string ourselves), and `plan_selector` recursing `FieldExpr` into a combined predicate then `LogicalPlanBuilder::from(scan).filter(pred)?.build()?`. Provide the full real predicate-building code; keep the `LogicalPlanBuilder::filter`/`scan` builder calls + the regex expr behind the "verify against rev `0838a4d`" note. Wire `plan_selector` into C1's dispatch.
+- [x] **Step 3: Implement `selector.rs`** — `field_to_column` mapping table, `comparison_to_expr` (use `datafusion::prelude::{col, lit}` + `Expr` operators; regex via the `regexp_match`/`~` expr — **verify the exact regex-predicate constructor against datafusion rev `0838a4d`**; anchor the pattern string ourselves), and `plan_selector` recursing `FieldExpr` into a combined predicate then `LogicalPlanBuilder::from(scan).filter(pred)?.build()?`. Provide the full real predicate-building code; keep the `LogicalPlanBuilder::filter`/`scan` builder calls + the regex expr behind the "verify against rev `0838a4d`" note. Wire `plan_selector` into C1's dispatch.
 
-- [ ] **Step 4: Run + commit** (`feat(traceql): selector lowering — scopes/intrinsics/comparisons/anchored-regex + AND fast path`).
+- [x] **Step 4: Run + commit** (`feat(traceql): selector lowering — scopes/intrinsics/comparisons/anchored-regex + AND fast path`).
 
 ---
 
@@ -1739,13 +1739,13 @@ git commit -m "feat(traceql): recursive-descent parser (single-span rule, scopes
 - Produces:
   - `pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher>` — extract the **conjunctive** comparison conditions of a brace into `SpanMatcher`s for the store's block/bloom prefilter (an over-approximation: only top-level `&&`-joined `Comparison`s become matchers; `||`/`!` subtrees are dropped from the prefilter and re-applied exactly by the `Filter`). Maps `Scope`→`MatchScope`, `ComparisonOp`→`MatchCmp`, `Value`→`MatchValue`.
 
-- [ ] **Step 1: Write the failing test** — `field_expr_to_matchers` of `.a = 1 && .b =~ "x"` yields two matchers; of `.a = 1 || .b = 2` yields **zero** (an OR can't be safely prefiltered); of `.a != nil` yields one presence matcher.
+- [x] **Step 1: Write the failing test** — `field_expr_to_matchers` of `.a = 1 && .b =~ "x"` yields two matchers; of `.a = 1 || .b = 2` yields **zero** (an OR can't be safely prefiltered); of `.a != nil` yields one presence matcher.
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function field_expr_to_matchers`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function field_expr_to_matchers`.
 
-- [ ] **Step 3: Implement** — walk the `FieldExpr`; for `And(l, r)` union both sides' matchers; for `Comparison` emit one; for `Or`/`Not` return empty (conservative). Wire it so `plan_selector` passes the extracted matchers to `store.scan`. Provide the full real code.
+- [x] **Step 3: Implement** — walk the `FieldExpr`; for `And(l, r)` union both sides' matchers; for `Comparison` emit one; for `Or`/`Not` return empty (conservative). Wire it so `plan_selector` passes the extracted matchers to `store.scan`. Provide the full real code.
 
-- [ ] **Step 4: Phase C gate + commit**
+- [x] **Step 4: Phase C gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
@@ -1773,13 +1773,13 @@ git commit -m "feat(traceql): conjunctive matcher extraction for store prefilter
 
 > **The single-span vs inter-brace distinction is the asserted behavior.** `plan_and` must NOT require the same span to satisfy both — that is the intra-brace case. Build the join on `trace_id` only. Keep the DataFusion join/semi-join/`IN`-subquery builder calls behind a "verify against rev `0838a4d`" note; the *behavior* (different-span match within one trace) is pinned by D3.
 
-- [ ] **Step 1: Write the failing test** — `{ .a = 1 } && { .b = 2 }` over a trace whose span-1 has `a=1` and span-2 has `b=2` (different spans): the trace matches, and the result spanset contains both spans. A second trace with only `a=1` does NOT match. (Drive via the engine in Phase E, or a planner-level `execute` helper here.)
+- [x] **Step 1: Write the failing test** — `{ .a = 1 } && { .b = 2 }` over a trace whose span-1 has `a=1` and span-2 has `b=2` (different spans): the trace matches, and the result spanset contains both spans. A second trace with only `a=1` does NOT match. (Drive via the engine in Phase E, or a planner-level `execute` helper here.)
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function plan_and`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function plan_and`.
 
-- [ ] **Step 3: Implement `combinator.rs`** — build the trace-id intersect via `LogicalPlanBuilder` join on `COL_TRACE_ID` (or a `semi join`); union via `LogicalPlanBuilder::union`. Provide the full real plan-construction code; keep the join/union builder calls behind the verify note. Wire `plan_and`/`plan_or` into the `And`/`Or` arms of `plan_query`.
+- [x] **Step 3: Implement `combinator.rs`** — build the trace-id intersect via `LogicalPlanBuilder` join on `COL_TRACE_ID` (or a `semi join`); union via `LogicalPlanBuilder::union`. Provide the full real plan-construction code; keep the join/union builder calls behind the verify note. Wire `plan_and`/`plan_or` into the `And`/`Or` arms of `plan_query`.
 
-- [ ] **Step 4: Run + commit** (`feat(traceql): spanset && (trace-level intersect) and || (union) combinators`).
+- [x] **Step 4: Run + commit** (`feat(traceql): spanset && (trace-level intersect) and || (union) combinators`).
 
 ---
 
@@ -1803,7 +1803,7 @@ git commit -m "feat(traceql): conjunctive matcher extraction for store prefilter
 
 > **Why this is a join, not a tree-walk (spec Decision 5, §6.3).** A per-trace tree traversal is O(spans) per evaluation and fights DataFusion's columnar model. The nested-set encoding turns "is B a descendant of A" into the integer-range predicate `A.left < B.left && B.right < A.right` — a plain join condition over `Int32` columns, which DataFusion evaluates columnar with no custom operator. The join is keyed by `trace_id` so it only ever compares spans of the *same* trace (the partition). **A thin custom `UserDefinedLogicalNodeCore` physical operator is added ONLY if** a standard `LogicalPlanBuilder::join` with the nested-set predicate does not partition by `trace_id` efficiently (spec §13 open question) — prototype the standard join first; it is the simpler path that hits the columnar fast path. If profiling later forces a custom operator, its behavior is the same nested-set predicate, pinned by the D3 tests.
 
-- [ ] **Step 1: Write the failing structural-correctness tests (known nested-set values, hand-built traces)**
+- [x] **Step 1: Write the failing structural-correctness tests (known nested-set values, hand-built traces)**
 
 These are the headline tests of the slice. Build a trace with a **known tree** so the nested-set integers are deterministic (via `assign_nested_set`), then assert each operator returns exactly the right `B` spans.
 
@@ -1900,13 +1900,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function plan_structural` (and the `unimplemented!` helper).
+- [x] **Step 2: Run to verify it fails** — `cannot find function plan_structural` (and the `unimplemented!` helper).
 
-- [ ] **Step 3: Implement `structural.rs`** — `nested_set_predicate` building the `Expr` for each core op over aliased columns (`col("a.nested_set_left")` etc. — alias the two sides so the self-join columns don't collide; **verify the column-aliasing / `LogicalPlanBuilder::join_on` signature against datafusion rev `0838a4d`**), and `plan_structural` constructing the join (`LogicalPlanBuilder::from(b_plan).join_on(a_plan, JoinType::Inner|LeftSemi, [predicate])` returning the `B` columns; the `trace_id` equality is part of the predicate so the join is partitioned by trace). Implement the `structural_b_ids` test helper (execute the planned join against the ctx, collect the `span_id` FixedSizeBinary column into `Vec<[u8;8]>`). Provide the full real predicate + join code; keep the `JoinType`/`join_on`/aliasing API behind the verify note. Wire `plan_structural` into the `Structural` arm of `plan_query`. Return `Unsupported` for the negated/union ops.
+- [x] **Step 3: Implement `structural.rs`** — `nested_set_predicate` building the `Expr` for each core op over aliased columns (`col("a.nested_set_left")` etc. — alias the two sides so the self-join columns don't collide; **verify the column-aliasing / `LogicalPlanBuilder::join_on` signature against datafusion rev `0838a4d`**), and `plan_structural` constructing the join (`LogicalPlanBuilder::from(b_plan).join_on(a_plan, JoinType::Inner|LeftSemi, [predicate])` returning the `B` columns; the `trace_id` equality is part of the predicate so the join is partitioned by trace). Implement the `structural_b_ids` test helper (execute the planned join against the ctx, collect the `span_id` FixedSizeBinary column into `Vec<[u8;8]>`). Provide the full real predicate + join code; keep the `JoinType`/`join_on`/aliasing API behind the verify note. Wire `plan_structural` into the `Structural` arm of `plan_query`. Return `Unsupported` for the negated/union ops.
 
 > **Verify against datafusion rev `0838a4d`:** the self-join column aliasing (qualifying the two sides so `nested_set_left` is unambiguous), the `LogicalPlanBuilder::join_on(right, JoinType, exprs)` (vs `join(right, JoinType, (left_cols, right_cols), filter)`) signature, and `JoinType::LeftSemi` for "return B spans that have a matching A" are the churn points. Implement to satisfy the known-value tests; if a builder signature differs, adapt it — never change the asserted matched-span sets. The nested-set *predicate algebra* (the `>`/`<`/`==`/`!=` integer comparisons) is NOT a churn point — it is the spec's correctness contract and must be exactly as written.
 
-- [ ] **Step 4: Run + commit** (`feat(traceql): SpanStructuralJoin — nested-set self-join lowering for descendant/ancestor/child/parent/sibling`).
+- [x] **Step 4: Run + commit** (`feat(traceql): SpanStructuralJoin — nested-set self-join lowering for descendant/ancestor/child/parent/sibling`).
 
 ---
 
@@ -1918,16 +1918,16 @@ mod tests {
 **Interfaces:**
 - Produces: additional behavioral tests pinning the remaining core operators + the partition invariant.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
   - **Ancestor** `B << A` where `A = {svc="c"}` (grandY), `B = {svc="a"}` (root): root is the ancestor → returns root.
   - **Parent** `B < A` where `A = {svc="c"}` (grandY, parent_id=2), `B = {svc="b"}` (childX, left=2): childX is grandY's parent → returns childX only (not childZ).
   - **Cross-trace isolation:** push a *second* trace with the same svc values; assert a descendant query never matches an A in trace-1 against a B in trace-2 (the `trace_id` equality in the join predicate). Build the second trace so a naive no-`trace_id` join would wrongly match, proving the partition predicate is load-bearing.
 
-- [ ] **Step 2: Run to verify it fails** (the cross-trace test fails if the `trace_id` equality is missing).
+- [x] **Step 2: Run to verify it fails** (the cross-trace test fails if the `trace_id` equality is missing).
 
-- [ ] **Step 3: Make them pass** — if ancestor/parent were already implemented in D2 they pass immediately; the cross-trace test confirms the `trace_id` clause. Fix any gap in `nested_set_predicate`.
+- [x] **Step 3: Make them pass** — if ancestor/parent were already implemented in D2 they pass immediately; the cross-trace test confirms the `trace_id` clause. Fix any gap in `nested_set_predicate`.
 
-- [ ] **Step 4: Phase D gate + commit**
+- [x] **Step 4: Phase D gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
@@ -1954,13 +1954,13 @@ git commit -m "test(traceql): structural-operator behavioral suite (ancestor/par
 
 > **Scope for this slice:** the five plain aggregations + scalar filter + `by`/`select`. The TraceQL-metrics pipeline functions (`rate`/`count_over_time`/`quantile_over_time`/...) are **Slice 3** — `plan_pipeline` returns `TraceqlError::Unsupported` for any pipeline stage it doesn't recognize (the metrics functions arrive via `query_range`, a separate entry, also Slice 3).
 
-- [ ] **Step 1: Write the failing test** — over the Phase-D fixture: `{ .svc = "b" } | count() > 1` → the trace matches (2 b-spans, count 2 > 1); `{ .svc = "b" } | count() > 5` → no match. `{ .svc="b" } | by(.svc) | count()` groups by svc.
+- [x] **Step 1: Write the failing test** — over the Phase-D fixture: `{ .svc = "b" } | count() > 1` → the trace matches (2 b-spans, count 2 > 1); `{ .svc = "b" } | count() > 5` → no match. `{ .svc="b" } | by(.svc) | count()` groups by svc.
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find function plan_pipeline`.
+- [x] **Step 2: Run to verify it fails** — `cannot find function plan_pipeline`.
 
-- [ ] **Step 3: Implement `pipeline.rs`** — fold the stages onto the plan via `LogicalPlanBuilder::aggregate(group_exprs, agg_exprs)` then `filter` for the scalar comparison. Provide the full real code; keep the `aggregate`/`filter` builder shapes behind the "verify against rev `0838a4d`" note. Wire into `plan_query` after the spanset is lowered.
+- [x] **Step 3: Implement `pipeline.rs`** — fold the stages onto the plan via `LogicalPlanBuilder::aggregate(group_exprs, agg_exprs)` then `filter` for the scalar comparison. Provide the full real code; keep the `aggregate`/`filter` builder shapes behind the "verify against rev `0838a4d`" note. Wire into `plan_query` after the spanset is lowered.
 
-- [ ] **Step 4: Run + commit** (`feat(traceql): pipeline aggregations — count/avg/max/min/sum + by/select + scalar filter`).
+- [x] **Step 4: Run + commit** (`feat(traceql): pipeline aggregations — count/avg/max/min/sum + by/select + scalar filter`).
 
 ---
 
@@ -1982,7 +1982,7 @@ git commit -m "test(traceql): structural-operator behavioral suite (ancestor/par
   - `pub fn store(&self) -> &Arc<S>` — borrow the backing `SpanStore` (Slice 5's Tempo `tag_names`/`tag_values` handlers call `engine.store().tag_names(..)` / `.tag_values(..)` directly, since discovery lives on `SpanStore`, not the engine).
   - `pub(crate) fn assemble_search_response(batches: &[RecordBatch], limit: usize, spss: usize) -> Result<SearchResponse, TraceqlError>` — turn the matched-span `RecordBatch`es (carrying `trace_id`/`span_id`/start/duration/the denormalized root columns + attr columns) into `SearchResponse`.
 
-- [ ] **Step 1: Write the failing end-to-end tests**
+- [x] **Step 1: Write the failing end-to-end tests**
 
 ```rust
 #[cfg(test)]
@@ -2060,13 +2060,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails** — `cannot find type TraceqlEngine`.
+- [x] **Step 2: Run to verify it fails** — `cannot find type TraceqlEngine`.
 
-- [ ] **Step 3: Implement `engine.rs`** — `search` parses (`parser::parse`), plans (`planner::plan_query` with a `PlannerContext`), executes (`ctx.execute_logical_plan(plan).collect()` — **verify entry point against rev `0838a4d`**), and `assemble_search_response` groups the matched-span batches by `trace_id` (read the `trace_id`/`span_id`/`start_unix_nano`/`duration_nanos`/`root_service_name`/`root_span_name`/`trace_start_unix_nano`/`trace_duration_nanos` columns + the `attr_*` columns into `SpanRef`/`TraceResult`). Enforce `max_traces`/`limit`. `query_range` returns `Unsupported`. `trace_by_id` delegates. Provide the full real assembly code; keep the plan-execution entry point behind the verify note.
+- [x] **Step 3: Implement `engine.rs`** — `search` parses (`parser::parse`), plans (`planner::plan_query` with a `PlannerContext`), executes (`ctx.execute_logical_plan(plan).collect()` — **verify entry point against rev `0838a4d`**), and `assemble_search_response` groups the matched-span batches by `trace_id` (read the `trace_id`/`span_id`/`start_unix_nano`/`duration_nanos`/`root_service_name`/`root_span_name`/`trace_start_unix_nano`/`trace_duration_nanos` columns + the `attr_*` columns into `SpanRef`/`TraceResult`). Enforce `max_traces`/`limit`. `query_range` returns `Unsupported`. `trace_by_id` delegates. Provide the full real assembly code; keep the plan-execution entry point behind the verify note.
 
-- [ ] **Step 4: Wire `lib.rs`** — `pub use engine::{EngineOpts, TraceqlEngine};`.
+- [x] **Step 4: Wire `lib.rs`** — `pub use engine::{EngineOpts, TraceqlEngine};`.
 
-- [ ] **Step 5: Phase E gate + commit**
+- [x] **Step 5: Phase E gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
@@ -2089,7 +2089,7 @@ git commit -m "feat(traceql): TraceqlEngine — search/trace_by_id + spanSet ass
 - Consumes: `crabka_traceql::{TraceqlEngine, EngineOpts, InMemorySpanStore}` + the public result model.
 - Produces: an integration test asserting a curated set of TraceQL queries against a fixed fixture with hand-computed expected results.
 
-- [ ] **Step 1: Write the suite** — build a fixed multi-trace, multi-service fixture (3–4 traces with known trees, services, durations, attributes), then assert each query's `SearchResponse` against the hand-computed expected traces/spans. Cover, at minimum:
+- [x] **Step 1: Write the suite** — build a fixed multi-trace, multi-service fixture (3–4 traces with known trees, services, durations, attributes), then assert each query's `SearchResponse` against the hand-computed expected traces/spans. Cover, at minimum:
   - selector by attribute (`{ .http.method = "GET" }`), by intrinsic (`{ span:duration > 150 }`), anchored regex (`{ .name =~ "po.*" }`).
   - the single-span rule: `{ .a = 1 && .b = 2 }` (intra-brace, one span) vs `{ .a = 1 } && { .b = 2 }` (inter-brace, different spans) returning different trace sets on a fixture crafted to distinguish them.
   - each core structural operator (`>>`, `<<`, `>`, `<`, `~`) returning the right RIGHT-hand spans, including the sibling self-exclusion.
@@ -2097,9 +2097,9 @@ git commit -m "feat(traceql): TraceqlEngine — search/trace_by_id + spanSet ass
   - cross-trace isolation (a structural query that must not bleed across traces).
   - `trace_by_id` for a known trace.
 
-- [ ] **Step 2: Run** — `cargo test -p crabka-traceql --test golden_queries`. Each failure is a planner/lowering bug — fix it in the relevant Phase C/D/E file (the hand-computed expectations are ground truth; never weaken an expectation to pass). Iterate to green.
+- [x] **Step 2: Run** — `cargo test -p crabka-traceql --test golden_queries`. Each failure is a planner/lowering bug — fix it in the relevant Phase C/D/E file (the hand-computed expectations are ground truth; never weaken an expectation to pass). Iterate to green.
 
-- [ ] **Step 3: Final whole-crate gate + commit**
+- [x] **Step 3: Final whole-crate gate + commit**
 
 ```bash
 cargo test -p crabka-traceql && cargo clippy -p crabka-traceql --all-targets && cargo fmt -p crabka-traceql --check
