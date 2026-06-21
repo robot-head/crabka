@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray,
-    StringViewArray,
+    Array, BooleanArray, DictionaryArray, Float64Array, Int64Array, LargeStringArray, ListArray,
+    StringArray, StringViewArray,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Int32Type};
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
 
@@ -1156,6 +1156,15 @@ fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<S
             string_array_value(array.as_ref(), row)
                 .ok_or_else(|| TraceqlError::Exec("unsupported string column type".into()))
         }
+        DataType::Dictionary(_, value_type)
+            if matches!(
+                value_type.as_ref(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) =>
+        {
+            string_array_value(array.as_ref(), row)
+                .ok_or_else(|| TraceqlError::Exec("unsupported string column type".into()))
+        }
         DataType::Int64 => Ok(array
             .as_primitive::<arrow::datatypes::Int64Type>()
             .value(row)
@@ -1418,6 +1427,15 @@ fn string_array_value(array: &dyn Array, row: usize) -> Option<String> {
                 .downcast_ref::<StringViewArray>()
                 .map(|arr| arr.value(row).to_string())
         })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int32Type>>()
+                .and_then(|arr| {
+                    let key = usize::try_from(arr.keys().value(row)).ok()?;
+                    string_array_value(arr.values().as_ref(), key)
+                })
+        })
 }
 
 fn row_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>> {
@@ -1651,12 +1669,20 @@ fn u64_from_i64(v: i64) -> Result<u64> {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{
+        ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
+        StringDictionaryBuilder,
+    };
+    use arrow::datatypes::{Field as ArrowField, Int32Type, Schema};
     use assert2::assert;
+    use datafusion::catalog::MemTable;
+    use datafusion::prelude::SessionContext;
 
     use super::*;
     use crate::in_memory::InMemorySpanStore;
-    use crate::result::{AttrValue, EventRef, LinkRef};
+    use crate::result::{AttrValue, EventRef, LinkRef, TypedValue};
     use crate::span_columns::InputSpan;
+    use crate::store::ScanResult;
 
     fn sp(tid: u8, id: u8, parent: Option<u8>, svc: &str) -> InputSpan {
         sp_at(tid, id, parent, svc, 1000 + i64::from(id))
@@ -1691,6 +1717,126 @@ mod tests {
         );
         s.push_trace("t", "x", "root", vec![sp(8, 1, None, "x")]);
         TraceqlEngine::new(Arc::new(s), EngineOpts::default())
+    }
+
+    struct BatchSpanStore {
+        batch: RecordBatch,
+    }
+
+    #[async_trait::async_trait]
+    impl SpanStore for BatchSpanStore {
+        async fn scan(
+            &self,
+            _tenant: &str,
+            _matchers: &[SpanMatcher],
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<ScanResult> {
+            let schema = self.batch.schema();
+            let ctx = SessionContext::new();
+            let table = MemTable::try_new(schema, vec![vec![self.batch.clone()]])?;
+            ctx.register_table("spans", Arc::new(table))?;
+            Ok(ScanResult {
+                ctx,
+                span_table: "spans".into(),
+            })
+        }
+
+        async fn trace_by_id(
+            &self,
+            _tenant: &str,
+            _trace_id: &[u8; 16],
+        ) -> Result<Option<TraceSpans>> {
+            Ok(None)
+        }
+
+        async fn tag_names(
+            &self,
+            _tenant: &str,
+            _scope: Option<TagScope>,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<ScopedTag>> {
+            Ok(Vec::new())
+        }
+
+        async fn tag_values(
+            &self,
+            _tenant: &str,
+            _tag: &str,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<TypedValue>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn dictionary_metric_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            ArrowField::new(COL_TRACE_ID, DataType::FixedSizeBinary(16), false),
+            ArrowField::new(COL_SPAN_ID, DataType::FixedSizeBinary(8), false),
+            ArrowField::new(COL_PARENT_SPAN_ID, DataType::FixedSizeBinary(8), true),
+            ArrowField::new(COL_NS_LEFT, DataType::Int32, false),
+            ArrowField::new(COL_NS_RIGHT, DataType::Int32, false),
+            ArrowField::new(COL_PARENT_ID, DataType::Int32, false),
+            ArrowField::new(COL_CHILD_COUNT, DataType::Int32, false),
+            ArrowField::new(COL_ROOT_SERVICE_NAME, DataType::Utf8, true),
+            ArrowField::new(COL_ROOT_SPAN_NAME, DataType::Utf8, true),
+            ArrowField::new(COL_TRACE_START, DataType::Int64, false),
+            ArrowField::new(COL_TRACE_DURATION, DataType::Int64, false),
+            ArrowField::new(COL_NAME, DataType::Utf8, true),
+            ArrowField::new(COL_KIND, DataType::Int32, false),
+            ArrowField::new(COL_START, DataType::Int64, false),
+            ArrowField::new(COL_DURATION, DataType::Int64, false),
+            ArrowField::new(COL_STATUS_CODE, DataType::Int32, false),
+            ArrowField::new(COL_STATUS_MESSAGE, DataType::Utf8, true),
+            ArrowField::new(COL_INSTRUMENTATION_NAME, DataType::Utf8, true),
+            ArrowField::new(COL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
+            ArrowField::new(
+                format!("{ATTR_PREFIX}http.method"),
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+                true,
+            ),
+        ]));
+        let mut trace_id = FixedSizeBinaryBuilder::with_capacity(2, 16);
+        trace_id.append_value([1; 16]).unwrap();
+        trace_id.append_value([2; 16]).unwrap();
+        let mut span_id = FixedSizeBinaryBuilder::with_capacity(2, 8);
+        span_id.append_value([1; 8]).unwrap();
+        span_id.append_value([2; 8]).unwrap();
+        let mut parent_span_id = FixedSizeBinaryBuilder::with_capacity(2, 8);
+        parent_span_id.append_null();
+        parent_span_id.append_null();
+        let mut methods = StringDictionaryBuilder::<Int32Type>::new();
+        methods.append_value("GET");
+        methods.append_value("POST");
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(trace_id.finish()) as ArrayRef,
+                Arc::new(span_id.finish()),
+                Arc::new(parent_span_id.finish()),
+                Arc::new(Int32Array::from(vec![1, 1])),
+                Arc::new(Int32Array::from(vec![2, 2])),
+                Arc::new(Int32Array::from(vec![0, 0])),
+                Arc::new(Int32Array::from(vec![0, 0])),
+                Arc::new(StringArray::from(vec!["api", "api"])),
+                Arc::new(StringArray::from(vec!["GET /", "POST /"])),
+                Arc::new(Int64Array::from(vec![0, 0])),
+                Arc::new(Int64Array::from(vec![10, 20])),
+                Arc::new(StringArray::from(vec!["GET /", "POST /"])),
+                Arc::new(Int32Array::from(vec![2, 2])),
+                Arc::new(Int64Array::from(vec![0, 10_000])),
+                Arc::new(Int64Array::from(vec![10, 20])),
+                Arc::new(Int32Array::from(vec![0, 0])),
+                Arc::new(StringArray::from(vec!["", ""])),
+                Arc::new(StringArray::from(vec!["tracer", "tracer"])),
+                Arc::new(StringArray::from(vec!["", ""])),
+                Arc::new(methods.finish()),
+            ],
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -2560,6 +2706,32 @@ mod tests {
         assert!(got[0].labels == vec![("service.name".into(), "billing".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("service.name".into(), "checkout".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_dictionary_promoted_attr_decodes_labels() {
+        let store = BatchSpanStore {
+            batch: dictionary_metric_batch(),
+        };
+        let e = TraceqlEngine::new(Arc::new(store), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ span:name != nil } | count_over_time() | by(span.http.method)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("http.method".into(), "GET".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("http.method".into(), "POST".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
