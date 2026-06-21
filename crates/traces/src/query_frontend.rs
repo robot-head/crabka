@@ -129,12 +129,8 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
     };
 
-    let start_ns = match required_seconds_param(&uri, "start") {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-    let end_ns = match required_seconds_param(&uri, "end") {
-        Ok(value) => value,
+    let (start_ns, end_ns) = match required_time_bounds(&uri) {
+        Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let mut merged_traces = Vec::new();
@@ -182,12 +178,8 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
     };
 
-    let start_ns = match required_seconds_param(&uri, "start") {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-    let end_ns = match required_seconds_param(&uri, "end") {
-        Ok(value) => value,
+    let (start_ns, end_ns) = match required_time_bounds(&uri) {
+        Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let mut merged_series = Vec::new();
@@ -229,12 +221,8 @@ async fn query_instant(State(state): State<AppState>, headers: HeaderMap, uri: U
         return proxy_querier_response(&state, &headers, &uri).await;
     }
 
-    let start_ns = match required_seconds_param(&uri, "start") {
-        Ok(value) => value,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
-    let end_ns = match required_seconds_param(&uri, "end") {
-        Ok(value) => value,
+    let (start_ns, end_ns) = match required_time_bounds(&uri) {
+        Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
@@ -521,6 +509,15 @@ fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
     parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
 }
 
+fn required_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
+    let start_ns = required_seconds_param(uri, "start")?;
+    let end_ns = required_seconds_param(uri, "end")?;
+    if end_ns < start_ns {
+        return Err("end must be >= start".to_string());
+    }
+    Ok((start_ns, end_ns))
+}
+
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     if let Ok(seconds) = value.parse::<i64>() {
         return seconds.checked_mul(1_000_000_000);
@@ -556,7 +553,11 @@ fn format_ns_as_seconds(ns: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt as _;
     use serde_json::json;
+    use tower::ServiceExt as _;
 
     use super::*;
 
@@ -587,5 +588,24 @@ mod tests {
     fn parses_fractional_epoch_seconds_to_nanoseconds() {
         assert!(parse_seconds_to_ns("1.4") == Some(1_400_000_000));
         assert!(parse_seconds_to_ns("1.000000001") == Some(1_000_000_001));
+    }
+
+    #[tokio::test]
+    async fn search_rejects_end_before_start_without_querying_backend() {
+        let app = router(QueryFrontendConfig::new("http://127.0.0.1:9").unwrap());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=2&end=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body.as_ref() == b"end must be >= start");
     }
 }
