@@ -3202,6 +3202,44 @@ async fn status_memberlist_endpoint_reports_memberlist_not_configured() {
 }
 
 #[tokio::test]
+async fn status_ring_aliases_return_loki_ring_pages() {
+    let state = fixture();
+    let querier = loki_router(state);
+    let distributor = distributor_router(InMemoryWalSink::default());
+    let compactor = build_service_router(
+        &test_service_config(Role::Compactor, tempfile::tempdir().unwrap().keep()),
+        ServiceDependencies::default(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for (app, path) in [
+        (querier.clone(), "/ring"),
+        (querier, "/scheduler/ring"),
+        (distributor, "/ring"),
+        (compactor, "/ring"),
+    ] {
+        let response = app
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = text_body(response).await;
+        assert!(content_type.starts_with("text/html"));
+        assert!(body.contains("Ring Status"));
+        assert!(body.contains("ACTIVE"));
+    }
+}
+
+#[tokio::test]
 async fn status_metrics_endpoint_returns_prometheus_text_for_loki_router() {
     let state = fixture();
     let app = loki_router(state);

@@ -368,8 +368,7 @@ async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
         ),
     ] {
         let loki_result = loki_ingester_control_result(&http, &loki_base, method, path).await;
-        let crabka_result =
-            crabka_ingester_control_result(crabka.clone(), method, path).await;
+        let crabka_result = crabka_ingester_control_result(crabka.clone(), method, path).await;
 
         assert!(crabka_result == loki_result);
     }
@@ -434,8 +433,10 @@ async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
     ));
 
     for (path, app) in [
+        ("/ring", querier.clone()),
         ("/distributor/ring", distributor),
         ("/compactor/ring", compactor),
+        ("/scheduler/ring", querier.clone()),
         ("/ruler/ring", querier),
     ] {
         let loki_result = loki_ring_status_result(&http, &loki_base, path).await;
@@ -5323,11 +5324,7 @@ async fn loki_ingester_control_result(
     stable_lifecycle_control_response(status, &content_type, &body)
 }
 
-async fn crabka_ingester_control_result(
-    app: axum::Router,
-    method: &str,
-    path: &str,
-) -> Value {
+async fn crabka_ingester_control_result(app: axum::Router, method: &str, path: &str) -> Value {
     let response = app
         .oneshot(
             Request::builder()
@@ -5346,11 +5343,7 @@ async fn crabka_ingester_control_result(
         .map(str::to_owned)
         .unwrap_or_default();
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-    stable_lifecycle_control_response(
-        status,
-        &content_type,
-        std::str::from_utf8(&body).unwrap(),
-    )
+    stable_lifecycle_control_response(status, &content_type, std::str::from_utf8(&body).unwrap())
 }
 
 async fn loki_ruler_inventory_result(http: &reqwest::Client, base: &str, path: &str) -> Value {

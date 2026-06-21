@@ -2547,6 +2547,7 @@ fn distributor_router_with_sink(
         .route("/services", get(distributor_services))
         .route("/memberlist", get(memberlist_status))
         .route("/flush", post(flush_ingester_chunks))
+        .route("/ring", get(distributor_ring))
         .route(
             "/ingester/prepare_shutdown",
             get(get_prepare_shutdown)
@@ -4693,6 +4694,7 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/config", get(querier_config))
         .route("/services", get(querier_services))
         .route("/memberlist", get(memberlist_status))
+        .route("/ring", get(querier_ring))
         .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route("/loki/api/v1/rules", get(loki_rules))
         .route(
@@ -4744,6 +4746,7 @@ pub fn loki_router(state: QuerierState) -> Router {
             get(query_range).post(query_range_post),
         )
         .route("/api/prom/rules", get(prometheus_rules))
+        .route("/scheduler/ring", get(scheduler_ring))
         .route(
             "/api/prom/rules/{namespace}",
             get(loki_rule_namespace)
@@ -4792,6 +4795,7 @@ fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequest
         .route("/config", get(compactor_config))
         .route("/services", get(compactor_services))
         .route("/memberlist", get(memberlist_status))
+        .route("/ring", get(compactor_ring))
         .route("/compactor/ring", get(compactor_ring))
         .route(
             "/loki/api/v1/format_query",
@@ -4982,6 +4986,14 @@ async fn compactor_metrics() -> Response {
 
 async fn distributor_ring() -> Response {
     ring_status_page("crabka-distributor")
+}
+
+async fn querier_ring() -> Response {
+    ring_status_page("crabka-querier")
+}
+
+async fn scheduler_ring() -> Response {
+    ring_status_page("crabka-scheduler")
 }
 
 async fn ruler_ring() -> Response {
