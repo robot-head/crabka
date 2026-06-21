@@ -354,6 +354,16 @@ impl<'a> CompactInput<'a> {
         Ok((element_type, len))
     }
 
+    fn read_map_header(&mut self) -> Result<(u8, u8, usize), WireError> {
+        let len = usize::try_from(self.read_varint()?)
+            .map_err(|_| WireError::Decode("map too large".into()))?;
+        if len == 0 {
+            return Ok((T_STOP, T_STOP, 0));
+        }
+        let types = self.read_u8()?;
+        Ok((types >> 4, types & 0x0F, len))
+    }
+
     fn read_string(&mut self) -> Result<String, WireError> {
         String::from_utf8(self.read_binary()?).map_err(|err| WireError::Decode(err.to_string()))
     }
@@ -439,7 +449,14 @@ impl<'a> CompactInput<'a> {
                 }
                 Ok(())
             }
-            T_MAP => Err(WireError::Decode("map skip unsupported".into())),
+            T_MAP => {
+                let (key_type, value_type, len) = self.read_map_header()?;
+                for _ in 0..len {
+                    self.skip(key_type)?;
+                    self.skip(value_type)?;
+                }
+                Ok(())
+            }
             other => Err(WireError::Decode(format!("unknown thrift type {other}"))),
         }
     }
@@ -584,6 +601,14 @@ impl<'a> BinaryInput<'a> {
         Ok((element_type, len))
     }
 
+    fn read_map_header(&mut self) -> Result<(u8, u8, usize), WireError> {
+        let key_type = self.read_u8()?;
+        let value_type = self.read_u8()?;
+        let len = usize::try_from(self.read_i32()?)
+            .map_err(|_| WireError::Decode("map length out of range".into()))?;
+        Ok((key_type, value_type, len))
+    }
+
     fn read_string(&mut self) -> Result<String, WireError> {
         String::from_utf8(self.read_binary()?).map_err(|err| WireError::Decode(err.to_string()))
     }
@@ -674,7 +699,14 @@ impl<'a> BinaryInput<'a> {
                 }
                 Ok(())
             }
-            BT_MAP => Err(WireError::Decode("map skip unsupported".into())),
+            BT_MAP => {
+                let (key_type, value_type, len) = self.read_map_header()?;
+                for _ in 0..len {
+                    self.skip(key_type)?;
+                    self.skip(value_type)?;
+                }
+                Ok(())
+            }
             other => Err(WireError::Decode(format!("unknown thrift type {other}"))),
         }
     }
@@ -892,6 +924,23 @@ mod tests {
         assert!(span.status == StatusCode::Error);
     }
 
+    #[test]
+    fn compact_thrift_skips_unknown_map_fields() {
+        let spans = decode_jaeger_thrift(&encode_sample_batch_with_unknown_map()).unwrap();
+
+        assert!(spans.len() == 1);
+        assert!(spans[0].name == "GET /");
+    }
+
+    #[test]
+    fn binary_thrift_skips_unknown_map_fields() {
+        let spans =
+            decode_jaeger_binary_thrift(&encode_binary_sample_batch_with_unknown_map()).unwrap();
+
+        assert!(spans.len() == 1);
+        assert!(spans[0].name == "GET /binary");
+    }
+
     fn encode_binary_sample_batch() -> Vec<u8> {
         const T_STOP: u8 = 0;
         const T_BOOL: u8 = 2;
@@ -968,10 +1017,43 @@ mod tests {
         out
     }
 
+    fn encode_binary_sample_batch_with_unknown_map() -> Vec<u8> {
+        const T_MAP: u8 = 13;
+        const T_BINARY: u8 = 11;
+        const T_I32: u8 = 8;
+
+        let mut out = encode_binary_sample_batch();
+        out.pop();
+        out.push(T_MAP);
+        out.extend_from_slice(&3_i16.to_be_bytes());
+        out.push(T_BINARY);
+        out.push(T_I32);
+        out.extend_from_slice(&1_i32.to_be_bytes());
+        out.extend_from_slice(&7_i32.to_be_bytes());
+        out.extend_from_slice(b"ignored");
+        out.extend_from_slice(&42_i32.to_be_bytes());
+        out.push(0);
+        out
+    }
+
     fn encode_sample_batch() -> Vec<u8> {
         let mut out = Vec::new();
         write_process(&mut out, 1, "checkout");
         write_span_list(&mut out, 2);
+        out.push(0);
+        out
+    }
+
+    fn encode_sample_batch_with_unknown_map() -> Vec<u8> {
+        let mut out = Vec::new();
+        write_process(&mut out, 1, "checkout");
+        write_span_list(&mut out, 2);
+        let mut last = 2;
+        write_field_header(&mut out, 11, 3, &mut last);
+        write_map_header(&mut out, 8, 5, 1);
+        write_varint(&mut out, 7);
+        out.extend_from_slice(b"ignored");
+        write_varint(&mut out, zigzag_i32(42));
         out.push(0);
         out
     }
@@ -1085,6 +1167,15 @@ mod tests {
         } else {
             out.push(0xF0 | element_type);
             write_varint(out, u64::try_from(size).unwrap());
+        }
+    }
+
+    fn write_map_header(out: &mut Vec<u8>, key_type: u8, value_type: u8, size: usize) {
+        if size == 0 {
+            out.push(0);
+        } else {
+            write_varint(out, u64::try_from(size).unwrap());
+            out.push((key_type << 4) | value_type);
         }
     }
 
