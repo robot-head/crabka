@@ -339,6 +339,43 @@ async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let crabka = distributor_router_for_status();
+
+    for (method, path) in [
+        ("POST", "/flush"),
+        ("GET", "/ingester/prepare_shutdown"),
+        ("POST", "/ingester/prepare_shutdown"),
+        ("GET", "/ingester/prepare_shutdown"),
+        ("DELETE", "/ingester/prepare_shutdown"),
+        ("GET", "/ingester/prepare_shutdown"),
+        (
+            "GET",
+            "/ingester/shutdown?flush=false&delete_ring_tokens=false&terminate=false",
+        ),
+    ] {
+        let loki_result = loki_ingester_control_result(&http, &loki_base, method, path).await;
+        let crabka_result =
+            crabka_ingester_control_result(crabka.clone(), method, path).await;
+
+        assert!(crabka_result == loki_result);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5261,6 +5298,61 @@ async fn crabka_log_level_post_result(
     stable_status_probe_response(status, std::str::from_utf8(&body).unwrap())
 }
 
+async fn loki_ingester_control_result(
+    http: &reqwest::Client,
+    base: &str,
+    method: &str,
+    path: &str,
+) -> Value {
+    let url = format!("{base}{path}");
+    let response = match method {
+        "GET" => http.get(url).send().await,
+        "POST" => http.post(url).send().await,
+        "DELETE" => http.delete(url).send().await,
+        _ => panic!("unsupported method {method}"),
+    }
+    .expect("query Loki ingester control endpoint");
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let body = response.text().await.expect("Loki ingester control body");
+    stable_lifecycle_control_response(status, &content_type, &body)
+}
+
+async fn crabka_ingester_control_result(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_lifecycle_control_response(
+        status,
+        &content_type,
+        std::str::from_utf8(&body).unwrap(),
+    )
+}
+
 async fn loki_ruler_inventory_result(http: &reqwest::Client, base: &str, path: &str) -> Value {
     let response = http
         .get(format!("{base}{path}"))
@@ -6046,6 +6138,14 @@ fn stable_delete_response(status: u16, content_type: &str, body: &str) -> Value 
     let body = serde_json::from_str::<Value>(body)
         .map(|value| stable_delete_body(&value))
         .unwrap_or_else(|_| json!(body));
+    json!({
+        "httpStatus": status,
+        "contentType": content_type.split(';').next().unwrap_or_default(),
+        "body": body,
+    })
+}
+
+fn stable_lifecycle_control_response(status: u16, content_type: &str, body: &str) -> Value {
     json!({
         "httpStatus": status,
         "contentType": content_type.split(';').next().unwrap_or_default(),
