@@ -5570,16 +5570,35 @@ async fn prometheus_rules(
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
-    let filters = PrometheusRulesFilters::parse(raw_query.as_deref());
-    let rules = state
+    let filters = match PrometheusRulesFilters::parse(raw_query.as_deref()) {
+        Ok(filters) => filters,
+        Err(error) => return error.into_response(),
+    };
+    let evaluation_time = filters.evaluation_time.unwrap_or_else(current_unix_time_ns);
+    let namespaces = state
         .rules
         .tenants
         .lock()
-        .expect("Loki rule store lock poisoned");
-    let groups = rules
+        .expect("Loki rule store lock poisoned")
         .get(&tenant)
-        .map(|namespaces| prometheus_rule_groups_response(namespaces, &filters))
-        .unwrap_or_default();
+        .cloned();
+    let groups = match namespaces {
+        Some(namespaces) => {
+            match prometheus_rule_groups_response(
+                &state,
+                &tenant,
+                &namespaces,
+                &filters,
+                evaluation_time,
+            )
+            .await
+            {
+                Ok(groups) => groups,
+                Err(error) => return error.into_response(),
+            }
+        }
+        None => Vec::new(),
+    };
     json_response(
         StatusCode::OK,
         &json!({
@@ -5593,24 +5612,72 @@ async fn prometheus_rules(
     )
 }
 
+async fn prometheus_alerts(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let filters = match PrometheusRulesFilters::parse(raw_query.as_deref()) {
+        Ok(filters) => filters,
+        Err(error) => return error.into_response(),
+    };
+    let evaluation_time = filters.evaluation_time.unwrap_or_else(current_unix_time_ns);
+    let namespaces = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned")
+        .get(&tenant)
+        .cloned();
+    let alerts = match namespaces {
+        Some(namespaces) => {
+            match prometheus_alerts_response(&state, &tenant, &namespaces, evaluation_time).await {
+                Ok(alerts) => alerts,
+                Err(error) => return error.into_response(),
+            }
+        }
+        None => Vec::new(),
+    };
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "status": "success",
+            "data": {
+                "alerts": alerts
+            },
+            "errorType": "",
+            "error": "",
+        }),
+    )
+}
+
 #[derive(Default)]
 struct PrometheusRulesFilters {
     rule_kind: Option<&'static str>,
     rule_names: BTreeSet<String>,
     rule_groups: BTreeSet<String>,
     files: BTreeSet<String>,
+    evaluation_time: Option<i64>,
 }
 
 impl PrometheusRulesFilters {
-    fn parse(raw_query: Option<&str>) -> Self {
+    fn parse(raw_query: Option<&str>) -> Result<Self, HttpQueryError> {
         let mut filters = Self::default();
         let Some(raw_query) = raw_query else {
-            return filters;
+            return Ok(filters);
         };
         for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
             match key.as_ref() {
                 "type" if value == "alert" => filters.rule_kind = Some("alerting"),
                 "type" if value == "record" => filters.rule_kind = Some("recording"),
+                "time" if !value.is_empty() => {
+                    filters.evaluation_time =
+                        Some(parse_loki_timestamp_query_param("time", &value)?);
+                }
                 "rule_name" | "rule_name[]" if !value.is_empty() => {
                     filters.rule_names.insert(value.into_owned());
                 }
@@ -5623,7 +5690,7 @@ impl PrometheusRulesFilters {
                 _ => {}
             }
         }
-        filters
+        Ok(filters)
     }
 
     fn has_rule_filter(&self) -> bool {
@@ -5645,55 +5712,71 @@ impl PrometheusRulesFilters {
     }
 }
 
-fn prometheus_rule_groups_response(
+async fn prometheus_rule_groups_response(
+    state: &QuerierState,
+    tenant: &str,
     namespaces: &LokiRuleNamespaces,
     filters: &PrometheusRulesFilters,
-) -> Vec<Value> {
-    namespaces
-        .iter()
-        .flat_map(|(namespace, groups)| {
-            if !filters.files.is_empty() && !filters.files.contains(namespace) {
-                return Vec::new();
+    evaluation_time: i64,
+) -> Result<Vec<Value>, HttpQueryError> {
+    let mut response_groups = Vec::new();
+    for (namespace, groups) in namespaces {
+        if !filters.files.is_empty() && !filters.files.contains(namespace) {
+            continue;
+        }
+        for group in groups.values() {
+            let Some(name) = loki_rule_group_name(group) else {
+                continue;
+            };
+            if !filters.rule_groups.is_empty() && !filters.rule_groups.contains(name) {
+                continue;
             }
-            groups
-                .values()
-                .filter_map(move |group| {
-                    let name = loki_rule_group_name(group)?;
-                    if !filters.rule_groups.is_empty() && !filters.rule_groups.contains(name) {
-                        return None;
-                    }
-                    let rules = prometheus_rules_for_group(group, filters);
-                    if filters.has_rule_filter() && rules.is_empty() {
-                        return None;
-                    }
-                    Some(json!({
-                        "name": name,
-                        "file": namespace,
-                        "interval": prometheus_rule_group_interval_seconds(group),
-                        "limit": 0,
-                        "rules": rules,
-                    }))
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect()
+            let rules =
+                prometheus_rules_for_group(state, tenant, group, filters, evaluation_time).await?;
+            if filters.has_rule_filter() && rules.is_empty() {
+                continue;
+            }
+            response_groups.push(json!({
+                "name": name,
+                "file": namespace,
+                "interval": prometheus_rule_group_interval_seconds(group),
+                "limit": 0,
+                "rules": rules,
+            }));
+        }
+    }
+    Ok(response_groups)
 }
 
-fn prometheus_rules_for_group(
+async fn prometheus_rules_for_group(
+    state: &QuerierState,
+    tenant: &str,
     group: &serde_yaml::Value,
     filters: &PrometheusRulesFilters,
-) -> Vec<Value> {
-    loki_yaml_mapping(group)
+    evaluation_time: i64,
+) -> Result<Vec<Value>, HttpQueryError> {
+    let mut response_rules = Vec::new();
+    let Some(rules) = loki_yaml_mapping(group)
         .and_then(|fields| fields.get(serde_yaml_key("rules")))
         .and_then(serde_yaml::Value::as_sequence)
-        .map(|rules| {
-            rules
-                .iter()
-                .filter_map(prometheus_rule_response)
-                .filter(|rule| filters.matches_rule(rule))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    else {
+        return Ok(response_rules);
+    };
+    for source_rule in rules {
+        let Some(mut rule) = prometheus_rule_response(source_rule) else {
+            continue;
+        };
+        if !filters.matches_rule(&rule) {
+            continue;
+        }
+        if rule.get("type").and_then(Value::as_str) == Some("alerting") {
+            let alerts =
+                prometheus_alerts_for_rule(state, tenant, source_rule, evaluation_time).await?;
+            rule["alerts"] = json!(alerts);
+        }
+        response_rules.push(rule);
+    }
+    Ok(response_rules)
 }
 
 fn prometheus_rule_response(rule: &serde_yaml::Value) -> Option<Value> {
@@ -5785,18 +5868,119 @@ fn remove_empty_object_field(value: &mut Value, field: &'static str) {
     }
 }
 
-async fn prometheus_alerts() -> Response {
-    json_response(
-        StatusCode::OK,
-        &json!({
-            "status": "success",
-            "data": {
-                "alerts": []
-            },
-            "errorType": "",
-            "error": "",
-        }),
-    )
+async fn prometheus_alerts_response(
+    state: &QuerierState,
+    tenant: &str,
+    namespaces: &LokiRuleNamespaces,
+    evaluation_time: i64,
+) -> Result<Vec<Value>, HttpQueryError> {
+    let mut alerts = Vec::new();
+    for groups in namespaces.values() {
+        for group in groups.values() {
+            let Some(rules) = loki_yaml_mapping(group)
+                .and_then(|fields| fields.get(serde_yaml_key("rules")))
+                .and_then(serde_yaml::Value::as_sequence)
+            else {
+                continue;
+            };
+            for rule in rules {
+                alerts.extend(
+                    prometheus_alerts_for_rule(state, tenant, rule, evaluation_time).await?,
+                );
+            }
+        }
+    }
+    Ok(alerts)
+}
+
+async fn prometheus_alerts_for_rule(
+    state: &QuerierState,
+    tenant: &str,
+    rule: &serde_yaml::Value,
+    evaluation_time: i64,
+) -> Result<Vec<Value>, HttpQueryError> {
+    let Some(fields) = loki_yaml_mapping(rule) else {
+        return Ok(Vec::new());
+    };
+    let Some(alert_name) = yaml_string_field(fields, "alert") else {
+        return Ok(Vec::new());
+    };
+    let Some(query) = yaml_string_field(fields, "expr") else {
+        return Ok(Vec::new());
+    };
+    let params = QueryParams {
+        query: query.to_string(),
+        time: Some(evaluation_time),
+        start: None,
+        end: None,
+        since: None,
+        step: None,
+        interval: None,
+        limit: None,
+        direction: None,
+        delay_for: None,
+    };
+    let result = execute_http_query_for_tenant(state, tenant, &params, QueryKind::Instant).await?;
+    Ok(prometheus_alerts_from_query_result(
+        alert_name,
+        fields,
+        evaluation_time,
+        &result,
+    ))
+}
+
+fn prometheus_alerts_from_query_result(
+    alert_name: &str,
+    fields: &serde_yaml::Mapping,
+    evaluation_time: i64,
+    result: &Value,
+) -> Vec<Value> {
+    let active_at = prometheus_active_at(evaluation_time);
+    let annotations = yaml_string_map_field(fields, "annotations");
+    let rule_labels = yaml_string_map_field(fields, "labels");
+    result
+        .pointer("/data/result")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|sample| {
+            let value = sample
+                .get("value")
+                .and_then(Value::as_array)
+                .and_then(|value| value.get(1))
+                .and_then(Value::as_str)?;
+            let mut labels = BTreeMap::new();
+            if let Some(metric) = sample.get("metric").and_then(Value::as_object) {
+                for (key, value) in metric {
+                    if let Some(value) = value.as_str() {
+                        labels.insert(key.clone(), value.to_string());
+                    }
+                }
+            }
+            if let Some(rule_labels) = rule_labels.as_object() {
+                for (key, value) in rule_labels {
+                    if let Some(value) = value.as_str() {
+                        labels.insert(key.clone(), value.to_string());
+                    }
+                }
+            }
+            labels.insert("alertname".to_string(), alert_name.to_string());
+            Some(json!({
+                "activeAt": active_at,
+                "annotations": annotations,
+                "labels": labels,
+                "state": "firing",
+                "value": value,
+            }))
+        })
+        .collect()
+}
+
+fn prometheus_active_at(timestamp_ns: i64) -> String {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(timestamp_ns))
+        .ok()
+        .and_then(|timestamp| timestamp.format(&Rfc3339).ok())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn status_metrics(component: &'static str) -> Response {
