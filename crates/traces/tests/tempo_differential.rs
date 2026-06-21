@@ -28,13 +28,15 @@ use opentelemetry_proto::tonic::trace::v1::{
 use prost::Message as _;
 use reqwest::StatusCode as ReqwestStatusCode;
 use serde_json::{Value as JsonValue, json};
-use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::core::{Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{GenericImage, ImageExt};
 use tower::ServiceExt as _;
 
 const TENANT: &str = "tenant-a";
 const TRACE_ID_HEX: &str = "01010101010101010101010101010101";
+const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
+const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -102,7 +104,7 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
     let otlp_body = sample_otlp_body();
-    let crabka = start_crabka_pair(&otlp_body).await?;
+    let crabka = start_crabka_pair_reachable_from_container(&otlp_body).await?;
 
     let grafana = start_grafana().await?;
     let grafana_base = mapped_base_url(&grafana, 3000).await?;
@@ -110,15 +112,20 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
 
     let payload = json!({
         "name": "Crabka Traces",
+        "uid": GRAFANA_TEMPO_DATASOURCE_UID,
         "type": "tempo",
         "access": "proxy",
-        "url": crabka.base_url,
+        "url": crabka.container_base_url,
         "isDefault": true,
         "jsonData": {
-            "httpMethod": "GET"
+            "httpMethod": "GET",
+            "httpHeaderName1": "X-Scope-OrgID"
+        },
+        "secureJsonData": {
+            "httpHeaderValue1": TENANT
         }
     });
-    let created: JsonValue = client
+    let _created: JsonValue = client
         .post(format!("{grafana_base}/api/datasources"))
         .basic_auth("admin", Some("admin"))
         .json(&payload)
@@ -127,46 +134,16 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .error_for_status()?
         .json()
         .await?;
-    let uid = created
-        .get("datasource")
-        .and_then(|datasource| datasource.get("uid"))
-        .and_then(JsonValue::as_str)
-        .map(str::to_string);
-    let id = created
-        .get("datasource")
-        .and_then(|datasource| datasource.get("id"))
-        .and_then(JsonValue::as_i64)
-        .unwrap_or_default();
-
-    let fetched: JsonValue = if let Some(uid) = uid {
-        client
-            .get(format!("{grafana_base}/api/datasources/uid/{uid}"))
-            .basic_auth("admin", Some("admin"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?
-    } else if id != 0 {
-        client
-            .get(format!("{grafana_base}/api/datasources/id/{id}"))
-            .basic_auth("admin", Some("admin"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?
-    } else {
-        let encoded = url::form_urlencoded::byte_serialize(b"Crabka Traces").collect::<String>();
-        client
-            .get(format!("{grafana_base}/api/datasources/name/{encoded}"))
-            .basic_auth("admin", Some("admin"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?
-    };
+    let fetched: JsonValue = client
+        .get(format!(
+            "{grafana_base}/api/datasources/uid/{GRAFANA_TEMPO_DATASOURCE_UID}"
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
     assert_eq!(
         fetched.get("type").and_then(JsonValue::as_str),
@@ -174,7 +151,35 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     );
     assert_eq!(
         fetched.get("url").and_then(JsonValue::as_str),
-        Some(crabka.base_url.as_str())
+        Some(crabka.container_base_url.as_str())
+    );
+
+    let echo = client
+        .get(format!(
+            "{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/api/echo"
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    assert_eq!(echo, "echo");
+
+    let trace: JsonValue = client
+        .get(format!(
+            "{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/api/v2/traces/{TRACE_ID_HEX}?start=0&end=1"
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        trace["trace"]["resourceSpans"]
+            .as_array()
+            .is_some_and(|spans| !spans.is_empty())
     );
 
     crabka.shutdown();
@@ -183,6 +188,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
 
 struct CrabkaPair {
     base_url: String,
+    container_base_url: String,
     shutdown: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -193,6 +199,18 @@ impl CrabkaPair {
 }
 
 async fn start_crabka_pair(otlp_body: &[u8]) -> TestResult<CrabkaPair> {
+    start_crabka_pair_on(otlp_body, "127.0.0.1", "127.0.0.1").await
+}
+
+async fn start_crabka_pair_reachable_from_container(otlp_body: &[u8]) -> TestResult<CrabkaPair> {
+    start_crabka_pair_on(otlp_body, "0.0.0.0", DOCKER_HOST_ALIAS).await
+}
+
+async fn start_crabka_pair_on(
+    otlp_body: &[u8],
+    bind_host: &str,
+    container_host: &str,
+) -> TestResult<CrabkaPair> {
     let sink = CapturingSink::default();
     let distributor_state = Arc::new(DistributorState::new(Arc::new(sink.clone())));
     let resp = distributor::router(distributor_state)
@@ -218,8 +236,9 @@ async fn start_crabka_pair(otlp_body: &[u8]) -> TestResult<CrabkaPair> {
         EngineOpts::default(),
     ));
     let app = crabka_traces::querier::http::router(store);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let listener = tokio::net::TcpListener::bind(format!("{bind_host}:0")).await?;
     let addr = listener.local_addr()?;
+    let port = addr.port();
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app)
@@ -230,7 +249,8 @@ async fn start_crabka_pair(otlp_body: &[u8]) -> TestResult<CrabkaPair> {
     });
 
     Ok(CrabkaPair {
-        base_url: format!("http://{addr}"),
+        base_url: format!("http://127.0.0.1:{port}"),
+        container_base_url: format!("http://{container_host}:{port}"),
         shutdown: tx,
     })
 }
@@ -323,6 +343,7 @@ async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericIma
         .with_exposed_port(3000.tcp())
         .with_wait_for(WaitFor::seconds(5))
         .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+        .with_host(DOCKER_HOST_ALIAS, Host::HostGateway)
         .start()
         .await?)
 }
