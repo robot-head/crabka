@@ -3023,7 +3023,7 @@ fn normalize_loki_http_push(
     creation_grace_period: Option<Duration>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let body = decode_loki_http_body(headers, body)?;
-    if is_loki_json_content_type(headers) {
+    if is_loki_json_content_type(headers)? {
         let payload =
             serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
         validate_loki_json_push_duplicate_keys(&body)?;
@@ -3182,12 +3182,45 @@ fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
     })
 }
 
-fn is_loki_json_content_type(headers: &HeaderMap) -> bool {
-    headers
+fn is_loki_json_content_type(headers: &HeaderMap) -> Result<bool, DistributorError> {
+    let Some(content_type) = headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(';').next())
-        .is_some_and(|content_type| content_type.trim().eq_ignore_ascii_case("application/json"))
+    else {
+        return Ok(false);
+    };
+    let content_type = content_type.trim();
+    if content_type.is_empty() {
+        return Ok(false);
+    }
+
+    let mut parts = content_type.split(';');
+    let media_type = parts.next().unwrap_or_default().trim();
+    if media_type.is_empty() {
+        return Err(DistributorError::InvalidLokiContentType(
+            content_type.to_string(),
+        ));
+    }
+
+    let mut parameters = parts.peekable();
+    while let Some(parameter) = parameters.next() {
+        let parameter = parameter.trim();
+        if parameter.is_empty() && parameters.peek().is_none() {
+            continue;
+        }
+        let Some((name, value)) = parameter.split_once('=') else {
+            return Err(DistributorError::InvalidLokiContentType(
+                content_type.to_string(),
+            ));
+        };
+        if name.trim().is_empty() || value.trim().is_empty() {
+            return Err(DistributorError::InvalidLokiContentType(
+                content_type.to_string(),
+            ));
+        }
+    }
+
+    Ok(media_type.eq_ignore_ascii_case("application/json"))
 }
 
 fn normalize_loki_push(
@@ -13305,6 +13338,8 @@ enum DistributorError {
     LokiDeflateDecode(std::io::Error),
     #[error("Content-Encoding {0:?} not supported")]
     UnsupportedLokiContentEncoding(String),
+    #[error("invalid media type {0:?}")]
+    InvalidLokiContentType(String),
     #[error("invalid OTLP protobuf payload: {0}")]
     OtlpDecode(prost::DecodeError),
     #[error("wal append timed out")]
@@ -13343,6 +13378,7 @@ impl IntoResponse for DistributorError {
             | Self::LokiDeflateDecode(_)
             | Self::LokiGzipDecode(_)
             | Self::LokiSnappyDecode(_)
+            | Self::InvalidLokiContentType(_)
             | Self::UnsupportedLokiContentEncoding(_)
             | Self::OtlpDecode(_) => StatusCode::BAD_REQUEST,
         };
@@ -13399,6 +13435,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::LokiDeflateDecode(_)
         | DistributorError::LokiGzipDecode(_)
         | DistributorError::LokiSnappyDecode(_)
+        | DistributorError::InvalidLokiContentType(_)
         | DistributorError::UnsupportedLokiContentEncoding(_)
         | DistributorError::OtlpDecode(_) => tonic::Status::invalid_argument(message),
     }
