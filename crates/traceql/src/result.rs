@@ -69,6 +69,7 @@ pub struct TraceResult {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SearchResponse {
     pub traces: Vec<TraceResult>,
+    pub inspected_traces: usize,
 }
 
 /// Full span set for one trace.
@@ -174,9 +175,11 @@ mod tests {
                     matched: 3,
                 }],
             }],
+            inspected_traces: 1,
         };
         assert!(resp.traces[0].span_sets[0].matched == 3);
         assert!(resp.traces[0].trace_id == [0xAB; 16]);
+        assert!(resp.inspected_traces == 1);
     }
 
     #[test]

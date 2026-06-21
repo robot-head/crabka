@@ -1125,6 +1125,7 @@ pub(crate) fn assemble_search_response(
             }
         })
         .collect();
+    let inspected_traces = out.len();
     if most_recent {
         out.sort_by(|a, b| {
             b.start_time_unix_nano
@@ -1135,7 +1136,10 @@ pub(crate) fn assemble_search_response(
         out.sort_by_key(|t| (t.start_time_unix_nano, t.trace_id));
     }
     out.truncate(limit);
-    Ok(SearchResponse { traces: out })
+    Ok(SearchResponse {
+        traces: out,
+        inspected_traces,
+    })
 }
 
 fn fixed_16(batch: &RecordBatch, col: &str, row: usize) -> Result<[u8; 16]> {

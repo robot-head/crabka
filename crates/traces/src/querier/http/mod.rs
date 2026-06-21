@@ -710,7 +710,7 @@ fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
 }
 
 fn search_json(resp: SearchResponse) -> Value {
-    let inspected = resp.traces.len();
+    let inspected = resp.inspected_traces;
     json!({
         "traces": resp.traces.into_iter().map(|trace| {
             json!({
@@ -748,6 +748,7 @@ fn filter_search_duration(
         min_duration_ns.is_none_or(|min| trace.duration_nanos >= min)
             && max_duration_ns.is_none_or(|max| trace.duration_nanos <= max)
     });
+    resp.inspected_traces = resp.traces.len();
     resp.traces.truncate(limit);
     resp
 }
@@ -2093,6 +2094,42 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
         assert!(body["traces"][0]["rootTraceName"] == "long");
+    }
+
+    #[tokio::test]
+    async fn search_metrics_report_inspected_traces_before_limit() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "first",
+            vec![span_at(1, 1, None, "a", 1_000)],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "second",
+            vec![span_at(2, 1, None, "b", 2_000)],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&limit=1&start=0&end=10")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert!(body["metrics"]["inspectedTraces"] == 2);
     }
 
     #[tokio::test]
