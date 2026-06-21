@@ -347,27 +347,13 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         "inspectedBytes": 0,
     });
 
-    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
-        .into_iter()
-        .enumerate()
+    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
     {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
-            .send()
-            .await
-        else {
-            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
-        };
-        let status = resp.status();
-        let Ok(bytes) = resp.bytes().await else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
-        if !status.is_success() {
-            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            return (status, bytes).into_response();
-        }
-        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
+        Ok(bodies) => bodies,
+        Err(err) => return err.into_response(),
+    };
+
+    for body in shard_bodies {
         if let Some(traces) = body.get("traces").and_then(Value::as_array) {
             for trace in traces {
                 merge_trace(&mut merged_traces, trace.clone());
@@ -394,10 +380,34 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     };
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
+    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
+    {
+        Ok(bodies) => bodies,
+        Err(err) => return err.into_response(),
+    };
+
+    for body in shard_bodies {
+        if let Some(series) = body.get("series").and_then(Value::as_array) {
+            for next in series {
+                merge_metric_series(&mut merged_series, next.clone());
+            }
+        }
+    }
+
+    limit_metric_exemplars(&mut merged_series, exemplar_limit);
+    axum::Json(json!({ "series": merged_series })).into_response()
+}
+
+async fn fetch_shard_json_bodies(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<Value>, ShardFetchError> {
     let mut shard_bodies = Vec::new();
     let mut shards = JoinSet::new();
-
-    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+    for (shard_index, shard) in planned_shards(state, headers, start_ns, end_ns)
         .into_iter()
         .enumerate()
     {
@@ -413,22 +423,12 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     while let Some(result) = shards.join_next().await {
         match result {
             Ok(Ok(body)) => shard_bodies.push(body),
-            Ok(Err(err)) => return err.into_response(),
-            Err(_) => return (StatusCode::BAD_GATEWAY, "querier request failed").into_response(),
+            Ok(Err(err)) => return Err(err),
+            Err(_) => return Err(ShardFetchError::RequestFailed),
         }
     }
     shard_bodies.sort_by_key(|(shard_index, _)| *shard_index);
-
-    for (_, body) in shard_bodies {
-        if let Some(series) = body.get("series").and_then(Value::as_array) {
-            for next in series {
-                merge_metric_series(&mut merged_series, next.clone());
-            }
-        }
-    }
-
-    limit_metric_exemplars(&mut merged_series, exemplar_limit);
-    axum::Json(json!({ "series": merged_series })).into_response()
+    Ok(shard_bodies.into_iter().map(|(_, body)| body).collect())
 }
 
 enum ShardFetchError {
