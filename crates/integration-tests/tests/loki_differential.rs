@@ -3343,6 +3343,35 @@ async fn real_loki_and_crabka_return_same_missing_query_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    for path in ["/loki/api/v1/series", "/api/prom/series"] {
+        let loki_error = loki_raw_path_error(&http, &loki_base, path).await;
+        let crabka_error = crabka_raw_path_error(querier.clone(), path).await;
+        assert!(crabka_error == loki_error, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -6053,6 +6082,34 @@ async fn crabka_metadata_error(app: axum::Router, path: &str) -> Value {
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
+async fn loki_raw_path_error(http: &reqwest::Client, base: &str, path: &str) -> Value {
+    let response = http
+        .get(format!("{base}{path}"))
+        .header("X-Scope-OrgID", "tenant-a")
+        .send()
+        .await
+        .expect("query Loki raw path");
+    let status = response.status().as_u16();
+    let body = response.text().await.expect("Loki raw path body");
+    stable_loki_error(status, &body)
+}
+
+async fn crabka_raw_path_error(app: axum::Router, path: &str) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
 async fn loki_metadata_result(
     http: &reqwest::Client,
     base: &str,
@@ -6448,6 +6505,9 @@ fn stable_loki_error(status: u16, body: &str) -> Value {
 }
 
 fn stable_loki_error_body(body: &str) -> String {
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        return serde_json::to_string(&value).expect("serialize stable Loki error body");
+    }
     let oldest_marker = "oldest acceptable timestamp is: ";
     if let Some(marker_start) = body.find(oldest_marker) {
         let stable_prefix = marker_start + oldest_marker.len();

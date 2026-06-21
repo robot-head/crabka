@@ -12057,23 +12057,32 @@ async fn series_endpoint_returns_loki_error_for_invalid_time_bound() {
 }
 
 #[tokio::test]
-async fn series_endpoint_requires_matcher_parameter() {
-    let state = fixture();
-    let app = loki_router(state);
+async fn series_endpoint_allows_missing_matcher_parameter_like_loki() {
+    for path in ["/loki/api/v1/series", "/api/prom/series"] {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let state = QuerierState::new(&dir, LabelIndex::default(), BlockIndex::default());
+        let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/series")
-                .header("X-Scope-OrgID", "tenant-a")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(&json_body(response).await, "bad_data", "match[]");
+        assert!(response.status() == StatusCode::OK, "{path}");
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": []
+                })
+        );
+    }
 }
 
 #[tokio::test]
