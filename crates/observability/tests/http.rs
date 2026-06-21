@@ -4165,6 +4165,210 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_rules_endpoint_lists_stored_loki_rule_groups() {
+    let state = fixture();
+    let app = loki_router(state);
+    let rule_group = "\
+name: api-errors
+interval: 1m
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+    for: 2m
+    labels:
+      severity: page
+    annotations:
+      summary: API errors detected
+  - record: job:api_errors:rate5m
+    expr: sum(rate({app=\"api\"} |= \"error\" [5m]))
+    labels:
+      job: api
+";
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/yaml")
+                .body(Body::from(rule_group))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(create_response.status() == StatusCode::ACCEPTED);
+
+    for uri in ["/prometheus/api/v1/rules", "/api/prom/rules"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": {
+                        "groups": [
+                            {
+                                "name": "api-errors",
+                                "file": "default",
+                                "interval": 60,
+                                "limit": 0,
+                                "rules": [
+                                    {
+                                        "type": "alerting",
+                                        "name": "ApiErrors",
+                                        "query": "count_over_time({app=\"api\"} |= \"error\" [5m]) > 0",
+                                        "duration": 120,
+                                        "labels": {
+                                            "severity": "page"
+                                        },
+                                        "annotations": {
+                                            "summary": "API errors detected"
+                                        },
+                                        "alerts": [],
+                                        "health": "ok"
+                                    },
+                                    {
+                                        "type": "recording",
+                                        "name": "job:api_errors:rate5m",
+                                        "query": "sum(rate({app=\"api\"} |= \"error\" [5m]))",
+                                        "labels": {
+                                            "job": "api"
+                                        },
+                                        "health": "ok"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    "errorType": "",
+                    "error": ""
+                })
+        );
+    }
+}
+
+async fn post_loki_rule_group_for_test(app: &axum::Router, namespace: &str, rule_group: &str) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/loki/api/v1/rules/{namespace}"))
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/yaml")
+                .body(Body::from(rule_group.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::ACCEPTED);
+}
+
+async fn prometheus_rules_body_for_test(app: &axum::Router, uri: &str) -> Value {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    json_body(response).await
+}
+
+#[tokio::test]
+async fn prometheus_rules_endpoint_filters_stored_loki_rule_groups() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (namespace, rule_group) in [
+        (
+            "default",
+            "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+  - record: job:api_errors:rate5m
+    expr: sum(rate({app=\"api\"} |= \"error\" [5m]))
+",
+        ),
+        (
+            "jobs",
+            "\
+name: worker-errors
+rules:
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [5m]) > 0
+",
+        ),
+    ] {
+        post_loki_rule_group_for_test(&app, namespace, rule_group).await;
+    }
+
+    let record_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?type=record").await;
+    assert!(record_body["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(record_body["data"]["groups"][0]["name"] == "api-errors");
+    assert!(
+        record_body["data"]["groups"][0]["rules"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    );
+    assert!(record_body["data"]["groups"][0]["rules"][0]["type"] == "recording");
+    assert!(record_body["data"]["groups"][0]["rules"][0]["name"] == "job:api_errors:rate5m");
+
+    let alert_name_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?rule_name[]=WorkerErrors")
+            .await;
+    assert!(alert_name_body["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(alert_name_body["data"]["groups"][0]["file"] == "jobs");
+    assert!(
+        alert_name_body["data"]["groups"][0]["rules"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 1
+    );
+    assert!(alert_name_body["data"]["groups"][0]["rules"][0]["name"] == "WorkerErrors");
+
+    let group_file_body = prometheus_rules_body_for_test(
+        &app,
+        "/prometheus/api/v1/rules?rule_group[]=api-errors&file[]=default",
+    )
+    .await;
+    assert!(group_file_body["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(group_file_body["data"]["groups"][0]["name"] == "api-errors");
+    assert!(group_file_body["data"]["groups"][0]["file"] == "default");
+    assert!(
+        group_file_body["data"]["groups"][0]["rules"]
+            .as_array()
+            .unwrap()
+            .len()
+            == 2
+    );
+}
+
+#[tokio::test]
 async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
     let state = fixture();
     let app = loki_router(state);

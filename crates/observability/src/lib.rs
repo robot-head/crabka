@@ -5561,18 +5561,228 @@ fn loki_yaml_response(status: StatusCode, value: &impl Serialize) -> Response {
     }
 }
 
-async fn prometheus_rules() -> Response {
+async fn prometheus_rules(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let filters = PrometheusRulesFilters::parse(raw_query.as_deref());
+    let rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let groups = rules
+        .get(&tenant)
+        .map(|namespaces| prometheus_rule_groups_response(namespaces, &filters))
+        .unwrap_or_default();
     json_response(
         StatusCode::OK,
         &json!({
             "status": "success",
             "data": {
-                "groups": []
+                "groups": groups
             },
             "errorType": "",
             "error": "",
         }),
     )
+}
+
+#[derive(Default)]
+struct PrometheusRulesFilters {
+    rule_kind: Option<&'static str>,
+    rule_names: BTreeSet<String>,
+    rule_groups: BTreeSet<String>,
+    files: BTreeSet<String>,
+}
+
+impl PrometheusRulesFilters {
+    fn parse(raw_query: Option<&str>) -> Self {
+        let mut filters = Self::default();
+        let Some(raw_query) = raw_query else {
+            return filters;
+        };
+        for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+            match key.as_ref() {
+                "type" if value == "alert" => filters.rule_kind = Some("alerting"),
+                "type" if value == "record" => filters.rule_kind = Some("recording"),
+                "rule_name" | "rule_name[]" if !value.is_empty() => {
+                    filters.rule_names.insert(value.into_owned());
+                }
+                "rule_group" | "rule_group[]" if !value.is_empty() => {
+                    filters.rule_groups.insert(value.into_owned());
+                }
+                "file" | "file[]" if !value.is_empty() => {
+                    filters.files.insert(value.into_owned());
+                }
+                _ => {}
+            }
+        }
+        filters
+    }
+
+    fn has_rule_filter(&self) -> bool {
+        self.rule_kind.is_some() || !self.rule_names.is_empty()
+    }
+
+    fn matches_rule(&self, rule: &Value) -> bool {
+        if self
+            .rule_kind
+            .is_some_and(|kind| rule.get("type").and_then(Value::as_str) != Some(kind))
+        {
+            return false;
+        }
+        self.rule_names.is_empty()
+            || rule
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| self.rule_names.contains(name))
+    }
+}
+
+fn prometheus_rule_groups_response(
+    namespaces: &LokiRuleNamespaces,
+    filters: &PrometheusRulesFilters,
+) -> Vec<Value> {
+    namespaces
+        .iter()
+        .flat_map(|(namespace, groups)| {
+            if !filters.files.is_empty() && !filters.files.contains(namespace) {
+                return Vec::new();
+            }
+            groups
+                .values()
+                .filter_map(move |group| {
+                    let name = loki_rule_group_name(group)?;
+                    if !filters.rule_groups.is_empty() && !filters.rule_groups.contains(name) {
+                        return None;
+                    }
+                    let rules = prometheus_rules_for_group(group, filters);
+                    if filters.has_rule_filter() && rules.is_empty() {
+                        return None;
+                    }
+                    Some(json!({
+                        "name": name,
+                        "file": namespace,
+                        "interval": prometheus_rule_group_interval_seconds(group),
+                        "limit": 0,
+                        "rules": rules,
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn prometheus_rules_for_group(
+    group: &serde_yaml::Value,
+    filters: &PrometheusRulesFilters,
+) -> Vec<Value> {
+    loki_yaml_mapping(group)
+        .and_then(|fields| fields.get(serde_yaml_key("rules")))
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|rules| {
+            rules
+                .iter()
+                .filter_map(prometheus_rule_response)
+                .filter(|rule| filters.matches_rule(rule))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn prometheus_rule_response(rule: &serde_yaml::Value) -> Option<Value> {
+    let fields = loki_yaml_mapping(rule)?;
+    let query = yaml_string_field(fields, "expr")?;
+    if let Some(name) = yaml_string_field(fields, "alert") {
+        let mut rule = json!({
+            "type": "alerting",
+            "name": name,
+            "query": query,
+            "duration": yaml_duration_seconds_field(fields, "for").unwrap_or(0),
+            "labels": yaml_string_map_field(fields, "labels"),
+            "annotations": yaml_string_map_field(fields, "annotations"),
+            "alerts": [],
+            "health": "ok",
+        });
+        remove_empty_object_field(&mut rule, "labels");
+        remove_empty_object_field(&mut rule, "annotations");
+        return Some(rule);
+    }
+    yaml_string_field(fields, "record").map(|name| {
+        let mut rule = json!({
+            "type": "recording",
+            "name": name,
+            "query": query,
+            "labels": yaml_string_map_field(fields, "labels"),
+            "health": "ok",
+        });
+        remove_empty_object_field(&mut rule, "labels");
+        rule
+    })
+}
+
+fn prometheus_rule_group_interval_seconds(group: &serde_yaml::Value) -> i64 {
+    loki_yaml_mapping(group)
+        .and_then(|fields| yaml_duration_seconds_field(fields, "interval"))
+        .unwrap_or(0)
+}
+
+fn yaml_duration_seconds_field(fields: &serde_yaml::Mapping, name: &'static str) -> Option<i64> {
+    let duration = yaml_string_field(fields, name)?;
+    parse_prometheus_duration(duration)
+        .and_then(|duration_ns| duration_ns.checked_div(1_000_000_000))
+}
+
+fn yaml_string_field<'a>(fields: &'a serde_yaml::Mapping, name: &'static str) -> Option<&'a str> {
+    fields
+        .get(serde_yaml_key(name))
+        .and_then(serde_yaml::Value::as_str)
+}
+
+fn yaml_string_map_field(fields: &serde_yaml::Mapping, name: &'static str) -> Value {
+    let values = fields
+        .get(serde_yaml_key(name))
+        .and_then(loki_yaml_mapping)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| {
+                    Some((key.as_str()?.to_string(), json!(value.as_str()?)))
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    Value::Object(values)
+}
+
+fn loki_yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
+    match value {
+        serde_yaml::Value::Mapping(fields) => Some(fields),
+        _ => None,
+    }
+}
+
+fn serde_yaml_key(value: &'static str) -> serde_yaml::Value {
+    serde_yaml::Value::String(value.to_string())
+}
+
+fn remove_empty_object_field(value: &mut Value, field: &'static str) {
+    let Some(fields) = value.as_object_mut() else {
+        return;
+    };
+    if fields
+        .get(field)
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        fields.remove(field);
+    }
 }
 
 async fn prometheus_alerts() -> Response {
