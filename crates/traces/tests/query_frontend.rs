@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use assert2::assert;
 use axum::Router;
@@ -12,6 +14,8 @@ use crabka_traces::query_frontend::{
 };
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
+use tokio::sync::Barrier;
+use tokio::time::timeout;
 use tower::ServiceExt as _;
 
 #[test]
@@ -335,6 +339,34 @@ async fn frontend_shards_metrics_query_range_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_dispatches_metric_shards_concurrently() {
+    let upstream_url = spawn_concurrent_metrics_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = timeout(
+        Duration::from_millis(500),
+        router(cfg).oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3&step=1",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("sharded query_range should not serialize shard requests")
+    .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["series"][0]["points"].as_array().unwrap().len() == 2);
+}
+
+#[tokio::test]
 async fn frontend_limits_merged_metric_exemplars_across_shards() {
     let upstream_url = spawn_sharded_metrics_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -596,6 +628,19 @@ async fn spawn_sharded_metrics_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_concurrent_metrics_querier() -> String {
+    let barrier = Arc::new(Barrier::new(2));
+    let app = Router::new()
+        .route("/{*path}", get(concurrent_metrics_response))
+        .with_state(barrier);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_sharded_tags_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(sharded_tags_response))
@@ -735,6 +780,31 @@ async fn sharded_metrics_response(State(()): State<()>, headers: HeaderMap) -> a
             "labels": { "svc": "api" },
             "points": points,
             "exemplars": [exemplar],
+        }]
+    }))
+}
+
+async fn concurrent_metrics_response(
+    State(barrier): State<Arc<Barrier>>,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    barrier.wait().await;
+    let timestamp = if tier == "backend" {
+        "1000000000"
+    } else {
+        "2000000000"
+    };
+
+    axum::Json(json!({
+        "series": [{
+            "labels": { "svc": "api" },
+            "points": [[timestamp, 1.0]],
+            "exemplars": [],
         }]
     }))
 }
