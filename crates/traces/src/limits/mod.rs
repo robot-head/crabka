@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod overrides;
+
+pub use overrides::{OverridesError, OverridesProvider};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
     /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec; `0.0` is unlimited.
