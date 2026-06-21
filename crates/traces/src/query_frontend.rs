@@ -331,6 +331,15 @@ fn planned_shards(
     )
 }
 
+fn planned_metric_shards(
+    state: &AppState,
+    _headers: &HeaderMap,
+    start_ns: i64,
+    end_ns: i64,
+) -> Vec<QueryShard> {
+    plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns)
+}
+
 async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let Ok(_permit) = acquire_queue_permit(&state).await else {
         return (
@@ -388,11 +397,11 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     };
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
-    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
-    {
-        Ok(bodies) => bodies,
-        Err(err) => return err.into_response(),
-    };
+    let shard_bodies =
+        match fetch_metric_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await {
+            Ok(bodies) => bodies,
+            Err(err) => return err.into_response(),
+        };
 
     for body in shard_bodies {
         if let Some(series) = body.get("series").and_then(Value::as_array) {
@@ -413,9 +422,30 @@ async fn fetch_shard_json_bodies(
     start_ns: i64,
     end_ns: i64,
 ) -> Result<Vec<Value>, ShardFetchError> {
+    fetch_shard_json_bodies_with(state, headers, uri, start_ns, end_ns, planned_shards).await
+}
+
+async fn fetch_metric_shard_json_bodies(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<Value>, ShardFetchError> {
+    fetch_shard_json_bodies_with(state, headers, uri, start_ns, end_ns, planned_metric_shards).await
+}
+
+async fn fetch_shard_json_bodies_with(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    start_ns: i64,
+    end_ns: i64,
+    planner: fn(&AppState, &HeaderMap, i64, i64) -> Vec<QueryShard>,
+) -> Result<Vec<Value>, ShardFetchError> {
     let mut shard_bodies = Vec::new();
     let mut shards = JoinSet::new();
-    for (shard_index, shard) in planned_shards(state, headers, start_ns, end_ns)
+    for (shard_index, shard) in planner(state, headers, start_ns, end_ns)
         .into_iter()
         .enumerate()
     {
@@ -515,11 +545,11 @@ async fn merged_metric_query_response(
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
-    {
-        Ok(bodies) => bodies,
-        Err(err) => return err.into_response(),
-    };
+    let shard_bodies =
+        match fetch_metric_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await {
+            Ok(bodies) => bodies,
+            Err(err) => return err.into_response(),
+        };
 
     for body in shard_bodies {
         if let Some(series) = body.get("series").and_then(Value::as_array) {
@@ -1259,6 +1289,39 @@ mod tests {
         let shards = planned_shards(&state, &headers, 0, 10);
 
         assert!(shards.len() == 1);
+        assert!(shards[0].backend_job.is_none());
+    }
+
+    #[test]
+    fn planned_metric_shards_do_not_split_backend_row_groups() {
+        let mut cfg = QueryFrontendConfig::new("http://querier:3200").unwrap();
+        cfg.target_bytes_per_job = 1;
+        cfg.backend_blocks = vec![BackendBlock {
+            object_key: "blocks/a.parquet".into(),
+            min_time_ns: 0,
+            max_time_ns: 10,
+            row_groups: vec![
+                BackendRowGroup {
+                    index: 0,
+                    compressed_bytes: 1,
+                },
+                BackendRowGroup {
+                    index: 1,
+                    compressed_bytes: 1,
+                },
+            ],
+        }];
+        let state = AppState {
+            cfg,
+            http: reqwest::Client::new(),
+            permits: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let headers = HeaderMap::new();
+
+        let shards = planned_metric_shards(&state, &headers, 0, 10);
+
+        assert!(shards.len() == 1);
+        assert!(shards[0].tier == QueryTier::Backend);
         assert!(shards[0].backend_job.is_none());
     }
 
