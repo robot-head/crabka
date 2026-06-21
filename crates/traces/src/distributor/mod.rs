@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -44,6 +45,8 @@ const CONTENT_ENCODING: &str = "content-encoding";
 pub struct TenantLimits {
     pub max_spans_per_request: usize,
     pub max_spans_per_trace: usize,
+    pub max_ingest_spans_per_second: usize,
+    pub ingest_rate_burst: usize,
     pub max_attr_value_len: usize,
 }
 
@@ -52,6 +55,8 @@ impl Default for TenantLimits {
         Self {
             max_spans_per_request: 10_000,
             max_spans_per_trace: usize::MAX,
+            max_ingest_spans_per_second: usize::MAX,
+            ingest_rate_burst: usize::MAX,
             max_attr_value_len: 64 * 1024,
         }
     }
@@ -101,6 +106,7 @@ pub struct DistributorState {
     pub sink: Arc<dyn WalSink>,
     pub limits: TenantLimits,
     pub max_decompressed: usize,
+    rate_buckets: Mutex<BTreeMap<String, RateBucket>>,
 }
 
 impl DistributorState {
@@ -110,8 +116,15 @@ impl DistributorState {
             sink,
             limits: TenantLimits::default(),
             max_decompressed: 10 * 1024 * 1024,
+            rate_buckets: Mutex::new(BTreeMap::new()),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct RateBucket {
+    tokens: usize,
+    updated: Instant,
 }
 
 /// Build the distributor HTTP router.
@@ -244,6 +257,9 @@ impl CollectorService for JaegerGrpcService {
             .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
         validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
+        self.state
+            .check_ingest_rate(&tenant, spans.len())
+            .map_err(|err| grpc_status_from_error(&err))?;
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
             .map_err(|err| GrpcStatus::internal(err.to_string()))?;
@@ -265,6 +281,9 @@ impl TraceService for OtlpGrpcService {
             decode_otlp(&data).map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
         validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
+        self.state
+            .check_ingest_rate(&tenant, spans.len())
+            .map_err(|err| grpc_status_from_error(&err))?;
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
             .map_err(|err| GrpcStatus::internal(err.to_string()))?;
@@ -347,6 +366,7 @@ async fn handle_jaeger_compact_datagram(
 ) -> Result<(), TracesError> {
     let spans = decode_jaeger_thrift(body)?;
     validate(&spans, &state.limits)?;
+    state.check_ingest_rate(tenant, spans.len())?;
     produce_spans(state.sink.as_ref(), tenant, spans).await
 }
 
@@ -367,6 +387,9 @@ async fn append_decoded_response(
 ) -> Response {
     let tenant = tenant(headers);
     if let Err(err) = validate(&spans, &state.limits) {
+        return error_response(&err);
+    }
+    if let Err(err) = state.check_ingest_rate(&tenant, spans.len()) {
         return error_response(&err);
     }
     match produce_spans(state.sink.as_ref(), &tenant, spans).await {
@@ -463,6 +486,48 @@ fn tenant_metadata(metadata: &MetadataMap) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("anonymous")
         .to_string()
+}
+
+impl DistributorState {
+    fn check_ingest_rate(&self, tenant: &str, spans: usize) -> Result<(), TracesError> {
+        if self.limits.max_ingest_spans_per_second == usize::MAX
+            && self.limits.ingest_rate_burst == usize::MAX
+        {
+            return Ok(());
+        }
+        let burst = self.limits.ingest_rate_burst;
+        if spans > burst {
+            return Err(TracesError::Limit(format!(
+                "ingest rate {spans} spans exceeds burst {burst}"
+            )));
+        }
+
+        let now = Instant::now();
+        let mut buckets = self
+            .rate_buckets
+            .lock()
+            .map_err(|_| TracesError::Limit("ingest rate state unavailable".into()))?;
+        let bucket = buckets.entry(tenant.to_string()).or_insert(RateBucket {
+            tokens: burst,
+            updated: now,
+        });
+        let elapsed = now.duration_since(bucket.updated).as_secs();
+        if elapsed > 0 {
+            let refill = self
+                .limits
+                .max_ingest_spans_per_second
+                .saturating_mul(usize::try_from(elapsed).unwrap_or(usize::MAX));
+            bucket.tokens = bucket.tokens.saturating_add(refill).min(burst);
+            bucket.updated = now;
+        }
+        if spans > bucket.tokens {
+            return Err(TracesError::Limit(format!(
+                "ingest rate exceeded for tenant {tenant}"
+            )));
+        }
+        bucket.tokens -= spans;
+        Ok(())
+    }
 }
 
 /// Validate decoded spans against per-tenant structural limits.
@@ -607,14 +672,10 @@ mod tests {
 
     fn test_state_with_limits(limits: TenantLimits) -> (Arc<DistributorState>, Arc<RecordingSink>) {
         let sink = Arc::new(RecordingSink::default());
-        (
-            Arc::new(DistributorState {
-                sink: sink.clone(),
-                limits,
-                max_decompressed: 1024 * 1024,
-            }),
-            sink,
-        )
+        let mut state = DistributorState::new(sink.clone());
+        state.limits = limits;
+        state.max_decompressed = 1024 * 1024;
+        (Arc::new(state), sink)
     }
 
     fn otlp_body() -> Vec<u8> {
@@ -933,6 +994,60 @@ mod tests {
             .unwrap();
         assert!(resp.status() == StatusCode::TOO_MANY_REQUESTS);
         assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn ingest_rate_limit_is_per_tenant() {
+        let limits = TenantLimits {
+            max_ingest_spans_per_second: 1,
+            ingest_rate_burst: 1,
+            ..TenantLimits::default()
+        };
+        let (state, sink) = test_state_with_limits(limits);
+        let app = router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let other_tenant = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-b")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(first.status() == StatusCode::OK);
+        assert!(second.status() == StatusCode::TOO_MANY_REQUESTS);
+        assert!(other_tenant.status() == StatusCode::OK);
+        assert!(sink.count() == 2);
+        assert!(sink.tenant(0) == "tenant-a");
+        assert!(sink.tenant(1) == "tenant-b");
     }
 
     #[tokio::test]

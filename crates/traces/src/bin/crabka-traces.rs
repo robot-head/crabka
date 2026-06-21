@@ -76,6 +76,10 @@ struct Cli {
     max_spans_per_request: usize,
     #[arg(long, default_value_t = usize::MAX)]
     max_spans_per_trace: usize,
+    #[arg(long, default_value_t = usize::MAX)]
+    max_ingest_spans_per_second: usize,
+    #[arg(long, default_value_t = usize::MAX)]
+    ingest_rate_burst: usize,
     #[arg(long, default_value_t = 64 * 1024)]
     max_attr_value_len: usize,
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
@@ -148,6 +152,8 @@ async fn run_distributor(
     let mut state = DistributorState::new(Arc::new(KafkaSink::new(Arc::new(producer))));
     state.limits.max_spans_per_request = cli.max_spans_per_request;
     state.limits.max_spans_per_trace = cli.max_spans_per_trace;
+    state.limits.max_ingest_spans_per_second = cli.max_ingest_spans_per_second;
+    state.limits.ingest_rate_burst = cli.ingest_rate_burst;
     state.limits.max_attr_value_len = cli.max_attr_value_len;
     state.max_decompressed = cli.max_decompressed_bytes;
     let state = Arc::new(state);
@@ -578,6 +584,24 @@ mod tests {
 
         assert!(matches!(cli.target, Target::Distributor));
         assert!(cli.max_spans_per_trace == 42);
+    }
+
+    #[test]
+    fn parses_distributor_ingest_rate_limit() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--max-ingest-spans-per-second",
+            "42",
+            "--ingest-rate-burst",
+            "7",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Distributor));
+        assert!(cli.max_ingest_spans_per_second == 42);
+        assert!(cli.ingest_rate_burst == 7);
     }
 
     #[test]
