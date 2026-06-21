@@ -97,6 +97,15 @@ where
         service
     }
 
+    #[must_use]
+    pub fn with_checkpoint_store_restoring_all_tenants(
+        self,
+        store: &Arc<dyn EdgeCheckpointStore>,
+    ) -> Self {
+        let tenants = store.tenants();
+        self.with_checkpoint_store_for_tenants(store, tenants)
+    }
+
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
         if !self
             .pending_payloads
@@ -398,5 +407,32 @@ mod tests {
                 .any(|s| s.name == "traces_service_graph_request_total")
         );
         assert!(store.load_all("A").is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpointed_edges_restore_all_store_tenants_on_restart() {
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        let svc = service().with_checkpoint_store(store.clone());
+        svc.source.push_batch(vec![
+            span("A", SpanKind::Client, [0xA; 8], [0; 8]),
+            span("B", SpanKind::Client, [0xC; 8], [0; 8]),
+        ]);
+        assert!(svc.poll_once(100).await.unwrap() == 2);
+
+        let store_for_restore: Arc<dyn EdgeCheckpointStore> = store.clone();
+        let restarted = service().with_checkpoint_store_restoring_all_tenants(&store_for_restore);
+        restarted.source.push_batch(vec![
+            span("A", SpanKind::Server, [0xB; 8], [0xA; 8]),
+            span("B", SpanKind::Server, [0xD; 8], [0xC; 8]),
+        ]);
+        assert!(restarted.poll_once(100).await.unwrap() == 2);
+        assert!(restarted.collect_once().await.unwrap() == 2);
+
+        let writes = restarted.sink.writes();
+        assert!(writes.len() == 2);
+        assert!(writes.iter().any(|payload| payload.tenant == "A"));
+        assert!(writes.iter().any(|payload| payload.tenant == "B"));
+        assert!(store.load_all("A").is_empty());
+        assert!(store.load_all("B").is_empty());
     }
 }

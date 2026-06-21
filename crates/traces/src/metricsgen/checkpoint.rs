@@ -61,6 +61,7 @@ fn get_bytes(buf: &mut &[u8]) -> Result<Vec<u8>, CheckpointCodecError> {
 pub trait EdgeCheckpointStore: Send + Sync {
     fn save(&self, tenant: &str, key: &[u8], value: &[u8]);
     fn load_all(&self, tenant: &str) -> Vec<(Vec<u8>, Vec<u8>)>;
+    fn tenants(&self) -> Vec<String>;
 }
 
 type StoreKey = (String, Vec<u8>);
@@ -88,6 +89,18 @@ impl EdgeCheckpointStore for InMemoryCheckpointStore {
             .filter(|((stored_tenant, _), _)| stored_tenant == tenant)
             .map(|((_, key), value)| (key.clone(), value.clone()))
             .collect()
+    }
+
+    fn tenants(&self) -> Vec<String> {
+        let inner = self.inner.lock().expect("checkpoint store mutex poisoned");
+        let mut tenants: Vec<_> = inner
+            .keys()
+            .map(|(tenant, _)| tenant.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        tenants.sort();
+        tenants
     }
 }
 
@@ -134,5 +147,6 @@ mod tests {
         assert!(after_tombstone.len() == 1);
         assert!(after_tombstone[0].0 == b"k2".to_vec());
         assert!(store.load_all("other").is_empty());
+        assert!(store.tenants() == vec!["t".to_string()]);
     }
 }
