@@ -4525,6 +4525,47 @@ rules:
 }
 
 #[tokio::test]
+async fn ruler_rule_group_recreate_resets_alert_for_duration_state() {
+    let state = fixture();
+    let app = loki_router(state);
+    let rule_group = "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    for: 20ns
+";
+    post_loki_rule_group_for_test(&app, "default", rule_group).await;
+
+    let first_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=19&type=alert").await;
+    assert!(first_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending");
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/loki/api/v1/rules/default/api-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
+
+    post_loki_rule_group_for_test(&app, "default", rule_group).await;
+    let recreated_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
+    assert!(recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending");
+    assert!(
+        recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
+            == "1970-01-01T00:00:00.00000004Z"
+    );
+}
+
+#[tokio::test]
 async fn prometheus_rules_endpoint_excludes_active_alerts_when_requested() {
     let state = fixture();
     let app = loki_router(state);
