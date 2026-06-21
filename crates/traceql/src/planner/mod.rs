@@ -218,6 +218,11 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             Pipeline::Filter { op, value },
         ]
         | [
+            Pipeline::Aggregate(Aggregate::Count),
+            Pipeline::Filter { op, value },
+            Pipeline::By(by),
+        ]
+        | [
             Pipeline::By(by),
             Pipeline::Aggregate(Aggregate::Count),
             Pipeline::Filter { op, value },
@@ -231,6 +236,16 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             ),
             Pipeline::By(by),
             Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::Aggregate(
+                agg @ (Aggregate::Sum(_)
+                | Aggregate::Avg(_)
+                | Aggregate::Min(_)
+                | Aggregate::Max(_)),
+            ),
+            Pipeline::Filter { op, value },
+            Pipeline::By(by),
         ]
         | [
             Pipeline::By(by),
@@ -1161,6 +1176,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_filter_then_by_preserves_spans_from_passing_traces() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span_with_parent(
+                    1,
+                    None,
+                    [1; 16],
+                    "api-a",
+                    1,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    2,
+                    None,
+                    [1; 16],
+                    "api-b",
+                    1,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    3,
+                    None,
+                    [2; 16],
+                    "db-a",
+                    1,
+                    vec![("svc", AttrValue::Str("db".into()))],
+                ),
+            ],
+        );
+
+        let out = planned("{ .svc != nil } | count() > 1 | by(span.svc)", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+    }
+
+    #[tokio::test]
     async fn preserving_stage_before_count_filter_is_ignored_for_search() {
         let mut store = InMemorySpanStore::new();
         store.push_trace(
@@ -1237,6 +1293,73 @@ mod tests {
             .await
             .unwrap();
         assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn avg_filter_then_by_preserves_spans_from_passing_traces() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span_with_parent(
+                    1,
+                    None,
+                    [1; 16],
+                    "fast-a",
+                    20,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    2,
+                    None,
+                    [1; 16],
+                    "fast-b",
+                    40,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+            ],
+        );
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span_with_parent(
+                    3,
+                    None,
+                    [2; 16],
+                    "slow-a",
+                    200,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+                span_with_parent(
+                    4,
+                    None,
+                    [2; 16],
+                    "slow-b",
+                    400,
+                    vec![("svc", AttrValue::Str("api".into()))],
+                ),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc = \"api\" } | avg(span:duration) > 100 | by(span.svc)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            names(&out)
+                == vec![
+                    "fast-a".to_string(),
+                    "fast-b".to_string(),
+                    "slow-a".to_string(),
+                    "slow-b".to_string()
+                ]
+        );
     }
 
     #[tokio::test]
