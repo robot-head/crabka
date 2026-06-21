@@ -8,7 +8,7 @@ use crabka_traces::{
     AttrValue, KeyValue, Span, SpanKind, SpanRecord, StatusCode,
     blockbuilder::{
         build_blocks, build_blocks_with_prefix, build_blocks_with_promoted_attrs,
-        decode_consumer_records, group_by_trace, object_key,
+        decode_consumer_records, flush_partition_windows, group_by_trace, object_key,
     },
 };
 use object_store::ObjectStore;
@@ -196,6 +196,42 @@ async fn replaying_same_offset_window_is_idempotent_in_trace_index() {
             .map(arrow::record_batch::RecordBatch::num_rows)
             .sum::<usize>()
             == 2
+    );
+}
+
+#[tokio::test]
+async fn replaying_saved_partition_window_after_restart_is_idempotent() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = BlockWriter::new(store.clone());
+    let config = crabka_traces::blockbuilder::BlockBuilderConfig {
+        object_key_prefix: String::new(),
+        index_key: "index/traces.json".into(),
+        window: std::time::Duration::from_millis(1),
+        promoted_attrs: Vec::new(),
+    };
+    let records = [
+        consumer_record(7, 10, &rec("tenant-a", [1; 16], 2, Some(1), 200)),
+        consumer_record(7, 11, &rec("tenant-a", [1; 16], 1, None, 100)),
+    ];
+    let windows = decode_consumer_records(&records).unwrap();
+    let mut index = TraceIndex::new();
+
+    flush_partition_windows(&writer, &mut index, store.clone(), &config, windows.clone())
+        .await
+        .unwrap();
+    let mut restarted = TraceIndex::load(&store, "index/traces.json").await.unwrap();
+
+    flush_partition_windows(&writer, &mut restarted, store.clone(), &config, windows)
+        .await
+        .unwrap();
+    let reloaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
+
+    assert!(
+        reloaded.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
+            == vec![
+                "traces/tenant-a/00007/00000000000000000010-00000000000000000011-100.parquet"
+                    .to_string()
+            ]
     );
 }
 

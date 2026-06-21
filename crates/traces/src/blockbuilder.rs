@@ -265,27 +265,14 @@ pub async fn run(
 
         {
             let mut guard = index.lock().await;
-            for (partition, partition_window) in windows {
-                for tenant in tenants_in_records(&partition_window.records) {
-                    build_blocks_with_options(
-                        &writer,
-                        &mut guard,
-                        &tenant,
-                        partition,
-                        &partition_window.records,
-                        partition_window.offset_range,
-                        BlockBuildOptions {
-                            object_key_prefix: &config.object_key_prefix,
-                            promoted_attrs: &config.promoted_attrs,
-                        },
-                    )
-                    .await?;
-                }
-            }
-            guard
-                .save(&object_store, &config.index_key)
-                .await
-                .map_err(|err| TracesError::Block(err.to_string()))?;
+            flush_partition_windows(
+                &writer,
+                &mut guard,
+                Arc::clone(&object_store),
+                &config,
+                windows,
+            )
+            .await?;
         }
 
         consumer
@@ -294,6 +281,39 @@ pub async fn run(
             .map_err(|err| TracesError::Wal(err.to_string()))?;
     }
     Ok(())
+}
+
+/// Flush decoded partition windows and durably save the trace index.
+///
+/// The caller should commit WAL offsets only after this returns `Ok(())`.
+pub async fn flush_partition_windows(
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    object_store: Arc<dyn ObjectStore>,
+    config: &BlockBuilderConfig,
+    windows: BTreeMap<i32, PartitionWindow>,
+) -> Result<(), TracesError> {
+    for (partition, partition_window) in windows {
+        for tenant in tenants_in_records(&partition_window.records) {
+            build_blocks_with_options(
+                writer,
+                index,
+                &tenant,
+                partition,
+                &partition_window.records,
+                partition_window.offset_range,
+                BlockBuildOptions {
+                    object_key_prefix: &config.object_key_prefix,
+                    promoted_attrs: &config.promoted_attrs,
+                },
+            )
+            .await?;
+        }
+    }
+    index
+        .save(&object_store, &config.index_key)
+        .await
+        .map_err(|err| TracesError::Block(err.to_string()))
 }
 
 fn collect_tags(
