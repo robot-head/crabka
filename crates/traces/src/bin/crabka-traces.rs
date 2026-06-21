@@ -275,9 +275,25 @@ async fn run_live_store(
     cli: Cli,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let consumer = wal_consumer(cli.bootstrap, "crabka-traces-live-store").await?;
+    let addr: SocketAddr = cli.listen.parse()?;
+    let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-live-store").await?;
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
-    livestore::run(consumer, store, shutdown).await?;
+    let router = build_live_store_router(&cli, Arc::clone(&store))?;
+    let live_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(err) = livestore::run(consumer, store, live_shutdown).await {
+            tracing::warn!(error = %err, "traces live-store consumer error");
+        }
+    });
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    tracing::info!(%bound, "traces live-store listening");
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+        })
+        .await?;
     Ok(())
 }
 
@@ -337,6 +353,29 @@ async fn build_querier_router_with_live(
         )))
     });
     let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, live));
+    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
+    Ok(trace_querier::http::router_with_config(
+        engine,
+        HttpConfig {
+            max_trace_spans: cli.max_trace_spans,
+        },
+    ))
+}
+
+fn build_live_store_router(
+    cli: &Cli,
+    live_store: Arc<RwLock<LiveStore>>,
+) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+    let trace_index = Arc::new(TraceIndex::new());
+    let blocks = Arc::new(BlockStore::new(
+        Arc::new(object_store::memory::InMemory::new()),
+        Url::parse("memory:///")?,
+    ));
+    let live = LiveTier::new(Arc::new(IndexedLiveSource::new(
+        live_store,
+        Arc::clone(&trace_index),
+    )));
+    let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, Some(live)));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     Ok(trace_querier::http::router_with_config(
         engine,
@@ -584,7 +623,11 @@ async fn wal_consumer(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode as HttpStatusCode};
     use clap::Parser;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
 
     use super::*;
 
@@ -764,6 +807,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_store_router_serves_recent_trace_by_id() {
+        let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
+        store.write().await.ingest(crabka_traces::SpanRecord {
+            tenant: "tenant-a".into(),
+            span: test_span([7; 16], [3; 8]),
+        });
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "live-store"]).unwrap();
+        let router = build_live_store_router(&cli, store).unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/07070707070707070707070707070707")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == HttpStatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["status"] == "COMPLETE");
+        assert!(
+            json["trace"]["resourceSpans"][0]["resource"]["attributes"][0]["key"] == "service.name"
+        );
+        assert!(
+            json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"] == "GET /live"
+        );
+    }
+
+    #[tokio::test]
     async fn indexed_live_source_uses_trace_index_max_timestamp_as_frontier() {
         let mut index = TraceIndex::new();
         index.add_trace_block(
@@ -795,6 +871,29 @@ mod tests {
 
         assert!(source.block_builder_frontier_ns("tenant-a") == 751);
         assert!(source.block_builder_frontier_ns("tenant-b") == 0);
+    }
+
+    fn test_span(trace_id: [u8; 16], span_id: [u8; 8]) -> crabka_traces::Span {
+        crabka_traces::Span {
+            trace_id,
+            span_id,
+            parent_span_id: None,
+            name: "GET /live".into(),
+            kind: crabka_traces::SpanKind::Server,
+            start_ns: 1_000,
+            duration_ns: 500,
+            status: crabka_traces::StatusCode::Ok,
+            status_message: String::new(),
+            resource_attrs: vec![crabka_traces::KeyValue {
+                key: "service.name".into(),
+                value: crabka_traces::AttrValue::Str("live-api".into()),
+            }],
+            span_attrs: Vec::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+            instrumentation_scope: "tracer".into(),
+            instrumentation_version: "1.2.3".into(),
+        }
     }
 
     #[test]
