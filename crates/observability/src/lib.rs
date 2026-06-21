@@ -4720,6 +4720,10 @@ pub fn loki_router(state: QuerierState) -> Router {
             get(detected_fields).post(detected_fields_post),
         )
         .route(
+            "/loki/api/v1/detected_labels",
+            get(detected_labels).post(detected_labels_post),
+        )
+        .route(
             "/loki/api/v1/detected_field/{name}/values",
             get(detected_field_values).post(detected_field_values_post),
         )
@@ -6866,6 +6870,32 @@ async fn detected_fields_post(
         Err(error) => return error.into_response(),
     };
     match execute_detected_fields_query(&state, &headers, Some(&raw_query)).await {
+        Ok(value) => json_response(StatusCode::OK, &value),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn detected_labels(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    match execute_detected_labels_query(&state, &headers, raw_query.as_deref()).await {
+        Ok(value) => json_response(StatusCode::OK, &value),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn detected_labels_post(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let raw_query = match form_body_query(&body) {
+        Ok(raw_query) => raw_query,
+        Err(error) => return error.into_response(),
+    };
+    match execute_detected_labels_query(&state, &headers, Some(&raw_query)).await {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
     }
@@ -9872,6 +9902,46 @@ async fn execute_detected_fields_query(
     Ok(json!({
         "fields": fields,
         "limit": limit,
+    }))
+}
+
+async fn execute_detected_labels_query(
+    state: &QuerierState,
+    headers: &HeaderMap,
+    raw_query: Option<&str>,
+) -> Result<Value, HttpQueryError> {
+    let params = parse_detected_fields_params(raw_query)?;
+    validate_query_length_limit(state, &params.query)?;
+    let series_params = SeriesParams {
+        matchers: vec![params.query],
+        start: Some(params.start),
+        end: Some(params.end),
+        since: None,
+    };
+    let label_sets = series_data(state, headers, &series_params).await?;
+    let mut values_by_label = BTreeMap::<String, BTreeSet<String>>::new();
+    for labels in label_sets {
+        for (name, value) in labels {
+            values_by_label.entry(name).or_default().insert(value);
+        }
+    }
+    if values_by_label.is_empty() {
+        return Ok(json!({}));
+    }
+
+    let detected_labels = values_by_label
+        .into_iter()
+        .take(params.limit)
+        .map(|(label, values)| {
+            json!({
+                "label": label,
+                "cardinality": values.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "detectedLabels": detected_labels,
     }))
 }
 
