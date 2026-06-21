@@ -207,6 +207,9 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
     if let Some(sql) = grouped_rank_pipeline_sql(spanset_sql, pipeline)? {
         return Ok(sql);
     }
+    if let Some(sql) = ungrouped_rank_pipeline_sql(spanset_sql, pipeline)? {
+        return Ok(sql);
+    }
 
     match pipeline {
         [
@@ -243,12 +246,6 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             by,
             Some((aggregate_expr_sql(agg)?, *op, *value)),
         ),
-        [
-            Pipeline::Aggregate(agg),
-            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
-        ] if is_search_preserving_aggregate(agg) => {
-            Ok(ungrouped_rank_sql(spanset_sql, rank_limit(rank)?))
-        }
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
@@ -274,6 +271,7 @@ fn grouped_rank_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result
 }
 
 type RankFilter = Option<(ComparisonOp, f64)>;
+type UngroupedRankParts<'a> = (&'a Aggregate, &'a Pipeline, RankFilter);
 
 fn grouped_rank_pipeline_parts(
     pipeline: &[Pipeline],
@@ -324,6 +322,48 @@ fn grouped_rank_pipeline_parts(
             Pipeline::By(by),
             Pipeline::Filter { op, value },
         ] => Some((agg, by, rank, None, Some((*op, *value)))),
+        _ => None,
+    }
+}
+
+fn ungrouped_rank_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Option<String>> {
+    let Some((agg, rank, filter)) = ungrouped_rank_pipeline_parts(pipeline) else {
+        return Ok(None);
+    };
+    if !is_search_preserving_aggregate(agg) {
+        return Ok(None);
+    }
+    let rank = rank_limit(rank)?;
+    if rank.k == 0 {
+        return Ok(Some(ungrouped_rank_sql(spanset_sql, rank)));
+    }
+    let Some((op, value)) = filter else {
+        return Ok(Some(ungrouped_rank_sql(spanset_sql, rank)));
+    };
+    Ok(Some(aggregate_filter_sql_query_any(
+        spanset_sql,
+        agg,
+        op,
+        value,
+    )?))
+}
+
+fn ungrouped_rank_pipeline_parts(pipeline: &[Pipeline]) -> Option<UngroupedRankParts<'_>> {
+    match pipeline {
+        [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] => Some((agg, rank, None)),
+        [
+            Pipeline::Aggregate(agg),
+            Pipeline::Filter { op, value },
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Filter { op, value },
+        ] => Some((agg, rank, Some((*op, *value)))),
         _ => None,
     }
 }
@@ -439,8 +479,20 @@ fn aggregate_filter_sql_query(
     op: ComparisonOp,
     value: f64,
 ) -> Result<String> {
+    aggregate_filter_sql_query_any(spanset_sql, agg, op, value)
+}
+
+fn aggregate_filter_sql_query_any(
+    spanset_sql: &str,
+    agg: &Aggregate,
+    op: ComparisonOp,
+    value: f64,
+) -> Result<String> {
     let trace = selector::ident(COL_TRACE_ID);
-    let expr = aggregate_expr_sql(agg)?;
+    let expr = match agg {
+        Aggregate::Count => "COUNT(*)".to_string(),
+        _ => aggregate_expr_sql(agg)?,
+    };
     let pred = aggregate_filter_sql(&expr, op, value)?;
     Ok(format!(
         "WITH matched AS ({spanset_sql}), \
@@ -1546,5 +1598,49 @@ mod tests {
         assert!(
             names(&bottom) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn count_topk_filter_gates_ungrouped_ranked_spans() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![span(1, "api-a", 20, vec![]), span(2, "api-b", 40, vec![])],
+        );
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![span_with_parent(3, None, [2; 16], "db-a", 200, vec![])],
+        );
+
+        let out = planned("{ span:name != nil } | count() | topk(1) > 1", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn count_filter_topk_gates_ungrouped_ranked_spans() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![span(1, "api-a", 20, vec![]), span(2, "api-b", 40, vec![])],
+        );
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![span_with_parent(3, None, [2; 16], "db-a", 200, vec![])],
+        );
+
+        let out = planned("{ span:name != nil } | count() > 1 | topk(1)", &store)
+            .await
+            .unwrap();
+        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 }
