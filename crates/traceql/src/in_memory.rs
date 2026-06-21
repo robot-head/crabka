@@ -229,59 +229,65 @@ impl SpanStore for InMemorySpanStore {
                 if !span_matches(trace, span, &trace.nested, i, matchers) {
                     continue;
                 }
-                trace_id
-                    .append_value(span.trace_id)
-                    .map_err(|e| TraceqlError::Store(e.to_string()))?;
-                span_id
-                    .append_value(span.span_id)
-                    .map_err(|e| TraceqlError::Store(e.to_string()))?;
-                if let Some(parent) = span.parent_span_id {
-                    parent_span_id
-                        .append_value(parent)
-                        .map_err(|e| TraceqlError::Store(e.to_string()))?;
-                } else {
-                    parent_span_id.append_null();
-                }
-                ns_left.append_value(trace.nested[i].left);
-                ns_right.append_value(trace.nested[i].right);
-                parent_id.append_value(trace.nested[i].parent_id);
-                child_count.append_value(child_count_for(&trace.nested, i));
-                root_service.append_value(&trace.root_service_name);
-                root_span.append_value(&trace.root_span_name);
-                trace_start.append_value(trace.trace_start_unix_nano);
-                trace_duration.append_value(trace.trace_duration_nanos);
-                name.append_value(&span.name);
-                kind.append_value(span.kind);
-                start.append_value(span.start_unix_nano);
-                duration.append_value(span.duration_nanos);
-                status_code.append_value(span.status_code);
-                status_message.append_value(&span.status_message);
-                instrumentation_name.append_value(&span.instrumentation_name);
-                instrumentation_version.append_value(&span.instrumentation_version);
-                if let Some(event) = span.events.first() {
-                    event_name.append_value(&event.name);
-                    event_time_since_start.append_value(
-                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
-                    );
-                } else {
-                    event_name.append_null();
-                    event_time_since_start.append_null();
-                }
-                if let Some(link) = span.links.first() {
-                    link_trace_id
-                        .append_value(link.trace_id)
-                        .map_err(|e| TraceqlError::Store(e.to_string()))?;
-                    link_span_id
-                        .append_value(link.span_id)
-                        .map_err(|e| TraceqlError::Store(e.to_string()))?;
-                } else {
-                    link_trace_id.append_null();
-                    link_span_id.append_null();
-                }
+                let event_rows = matching_events_for_scan(span, matchers);
+                let link_rows = matching_links_for_scan(span, matchers);
+                for event in event_rows {
+                    for link in &link_rows {
+                        trace_id
+                            .append_value(span.trace_id)
+                            .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                        span_id
+                            .append_value(span.span_id)
+                            .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                        if let Some(parent) = span.parent_span_id {
+                            parent_span_id
+                                .append_value(parent)
+                                .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                        } else {
+                            parent_span_id.append_null();
+                        }
+                        ns_left.append_value(trace.nested[i].left);
+                        ns_right.append_value(trace.nested[i].right);
+                        parent_id.append_value(trace.nested[i].parent_id);
+                        child_count.append_value(child_count_for(&trace.nested, i));
+                        root_service.append_value(&trace.root_service_name);
+                        root_span.append_value(&trace.root_span_name);
+                        trace_start.append_value(trace.trace_start_unix_nano);
+                        trace_duration.append_value(trace.trace_duration_nanos);
+                        name.append_value(&span.name);
+                        kind.append_value(span.kind);
+                        start.append_value(span.start_unix_nano);
+                        duration.append_value(span.duration_nanos);
+                        status_code.append_value(span.status_code);
+                        status_message.append_value(&span.status_message);
+                        instrumentation_name.append_value(&span.instrumentation_name);
+                        instrumentation_version.append_value(&span.instrumentation_version);
+                        if let Some(event) = event {
+                            event_name.append_value(&event.name);
+                            event_time_since_start.append_value(
+                                i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                            );
+                        } else {
+                            event_name.append_null();
+                            event_time_since_start.append_null();
+                        }
+                        if let Some(link) = link {
+                            link_trace_id
+                                .append_value(link.trace_id)
+                                .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                            link_span_id
+                                .append_value(link.span_id)
+                                .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                        } else {
+                            link_trace_id.append_null();
+                            link_span_id.append_null();
+                        }
 
-                for (key, builder) in &mut attr_builders {
-                    let value = span.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
-                    builder.append(value);
+                        for (key, builder) in &mut attr_builders {
+                            let value = span.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                            builder.append(value);
+                        }
+                    }
                 }
             }
         }
@@ -494,6 +500,56 @@ fn span_matches(
         .iter()
         .filter(|matcher| !is_event_matcher(matcher) && !is_link_matcher(matcher))
         .all(|matcher| matcher_matches(trace, span, nested_sets, idx, matcher))
+}
+
+fn matching_events_for_scan<'a>(
+    span: &'a InputSpan,
+    matchers: &[SpanMatcher],
+) -> Vec<Option<&'a EventRef>> {
+    let event_matchers = matchers
+        .iter()
+        .filter(|matcher| is_event_matcher(matcher))
+        .collect::<Vec<_>>();
+    if event_matchers.is_empty() {
+        return vec![span.events.first()];
+    }
+    if span.events.is_empty() {
+        return vec![None];
+    }
+    span.events
+        .iter()
+        .filter(|event| {
+            event_matchers
+                .iter()
+                .all(|matcher| event_matcher_matches_event(event, matcher))
+        })
+        .map(Some)
+        .collect()
+}
+
+fn matching_links_for_scan<'a>(
+    span: &'a InputSpan,
+    matchers: &[SpanMatcher],
+) -> Vec<Option<&'a LinkRef>> {
+    let link_matchers = matchers
+        .iter()
+        .filter(|matcher| is_link_matcher(matcher))
+        .collect::<Vec<_>>();
+    if link_matchers.is_empty() {
+        return vec![span.links.first()];
+    }
+    if span.links.is_empty() {
+        return vec![None];
+    }
+    span.links
+        .iter()
+        .filter(|link| {
+            link_matchers
+                .iter()
+                .all(|matcher| link_matcher_matches_link(link, matcher))
+        })
+        .map(Some)
+        .collect()
 }
 
 fn nested_event_matchers_match(span: &InputSpan, matchers: &[SpanMatcher]) -> bool {

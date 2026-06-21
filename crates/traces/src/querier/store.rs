@@ -6,9 +6,9 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array,
     Int32Array, Int64Array, Int64Builder, LargeStringArray, ListArray, StringArray, StringBuilder,
-    StringViewArray, StructArray,
+    StringViewArray, StructArray, UInt32Array,
 };
-use arrow::compute::{cast, concat_batches, filter_record_batch};
+use arrow::compute::{cast, concat_batches, filter_record_batch, take};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
@@ -146,7 +146,7 @@ impl CrabkaSpanStore {
         }
         let batches = recompute_scan_nested_sets(batches)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
-        let batches = add_nested_intrinsic_columns(batches)?;
+        let batches = add_nested_intrinsic_columns(batches, matchers)?;
 
         let schema = batches
             .first()
@@ -1278,14 +1278,18 @@ fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBat
 
 fn add_nested_intrinsic_columns(
     batches: Vec<RecordBatch>,
+    matchers: &[SpanMatcher],
 ) -> Result<Vec<RecordBatch>, TraceqlError> {
     batches
         .into_iter()
-        .map(|batch| add_nested_intrinsic_columns_to_batch(&batch))
+        .map(|batch| add_nested_intrinsic_columns_to_batch(&batch, matchers))
         .collect()
 }
 
-fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBatch, TraceqlError> {
+fn add_nested_intrinsic_columns_to_batch(
+    batch: &RecordBatch,
+    matchers: &[SpanMatcher],
+) -> Result<RecordBatch, TraceqlError> {
     let schema = batch.schema();
     let missing = [
         COL_EVENT_NAME,
@@ -1300,49 +1304,25 @@ fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBa
         return Ok(batch.clone());
     }
 
-    let mut event_name = StringBuilder::new();
-    let mut event_time_since_start = Int64Builder::new();
-    let mut link_trace_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 16);
-    let mut link_span_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 8);
-    for row in 0..batch.num_rows() {
-        let events = event_values(batch, row)?;
-        if let Some(event) = events.first() {
-            event_name.append_value(&event.name);
-            event_time_since_start
-                .append_value(i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX));
-        } else {
-            event_name.append_null();
-            event_time_since_start.append_null();
-        }
-        let links = link_values(batch, row)?;
-        if let Some(link) = links.first() {
-            link_trace_id
-                .append_value(link.trace_id)
-                .map_err(|err| TraceqlError::Store(err.to_string()))?;
-            link_span_id
-                .append_value(link.span_id)
-                .map_err(|err| TraceqlError::Store(err.to_string()))?;
-        } else {
-            link_trace_id.append_null();
-            link_span_id.append_null();
-        }
-    }
-
-    let event_name = Arc::new(event_name.finish()) as ArrayRef;
-    let event_time_since_start = Arc::new(event_time_since_start.finish()) as ArrayRef;
-    let link_trace_id = Arc::new(link_trace_id.finish()) as ArrayRef;
-    let link_span_id = Arc::new(link_span_id.finish()) as ArrayRef;
+    let nested = nested_intrinsic_rows(batch, matchers)?;
     let mut fields = schema
         .fields()
         .iter()
         .map(|field| field.as_ref().clone())
         .collect::<Vec<_>>();
-    let mut columns = batch.columns().to_vec();
+    let mut columns = batch
+        .columns()
+        .iter()
+        .map(|column| {
+            take(column.as_ref(), &nested.indices, None)
+                .map_err(|err| TraceqlError::Store(format!("expand nested intrinsic rows: {err}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     for name in missing {
         match name {
             COL_EVENT_NAME => {
                 fields.push(Field::new(COL_EVENT_NAME, DataType::Utf8, true));
-                columns.push(event_name.clone());
+                columns.push(nested.event_name.clone());
             }
             COL_EVENT_TIME_SINCE_START => {
                 fields.push(Field::new(
@@ -1350,7 +1330,7 @@ fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBa
                     DataType::Int64,
                     true,
                 ));
-                columns.push(event_time_since_start.clone());
+                columns.push(nested.event_time_since_start.clone());
             }
             COL_LINK_TRACE_ID => {
                 fields.push(Field::new(
@@ -1358,7 +1338,7 @@ fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBa
                     DataType::FixedSizeBinary(16),
                     true,
                 ));
-                columns.push(link_trace_id.clone());
+                columns.push(nested.link_trace_id.clone());
             }
             COL_LINK_SPAN_ID => {
                 fields.push(Field::new(
@@ -1366,13 +1346,141 @@ fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBa
                     DataType::FixedSizeBinary(8),
                     true,
                 ));
-                columns.push(link_span_id.clone());
+                columns.push(nested.link_span_id.clone());
             }
             _ => {}
         }
     }
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
         .map_err(|err| TraceqlError::Store(format!("add nested intrinsic columns: {err}")))
+}
+
+struct NestedIntrinsicRows {
+    indices: UInt32Array,
+    event_name: ArrayRef,
+    event_time_since_start: ArrayRef,
+    link_trace_id: ArrayRef,
+    link_span_id: ArrayRef,
+}
+
+fn nested_intrinsic_rows(
+    batch: &RecordBatch,
+    matchers: &[SpanMatcher],
+) -> Result<NestedIntrinsicRows, TraceqlError> {
+    let mut event_name = StringBuilder::new();
+    let mut event_time_since_start = Int64Builder::new();
+    let mut link_trace_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 16);
+    let mut link_span_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 8);
+    let mut row_indices = Vec::new();
+    for row in 0..batch.num_rows() {
+        let events = matching_events_for_scan(batch, row, matchers)?;
+        let links = matching_links_for_scan(batch, row, matchers)?;
+        for event in &events {
+            for link in &links {
+                row_indices
+                    .push(u32::try_from(row).map_err(|err| {
+                        TraceqlError::Store(format!("row index overflow: {err}"))
+                    })?);
+                append_nested_event(event.as_ref(), &mut event_name, &mut event_time_since_start);
+                append_nested_link(link.as_ref(), &mut link_trace_id, &mut link_span_id)?;
+            }
+        }
+    }
+    Ok(NestedIntrinsicRows {
+        indices: UInt32Array::from(row_indices),
+        event_name: Arc::new(event_name.finish()),
+        event_time_since_start: Arc::new(event_time_since_start.finish()),
+        link_trace_id: Arc::new(link_trace_id.finish()),
+        link_span_id: Arc::new(link_span_id.finish()),
+    })
+}
+
+fn append_nested_event(
+    event: Option<&EventRef>,
+    event_name: &mut StringBuilder,
+    event_time_since_start: &mut Int64Builder,
+) {
+    if let Some(event) = event {
+        event_name.append_value(&event.name);
+        event_time_since_start
+            .append_value(i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX));
+    } else {
+        event_name.append_null();
+        event_time_since_start.append_null();
+    }
+}
+
+fn append_nested_link(
+    link: Option<&LinkRef>,
+    link_trace_id: &mut FixedSizeBinaryBuilder,
+    link_span_id: &mut FixedSizeBinaryBuilder,
+) -> Result<(), TraceqlError> {
+    if let Some(link) = link {
+        link_trace_id
+            .append_value(link.trace_id)
+            .map_err(|err| TraceqlError::Store(err.to_string()))?;
+        link_span_id
+            .append_value(link.span_id)
+            .map_err(|err| TraceqlError::Store(err.to_string()))?;
+    } else {
+        link_trace_id.append_null();
+        link_span_id.append_null();
+    }
+    Ok(())
+}
+
+fn matching_events_for_scan(
+    batch: &RecordBatch,
+    row: usize,
+    matchers: &[SpanMatcher],
+) -> Result<Vec<Option<EventRef>>, TraceqlError> {
+    let event_matchers = matchers
+        .iter()
+        .filter(|matcher| is_event_matcher(matcher))
+        .collect::<Vec<_>>();
+    let events = event_values(batch, row)?;
+    if event_matchers.is_empty() {
+        return Ok(vec![events.into_iter().next()]);
+    }
+    if events.is_empty() {
+        return Ok(vec![None]);
+    }
+    Ok(events
+        .into_iter()
+        .filter(|event| {
+            event_matchers
+                .iter()
+                .all(|matcher| event_matcher_matches_event(event, matcher))
+        })
+        .map(Some)
+        .collect())
+}
+
+fn matching_links_for_scan(
+    batch: &RecordBatch,
+    row: usize,
+    matchers: &[SpanMatcher],
+) -> Result<Vec<Option<LinkRef>>, TraceqlError> {
+    let link_matchers = matchers
+        .iter()
+        .filter(|matcher| is_link_matcher(matcher))
+        .collect::<Vec<_>>();
+    let links = link_values(batch, row)?;
+    if link_matchers.is_empty() {
+        return Ok(vec![links.into_iter().next()]);
+    }
+    if links.is_empty() {
+        return Ok(vec![None]);
+    }
+    Ok(links
+        .into_iter()
+        .filter(|link| {
+            link_matchers
+                .iter()
+                .all(|matcher| link_matcher_matches_link(link, matcher))
+        })
+        .map(Some)
+        .collect())
 }
 
 fn align_scan_batches_to_schema(
@@ -3513,11 +3621,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 2);
+        assert!(resp.traces.len() == 3);
         assert!(
             resp.traces
                 .iter()
                 .any(|trace| trace.trace_id == matching.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == other.trace_id)
         );
         assert!(
             resp.traces
@@ -3566,6 +3679,25 @@ mod tests {
                 .iter()
                 .any(|trace| trace.trace_id == no_event.trace_id)
         );
+
+        let mut series = engine
+            .query_range(
+                "tenant",
+                "{ event:name != nil } | count_over_time() | by(event:name)",
+                0,
+                10_000,
+                10_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        let cache_hit = series
+            .iter()
+            .find(|series| series.labels == vec![("name".into(), "cache.hit".into())])
+            .unwrap();
+        assert!(cache_hit.points == vec![(0, 2.0), (10_000, 0.0)]);
     }
 
     #[tokio::test]

@@ -2548,6 +2548,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_over_time_by_event_name_counts_each_event_on_a_span() {
+        let mut span = sp_at(1, 1, None, "api", 0);
+        span.events = vec![
+            EventRef {
+                time_since_start_nano: 50,
+                name: "cache.miss".into(),
+                attributes: Vec::new(),
+            },
+            EventRef {
+                time_since_start_nano: 60,
+                name: "cache.hit".into(),
+                attributes: Vec::new(),
+            },
+        ];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![span]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ event:name != nil } | count_over_time() | by(event:name)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("name".into(), "cache.hit".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("name".into(), "cache.miss".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
     async fn count_over_time_by_link_trace_id_intrinsic_uses_hex_label() {
         let mut span = sp_at(1, 1, None, "api", 0);
         span.links = vec![LinkRef {
