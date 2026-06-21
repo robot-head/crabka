@@ -3045,6 +3045,99 @@ async fn status_config_endpoint_returns_loki_yaml_placeholder() {
 }
 
 #[tokio::test]
+async fn distributor_router_exposes_loki_ingester_control_endpoints() {
+    let app = distributor_router(InMemoryWalSink::default());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/flush")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::NO_CONTENT);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ingester/prepare_shutdown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    assert!(text_body(response).await == "unset");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ingester/prepare_shutdown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::NO_CONTENT);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ingester/prepare_shutdown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(text_body(response).await == "set");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/ingester/prepare_shutdown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::NO_CONTENT);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ingester/prepare_shutdown")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(text_body(response).await == "unset");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/ingester/shutdown?flush=true&delete_ring_tokens=false&terminate=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn status_services_endpoint_returns_loki_service_states() {
     let state = fixture();
     let app = loki_router(state);
