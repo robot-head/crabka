@@ -25,7 +25,7 @@ use tonic::transport::Server as GrpcServer;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 
 use crate::error::{TracesError, tempo_error_response};
-use crate::limits::{IngestEnforcer, LimitError, Limits};
+use crate::limits::{IngestEnforcer, LimitError, Limits, OverridesProvider};
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
 use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
@@ -120,6 +120,7 @@ pub struct DistributorState {
     pub sink: Arc<dyn WalSink>,
     pub limits: TenantLimits,
     pub shared_limits: Limits,
+    pub overrides: Option<OverridesProvider>,
     pub ingest_enforcer: IngestEnforcer,
     pub max_decompressed: usize,
 }
@@ -131,6 +132,7 @@ impl DistributorState {
             sink,
             limits: TenantLimits::default(),
             shared_limits: TenantLimits::default().to_shared_limits(),
+            overrides: None,
             ingest_enforcer: IngestEnforcer::new(),
             max_decompressed: 10 * 1024 * 1024,
         }
@@ -495,14 +497,23 @@ fn tenant_metadata(metadata: &MetadataMap) -> String {
 impl DistributorState {
     fn enforce_ingest(&self, tenant: &str, spans: &[Span]) -> Result<(), TracesError> {
         validate(spans, &self.limits)?;
-        validate_shared(spans, &self.shared_limits)?;
+        let limits = self.ingest_limits_for_tenant(tenant);
+        validate_shared(spans, limits)?;
         self.ingest_enforcer
             .check_span_rate(
-                &self.shared_limits,
+                limits,
                 tenant,
                 u64::try_from(spans.len()).unwrap_or(u64::MAX),
             )
             .map_err(|err| limit_error_to_traces_error(&err))
+    }
+
+    fn ingest_limits_for_tenant(&self, tenant: &str) -> &Limits {
+        self.overrides
+            .as_ref()
+            .map_or(&self.shared_limits, |overrides| {
+                overrides.for_tenant(tenant)
+            })
     }
 }
 
@@ -729,6 +740,16 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let mut state = DistributorState::new(sink.clone());
         state.shared_limits = limits;
+        state.max_decompressed = 1024 * 1024;
+        (Arc::new(state), sink)
+    }
+
+    fn test_state_with_overrides(
+        overrides: crate::limits::OverridesProvider,
+    ) -> (Arc<DistributorState>, Arc<RecordingSink>) {
+        let sink = Arc::new(RecordingSink::default());
+        let mut state = DistributorState::new(sink.clone());
+        state.overrides = Some(overrides);
         state.max_decompressed = 1024 * 1024;
         (Arc::new(state), sink)
     }
@@ -1125,6 +1146,50 @@ mod tests {
                 .is_some_and(|message| message.contains("max spans per trace"))
         );
         assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn tenant_override_trace_span_limit_is_enforced_before_append() {
+        let overrides = crate::limits::OverridesProvider::from_yaml(
+            r"
+overrides:
+  tenant-tight:
+    max_spans_per_trace: 1
+",
+        )
+        .unwrap();
+        let (state, sink) = test_state_with_overrides(overrides);
+        let app = router(state);
+
+        let tight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-tight")
+                    .body(Body::from(otlp_body_with_spans(2)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loose = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-loose")
+                    .body(Body::from(otlp_body_with_spans(2)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(tight.status() == StatusCode::BAD_REQUEST);
+        assert!(loose.status() == StatusCode::OK);
+        assert!(sink.count() == 2);
+        assert!(sink.tenant(0) == "tenant-loose");
+        assert!(sink.tenant(1) == "tenant-loose");
     }
 
     #[tokio::test]

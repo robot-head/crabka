@@ -25,7 +25,7 @@ use prost::Message as _;
 use serde_json::{Map, Value, json};
 
 use crate::error::tempo_limit_error_response;
-use crate::limits::{LimitError, Limits, QueryEnforcer};
+use crate::limits::{LimitError, Limits, OverridesProvider, QueryEnforcer};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
@@ -59,15 +59,16 @@ impl<S: SpanStore> Clone for AppState<S> {
     fn clone(&self) -> Self {
         Self {
             engine: Arc::clone(&self.engine),
-            cfg: self.cfg,
+            cfg: self.cfg.clone(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct HttpConfig {
     pub max_trace_spans: usize,
     pub limits: Limits,
+    pub overrides: Option<OverridesProvider>,
 }
 
 impl Default for HttpConfig {
@@ -75,7 +76,16 @@ impl Default for HttpConfig {
         Self {
             max_trace_spans: usize::MAX,
             limits: Limits::default(),
+            overrides: None,
         }
+    }
+}
+
+impl HttpConfig {
+    fn limits_for_tenant(&self, tenant: &str) -> &Limits {
+        self.overrides
+            .as_ref()
+            .map_or(&self.limits, |overrides| overrides.for_tenant(tenant))
     }
 }
 
@@ -143,13 +153,13 @@ where
         Ok(value) => value.unwrap_or(0),
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    if let Err(err) = QueryEnforcer::check_search_limit(
-        &state.cfg.limits,
-        u64::try_from(limit).unwrap_or(u64::MAX),
-    ) {
+    let limits = state.cfg.limits_for_tenant(&tenant);
+    if let Err(err) =
+        QueryEnforcer::check_search_limit(limits, u64::try_from(limit).unwrap_or(u64::MAX))
+    {
         return limit_error_response(&err);
     }
-    if let Err(err) = QueryEnforcer::check_search_duration(&state.cfg.limits, start_ns, end_ns) {
+    if let Err(err) = QueryEnforcer::check_search_duration(limits, start_ns, end_ns) {
         return limit_error_response(&err);
     }
     if limit > state.engine.max_traces() {
@@ -421,7 +431,8 @@ where
     if end_ns < start_ns {
         return (StatusCode::BAD_REQUEST, "end must be >= start").into_response();
     }
-    if let Err(err) = QueryEnforcer::check_search_duration(&state.cfg.limits, start_ns, end_ns) {
+    let limits = state.cfg.limits_for_tenant(&tenant);
+    if let Err(err) = QueryEnforcer::check_search_duration(limits, start_ns, end_ns) {
         return limit_error_response(&err);
     }
     let step_ns = match step_param(&uri) {
@@ -2475,6 +2486,7 @@ mod tests {
                 max_traces_per_search: 1,
                 ..crate::limits::Limits::default()
             },
+            overrides: None,
         });
         let (status, body) = get_json_with_app(
             app,
@@ -2492,6 +2504,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_applies_tenant_limit_overrides() {
+        let app = app_with_http_config(HttpConfig {
+            max_trace_spans: usize::MAX,
+            limits: crate::limits::Limits::default(),
+            overrides: Some(
+                crate::limits::OverridesProvider::from_yaml(
+                    r"
+overrides:
+  tenant-tight:
+    max_traces_per_search: 1
+",
+                )
+                .unwrap(),
+            ),
+        });
+        let tight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=2")
+                    .header("x-scope-orgid", "tenant-tight")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let loose = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=2")
+                    .header("x-scope-orgid", "tenant-loose")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(tight.status() == StatusCode::BAD_REQUEST);
+        let body = tight.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("max traces per search"))
+        );
+        assert!(loose.status() == StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn metrics_query_range_rejects_duration_above_http_limits() {
         let app = app_with_http_config(HttpConfig {
             max_trace_spans: usize::MAX,
@@ -2499,6 +2560,7 @@ mod tests {
                 max_search_duration_secs: 1,
                 ..crate::limits::Limits::default()
             },
+            overrides: None,
         });
         let (status, body) = get_json_with_app(
             app,
