@@ -420,6 +420,7 @@ fn merge_scopes(merged_scopes: &mut Vec<Value>, incoming_scopes: &[Value]) {
                 existing_tags.push(tag.clone());
             }
         }
+        existing_tags.sort_by(tag_value_cmp);
     }
 }
 
@@ -429,6 +430,28 @@ fn merge_tag_values(merged_values: &mut Vec<Value>, incoming_values: &[Value]) {
             merged_values.push(value.clone());
         }
     }
+    merged_values.sort_by(tag_value_cmp);
+}
+
+fn tag_value_cmp(lhs: &Value, rhs: &Value) -> std::cmp::Ordering {
+    tag_value_sort_key(lhs).cmp(&tag_value_sort_key(rhs))
+}
+
+fn tag_value_sort_key(value: &Value) -> (String, String) {
+    if let Some(value) = value.as_str() {
+        return (String::new(), value.to_string());
+    }
+    let type_ = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let value = value
+        .get("value")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (type_, value)
 }
 
 fn merge_metric_series(series: &mut Vec<Value>, next: Value) {
@@ -745,6 +768,45 @@ mod tests {
                     { "spanID": "01" },
                     { "spanID": "02" },
                 ])
+        );
+    }
+
+    #[test]
+    fn merge_scopes_keeps_tags_sorted_after_deduping_shards() {
+        let mut scopes = vec![json!({
+            "name": "span",
+            "tags": ["zeta", "svc"],
+        })];
+        let incoming = vec![json!({
+            "name": "span",
+            "tags": ["alpha", "svc"],
+        })];
+
+        merge_scopes(&mut scopes, &incoming);
+
+        assert!(scopes[0]["tags"] == json!(["alpha", "svc", "zeta"]));
+    }
+
+    #[test]
+    fn merge_tag_values_keeps_values_sorted_after_deduping_shards() {
+        let mut values = vec![
+            json!({"type": "string", "value": "zeta"}),
+            json!({"type": "int", "value": "9"}),
+        ];
+        let incoming = vec![
+            json!({"type": "string", "value": "alpha"}),
+            json!({"type": "int", "value": "9"}),
+        ];
+
+        merge_tag_values(&mut values, &incoming);
+
+        assert!(
+            values
+                == vec![
+                    json!({"type": "int", "value": "9"}),
+                    json!({"type": "string", "value": "alpha"}),
+                    json!({"type": "string", "value": "zeta"}),
+                ]
         );
     }
 
