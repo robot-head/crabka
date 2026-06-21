@@ -4466,6 +4466,41 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_rules_endpoint_filters_rules_by_configured_labels() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-rules
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    labels:
+      severity: page
+      team: api
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [30ns]) > 0
+    labels:
+      team: batch
+",
+    )
+    .await;
+
+    let body = prometheus_rules_body_for_test(
+        &app,
+        "/prometheus/api/v1/rules?exclude_alerts=true&match[]=%7Bseverity%3D%22page%22%7D",
+    )
+    .await;
+
+    assert!(body["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(body["data"]["groups"][0]["rules"].as_array().unwrap().len() == 1);
+    assert!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
+    assert!(body["data"]["groups"][0]["rules"][0]["labels"]["severity"] == "page");
+}
+
+#[tokio::test]
 async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
     let state = fixture();
     let app = loki_router(state);
