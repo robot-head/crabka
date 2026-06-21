@@ -55,6 +55,13 @@ impl TraceIndex {
             .map_or(&[], |tenant_index| tenant_index.blocks.as_slice())
     }
 
+    #[must_use]
+    pub fn tenants(&self) -> Vec<String> {
+        let mut tenants: Vec<String> = self.tenants.keys().cloned().collect();
+        tenants.sort();
+        tenants
+    }
+
     pub fn replace_trace_blocks(
         &mut self,
         tenant: &str,

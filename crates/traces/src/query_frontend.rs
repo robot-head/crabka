@@ -1,5 +1,6 @@
 //! Query-frontend role: queue and shard Tempo search requests across queriers.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -56,6 +57,7 @@ pub struct QueryFrontendConfig {
     pub max_queue_depth: usize,
     pub target_bytes_per_job: u64,
     pub backend_blocks: Vec<BackendBlock>,
+    pub backend_blocks_by_tenant: BTreeMap<String, Vec<BackendBlock>>,
 }
 
 impl QueryFrontendConfig {
@@ -66,6 +68,7 @@ impl QueryFrontendConfig {
             max_queue_depth: 128,
             target_bytes_per_job: 0,
             backend_blocks: Vec::new(),
+            backend_blocks_by_tenant: BTreeMap::new(),
         })
     }
 }
@@ -212,6 +215,18 @@ pub async fn backend_blocks_from_trace_index(
     Ok(out)
 }
 
+pub async fn backend_blocks_by_tenant_from_trace_index(
+    blocks: &BlockStore,
+    index: &TraceIndex,
+) -> BlockStoreResult<BTreeMap<String, Vec<BackendBlock>>> {
+    let mut out = BTreeMap::new();
+    for tenant in index.tenants() {
+        let blocks = backend_blocks_from_trace_index(blocks, index, &tenant).await?;
+        out.insert(tenant, blocks);
+    }
+    Ok(out)
+}
+
 fn plan_block_jobs(
     shard: &QueryShard,
     block: &BackendBlock,
@@ -271,13 +286,23 @@ async fn ready() -> &'static str {
     "ready"
 }
 
-fn planned_shards(state: &AppState, start_ns: i64, end_ns: i64) -> Vec<QueryShard> {
+fn planned_shards(
+    state: &AppState,
+    headers: &HeaderMap,
+    start_ns: i64,
+    end_ns: i64,
+) -> Vec<QueryShard> {
+    let backend_blocks = state
+        .cfg
+        .backend_blocks_by_tenant
+        .get(request_tenant(headers))
+        .unwrap_or(&state.cfg.backend_blocks);
     plan_query_shards(
         start_ns,
         end_ns,
         state.cfg.live_frontier_ns,
         state.cfg.target_bytes_per_job,
-        &state.cfg.backend_blocks,
+        backend_blocks,
     )
 }
 
@@ -297,7 +322,7 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, start_ns, end_ns) {
+    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
         let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
@@ -342,7 +367,7 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in planned_shards(&state, start_ns, end_ns) {
+    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
         let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
@@ -398,7 +423,7 @@ async fn merged_metric_query_response(
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in planned_shards(&state, start_ns, end_ns) {
+    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
         let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
@@ -443,7 +468,7 @@ async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: 
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, start_ns, end_ns) {
+    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
         let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
@@ -494,7 +519,7 @@ async fn search_tag_values_v2(
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, start_ns, end_ns) {
+    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
         let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
@@ -818,6 +843,14 @@ fn merge_metrics(metrics: &mut Value, next: Option<&Value>) {
     }
 }
 
+fn request_tenant(headers: &HeaderMap) -> &str {
+    headers
+        .get("x-scope-orgid")
+        .and_then(|value| value.to_str().ok())
+        .filter(|tenant| !tenant.is_empty())
+        .unwrap_or("anonymous")
+}
+
 fn forward_accept(req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest::RequestBuilder {
     if let Some(accept) = headers.get(header::ACCEPT) {
         req.header(header::ACCEPT, accept.clone())
@@ -1060,6 +1093,59 @@ mod tests {
         assert!(blocks[0].row_groups[0].compressed_bytes > 0);
         assert!(blocks[0].row_groups[1].index == 1);
         assert!(blocks[0].row_groups[1].compressed_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn backend_blocks_by_tenant_from_trace_index_reads_all_tenants() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = BlockStore::new(object_store.clone(), Url::parse("memory:///").unwrap());
+        write_frontend_block(object_store.clone(), "blocks/tenant-a.parquet", 1).await;
+        write_frontend_block(object_store.clone(), "blocks/tenant-b.parquet", 2).await;
+
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant-a",
+            TraceBlockStats {
+                object_key: "blocks/tenant-a.parquet".into(),
+                min_ts: 10,
+                max_ts: 20,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        index.add_trace_block(
+            "tenant-b",
+            TraceBlockStats {
+                object_key: "blocks/tenant-b.parquet".into(),
+                min_ts: 30,
+                max_ts: 40,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+
+        let by_tenant = backend_blocks_by_tenant_from_trace_index(&blocks, &index)
+            .await
+            .unwrap();
+
+        assert!(by_tenant.len() == 2);
+        assert!(by_tenant["tenant-a"][0].object_key == "blocks/tenant-a.parquet");
+        assert!(by_tenant["tenant-b"][0].object_key == "blocks/tenant-b.parquet");
+    }
+
+    async fn write_frontend_block(object_store: Arc<InMemory>, object_key: &str, span_id: u8) {
+        let batch = encode_span_rows(&[frontend_span_row(span_id)]).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_write_batch_size(1)
+            .build();
+        let object_writer = ParquetObjectWriter::new(object_store, Path::from(object_key));
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), Some(props)).unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
     }
 
     fn frontend_span_row(id: u8) -> SpanRow {

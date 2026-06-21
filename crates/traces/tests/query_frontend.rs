@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use assert2::assert;
 use axum::Router;
 use axum::extract::State;
@@ -241,6 +243,59 @@ async fn frontend_forwards_backend_row_group_job_to_querier() {
     assert!(received_query.contains("block=blocks%2Fa.parquet"));
     assert!(received_query.contains("rowGroupStart=0"));
     assert!(received_query.contains("rowGroupEnd=2"));
+}
+
+#[tokio::test]
+async fn frontend_uses_tenant_specific_backend_row_group_jobs() {
+    let upstream_url = spawn_query_echo_search_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.target_bytes_per_job = 100;
+    cfg.backend_blocks_by_tenant = BTreeMap::from([
+        (
+            "tenant-a".to_string(),
+            vec![BackendBlock {
+                object_key: "blocks/tenant-a.parquet".into(),
+                min_time_ns: 0,
+                max_time_ns: 10_000_000_000,
+                row_groups: vec![BackendRowGroup {
+                    index: 0,
+                    compressed_bytes: 100,
+                }],
+            }],
+        ),
+        (
+            "tenant-b".to_string(),
+            vec![BackendBlock {
+                object_key: "blocks/tenant-b.parquet".into(),
+                min_time_ns: 0,
+                max_time_ns: 10_000_000_000,
+                row_groups: vec![BackendRowGroup {
+                    index: 2,
+                    compressed_bytes: 100,
+                }],
+            }],
+        ),
+    ]);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=10")
+                .header("x-scope-orgid", "tenant-b")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
+
+    assert!(received_query.contains("block=blocks%2Ftenant-b.parquet"));
+    assert!(received_query.contains("rowGroupStart=2"));
+    assert!(received_query.contains("rowGroupEnd=3"));
 }
 
 #[tokio::test]

@@ -18,7 +18,7 @@ use crabka_traces::{
         SystemClock,
     },
     querier::{self as trace_querier, http::HttpConfig, store::CrabkaSpanStore},
-    query_frontend::{self, QueryFrontendConfig, backend_blocks_from_trace_index},
+    query_frontend::{self, QueryFrontendConfig, backend_blocks_by_tenant_from_trace_index},
 };
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -319,9 +319,10 @@ async fn build_query_frontend_router(
             .await
             .unwrap_or_else(|_| TraceIndex::new());
         let blocks = BlockStore::new(configured.store, configured.root);
-        cfg.backend_blocks = backend_blocks_from_trace_index(&blocks, &trace_index, "anonymous")
-            .await
-            .unwrap_or_default();
+        cfg.backend_blocks_by_tenant =
+            backend_blocks_by_tenant_from_trace_index(&blocks, &trace_index)
+                .await
+                .unwrap_or_default();
     }
     Ok(query_frontend::router(cfg))
 }
