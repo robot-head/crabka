@@ -289,7 +289,8 @@ impl<'a> Iterator for RecordIter<'a> {
     }
 }
 
-fn parse_one_record<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
+#[inline]
+pub(crate) fn parse_one_record<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
     let body_len =
         get_varlong(buf).map_err(|e| RecordsError::RecordParse(format!("record length: {e}")))?;
     let body_len = usize::try_from(body_len).map_err(|_| {
