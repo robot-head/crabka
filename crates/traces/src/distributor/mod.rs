@@ -24,7 +24,7 @@ use tonic::metadata::MetadataMap;
 use tonic::transport::Server as GrpcServer;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 
-use crate::error::TracesError;
+use crate::error::{TracesError, tempo_error_response};
 use crate::limits::{IngestEnforcer, LimitError, Limits};
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
@@ -652,11 +652,14 @@ pub async fn produce_spans(
 }
 
 fn error_response(err: &TracesError) -> Response {
-    (
-        StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-        err.to_string(),
-    )
-        .into_response()
+    let status =
+        StatusCode::from_u16(err.status_code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    match err {
+        TracesError::Limit(_) | TracesError::RateLimit(_) => {
+            tempo_error_response(status, err.to_string())
+        }
+        _ => (status, err.to_string()).into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -1113,6 +1116,14 @@ mod tests {
             .unwrap();
 
         assert!(resp.status() == StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["status"] == "error");
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("max spans per trace"))
+        );
         assert!(sink.count() == 0);
     }
 
@@ -1164,6 +1175,14 @@ mod tests {
 
         assert!(first.status() == StatusCode::OK);
         assert!(second.status() == StatusCode::TOO_MANY_REQUESTS);
+        let body = second.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["status"] == "error");
+        assert!(
+            json["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("ingestion rate"))
+        );
         assert!(other_tenant.status() == StatusCode::OK);
         assert!(sink.count() == 2);
         assert!(sink.tenant(0) == "tenant-a");

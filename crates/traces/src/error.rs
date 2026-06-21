@@ -1,5 +1,12 @@
 //! Crate-wide error type and ingest-edge HTTP status mapping.
 
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
+
+use crate::limits::LimitError;
+
 /// Errors across the traces ingest and query pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum TracesError {
@@ -34,6 +41,26 @@ impl TracesError {
             Self::Wal(_) | Self::Produce(_) | Self::Block(_) => 500,
         }
     }
+}
+
+#[must_use]
+pub fn tempo_error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(json!({
+            "status": "error",
+            "error": message.into(),
+        })),
+    )
+        .into_response()
+}
+
+#[must_use]
+pub fn tempo_limit_error_response(err: &LimitError) -> Response {
+    tempo_error_response(
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
+        err.message(),
+    )
 }
 
 #[cfg(test)]

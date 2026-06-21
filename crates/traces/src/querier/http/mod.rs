@@ -24,6 +24,7 @@ use opentelemetry_proto::tonic::trace::v1::{
 use prost::Message as _;
 use serde_json::{Map, Value, json};
 
+use crate::error::tempo_limit_error_response;
 use crate::limits::{LimitError, Limits, QueryEnforcer};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
@@ -979,11 +980,7 @@ fn traceql_query_error_response(err: &TraceqlError) -> Response {
 }
 
 fn limit_error_response(err: &LimitError) -> Response {
-    (
-        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
-        err.message(),
-    )
-        .into_response()
+    tempo_limit_error_response(err)
 }
 
 fn add_intrinsic_tags(mut tags: Vec<ScopedTag>, scope: Option<TagScope>) -> Vec<ScopedTag> {
@@ -2479,14 +2476,19 @@ mod tests {
                 ..crate::limits::Limits::default()
             },
         });
-        let (status, body) = get_text_with_app(
+        let (status, body) = get_json_with_app(
             app,
             "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=2",
         )
         .await;
 
         assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body.contains("max traces per search"));
+        assert!(body["status"] == "error");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("max traces per search"))
+        );
     }
 
     #[tokio::test]
@@ -2498,14 +2500,19 @@ mod tests {
                 ..crate::limits::Limits::default()
             },
         });
-        let (status, body) = get_text_with_app(
+        let (status, body) = get_json_with_app(
             app,
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=3&step=1",
         )
         .await;
 
         assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body.contains("max search duration"));
+        assert!(body["status"] == "error");
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("max search duration"))
+        );
     }
 
     #[tokio::test]
