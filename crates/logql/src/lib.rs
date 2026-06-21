@@ -793,6 +793,14 @@ impl TemplateRuntimeValue {
             Self::String(_) | Self::Json(serde_json::Value::String(_))
         )
     }
+
+    fn is_truthy(&self) -> bool {
+        match self {
+            Self::String(value) => template_string_truthy(value),
+            Self::Integer(value) => *value != 0,
+            Self::Json(value) => template_json_value_truthy(value),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -850,6 +858,25 @@ fn template_json_value_to_string(value: &serde_json::Value) -> String {
     }
 }
 
+fn template_json_value_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(value) => *value,
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                value != 0
+            } else if let Some(value) = value.as_u64() {
+                value != 0
+            } else {
+                value.as_f64().is_some_and(|value| value != 0.0)
+            }
+        }
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(value) => !value.is_empty(),
+        serde_json::Value::Object(value) => !value.is_empty(),
+    }
+}
+
 fn template_variable_path_value(
     value: &TemplateRuntimeValue,
     path: &[String],
@@ -892,7 +919,7 @@ struct TemplateConditional {
 impl TemplateConditional {
     fn render(&self, context: &TemplateRenderContext<'_>) -> String {
         for (condition, parts) in &self.branches {
-            if template_truthy(&condition.render(context)) {
+            if condition.evaluate(context).is_truthy() {
                 return render_template_parts(parts, context);
             }
         }
@@ -1002,7 +1029,7 @@ struct TemplateWith {
 impl TemplateWith {
     fn render(&self, context: &TemplateRenderContext<'_>) -> String {
         let value = self.expression.evaluate(context);
-        if !template_truthy(&value.as_rendered_string()) {
+        if !value.is_truthy() {
             return render_template_parts(&self.else_parts, context);
         }
         let child_context = context.with_current_dot(value);
@@ -1619,7 +1646,7 @@ fn render_template_parts(parts: &[TemplatePart], context: &TemplateRenderContext
     rendered
 }
 
-fn template_truthy(value: &str) -> bool {
+fn template_string_truthy(value: &str) -> bool {
     !matches!(value, "" | "false" | "0")
 }
 
@@ -1908,6 +1935,23 @@ fn evaluate_template_function(name: &str, args: &[TemplateRuntimeValue]) -> Temp
             args, false,
         )));
     }
+    if name == "and" {
+        return TemplateRuntimeValue::String(
+            args.iter().all(TemplateRuntimeValue::is_truthy).to_string(),
+        );
+    }
+    if name == "not" {
+        return TemplateRuntimeValue::String(
+            args.first()
+                .is_none_or(|value| !value.is_truthy())
+                .to_string(),
+        );
+    }
+    if name == "or" {
+        return TemplateRuntimeValue::String(
+            args.iter().any(TemplateRuntimeValue::is_truthy).to_string(),
+        );
+    }
 
     let args = args
         .iter()
@@ -1935,7 +1979,6 @@ fn evaluate_template_function(name: &str, args: &[TemplateRuntimeValue]) -> Temp
                 };
                 align_right_template_string(width, &args[1])
             }
-            "and" => args.iter().all(|value| template_truthy(value)).to_string(),
             "b64enc" => args
                 .first()
                 .map_or_else(String::new, |value| BASE64_STANDARD.encode(value)),
@@ -2062,11 +2105,6 @@ fn evaluate_template_function(name: &str, args: &[TemplateRuntimeValue]) -> Temp
                 format!("\n{}", indent_template_string(spaces, &args[1]))
             }
             "now" => current_template_timestamp(),
-            "not" => args
-                .first()
-                .is_none_or(|value| !template_truthy(value))
-                .to_string(),
-            "or" => args.iter().any(|value| template_truthy(value)).to_string(),
             "printf" => format_template_printf(&args),
             "repeat" => {
                 if args.len() < 2 {

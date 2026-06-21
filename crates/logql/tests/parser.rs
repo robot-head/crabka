@@ -880,6 +880,24 @@ fn query_evaluator_line_format_applies_conditional_template_blocks() {
 }
 
 #[test]
+fn query_evaluator_line_format_applies_json_template_truthiness() {
+    let query = parse_query(
+        r#"{app="api"} | line_format `{{ if fromJson "[]" }}array{{ else }}empty-array{{ end }}|{{ if fromJson "{}" }}object{{ else }}empty-object{{ end }}|{{ if fromJson "null" }}null{{ else }}empty-null{{ end }}|{{ if fromJson "false" }}bool{{ else }}empty-bool{{ end }}|{{ if fromJson "0" }}number{{ else }}empty-number{{ end }}|{{ with fromJson "{\"method\":\"GET\"}" }}{{ .method }}{{ else }}missing{{ end }}|{{ not (fromJson "[]") }}|{{ or (fromJson "[]") (fromJson "{\"x\":1}") }}|{{ and (fromJson "{\"x\":1}") (fromJson "0") }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let result = query
+        .evaluate_with_fields(&labels, "raw", &BTreeMap::new())
+        .unwrap();
+
+    check!(
+        result.line
+            == "empty-array|empty-object|empty-null|empty-bool|empty-number|GET|true|true|false"
+    );
+}
+
+#[test]
 fn query_evaluator_line_format_applies_with_template_blocks() {
     let query = parse_query(
         r#"{app="api"} | logfmt | line_format `{{ with .method }}method={{ . }}{{ else }}missing{{ end }}`"#,
