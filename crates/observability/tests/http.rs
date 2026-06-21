@@ -10885,6 +10885,51 @@ async fn series_endpoint_accepts_form_encoded_post_body() {
 }
 
 #[tokio::test]
+async fn series_endpoint_accepts_form_post_matcher_with_raw_ampersand() {
+    let hot_tail = InMemoryWalSink::default();
+    hot_tail
+        .append(WalLogRecord {
+            tenant: "tenant-a".to_string(),
+            labels: labels([("app", "api&edge"), ("level", "info")]),
+            timestamp_ns: 20,
+            line: "api edge hot".to_string(),
+            structured_metadata: BTreeMap::new(),
+            position: None,
+        })
+        .await
+        .unwrap();
+    let state = fixture().with_hot_tail(hot_tail, 19);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/series")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(r#"match[]={app="api&edge"}&start=0&end=30"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": [
+                    {
+                        "app": "api&edge",
+                        "level": "info"
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn index_stats_endpoint_returns_stream_chunk_entry_and_byte_counts() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
@@ -11079,6 +11124,63 @@ async fn index_volume_range_endpoint_accepts_form_post_and_target_labels() {
                         }
                     ],
                     "stats": expected_loki_stats_with(expected_block_bytes, 0, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
+async fn index_volume_range_endpoint_accepts_form_post_query_with_raw_ampersand() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api&edge")]));
+    let api_block = write_log_block(
+        &dir,
+        &BlockKey::new("tenant-a", 0, 10, 19, TimeRange::new(10, 19).unwrap()),
+        vec![LogRow::new(api, 19, "api edge error", BTreeMap::new())],
+    )
+    .unwrap();
+    let expected_block_bytes = api_block.size_bytes;
+    let mut block_index = BlockIndex::default();
+    block_index.insert(api_block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/index/volume_range")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api&edge"}&start=10&end=30&step=10"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "api&edge"
+                            },
+                            "values": [
+                                [10, expected_block_bytes.to_string()],
+                                [20, "0"],
+                                [30, "0"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(expected_block_bytes, 3, 1)
                 }
             })
     );
@@ -11477,6 +11579,74 @@ async fn patterns_endpoint_accepts_form_encoded_post_body() {
 }
 
 #[tokio::test]
+async fn patterns_endpoint_accepts_form_post_query_with_raw_ampersand() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api&edge")]));
+    let api_block = write_log_block(
+        &dir,
+        &BlockKey::new(
+            "tenant-a",
+            0,
+            100_000_000,
+            1_100_000_000,
+            TimeRange::new(100_000_000, 1_100_000_000).unwrap(),
+        ),
+        vec![
+            LogRow::new(
+                api,
+                100_000_000,
+                "status=500 user=100 route=/checkout",
+                BTreeMap::new(),
+            ),
+            LogRow::new(
+                api,
+                1_100_000_000,
+                "status=200 user=200 route=/checkout",
+                BTreeMap::new(),
+            ),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(api_block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/patterns")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api&edge"}&start=0&end=2000000000&step=1000000000"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": [
+                    {
+                        "pattern": "status=<_> user=<_> route=/checkout",
+                        "samples": [
+                            [0, 1],
+                            [1, 1]
+                        ]
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_patterns_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     create_secret_delete_request(&delete_requests).await;
@@ -11821,6 +11991,50 @@ async fn detected_field_values_endpoint_accepts_form_post_body() {
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
                     "query=%7Bapp%3D%22api%22%7D&start=10&end=20&limit=1",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "values": ["500"],
+                "limit": 1
+            })
+    );
+}
+
+#[tokio::test]
+async fn detected_field_values_endpoint_accepts_form_post_query_with_raw_ampersand() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api&edge")]));
+    let api_block = write_log_block(
+        &dir,
+        &BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(10, 20).unwrap()),
+        vec![
+            LogRow::new(api, 10, r#"{"status":500}"#, BTreeMap::new()),
+            LogRow::new(api, 11, "status=503", BTreeMap::new()),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(api_block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/detected_field/status/values")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api&edge"}&start=10&end=20&limit=1"#,
                 ))
                 .unwrap(),
         )
