@@ -4040,6 +4040,39 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
 }
 
 #[tokio::test]
+async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for uri in ["/loki/api/v1/rules/default", "/api/prom/rules/default"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::NOT_FOUND);
+        let body = text_body(response).await;
+        assert!(body == "no rule groups found\n");
+    }
+
+    for uri in [
+        "/loki/api/v1/rules/default/api-errors",
+        "/api/prom/rules/default/api-errors",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::NOT_FOUND);
+        let body = text_body(response).await;
+        assert!(body == "group does not exist\n");
+    }
+}
+
+#[tokio::test]
 async fn ruler_ring_endpoint_returns_loki_status_page() {
     let state = fixture();
     let app = loki_router(state);
