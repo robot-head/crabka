@@ -11489,7 +11489,6 @@ fn parse_detected_labels_params(
     let mut start = None;
     let mut end = None;
     let mut since = None;
-    let mut step = None;
     let mut limit = None;
 
     if let Some(raw_query) = raw_query {
@@ -11500,9 +11499,9 @@ fn parse_detected_labels_params(
                 "start",
                 "end",
                 "since",
-                "step",
                 "limit",
                 "field_limit",
+                "step",
             ],
         ) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -11514,18 +11513,14 @@ fn parse_detected_labels_params(
                 "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
                 "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
                 "since" => since = Some(parse_loki_duration_query_param("since", &value)?),
-                "step" => step = Some(parse_loki_duration_query_param("step", &value)?),
-                "limit" | "field_limit" => limit = Some(parse_usize_query_param("limit", &value)?),
+                "limit" | "field_limit" => {
+                    limit = parse_usize_query_param("limit", &value).ok().or(limit);
+                }
                 _ => {}
             }
         }
     }
 
-    if let Some(step) = step
-        && step <= 0
-    {
-        return Err(HttpQueryError::InvalidStep);
-    }
     let end = end.unwrap_or_else(current_unix_time_ns);
     let start = start_or_since(start, since, Some(end))?
         .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));

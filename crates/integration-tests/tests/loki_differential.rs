@@ -1238,6 +1238,25 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
             .await;
     assert!(crabka_all_detected_labels == loki_all_detected_labels);
 
+    let lenient_detected_labels_path =
+        "detected_labels?query=%7Bapp%3D%22api%22%7D&step=not-a-number&limit=not-a-limit";
+    let loki_lenient_detected_labels = loki_detected_labels_result(
+        &http,
+        &loki_base,
+        lenient_detected_labels_path,
+        base_ns,
+        end_ns,
+    )
+    .await;
+    let crabka_lenient_detected_labels = crabka_detected_labels_result(
+        querier.clone(),
+        lenient_detected_labels_path,
+        base_ns,
+        end_ns,
+    )
+    .await;
+    assert!(crabka_lenient_detected_labels == loki_lenient_detected_labels);
+
     let series_path = "series?match%5B%5D=%7Bapp%3D%22api%22%7D";
     let loki_series = loki_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_series = crabka_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
