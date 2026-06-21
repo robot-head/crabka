@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 use crate::metricsgen::clock::Clock;
 use crate::metricsgen::config::MetricsGenConfig;
 use crate::metricsgen::processor::MetricsGenerator;
+use crate::metricsgen::series::SeriesPayload;
 use crate::metricsgen::sink::{RemoteWriteSink, SinkError, SpanSource};
 
 /// Wires the source, processors, sink, and clock for the metrics-generator role.
@@ -19,6 +20,7 @@ where
     pub(crate) source: Arc<Src>,
     pub(crate) sink: Arc<Snk>,
     generator: Mutex<MetricsGenerator>,
+    pending_payloads: Mutex<Vec<SeriesPayload>>,
     clock: Arc<dyn Clock>,
     cfg: MetricsGenConfig,
 }
@@ -37,6 +39,7 @@ where
     ) -> Self {
         Self {
             generator: Mutex::new(MetricsGenerator::new(cfg.clone(), clock.clone())),
+            pending_payloads: Mutex::new(Vec::new()),
             cfg,
             clock,
             source,
@@ -45,6 +48,15 @@ where
     }
 
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
+        if !self
+            .pending_payloads
+            .lock()
+            .expect("metrics generator pending payload mutex poisoned")
+            .is_empty()
+        {
+            return Ok(0);
+        }
+
         let spans = self.source.poll(max).await?;
         let count = spans.len();
         if count > 0 {
@@ -62,11 +74,18 @@ where
     pub async fn collect_once(&self) -> Result<usize, SinkError> {
         let timestamp_ms = self.clock.now_ns() / 1_000_000;
         let payloads = {
-            let mut generator = self
-                .generator
+            let mut pending = self
+                .pending_payloads
                 .lock()
-                .expect("metrics generator mutex poisoned");
-            generator.collect(timestamp_ms)
+                .expect("metrics generator pending payload mutex poisoned");
+            if pending.is_empty() {
+                let mut generator = self
+                    .generator
+                    .lock()
+                    .expect("metrics generator mutex poisoned");
+                *pending = generator.collect(timestamp_ms);
+            }
+            pending.clone()
         };
 
         if payloads.is_empty() {
@@ -77,6 +96,10 @@ where
             self.sink.write(payload).await?;
         }
         self.source.commit().await?;
+        self.pending_payloads
+            .lock()
+            .expect("metrics generator pending payload mutex poisoned")
+            .clear();
         Ok(payloads.len())
     }
 
@@ -187,6 +210,25 @@ mod tests {
 
         assert!(result.is_err());
         assert!(svc.source.commits() == 0);
+    }
+
+    #[tokio::test]
+    async fn collect_retries_pending_payload_after_write_failure() {
+        let svc = service();
+        svc.source
+            .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0; 8])]);
+        svc.poll_once(100).await.unwrap();
+        svc.sink.fail_next();
+
+        assert!(svc.collect_once().await.is_err());
+        assert!(svc.source.commits() == 0);
+        assert!(svc.sink.writes().is_empty());
+
+        let retried = svc.collect_once().await.unwrap();
+
+        assert!(retried == 1);
+        assert!(svc.sink.writes().len() == 1);
+        assert!(svc.source.commits() == 1);
     }
 
     #[tokio::test]
