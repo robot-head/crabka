@@ -241,9 +241,15 @@ async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
     assert!(crabka_result == loki_result);
 
     let loki_diff_result = loki_config_result_with_query(&http, &loki_base, "mode=diff").await;
-    let crabka_diff_result = crabka_config_result_with_query(querier, "mode=diff").await;
+    let crabka_diff_result = crabka_config_result_with_query(querier.clone(), "mode=diff").await;
 
     assert!(crabka_diff_result == loki_diff_result);
+
+    let loki_defaults_result =
+        loki_config_result_with_query(&http, &loki_base, "mode=defaults").await;
+    let crabka_defaults_result = crabka_config_result_with_query(querier, "mode=defaults").await;
+
+    assert!(crabka_defaults_result == loki_defaults_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
