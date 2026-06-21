@@ -1384,7 +1384,17 @@ fn parse_template_assignment(expression: &str) -> Result<Option<TemplateAssignme
     if !expression.trim_start().starts_with('$') {
         return Ok(None);
     }
-    let Some((variable, expression)) = expression.split_once(":=") else {
+    let (variable, expression) = if let Some((variable, expression)) = expression.split_once(":=") {
+        (variable, expression)
+    } else if let Some((variable, expression)) = expression.split_once('=') {
+        if variable
+            .trim()
+            .contains(|ch: char| ch.is_whitespace() || ch == '|')
+        {
+            return Ok(None);
+        }
+        (variable, expression)
+    } else {
         return Ok(None);
     };
     let variable = parse_template_variable_name(variable.trim(), "expected template variable")?;

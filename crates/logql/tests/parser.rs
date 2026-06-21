@@ -932,6 +932,21 @@ fn query_evaluator_line_format_applies_template_variable_assignments() {
 }
 
 #[test]
+fn query_evaluator_line_format_reassigns_template_variables() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | line_format `{{ $status := .status }}{{ $status = printf "status=%s" $status }}{{ $status }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let output = query
+        .evaluate_with_fields(&labels, r#"status=500"#, &BTreeMap::new())
+        .unwrap();
+
+    check!(output.line == "status=500");
+}
+
+#[test]
 fn query_evaluator_line_format_applies_template_trim_markers() {
     let query =
         parse_query(r#"{app="api"} | logfmt | line_format `left {{- .method -}} right`"#).unwrap();
