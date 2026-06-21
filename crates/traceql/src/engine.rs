@@ -404,8 +404,15 @@ struct MetricPlan {
     value: Option<Field>,
     quantiles: Vec<f64>,
     by: Vec<Field>,
+    filter: Option<MetricFilter>,
     rank: Option<RankLimit>,
     compare: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MetricFilter {
+    op: crate::ast::ComparisonOp,
+    value: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -446,15 +453,16 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
         return Err(unsupported_metric_pipeline());
     };
     if parts.compare {
-        metric_plan_with_compare(parts.aggregate, parts.by, parts.rank)
+        metric_plan_with_compare(parts.aggregate, parts.by, parts.filter, parts.rank)
     } else {
-        metric_plan_for(parts.aggregate, parts.by, parts.rank)
+        metric_plan_for(parts.aggregate, parts.by, parts.filter, parts.rank)
     }
 }
 
 struct MetricPipelineParts<'a> {
     aggregate: &'a Aggregate,
     by: Vec<Field>,
+    filter: Option<MetricFilter>,
     rank: Option<RankLimit>,
     compare: bool,
 }
@@ -462,12 +470,16 @@ struct MetricPipelineParts<'a> {
 fn metric_pipeline_parts(pipeline: &[Pipeline]) -> Result<Option<MetricPipelineParts<'_>>> {
     let mut aggregate = None;
     let mut by = None;
+    let mut filter = None;
     let mut rank = None;
     let mut compare = false;
     for stage in pipeline {
         match stage {
             Pipeline::Aggregate(value) if aggregate.is_none() => aggregate = Some(value),
             Pipeline::By(value) if by.is_none() => by = Some(value.clone()),
+            Pipeline::Filter { op, value } if filter.is_none() => {
+                filter = Some(metric_filter(*op, *value)?);
+            }
             stage @ (Pipeline::TopK(_) | Pipeline::BottomK(_)) if rank.is_none() => {
                 rank = Some(rank_limit(stage)?);
             }
@@ -478,6 +490,7 @@ fn metric_pipeline_parts(pipeline: &[Pipeline]) -> Result<Option<MetricPipelineP
     Ok(aggregate.map(|aggregate| MetricPipelineParts {
         aggregate,
         by: by.unwrap_or_default(),
+        filter,
         rank,
         compare,
     }))
@@ -510,9 +523,29 @@ fn rank_limit(pipeline: &Pipeline) -> Result<RankLimit> {
     }
 }
 
+fn metric_filter(op: crate::ast::ComparisonOp, value: f64) -> Result<MetricFilter> {
+    if !value.is_finite() {
+        return Err(TraceqlError::Plan(
+            "metric comparison filter value is not finite".into(),
+        ));
+    }
+    match op {
+        crate::ast::ComparisonOp::Eq
+        | crate::ast::ComparisonOp::Neq
+        | crate::ast::ComparisonOp::Lt
+        | crate::ast::ComparisonOp::Lte
+        | crate::ast::ComparisonOp::Gt
+        | crate::ast::ComparisonOp::Gte => Ok(MetricFilter { op, value }),
+        crate::ast::ComparisonOp::Re | crate::ast::ComparisonOp::Nre => Err(
+            TraceqlError::Unsupported("regex filter on metric scalar is not supported".into()),
+        ),
+    }
+}
+
 fn metric_plan_for(
     aggregate: &Aggregate,
     by: Vec<Field>,
+    filter: Option<MetricFilter>,
     rank: Option<RankLimit>,
 ) -> Result<MetricPlan> {
     let (function, value, quantiles) = match aggregate {
@@ -555,6 +588,7 @@ fn metric_plan_for(
         value,
         quantiles,
         by,
+        filter,
         rank,
         compare: false,
     })
@@ -563,9 +597,10 @@ fn metric_plan_for(
 fn metric_plan_with_compare(
     aggregate: &Aggregate,
     by: Vec<Field>,
+    filter: Option<MetricFilter>,
     rank: Option<RankLimit>,
 ) -> Result<MetricPlan> {
-    let mut plan = metric_plan_for(aggregate, by, rank)?;
+    let mut plan = metric_plan_for(aggregate, by, filter, rank)?;
     plan.compare = true;
     Ok(plan)
 }
@@ -672,8 +707,43 @@ fn assemble_metrics_response(
         .flatten()
         .collect();
     Ok(TraceMetricsResponse {
-        series: apply_rank(series, metric.rank),
+        series: apply_rank(apply_metric_filter(series, metric.filter), metric.rank),
     })
+}
+
+fn apply_metric_filter(
+    series: Vec<TraceMetricSeries>,
+    filter: Option<MetricFilter>,
+) -> Vec<TraceMetricSeries> {
+    let Some(filter) = filter else {
+        return series;
+    };
+    series
+        .into_iter()
+        .filter_map(|mut series| {
+            series
+                .points
+                .retain(|(_, value)| metric_filter_passes(*value, filter));
+            if series.points.is_empty() {
+                None
+            } else {
+                Some(series)
+            }
+        })
+        .collect()
+}
+
+fn metric_filter_passes(value: f64, filter: MetricFilter) -> bool {
+    let ordering = value.total_cmp(&filter.value);
+    match filter.op {
+        crate::ast::ComparisonOp::Eq => ordering.is_eq(),
+        crate::ast::ComparisonOp::Neq => !ordering.is_eq(),
+        crate::ast::ComparisonOp::Lt => ordering.is_lt(),
+        crate::ast::ComparisonOp::Lte => !ordering.is_gt(),
+        crate::ast::ComparisonOp::Gt => ordering.is_gt(),
+        crate::ast::ComparisonOp::Gte => !ordering.is_lt(),
+        crate::ast::ComparisonOp::Re | crate::ast::ComparisonOp::Nre => false,
+    }
 }
 
 fn apply_rank(
@@ -2343,6 +2413,38 @@ mod tests {
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
         assert!(got[1].labels == vec![("svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn metric_comparison_filter_keeps_only_passing_samples() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(1, 1, None, "api", 0),
+                sp_at(1, 2, None, "api", 10_000),
+                sp_at(1, 3, None, "db", 20_000),
+                sp_at(1, 4, None, "db", 70_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | by(span.svc) > 1",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        assert!(got.len() == 1);
+        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].points == vec![(0, 2.0)]);
     }
 
     #[tokio::test]
