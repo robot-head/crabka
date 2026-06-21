@@ -1214,6 +1214,13 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
             })
     );
 
+    let detected_labels_path = "detected_labels?query=%7Bapp%3D%22api%22%7D&limit=10";
+    let loki_detected_labels =
+        loki_detected_labels_result(&http, &loki_base, detected_labels_path, base_ns, end_ns).await;
+    let crabka_detected_labels =
+        crabka_detected_labels_result(querier.clone(), detected_labels_path, base_ns, end_ns).await;
+    assert!(crabka_detected_labels == loki_detected_labels);
+
     let series_path = "series?match%5B%5D=%7Bapp%3D%22api%22%7D";
     let loki_series = loki_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_series = crabka_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
@@ -5876,6 +5883,62 @@ async fn crabka_detected_fields_result(
     stable_detected_fields_result(&serde_json::from_slice(&body).unwrap())
 }
 
+async fn loki_detected_labels_result(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let body: Value = http
+            .get(format!(
+                "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}",
+            ))
+            .header("X-Scope-OrgID", "tenant-a")
+            .send()
+            .await
+            .expect("query Loki detected labels")
+            .json()
+            .await
+            .expect("Loki detected labels JSON response");
+        let stable = stable_detected_labels_result(&body);
+        if detected_labels_result_is_populated(&stable) {
+            return stable;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Loki never returned the differential detected-labels row: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn crabka_detected_labels_result(
+    app: axum::Router,
+    path: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Value {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    let uri = format!("/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_detected_labels_result(&serde_json::from_slice(&body).unwrap())
+}
+
 async fn loki_patterns_default_response(
     http: &reqwest::Client,
     base: &str,
@@ -6284,6 +6347,10 @@ fn detected_fields_result_is_populated(body: &Value) -> bool {
             .is_some_and(|values| !values.is_empty())
 }
 
+fn detected_labels_result_is_populated(body: &Value) -> bool {
+    body.as_array().is_some_and(|labels| !labels.is_empty())
+}
+
 fn volume_result_is_populated(body: &Value) -> bool {
     body["data"]["result"]
         .as_array()
@@ -6353,6 +6420,15 @@ fn stable_detected_fields_result(body: &Value) -> Value {
             "limit": body["limit"].clone()
         })
     }
+}
+
+fn stable_detected_labels_result(body: &Value) -> Value {
+    let mut labels = body["detectedLabels"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    labels.sort_by_key(|value| value["label"].as_str().unwrap_or_default().to_string());
+    json!(labels)
 }
 
 fn stable_patterns_result(body: &Value) -> Value {
