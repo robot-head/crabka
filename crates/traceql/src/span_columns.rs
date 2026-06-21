@@ -26,6 +26,10 @@ pub const COL_STATUS_CODE: &str = "status_code";
 pub const COL_STATUS_MESSAGE: &str = "status_message";
 pub const COL_INSTRUMENTATION_NAME: &str = "instrumentation_name";
 pub const COL_INSTRUMENTATION_VERSION: &str = "instrumentation_version";
+pub const COL_EVENT_NAME: &str = "event_name";
+pub const COL_EVENT_TIME_SINCE_START: &str = "event_time_since_start_nanos";
+pub const COL_LINK_TRACE_ID: &str = "link_trace_id";
+pub const COL_LINK_SPAN_ID: &str = "link_span_id";
 pub const ATTR_PREFIX: &str = "attr.";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +84,10 @@ pub fn span_schema_with_attrs(attr_cols: &[(String, DataType)]) -> SchemaRef {
         Field::new(COL_STATUS_MESSAGE, DataType::Utf8, true),
         Field::new(COL_INSTRUMENTATION_NAME, DataType::Utf8, true),
         Field::new(COL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
+        Field::new(COL_EVENT_NAME, DataType::Utf8, true),
+        Field::new(COL_EVENT_TIME_SINCE_START, DataType::Int64, true),
+        Field::new(COL_LINK_TRACE_ID, DataType::FixedSizeBinary(16), true),
+        Field::new(COL_LINK_SPAN_ID, DataType::FixedSizeBinary(8), true),
     ];
 
     fields.extend(

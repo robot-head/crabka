@@ -4,11 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, ListArray, StringArray, StringViewArray, StructArray,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array,
+    Int32Array, Int64Array, Int64Builder, LargeStringArray, ListArray, StringArray, StringBuilder,
+    StringViewArray, StructArray,
 };
 use arrow::compute::{cast, concat_batches, filter_record_batch};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockIndex, BlockStore, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
@@ -16,8 +17,9 @@ use crabka_blockstore::{
     span_block_schema,
 };
 use crabka_traceql::{
-    ATTR_PREFIX, AttrValue, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
-    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
+    ATTR_PREFIX, AttrValue, COL_CHILD_COUNT, COL_DURATION, COL_EVENT_NAME,
+    COL_EVENT_TIME_SINCE_START, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND,
+    COL_LINK_SPAN_ID, COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EventRef, LinkRef,
     MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, ScopedTag, SpanMatcher,
@@ -144,6 +146,7 @@ impl CrabkaSpanStore {
         }
         let batches = recompute_scan_nested_sets(batches)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
+        let batches = add_nested_intrinsic_columns(batches)?;
 
         let schema = batches
             .first()
@@ -1271,6 +1274,105 @@ fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBat
     let batch = concat_batches(&schema, &batches)
         .map_err(|err| TraceqlError::Store(format!("concat scan batches: {err}")))?;
     recompute_batch_nested_sets(&batch).map(|batch| vec![batch])
+}
+
+fn add_nested_intrinsic_columns(
+    batches: Vec<RecordBatch>,
+) -> Result<Vec<RecordBatch>, TraceqlError> {
+    batches
+        .into_iter()
+        .map(|batch| add_nested_intrinsic_columns_to_batch(&batch))
+        .collect()
+}
+
+fn add_nested_intrinsic_columns_to_batch(batch: &RecordBatch) -> Result<RecordBatch, TraceqlError> {
+    let schema = batch.schema();
+    let missing = [
+        COL_EVENT_NAME,
+        COL_EVENT_TIME_SINCE_START,
+        COL_LINK_TRACE_ID,
+        COL_LINK_SPAN_ID,
+    ]
+    .into_iter()
+    .filter(|name| schema.column_with_name(name).is_none())
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(batch.clone());
+    }
+
+    let mut event_name = StringBuilder::new();
+    let mut event_time_since_start = Int64Builder::new();
+    let mut link_trace_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 16);
+    let mut link_span_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 8);
+    for row in 0..batch.num_rows() {
+        let events = event_values(batch, row)?;
+        if let Some(event) = events.first() {
+            event_name.append_value(&event.name);
+            event_time_since_start
+                .append_value(i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX));
+        } else {
+            event_name.append_null();
+            event_time_since_start.append_null();
+        }
+        let links = link_values(batch, row)?;
+        if let Some(link) = links.first() {
+            link_trace_id
+                .append_value(link.trace_id)
+                .map_err(|err| TraceqlError::Store(err.to_string()))?;
+            link_span_id
+                .append_value(link.span_id)
+                .map_err(|err| TraceqlError::Store(err.to_string()))?;
+        } else {
+            link_trace_id.append_null();
+            link_span_id.append_null();
+        }
+    }
+
+    let event_name = Arc::new(event_name.finish()) as ArrayRef;
+    let event_time_since_start = Arc::new(event_time_since_start.finish()) as ArrayRef;
+    let link_trace_id = Arc::new(link_trace_id.finish()) as ArrayRef;
+    let link_span_id = Arc::new(link_span_id.finish()) as ArrayRef;
+    let mut fields = schema
+        .fields()
+        .iter()
+        .map(|field| field.as_ref().clone())
+        .collect::<Vec<_>>();
+    let mut columns = batch.columns().to_vec();
+    for name in missing {
+        match name {
+            COL_EVENT_NAME => {
+                fields.push(Field::new(COL_EVENT_NAME, DataType::Utf8, true));
+                columns.push(event_name.clone());
+            }
+            COL_EVENT_TIME_SINCE_START => {
+                fields.push(Field::new(
+                    COL_EVENT_TIME_SINCE_START,
+                    DataType::Int64,
+                    true,
+                ));
+                columns.push(event_time_since_start.clone());
+            }
+            COL_LINK_TRACE_ID => {
+                fields.push(Field::new(
+                    COL_LINK_TRACE_ID,
+                    DataType::FixedSizeBinary(16),
+                    true,
+                ));
+                columns.push(link_trace_id.clone());
+            }
+            COL_LINK_SPAN_ID => {
+                fields.push(Field::new(
+                    COL_LINK_SPAN_ID,
+                    DataType::FixedSizeBinary(8),
+                    true,
+                ));
+                columns.push(link_span_id.clone());
+            }
+            _ => {}
+        }
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+        .map_err(|err| TraceqlError::Store(format!("add nested intrinsic columns: {err}")))
 }
 
 fn align_scan_batches_to_schema(
@@ -3385,6 +3487,29 @@ mod tests {
 
         let resp = engine
             .search("tenant", "{ event:name = \"exception\" }", 0, 10_000, 10)
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 2);
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == matching.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == split_events.trace_id)
+        );
+
+        let resp = engine
+            .search(
+                "tenant",
+                "{ event:name != nil } | count() by (event:name) > 1",
+                0,
+                10_000,
+                10,
+            )
             .await
             .unwrap();
 

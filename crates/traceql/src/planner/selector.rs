@@ -8,10 +8,11 @@ use crate::ast::{ComparisonOp, Field, FieldExpr, Intrinsic, Scope, Value};
 use crate::error::{Result, TraceqlError};
 use crate::planner::{PlannedSpanset, PlannerContext};
 use crate::span_columns::{
-    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
-    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
-    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_STATUS_CODE,
-    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID,
+    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_EVENT_NAME, COL_EVENT_TIME_SINCE_START,
+    COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND, COL_LINK_SPAN_ID,
+    COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
+    COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_STATUS_CODE, COL_STATUS_MESSAGE,
+    COL_TRACE_DURATION, COL_TRACE_ID,
 };
 use crate::store::{MatchCmp, MatchScope, MatchValue, SpanMatcher, SpanStore};
 
@@ -178,7 +179,7 @@ fn parent_field_expr_to_sql_qualified(
         )),
         FieldExpr::Field(field) if matches!(field.scope, Scope::Parent) => Ok(Some(format!(
             "{} IS NOT NULL",
-            qualified_field_ident(field, span_alias, parent_alias)?
+            qualified_field_ident(field, span_alias, parent_alias)
         ))),
         FieldExpr::And(a, b) => {
             let left = parent_field_expr_to_sql_qualified(a, span_alias, parent_alias)?;
@@ -207,7 +208,7 @@ fn parent_field_expr_to_sql_qualified(
     }
 }
 
-pub(crate) fn field_to_column(field: &Field) -> Result<String> {
+pub(crate) fn field_to_column(field: &Field) -> String {
     let col = match &field.scope {
         Scope::Intrinsic(i) => match i {
             Intrinsic::Name => COL_NAME,
@@ -227,14 +228,10 @@ pub(crate) fn field_to_column(field: &Field) -> Result<String> {
             Intrinsic::ChildCount => COL_CHILD_COUNT,
             Intrinsic::InstrumentationName => COL_INSTRUMENTATION_NAME,
             Intrinsic::InstrumentationVersion => COL_INSTRUMENTATION_VERSION,
-            Intrinsic::EventName
-            | Intrinsic::EventTimeSinceStart
-            | Intrinsic::LinkTraceId
-            | Intrinsic::LinkSpanId => {
-                return Err(TraceqlError::Unsupported(format!(
-                    "intrinsic {i:?} is not mapped to a scalar span column yet"
-                )));
-            }
+            Intrinsic::EventName => COL_EVENT_NAME,
+            Intrinsic::EventTimeSinceStart => COL_EVENT_TIME_SINCE_START,
+            Intrinsic::LinkTraceId => COL_LINK_TRACE_ID,
+            Intrinsic::LinkSpanId => COL_LINK_SPAN_ID,
         },
         Scope::Both | Scope::Resource if field.key == "service.name" => COL_ROOT_SERVICE_NAME,
         Scope::Both
@@ -243,9 +240,9 @@ pub(crate) fn field_to_column(field: &Field) -> Result<String> {
         | Scope::Parent
         | Scope::Event
         | Scope::Link
-        | Scope::Instrumentation => return Ok(format!("{ATTR_PREFIX}{}", field.key)),
+        | Scope::Instrumentation => return format!("{ATTR_PREFIX}{}", field.key),
     };
-    Ok(col.to_string())
+    col.to_string()
 }
 
 pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
@@ -262,7 +259,7 @@ pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
             field_expr_to_sql(b)?
         )),
         FieldExpr::Not(inner) => Ok(format!("(NOT {})", field_expr_to_sql(inner)?)),
-        FieldExpr::Field(field) => Ok(format!("{} IS NOT NULL", ident(&field_to_column(field)?))),
+        FieldExpr::Field(field) => Ok(format!("{} IS NOT NULL", ident(&field_to_column(field)))),
     }
 }
 
@@ -320,13 +317,13 @@ fn field_expr_to_sql_qualified(
         )),
         FieldExpr::Field(field) => Ok(format!(
             "{} IS NOT NULL",
-            qualified_field_ident(field, span_alias, parent_alias)?
+            qualified_field_ident(field, span_alias, parent_alias)
         )),
     }
 }
 
 pub(crate) fn comparison_to_sql(field: &Field, op: ComparisonOp, value: &Value) -> Result<String> {
-    let col = ident(&field_to_column(field)?);
+    let col = ident(&field_to_column(field));
     Ok(match (op, value) {
         (ComparisonOp::Eq, Value::Nil) => format!("{col} IS NULL"),
         (ComparisonOp::Neq, Value::Nil) => format!("{col} IS NOT NULL"),
@@ -357,7 +354,7 @@ fn comparison_to_sql_qualified(
     span_alias: &str,
     parent_alias: &str,
 ) -> Result<String> {
-    let col = qualified_field_ident(field, span_alias, parent_alias)?;
+    let col = qualified_field_ident(field, span_alias, parent_alias);
     Ok(match (op, value) {
         (ComparisonOp::Eq, Value::Nil) => format!("{col} IS NULL"),
         (ComparisonOp::Neq, Value::Nil) => format!("{col} IS NOT NULL"),
@@ -381,13 +378,13 @@ fn comparison_to_sql_qualified(
     })
 }
 
-fn qualified_field_ident(field: &Field, span_alias: &str, parent_alias: &str) -> Result<String> {
+fn qualified_field_ident(field: &Field, span_alias: &str, parent_alias: &str) -> String {
     let alias = if matches!(field.scope, Scope::Parent) {
         parent_alias
     } else {
         span_alias
     };
-    Ok(format!("{alias}.{}", ident(&field_to_column(field)?)))
+    format!("{alias}.{}", ident(&field_to_column(field)))
 }
 
 pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
@@ -586,8 +583,8 @@ fn comparison_value_sql(field: &Field, value: &Value) -> Result<String> {
         return enum_value_sql(&field.scope, name);
     }
     let width = match field.scope {
-        Scope::Intrinsic(Intrinsic::TraceId) => Some(16),
-        Scope::Intrinsic(Intrinsic::Id | Intrinsic::ParentId) => Some(8),
+        Scope::Intrinsic(Intrinsic::TraceId | Intrinsic::LinkTraceId) => Some(16),
+        Scope::Intrinsic(Intrinsic::Id | Intrinsic::ParentId | Intrinsic::LinkSpanId) => Some(8),
         _ => None,
     };
     if let Some(width) = width {

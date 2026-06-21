@@ -434,8 +434,8 @@ fn grouped_aggregate_sql(
     };
     let group_cols = by
         .iter()
-        .map(|field| selector::field_to_column(field).map(|col| selector::ident(&col)))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|field| selector::ident(&selector::field_to_column(field)))
+        .collect::<Vec<_>>();
     let group_exprs = group_cols.join(", ");
     let join_pred = group_cols
         .iter()
@@ -460,8 +460,8 @@ fn grouped_rank_sql(
 ) -> Result<String> {
     let group_cols = by
         .iter()
-        .map(|field| selector::field_to_column(field).map(|col| selector::ident(&col)))
-        .collect::<Result<Vec<_>>>()?;
+        .map(|field| selector::ident(&selector::field_to_column(field)))
+        .collect::<Vec<_>>();
     let group_exprs = group_cols.join(", ");
     let join_pred = group_cols
         .iter()
@@ -582,7 +582,7 @@ fn aggregate_expr_sql(agg: &Aggregate) -> Result<String> {
     };
     Ok(format!(
         "{func}({})",
-        selector::ident(&selector::field_to_column(field)?)
+        selector::ident(&selector::field_to_column(field))
     ))
 }
 
@@ -748,7 +748,7 @@ mod tests {
     use super::*;
     use crate::InMemorySpanStore;
     use crate::parser::parse;
-    use crate::result::AttrValue;
+    use crate::result::{AttrValue, EventRef};
     use crate::span_columns::{COL_NAME, InputSpan};
 
     fn span_with_parent(
@@ -884,6 +884,39 @@ mod tests {
         let out = planned("{ span:duration > 100 }", &store).await.unwrap();
         assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
         assert!(first_name(&out) == "long");
+    }
+
+    #[tokio::test]
+    async fn grouped_pipeline_filters_by_nested_event_intrinsic() {
+        let mut miss_one = span(1, "miss-one", 50, vec![]);
+        miss_one.events = vec![EventRef {
+            time_since_start_nano: 10,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut miss_two = span(2, "miss-two", 50, vec![]);
+        miss_two.events = vec![EventRef {
+            time_since_start_nano: 20,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut hit = span(3, "hit", 50, vec![]);
+        hit.events = vec![EventRef {
+            time_since_start_nano: 30,
+            name: "cache.hit".into(),
+            attributes: Vec::new(),
+        }];
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("t", "svc", "root", vec![miss_one, miss_two, hit]);
+
+        let out = planned(
+            "{ event:name != nil } | count() by (event:name) > 1",
+            &store,
+        )
+        .await
+        .unwrap();
+
+        assert!(names(&out) == vec!["miss-one".to_string(), "miss-two".to_string()]);
     }
 
     #[tokio::test]

@@ -215,6 +215,10 @@ impl SpanStore for InMemorySpanStore {
         let mut status_message = StringBuilder::new();
         let mut instrumentation_name = StringBuilder::new();
         let mut instrumentation_version = StringBuilder::new();
+        let mut event_name = StringBuilder::new();
+        let mut event_time_since_start = Int64Builder::new();
+        let mut link_trace_id = FixedSizeBinaryBuilder::with_capacity(row_count, 16);
+        let mut link_span_id = FixedSizeBinaryBuilder::with_capacity(row_count, 8);
         let mut attr_builders: Vec<(String, AttrBuilder)> = attr_cols
             .iter()
             .map(|(key, dt)| (key.clone(), AttrBuilder::new(dt)))
@@ -254,6 +258,26 @@ impl SpanStore for InMemorySpanStore {
                 status_message.append_value(&span.status_message);
                 instrumentation_name.append_value(&span.instrumentation_name);
                 instrumentation_version.append_value(&span.instrumentation_version);
+                if let Some(event) = span.events.first() {
+                    event_name.append_value(&event.name);
+                    event_time_since_start.append_value(
+                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                    );
+                } else {
+                    event_name.append_null();
+                    event_time_since_start.append_null();
+                }
+                if let Some(link) = span.links.first() {
+                    link_trace_id
+                        .append_value(link.trace_id)
+                        .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                    link_span_id
+                        .append_value(link.span_id)
+                        .map_err(|e| TraceqlError::Store(e.to_string()))?;
+                } else {
+                    link_trace_id.append_null();
+                    link_span_id.append_null();
+                }
 
                 for (key, builder) in &mut attr_builders {
                     let value = span.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
@@ -282,6 +306,10 @@ impl SpanStore for InMemorySpanStore {
             Arc::new(status_message.finish()),
             Arc::new(instrumentation_name.finish()),
             Arc::new(instrumentation_version.finish()),
+            Arc::new(event_name.finish()),
+            Arc::new(event_time_since_start.finish()),
+            Arc::new(link_trace_id.finish()),
+            Arc::new(link_span_id.finish()),
         ];
         columns.extend(attr_builders.into_iter().map(|(_, b)| b.finish()));
 
