@@ -676,32 +676,43 @@ fn parse_seconds_to_ns(value: &str) -> Option<i64> {
         return seconds.checked_mul(1_000_000_000);
     }
 
+    let (negative, value) = value
+        .strip_prefix('-')
+        .map_or((false, value), |rest| (true, rest));
     let (whole, frac) = value.split_once('.')?;
     if frac.is_empty() || frac.len() > 9 || !frac.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let whole = whole.parse::<i64>().ok()?;
-    if whole < 0 {
-        return None;
-    }
     let mut nanos = frac.parse::<i64>().ok()?;
     for _ in frac.len()..9 {
         nanos = nanos.checked_mul(10)?;
     }
-    whole.checked_mul(1_000_000_000)?.checked_add(nanos)
+    let ns = whole.checked_mul(1_000_000_000)?.checked_add(nanos)?;
+    if negative { ns.checked_neg() } else { Some(ns) }
 }
 
 fn format_ns_as_seconds(ns: i64) -> String {
+    let negative = ns < 0;
+    let ns = ns.unsigned_abs();
     let seconds = ns / 1_000_000_000;
     let nanos = ns % 1_000_000_000;
     if nanos == 0 {
-        return seconds.to_string();
+        return if negative {
+            format!("-{seconds}")
+        } else {
+            seconds.to_string()
+        };
     }
     let mut frac = format!("{nanos:09}");
     while frac.ends_with('0') {
         frac.pop();
     }
-    format!("{seconds}.{frac}")
+    if negative {
+        format!("-{seconds}.{frac}")
+    } else {
+        format!("{seconds}.{frac}")
+    }
 }
 
 #[cfg(test)]
@@ -741,6 +752,18 @@ mod tests {
     fn parses_fractional_epoch_seconds_to_nanoseconds() {
         assert!(parse_seconds_to_ns("1.4") == Some(1_400_000_000));
         assert!(parse_seconds_to_ns("1.000000001") == Some(1_000_000_001));
+    }
+
+    #[test]
+    fn parses_negative_fractional_epoch_seconds_to_nanoseconds() {
+        assert!(parse_seconds_to_ns("-1.4") == Some(-1_400_000_000));
+        assert!(parse_seconds_to_ns("-0.5") == Some(-500_000_000));
+    }
+
+    #[test]
+    fn formats_negative_epoch_nanoseconds_as_seconds() {
+        assert!(format_ns_as_seconds(-1_400_000_000) == "-1.4");
+        assert!(format_ns_as_seconds(-500_000_000) == "-0.5");
     }
 
     #[tokio::test]
