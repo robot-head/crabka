@@ -222,6 +222,55 @@ async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult
 }
 
 #[tokio::test]
+async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResult {
+    let client = reqwest::Client::new();
+    let query_range = "start=0&end=1";
+    let query = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
+    let crabka = start_crabka_pair(&sample_otlp_body()).await?;
+
+    let tenant_b_trace_status = get_status(
+        &client,
+        &format!(
+            "{}/api/v2/traces/{TRACE_ID_HEX}?{query_range}",
+            crabka.base_url
+        ),
+        Some("tenant-b"),
+    )
+    .await?;
+    assert!(tenant_b_trace_status == ReqwestStatusCode::NOT_FOUND);
+
+    let tenant_b_search = get_json(
+        &client,
+        &format!("{}/api/search?q={query}&{query_range}", crabka.base_url),
+        Some("tenant-b"),
+    )
+    .await?;
+    assert_search_empty(&tenant_b_search);
+
+    let tenant_b_tags = get_json(
+        &client,
+        &format!("{}/api/v2/search/tags?{query_range}", crabka.base_url),
+        Some("tenant-b"),
+    )
+    .await?;
+    assert_tag_names_do_not_contain(&tenant_b_tags, "service.name");
+
+    let tenant_b_values = get_json(
+        &client,
+        &format!(
+            "{}/api/v2/search/tag/resource.service.name/values?{query_range}",
+            crabka.base_url
+        ),
+        Some("tenant-b"),
+    )
+    .await?;
+    assert_tag_values_do_not_contain(&tenant_b_values, "checkout");
+
+    crabka.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires Docker and the grafana/grafana image"]
 async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
@@ -554,6 +603,18 @@ async fn get_json(
     Ok(serde_json::from_slice(&body)?)
 }
 
+async fn get_status(
+    client: &reqwest::Client,
+    url: &str,
+    tenant: Option<&str>,
+) -> TestResult<ReqwestStatusCode> {
+    let mut req = client.get(url);
+    if let Some(tenant) = tenant {
+        req = req.header("x-scope-orgid", tenant);
+    }
+    Ok(req.send().await?.status())
+}
+
 async fn get_json_until_non_empty_traces(
     client: &reqwest::Client,
     url: &str,
@@ -639,6 +700,13 @@ fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {
     );
 }
 
+fn assert_search_empty(search: &JsonValue) {
+    assert!(
+        search["traces"].as_array().is_some_and(Vec::is_empty),
+        "expected empty search response: {search}"
+    );
+}
+
 fn assert_metric_totals_match(tempo: &JsonValue, crabka: &JsonValue) {
     let tempo_total = metric_points_total(tempo);
     let crabka_total = metric_points_total(crabka);
@@ -685,6 +753,22 @@ fn assert_required_tag_values_match(tempo: &JsonValue, crabka: &JsonValue, requi
     let crabka_values = tag_values(crabka);
     assert!(tempo_values.contains(required));
     assert!(crabka_values.contains(required));
+}
+
+fn assert_tag_names_do_not_contain(value: &JsonValue, forbidden: &str) {
+    let names = tag_names(value);
+    assert!(
+        !names.contains(forbidden),
+        "tag names unexpectedly contained {forbidden}: {value}"
+    );
+}
+
+fn assert_tag_values_do_not_contain(value: &JsonValue, forbidden: &str) {
+    let values = tag_values(value);
+    assert!(
+        !values.contains(forbidden),
+        "tag values unexpectedly contained {forbidden}: {value}"
+    );
 }
 
 fn tag_names(value: &JsonValue) -> BTreeSet<String> {
