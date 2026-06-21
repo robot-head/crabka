@@ -94,6 +94,8 @@ struct Cli {
     max_trace_spans: usize,
     #[arg(long, default_value_t = 1000)]
     max_search_traces: usize,
+    #[arg(long, default_value_t = 0)]
+    max_metric_exemplars: usize,
     #[arg(long, default_value_t = 10_000)]
     max_spans_per_request: usize,
     #[arg(long, default_value_t = usize::MAX)]
@@ -326,19 +328,21 @@ async fn build_querier_router_with_live(
         )))
     });
     let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, live));
-    let engine = Arc::new(TraceqlEngine::new(
-        store,
-        EngineOpts {
-            max_traces: cli.max_search_traces,
-            ..EngineOpts::default()
-        },
-    ));
+    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     Ok(trace_querier::http::router_with_config(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
         },
     ))
+}
+
+fn engine_opts_from_cli(cli: &Cli) -> EngineOpts {
+    EngineOpts {
+        max_traces: cli.max_search_traces,
+        max_exemplars: cli.max_metric_exemplars,
+        ..EngineOpts::default()
+    }
 }
 
 struct IndexedLiveSource {
@@ -878,6 +882,22 @@ mod tests {
         assert!(matches!(cli.target, Target::Querier));
         assert!(cli.max_search_traces == 42);
         assert!(build_querier_router(&cli).await.is_ok());
+    }
+
+    #[test]
+    fn parses_querier_traceql_metric_exemplar_limit() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--max-metric-exemplars",
+            "7",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Querier));
+        assert!(cli.max_metric_exemplars == 7);
+        assert!(engine_opts_from_cli(&cli).max_exemplars == 7);
     }
 
     #[test]
