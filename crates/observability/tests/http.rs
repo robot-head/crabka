@@ -13387,6 +13387,38 @@ async fn series_endpoint_accepts_form_encoded_post_body() {
 }
 
 #[tokio::test]
+async fn series_endpoint_accepts_post_query_parameters_when_body_is_empty() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/series?match%5B%5D=%7Bapp%3D%22worker%22%7D&start=20&end=30")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": [
+                    {
+                        "app": "worker",
+                        "env": "prod"
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn series_endpoint_accepts_form_post_matcher_with_raw_ampersand() {
     let hot_tail = InMemoryWalSink::default();
     hot_tail

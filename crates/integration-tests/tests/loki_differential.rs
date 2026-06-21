@@ -1142,6 +1142,15 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
                     [base_ns.to_string(), "api loki metadata ok"],
                     [(base_ns + 1_000_000_000).to_string(), "api loki metadata error"]
                 ]
+            },
+            {
+                "stream": {
+                    "app": "worker",
+                    "env": "prod"
+                },
+                "values": [
+                    [(base_ns + 1_500_000_000).to_string(), "worker loki metadata ok"]
+                ]
             }
         ]
     });
@@ -1265,8 +1274,15 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let loki_alias_series =
         loki_api_prom_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_alias_series =
-        crabka_api_prom_metadata_result(querier, series_path, base_ns, end_ns).await;
+        crabka_api_prom_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
     assert!(crabka_alias_series == loki_alias_series);
+
+    let worker_series_path = "series?match%5B%5D=%7Bapp%3D%22worker%22%7D";
+    let loki_post_series =
+        loki_metadata_post_result(&http, &loki_base, worker_series_path, base_ns, end_ns).await;
+    let crabka_post_series =
+        crabka_metadata_post_result(querier, worker_series_path, base_ns, end_ns).await;
+    assert!(crabka_post_series == loki_post_series);
 
     broker.shutdown().await;
 }
@@ -3367,6 +3383,35 @@ async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
     for path in ["/loki/api/v1/series", "/api/prom/series"] {
         let loki_error = loki_raw_path_error(&http, &loki_base, path).await;
         let crabka_error = crabka_raw_path_error(querier.clone(), path).await;
+        assert!(crabka_error == loki_error, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    for path in ["/loki/api/v1/series", "/api/prom/series"] {
+        let loki_error = loki_raw_post_path_error(&http, &loki_base, path).await;
+        let crabka_error = crabka_raw_post_path_error(querier.clone(), path).await;
         assert!(crabka_error == loki_error, "{path}");
     }
 }
@@ -6110,6 +6155,35 @@ async fn crabka_raw_path_error(app: axum::Router, path: &str) -> Value {
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
 }
 
+async fn loki_raw_post_path_error(http: &reqwest::Client, base: &str, path: &str) -> Value {
+    let response = http
+        .post(format!("{base}{path}"))
+        .header("X-Scope-OrgID", "tenant-a")
+        .send()
+        .await
+        .expect("post Loki raw path");
+    let status = response.status().as_u16();
+    let body = response.text().await.expect("Loki raw post path body");
+    stable_loki_error(status, &body)
+}
+
+async fn crabka_raw_post_path_error(app: axum::Router, path: &str) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
 async fn loki_metadata_result(
     http: &reqwest::Client,
     base: &str,
@@ -6153,6 +6227,62 @@ async fn crabka_metadata_result(
     let response = app
         .oneshot(
             Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_metadata_result(&serde_json::from_slice(&body).unwrap())
+}
+
+async fn loki_metadata_post_result(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let body: Value = http
+            .post(format!(
+                "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}"
+            ))
+            .header("X-Scope-OrgID", "tenant-a")
+            .send()
+            .await
+            .expect("post Loki metadata")
+            .json()
+            .await
+            .expect("Loki metadata POST JSON response");
+        if metadata_result_is_populated(&body) {
+            return stable_metadata_result(&body);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Loki never returned the differential metadata POST row: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn crabka_metadata_post_result(
+    app: axum::Router,
+    path: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Value {
+    let separator = if path.contains('?') { '&' } else { '?' };
+    let uri = format!("/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
                 .uri(uri)
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
