@@ -202,7 +202,7 @@ impl BlockIndex for TraceIndex {
                 object_key: meta.object_key.clone(),
                 min_ts: meta.min_ts,
                 max_ts: meta.max_ts,
-                bloom: ShardedTraceBloom::new(1, 1, 0.01),
+                bloom: ShardedTraceBloom::match_all_with_tempo_defaults(),
                 tag_names: BTreeSet::new(),
                 tag_values: BTreeMap::new(),
             },
@@ -344,6 +344,29 @@ mod tests {
         assert!(idx.block_count("t") == 1);
         assert!(
             BlockIndex::candidate_blocks(&idx, "t", 0, 100)
+                == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
+        );
+    }
+
+    #[test]
+    fn block_index_trait_add_block_does_not_false_negative_by_id_candidates() {
+        use crate::block::BlockMeta;
+        use crate::block_index::BlockIndex;
+
+        let mut idx = TraceIndex::new();
+        let meta = BlockMeta {
+            tenant: "t".into(),
+            object_key: "traces/t/00000/00000000000000000001.parquet".into(),
+            min_ts: 10,
+            max_ts: 20,
+            row_count: 1,
+            fingerprints: Vec::new(),
+        };
+
+        BlockIndex::add_block(&mut idx, &meta);
+
+        assert!(
+            idx.candidate_blocks_for_trace("t", &tid(99), 0, 100)
                 == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
         );
     }

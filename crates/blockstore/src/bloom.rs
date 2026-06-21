@@ -103,6 +103,15 @@ impl ShardedTraceBloom {
     }
 
     #[must_use]
+    pub fn match_all_with_tempo_defaults() -> Self {
+        let mut bloom = Self::with_tempo_defaults(1);
+        for shard in &mut bloom.shards {
+            shard.bits.fill(u64::MAX);
+        }
+        bloom
+    }
+
+    #[must_use]
     pub fn shard_of(&self, trace_id: &[u8; 16]) -> usize {
         (fnv1_32(trace_id) as usize) % self.shards.len()
     }
@@ -169,6 +178,14 @@ mod tests {
         let b = ShardedTraceBloom::new(16, 64, 0.01);
         let t = tid(42);
         assert!(b.shard_of(&t) == (fnv1_32(&t) as usize) % 16);
+    }
+
+    #[test]
+    fn match_all_bloom_has_no_false_negatives() {
+        let b = ShardedTraceBloom::match_all_with_tempo_defaults();
+        for n in 0..=255_u8 {
+            assert!(b.maybe_contains(&tid(n)));
+        }
     }
 
     #[test]
