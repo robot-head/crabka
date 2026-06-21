@@ -5678,7 +5678,9 @@ fn loki_rule_namespace_response(
 }
 
 fn parse_loki_rule_group(body: &[u8]) -> Result<serde_yaml::Value, ()> {
-    serde_yaml::from_slice(body).map_err(|_| ())
+    let rule_group = serde_yaml::from_slice(body).map_err(|_| ())?;
+    validate_loki_rule_group(&rule_group)?;
+    Ok(rule_group)
 }
 
 fn loki_rule_group_name(rule_group: &serde_yaml::Value) -> Option<&str> {
@@ -5689,6 +5691,34 @@ fn loki_rule_group_name(rule_group: &serde_yaml::Value) -> Option<&str> {
         .get(serde_yaml::Value::String("name".to_string()))
         .and_then(serde_yaml::Value::as_str)
         .filter(|name| !name.is_empty())
+}
+
+fn validate_loki_rule_group(rule_group: &serde_yaml::Value) -> Result<(), ()> {
+    let fields = loki_yaml_mapping(rule_group).ok_or(())?;
+    if loki_rule_group_name(rule_group).is_none() {
+        return Err(());
+    }
+    let rules = fields
+        .get(serde_yaml_key("rules"))
+        .and_then(serde_yaml::Value::as_sequence)
+        .ok_or(())?;
+    for rule in rules {
+        validate_loki_rule(rule)?;
+    }
+    Ok(())
+}
+
+fn validate_loki_rule(rule: &serde_yaml::Value) -> Result<(), ()> {
+    let fields = loki_yaml_mapping(rule).ok_or(())?;
+    yaml_string_field(fields, "expr")
+        .filter(|expr| !expr.is_empty())
+        .ok_or(())?;
+    let is_alert = yaml_string_field(fields, "alert").is_some_and(|name| !name.is_empty());
+    let is_record = yaml_string_field(fields, "record").is_some_and(|name| !name.is_empty());
+    if is_alert == is_record {
+        return Err(());
+    }
+    Ok(())
 }
 
 fn loki_yaml_response(status: StatusCode, value: &impl Serialize) -> Response {
