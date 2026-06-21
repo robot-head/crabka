@@ -31,10 +31,18 @@ async fn main() {
     let mut cfg = BrokerConfig::for_tests(data_dir);
     cfg.listen_addr = listen.parse().expect("PROFILE_LISTEN must be host:port");
     cfg.advertised_listener = listen.clone();
+    // PROFILE_FLUSH=1 forces an fsync per append (Kafka's durability mode);
+    // off by default, matching Kafka's `flush.messages` default. This is the
+    // setting where real-disk latency actually matters for the write path.
+    let flush = std::env::var("PROFILE_FLUSH").ok().as_deref() == Some("1");
+    cfg.log_config.flush_on_append = flush;
 
     let broker = Broker::start(cfg).await.expect("broker start");
     let addr = broker.listen_addr().to_string();
-    println!("PROFILE_SERVER pid={} listen={addr}", std::process::id());
+    println!(
+        "PROFILE_SERVER pid={} listen={addr} flush_on_append={flush}",
+        std::process::id()
+    );
 
     tokio::signal::ctrl_c().await.expect("ctrl_c");
     broker.shutdown().await;
