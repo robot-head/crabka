@@ -9810,7 +9810,20 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(
+        raw_query,
+        &[
+            "query",
+            "time",
+            "start",
+            "end",
+            "since",
+            "step",
+            "interval",
+            "limit",
+            "direction",
+        ],
+    ) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
@@ -9840,6 +9853,29 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
         limit,
         direction,
     })
+}
+
+fn split_query_param_pairs<'a>(raw_query: &'a str, known_keys: &[&str]) -> Vec<&'a str> {
+    let mut pairs = Vec::new();
+    let mut pair_start = 0;
+    for (index, byte) in raw_query.bytes().enumerate() {
+        if byte == b'&'
+            && known_keys.iter().any(|key| {
+                raw_query[index + 1..]
+                    .strip_prefix(key)
+                    .is_some_and(|rest| rest.starts_with('='))
+            })
+        {
+            if pair_start != index {
+                pairs.push(&raw_query[pair_start..index]);
+            }
+            pair_start = index + 1;
+        }
+    }
+    if pair_start < raw_query.len() {
+        pairs.push(&raw_query[pair_start..]);
+    }
+    pairs
 }
 
 fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQueryError> {

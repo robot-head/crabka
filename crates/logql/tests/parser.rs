@@ -1710,6 +1710,26 @@ fn parses_count_over_time_metric_query() {
 }
 
 #[test]
+fn parses_metric_range_selector_before_pipeline() {
+    let query = parse_metric_query(
+        r#"count_over_time({app="api"}[30s] |= "error" | logfmt | status >= 500)"#,
+    )
+    .unwrap();
+
+    check!(
+        query
+            == MetricQuery {
+                aggregation: RangeAggregation::CountOverTime,
+                vector_aggregation: None,
+                range_grouping: None,
+                stream: parse_query(r#"{app="api"} |= "error" | logfmt | status >= 500"#).unwrap(),
+                range_ns: 30_000_000_000,
+                offset_ns: 0,
+            }
+    );
+}
+
+#[test]
 fn parses_label_replace_metric_query() {
     let query = parse_metric_label_replace_query(
         r#"label_replace(count_over_time({app="api"} |= "error" [30s]), "service", "$1-api", "app", "(.*)")"#,

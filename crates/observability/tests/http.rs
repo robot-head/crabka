@@ -4273,6 +4273,31 @@ async fn format_query_endpoint_accepts_metric_binary_arithmetic_query() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_accepts_range_selector_before_pipeline() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%20%7C%3D%20%22error%22%20%7C%20logfmt%20%7C%20status%20%3E%3D%20500%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"count_over_time({app="api"}[30s] |= "error" | logfmt | status >= 500)"#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_accepts_approx_topk_metric_query() {
     let state = fixture();
     let app = loki_router(state);
@@ -7569,6 +7594,47 @@ async fn query_range_endpoint_returns_count_over_time_matrix_json() {
         .oneshot(
             Request::builder()
                 .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30s%5D%29&start=0&end=30")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod"
+                            },
+                            "values": [
+                                [0.00000003, "1"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(1819, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
+async fn query_range_endpoint_accepts_range_selector_before_pipeline() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%20%7C%3D%20%22error%22%29&start=0&end=30")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
