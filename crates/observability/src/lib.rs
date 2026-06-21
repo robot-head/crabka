@@ -11554,14 +11554,26 @@ fn parse_detected_fields_params(
         let value = decode_form_component(value)?;
 
         match key.as_str() {
-            "query" => query = Some(value),
-            "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
-            "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
-            "since" => since = Some(parse_loki_duration_query_param("since", &value)?),
-            "step" => step = Some(parse_loki_duration_query_param("step", &value)?),
-            "limit" => limit = Some(parse_usize_query_param("limit", &value)?),
-            "field_limit" => limit = Some(parse_usize_query_param("field_limit", &value)?),
-            "line_limit" => line_limit = Some(parse_usize_query_param("line_limit", &value)?),
+            "query" if query.is_none() => query = Some(value),
+            "start" if start.is_none() => {
+                start = Some(parse_loki_timestamp_query_param("start", &value)?);
+            }
+            "end" if end.is_none() => {
+                end = Some(parse_loki_timestamp_query_param("end", &value)?);
+            }
+            "since" if since.is_none() => {
+                since = Some(parse_loki_duration_query_param("since", &value)?);
+            }
+            "step" if step.is_none() => {
+                step = Some(parse_loki_duration_query_param("step", &value)?);
+            }
+            "limit" if limit.is_none() => limit = Some(parse_usize_query_param("limit", &value)?),
+            "field_limit" if limit.is_none() => {
+                limit = Some(parse_usize_query_param("field_limit", &value)?);
+            }
+            "line_limit" if line_limit.is_none() => {
+                line_limit = Some(parse_usize_query_param("line_limit", &value)?);
+            }
             _ => {}
         }
     }
@@ -11611,11 +11623,17 @@ fn parse_detected_labels_params(
             let value = decode_form_component(value)?;
 
             match key.as_str() {
-                "query" => query = Some(value),
-                "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
-                "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
-                "since" => since = Some(parse_loki_duration_query_param("since", &value)?),
-                "limit" | "field_limit" => {
+                "query" if query.is_none() => query = Some(value),
+                "start" if start.is_none() => {
+                    start = Some(parse_loki_timestamp_query_param("start", &value)?);
+                }
+                "end" if end.is_none() => {
+                    end = Some(parse_loki_timestamp_query_param("end", &value)?);
+                }
+                "since" if since.is_none() => {
+                    since = Some(parse_loki_duration_query_param("since", &value)?);
+                }
+                "limit" | "field_limit" if limit.is_none() => {
                     limit = parse_usize_query_param("limit", &value).ok().or(limit);
                 }
                 _ => {}
