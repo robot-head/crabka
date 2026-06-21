@@ -8548,7 +8548,7 @@ async fn execute_patterns_query(
         for row in rows {
             if !plan.fingerprints.contains(&row.series_fingerprint)
                 || row.timestamp_ns < plan.time_range.start_ns
-                || row.timestamp_ns > plan.time_range.end_ns
+                || row.timestamp_ns >= plan.time_range.end_ns
             {
                 continue;
             }

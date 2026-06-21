@@ -12328,6 +12328,69 @@ async fn patterns_endpoint_groups_matching_logs_by_detected_pattern() {
 }
 
 #[tokio::test]
+async fn patterns_endpoint_excludes_entries_at_end_bound() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api")]));
+    let api_block = write_log_block(
+        &dir,
+        &BlockKey::new(
+            "tenant-a",
+            0,
+            1_000_000_000,
+            2_000_000_000,
+            TimeRange::new(1_000_000_000, 2_000_000_000).unwrap(),
+        ),
+        vec![
+            LogRow::new(
+                api,
+                1_000_000_000,
+                "status=500 user=100 route=/checkout",
+                BTreeMap::new(),
+            ),
+            LogRow::new(
+                api,
+                2_000_000_000,
+                "status=200 user=200 route=/checkout",
+                BTreeMap::new(),
+            ),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(api_block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": [
+                    {
+                        "pattern": "status=<_> user=<_> route=/checkout",
+                        "samples": [
+                            [1, 1]
+                        ]
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn patterns_endpoint_accepts_form_encoded_post_body() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
@@ -12511,7 +12574,7 @@ async fn compactor_delete_requests_filter_querier_patterns_results() {
     let response = querier_app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000000&step=1000000000")
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000001&step=1000000000")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
