@@ -1,0 +1,75 @@
+# TraceQL-metrics families. Each case asserts the emitted series count for a
+# single-bucket query_range over the shared testkit fixture
+# (start=0, end=10000, step=10000). The fixture has 5 distinct span.svc values
+# (a, b, c, x, d) across 3 traces / 7 spans.
+
+name: metrics_rate_single_series
+kind: metrics
+query: { .svc != nil } | rate()
+expect_series_count: 1
+
+---
+name: metrics_rate_by_svc
+kind: metrics
+query: { .svc != nil } | rate() | by(span.svc)
+expect_series_count: 5
+
+---
+name: metrics_count_over_time_single_series
+kind: metrics
+query: { .svc != nil } | count_over_time()
+expect_series_count: 1
+
+---
+name: metrics_count_over_time_by_svc
+kind: metrics
+query: { .svc != nil } | count_over_time() | by(span.svc)
+expect_series_count: 5
+
+---
+name: metrics_quantile_over_time_one_quantile
+kind: metrics
+query: { .svc != nil } | quantile_over_time(span:duration, .99)
+expect_series_count: 1
+
+---
+name: metrics_quantile_over_time_three_quantiles
+kind: metrics
+query: { .svc != nil } | quantile_over_time(span:duration, .5, .9, .99)
+expect_series_count: 3
+
+---
+name: metrics_histogram_over_time_default_field
+kind: metrics
+query: { .svc != nil } | histogram_over_time()
+expect_series_count: 17
+
+---
+name: metrics_histogram_over_time_explicit_field
+kind: metrics
+query: { .svc != nil } | histogram_over_time(span:duration)
+expect_series_count: 17
+
+---
+name: metrics_compare_current_and_previous
+kind: metrics
+query: { .svc != nil } | count_over_time() | compare()
+expect_series_count: 2
+
+---
+name: metrics_topk_truncates_groups
+kind: metrics
+query: { .svc != nil } | count_over_time() | by(span.svc) | topk(2)
+expect_series_count: 2
+
+---
+name: metrics_topk_above_group_count
+kind: metrics
+query: { .svc != nil } | count_over_time() | by(span.svc) | topk(10)
+expect_series_count: 5
+
+---
+name: metrics_bottomk_truncates_groups
+kind: metrics
+query: { .svc != nil } | count_over_time() | by(span.svc) | bottomk(1)
+expect_series_count: 1

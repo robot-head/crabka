@@ -16,6 +16,10 @@ use crabka_traceql::{
     AttrValue as TraceqlAttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine,
 };
 use crabka_traces::distributor::{self, DistributorState, WalSink};
+use crabka_traces::metricsgen::{
+    EdgeStore, MetricsGenConfig, RecordOutcome, Series, SeriesSample, SpanKind as MetricsSpanKind,
+    SpanRecord as MetricsSpanRecord, StatusCode as MetricsStatusCode,
+};
 use crabka_traces::{AttrValue, Span, SpanRecord, TracesError};
 use http_body_util::BodyExt as _;
 use opentelemetry_proto::tonic::common::v1::{
@@ -23,7 +27,7 @@ use opentelemetry_proto::tonic::common::v1::{
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
+    ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpStatus, TracesData,
 };
 use prost::Message as _;
 use reqwest::StatusCode as ReqwestStatusCode;
@@ -36,6 +40,9 @@ use tower::ServiceExt as _;
 const TENANT: &str = "tenant-a";
 const TRACE_ID_HEX: &str = "01010101010101010101010101010101";
 const CHILD_SPAN_ID_HEX: &str = "0303030303030303";
+const ERROR_SPAN_ID_HEX: &str = "0404040404040404";
+/// OTLP `STATUS_CODE_ERROR`.
+const OTLP_STATUS_CODE_ERROR: i32 = 2;
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 const TEMPO_CONFIG: &str = r"
@@ -323,6 +330,10 @@ async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires Docker and the grafana/grafana image"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "integration test drives all Grafana datasource legs end-to-end"
+)]
 async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
     let otlp_body = sample_otlp_body();
@@ -422,8 +433,198 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         "Grafana-proxied TraceQL search response was empty: {search}"
     );
 
+    // LEG 4 (error-span TraceQL): drive a status=error selector through the same
+    // Grafana → Tempo-datasource → Crabka proxy and assert it returns the seeded
+    // error trace. The seed body carries one `STATUS_CODE_ERROR` span (span id
+    // 0404…), so `{ span:status = error }` must match its trace.
+    let error_query = "%7B%20span%3Astatus%20%3D%20error%20%7D";
+    let error_search: JsonValue = client
+        .get(format!(
+            "{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/api/search?q={error_query}&start=0&end=1"
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        error_search["traces"]
+            .as_array()
+            .is_some_and(|traces| traces
+                .iter()
+                .any(|trace| { trace["traceID"].as_str() == Some(TRACE_ID_HEX) })),
+        "Grafana-proxied error-status TraceQL search did not return the error trace: {error_search}"
+    );
+    assert_search_contains_span_id(&error_search, ERROR_SPAN_ID_HEX);
+
     crabka.shutdown();
     Ok(())
+}
+
+/// LEG 5 (Service Graph) — the loop-closing leg.
+///
+/// In Grafana, the Tempo datasource's **Service Graph** tab is NOT served by a
+/// Tempo endpoint: Grafana renders it from `traces_service_graph_*` series in a
+/// **Prometheus** datasource (spec §7.2/§8). The full production loop is
+///   traces → metrics-generator → Prometheus `remote_write` → Prometheus → Grafana.
+///
+/// What this test FAITHFULLY covers (no fabrication):
+///   1. The **Grafana-side wiring**: Grafana accepts and round-trips a
+///      `prometheus`-type datasource (the Service-Graph backend), proving the
+///      datasource half of the loop is configured exactly as the Tempo
+///      datasource's `serviceMap.datasourceUid` would point at.
+///   2. The **Crabka-side production**: the real in-process metrics-generator
+///      `EdgeStore` (Slice 7) pairs the seed's client↔server span pair into the
+///      exact `traces_service_graph_request_total` series — with the `client` /
+///      `server` / `connection_type` edge labels — that Grafana's Service Graph
+///      queries. This is the series the loop depends on.
+///
+/// What this test does NOT stand up (documented gap, deliberately not faked):
+///   The metrics-generator → Prometheus `remote_write` ingestion path and a live
+///   Prometheus container. There is no in-process Prometheus `/api/v1/query`
+///   endpoint in `crabka-traces` (the metrics-generator emits via a
+///   `RemoteWriteSink`, not a query API), so a live `POST /api/ds/query` against
+///   the Prometheus datasource cannot return real data within this harness. We
+///   therefore prove the two ends of the loop separately rather than asserting a
+///   passing query against data the harness never produces.
+#[tokio::test]
+#[ignore = "requires Docker and the grafana/grafana image"]
+async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult {
+    let client = reqwest::Client::new();
+
+    let grafana = start_grafana().await?;
+    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
+
+    // (1) Grafana-side wiring: provision the Prometheus datasource that backs the
+    // Tempo datasource's Service Graph and assert Grafana round-trips it. In a
+    // full deployment its URL points at Crabka's metrics querier / a Prometheus
+    // scraping Crabka's metrics-generator `remote_write` output.
+    let prom_uid = "crabka-service-graph";
+    let payload = json!({
+        "name": "Crabka Service Graph",
+        "uid": prom_uid,
+        "type": "prometheus",
+        "access": "proxy",
+        // Placeholder: the metrics-generator → Prometheus ingestion path is not
+        // stood up in this harness (see the doc comment). The assertion below is
+        // strictly the datasource round-trip, not a query against this URL.
+        "url": format!("http://{DOCKER_HOST_ALIAS}:9090"),
+        "isDefault": false,
+        "jsonData": {
+            "httpMethod": "GET",
+            "httpHeaderName1": "X-Scope-OrgID"
+        },
+        "secureJsonData": {
+            "httpHeaderValue1": TENANT
+        }
+    });
+    let _created: JsonValue = client
+        .post(format!("{grafana_base}/api/datasources"))
+        .basic_auth("admin", Some("admin"))
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let fetched: JsonValue = client
+        .get(format!("{grafana_base}/api/datasources/uid/{prom_uid}"))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        fetched.get("type").and_then(JsonValue::as_str),
+        Some("prometheus")
+    );
+
+    // (2) Crabka-side production: the real metrics-generator EdgeStore pairs the
+    // seed's client↔server pair into the Service-Graph series Grafana queries.
+    let series = service_graph_series_for_seed_edge();
+    let request_total = series
+        .iter()
+        .find(|s| s.name == "traces_service_graph_request_total")
+        .expect("metrics-generator must emit traces_service_graph_request_total for a paired edge");
+    let SeriesSample::Counter(count) = request_total.sample else {
+        panic!("traces_service_graph_request_total must be a counter")
+    };
+    assert!(
+        (count - 1.0).abs() < 1e-9,
+        "expected one paired request for the seed edge, got {count}"
+    );
+    assert!(
+        request_total
+            .labels
+            .iter()
+            .any(|(k, v)| k == "client" && v == "checkout-frontend"),
+        "service-graph edge missing client label: {:?}",
+        request_total.labels
+    );
+    assert!(
+        request_total
+            .labels
+            .iter()
+            .any(|(k, v)| k == "server" && v == "cart-backend"),
+        "service-graph edge missing server label: {:?}",
+        request_total.labels
+    );
+
+    Ok(())
+}
+
+/// Drive the real Slice 7 `EdgeStore` over a client↔server span pair (the same
+/// caller/callee shape the seed's `GET /checkout` → `SELECT cart` models) and
+/// return the emitted service-graph series.
+fn service_graph_series_for_seed_edge() -> Vec<Series> {
+    let mut store = EdgeStore::new(&MetricsGenConfig::default());
+    let client = metrics_span(
+        "checkout-frontend",
+        [0xA; 8],
+        [0; 8],
+        MetricsSpanKind::Client,
+        MetricsStatusCode::Ok,
+        10_000_000,
+    );
+    let server = metrics_span(
+        "cart-backend",
+        [0xB; 8],
+        [0xA; 8],
+        MetricsSpanKind::Server,
+        MetricsStatusCode::Ok,
+        8_000_000,
+    );
+    assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+    assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+    store.drain(1_000)
+}
+
+fn metrics_span(
+    service: &str,
+    span_id: [u8; 8],
+    parent: [u8; 8],
+    kind: MetricsSpanKind,
+    status: MetricsStatusCode,
+    duration_ns: i64,
+) -> MetricsSpanRecord {
+    MetricsSpanRecord {
+        tenant: TENANT.into(),
+        trace_id: [0x11; 16],
+        span_id,
+        parent_span_id: parent,
+        name: "op".into(),
+        kind,
+        start_ns: 0,
+        duration_ns,
+        status,
+        status_message: String::new(),
+        service_name: service.into(),
+        attributes: vec![],
+        size_bytes: 0,
+    }
 }
 
 struct CrabkaPair {
@@ -901,6 +1102,23 @@ fn sample_otlp_body_at(start_ns: u64) -> Vec<u8> {
                         start_time_unix_nano: start_ns + 100_000_000,
                         end_time_unix_nano: start_ns + 250_000_000,
                         attributes: vec![string_kv("db.system", "postgresql")],
+                        ..OtlpSpan::default()
+                    },
+                    // An error-status span so the Grafana TraceQL `{ span:status = error }`
+                    // leg (LEG 4) has a real error trace to find. Pushed identically to
+                    // both Tempo and Crabka, so the differential corpus stays equal.
+                    OtlpSpan {
+                        trace_id: vec![1; 16],
+                        span_id: vec![4; 8],
+                        parent_span_id: vec![2; 8],
+                        name: "charge card".into(),
+                        start_time_unix_nano: start_ns + 260_000_000,
+                        end_time_unix_nano: start_ns + 400_000_000,
+                        attributes: vec![string_kv("http.method", "POST")],
+                        status: Some(OtlpStatus {
+                            code: OTLP_STATUS_CODE_ERROR,
+                            message: "payment declined".into(),
+                        }),
                         ..OtlpSpan::default()
                     },
                 ],

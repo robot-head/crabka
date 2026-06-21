@@ -1,0 +1,149 @@
+# Typed comparison conformance: one family per value type plus anchored regex,
+# negated regex, enum (status/kind) typing, duration literals, and presence.
+# All expectations are hand-derived against the shared testkit fixture.
+
+name: typed_string_eq
+kind: search
+query: { .svc = "a" }
+expect_trace_ids: 1,3
+expect_span_ids: 1,1
+
+---
+name: typed_string_neq
+kind: search
+query: { .svc != "a" }
+expect_trace_ids: 1,2,3
+expect_span_ids: 1,2,2,3,4
+
+---
+name: typed_int_eq
+kind: search
+query: { .a = 1 }
+expect_trace_ids: 1,2
+expect_span_ids: 1,1
+
+---
+name: typed_int_gt
+kind: search
+query: { .b > 1 }
+expect_trace_ids: 1,2
+expect_span_ids: 1,2
+
+---
+name: typed_int_lte
+kind: search
+query: { .a <= 1 }
+expect_trace_ids: 1,2
+expect_span_ids: 1,1
+
+---
+name: typed_float_no_match
+kind: search
+query: { .ratio = 1.5 }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: typed_bool_no_match
+kind: search
+query: { .flag = true }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: typed_duration_literal_gt
+kind: search
+query: { span:duration > 100ns }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: typed_duration_literal_gte
+kind: search
+query: { span:duration >= 200ns }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: typed_status_enum_unset_matches_svc_b
+kind: search
+query: { span:status = unset && .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: typed_status_enum_error_no_match
+kind: search
+query: { span:status = error }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: typed_kind_enum_unspecified_matches_svc_b
+kind: search
+query: { span:kind = unspecified && .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: typed_kind_enum_server_no_match
+kind: search
+query: { span:kind = server }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: typed_regex_anchored_match
+kind: search
+query: { span:name =~ "child-.*" }
+expect_trace_ids: 1,3
+expect_span_ids: 2,2,3
+
+---
+name: typed_regex_anchored_requires_full_match
+kind: search
+query: { span:name =~ "child" }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: typed_regex_negated
+kind: search
+query: { span:name !~ "child-.*" }
+expect_trace_ids: 1,2,3
+expect_span_ids: 1,1,1,4
+
+---
+name: typed_resource_service_name
+kind: search
+query: { resource.service.name = "svc-d" }
+expect_trace_ids: 3
+expect_span_ids: 1,2
+
+---
+name: typed_child_count_intrinsic_eq
+kind: search
+query: { span:childCount = 2 }
+expect_trace_ids: 1
+expect_span_ids: 1
+
+---
+name: typed_child_count_intrinsic_gt
+kind: search
+query: { span:childCount > 0 }
+expect_trace_ids: 1,3
+expect_span_ids: 1,1,2
+
+---
+name: typed_presence_existence
+kind: search
+query: { .b != nil }
+expect_trace_ids: 1,2
+expect_span_ids: 1,2
+
+---
+name: typed_int_and_status_enum
+kind: search
+query: { .a = 1 && span:status = unset }
+expect_trace_ids: 1,2
+expect_span_ids: 1,1
