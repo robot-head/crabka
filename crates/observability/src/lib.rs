@@ -9054,11 +9054,7 @@ async fn execute_index_volume_query(
             if step <= 0 {
                 return Err(HttpQueryError::InvalidStep);
             }
-            if params.aggregate_by == VolumeAggregateBy::Series && params.target_labels.is_some() {
-                loki_volume_vector_response(volumes, params.end, params.limit)
-            } else {
-                loki_volume_matrix_response(volumes, params.start, params.end, step, params.limit)
-            }
+            loki_volume_matrix_response(volumes, params.start, params.end, step, params.limit)
         }
     };
     Ok(add_loki_query_stats_for_stream_plan(response, &plan))
