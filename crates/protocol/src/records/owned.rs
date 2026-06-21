@@ -518,10 +518,29 @@ impl RecordBatch {
         #[allow(clippy::cast_sign_loss)] // checked < 0 above
         let mut records = Vec::with_capacity((count as usize).min(body_for_records.len()));
         for i in 0..count {
-            records.push(
-                Record::decode(&mut body_cur)
-                    .map_err(|e| RecordsError::RecordParse(format!("record[{i}]: {e}")))?,
-            );
+            // Parse the record into borrowed slices, then materialise its
+            // key / value / header-values as zero-copy `Bytes` views into
+            // `body_for_records`. The whole batch shares that single backing
+            // allocation instead of copying every field into its own `Bytes`,
+            // which removes ~2 heap allocations + memcpys per record on the
+            // common (header-free) path.
+            let r = crate::records::borrowed::parse_one_record(&mut body_cur)
+                .map_err(|e| RecordsError::RecordParse(format!("record[{i}]: {e}")))?;
+            records.push(Record {
+                attributes: r.attributes,
+                timestamp_delta: r.timestamp_delta,
+                offset_delta: r.offset_delta,
+                key: r.key.map(|s| body_for_records.slice_ref(s)),
+                value: r.value.map(|s| body_for_records.slice_ref(s)),
+                headers: r
+                    .headers
+                    .into_iter()
+                    .map(|h| RecordHeader {
+                        key: h.key.to_string(),
+                        value: h.value.map(|s| body_for_records.slice_ref(s)),
+                    })
+                    .collect(),
+            });
         }
         if !body_cur.is_empty() {
             return Err(RecordsError::RecordParse(format!(

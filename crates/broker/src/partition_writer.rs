@@ -26,6 +26,13 @@ use crate::replica_state::ReplicaState;
 /// can be wired to a broker config (`producer.id.expiration.ms`) later.
 const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
 
+/// Upper bound on how many queued `Produce` jobs the writer folds into a single
+/// group commit (one lock acquisition + one `spawn_blocking`). Caps worst-case
+/// memory and per-group latency if a producer floods faster than the writer
+/// drains; in practice the group is bounded by the channel backlog and is 1
+/// under light load.
+const MAX_PRODUCE_GROUP: usize = 1024;
+
 /// Inspect a `BrokerError` returned by a partition-writer mutation
 /// (`append`, `append_at`, `truncate_to`, `reset_to`, `compact`,
 /// `trim_to_offset`) and, if it looks like an underlying storage
@@ -76,47 +83,59 @@ fn storage_failure_error(
     crate::error::BrokerError::Log(crabka_log::LogError::Io(io))
 }
 
-fn append_produce_data(
+/// Append a whole group of produce jobs under a single lock acquisition,
+/// returning the per-job results (base offset / error, in input order) plus the
+/// post-append log-end offset for the group's HW recompute. Verbatim jobs go
+/// straight to `append_verbatim`; owned jobs are recompressed to the topic's
+/// configured codec (read once under the same lock). Sequential appends stamp
+/// sequential base offsets, so ordering across the group is preserved.
+fn append_produce_batch(
     log: &Mutex<Log>,
-    data: ProduceData,
-) -> (Result<i64, crate::error::BrokerError>, Option<i64>) {
+    datas: Vec<ProduceData>,
+) -> (Vec<Result<i64, crate::error::BrokerError>>, i64) {
     let mut guard = lock_log(log);
-    let result = match data {
-        ProduceData::Verbatim(batch) => guard
-            .append_verbatim(&batch)
-            .map_err(crate::error::BrokerError::from),
-        ProduceData::Owned(mut batch) => {
-            let target = guard.config_snapshot().compression_type;
-            if let Some(target) = target {
-                let current = batch.attributes.compression();
-                if current != target {
+    let target = guard.config_snapshot().compression_type;
+    let mut results = Vec::with_capacity(datas.len());
+    for data in datas {
+        let r = match data {
+            ProduceData::Verbatim(batch) => guard
+                .append_verbatim(&batch)
+                .map_err(crate::error::BrokerError::from),
+            ProduceData::Owned(mut batch) => {
+                if let Some(target) = target
+                    && batch.attributes.compression() != target
+                {
                     batch.attributes = batch.attributes.with_compression(target);
                 }
+                guard
+                    .append(&mut batch)
+                    .map_err(crate::error::BrokerError::from)
             }
-            guard
-                .append(&mut batch)
-                .map_err(crate::error::BrokerError::from)
-        }
-    };
-    let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
-    (result, leo)
+        };
+        results.push(r);
+    }
+    // Read the post-append LEO once under the same lock so the HW recompute
+    // reflects the whole group.
+    let leo = guard.log_end_offset();
+    (results, leo)
 }
 
-async fn run_produce_append(
+/// Run [`append_produce_batch`] away from normal async polling. On the broker's
+/// multi-thread runtime, `block_in_place` avoids the per-batch `spawn_blocking`
+/// scheduling hop while letting Tokio hand the worker's other tasks to a
+/// replacement thread; current-thread test runtimes keep the `spawn_blocking`
+/// fallback because `block_in_place` is illegal there. The writer loop is still
+/// the single serializer for this partition, so append ordering is unchanged.
+async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
-    data: ProduceData,
-) -> Result<(Result<i64, crate::error::BrokerError>, Option<i64>), crate::error::BrokerError> {
+    datas: Vec<ProduceData>,
+) -> Result<(Vec<Result<i64, crate::error::BrokerError>>, i64), crate::error::BrokerError> {
     match Handle::current().runtime_flavor() {
         RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
-            tokio::task::block_in_place(move || append_produce_data(&log, data))
+            tokio::task::block_in_place(move || append_produce_batch(&log, datas))
         }))
         .map_err(|_| storage_failure_error("append task panicked", "block_in_place panic")),
-        RuntimeFlavor::CurrentThread => {
-            tokio::task::spawn_blocking(move || append_produce_data(&log, data))
-                .await
-                .map_err(|join_err| storage_failure_error("append task panicked", &join_err))
-        }
-        _ => tokio::task::spawn_blocking(move || append_produce_data(&log, data))
+        _ => tokio::task::spawn_blocking(move || append_produce_batch(&log, datas))
             .await
             .map_err(|join_err| storage_failure_error("append task panicked", &join_err)),
     }
@@ -137,53 +156,95 @@ pub async fn run(
     log_dir_status: LogDirRegistry,
     producer_state: Arc<ProducerState>,
 ) {
-    while let Some(msg) = rx.recv().await {
+    // `pending` holds a non-Produce message that was pulled off the channel
+    // while group-draining Produce jobs (see the Produce arm). It is handled on
+    // the next iteration so control messages are never reordered ahead of the
+    // produces that preceded them in the channel.
+    let mut pending: Option<WriterMessage> = None;
+    loop {
+        let msg = match pending.take() {
+            Some(m) => m,
+            None => match rx.recv().await {
+                Some(m) => m,
+                None => break, // channel closed: every sender dropped
+            },
+        };
         match msg {
-            WriterMessage::Produce(ProduceJob { data, ack }) => {
-                // Run the blocking append away from normal async polling.
-                // On the broker's multi-thread runtime, `block_in_place`
-                // avoids the per-batch `spawn_blocking` scheduling hop while
-                // letting Tokio hand the worker's other tasks to a replacement
-                // thread. Current-thread test runtimes keep the old
-                // `spawn_blocking` fallback because `block_in_place` is not
-                // legal there. The writer loop is still the single serializer
-                // for this partition, so append ordering is unchanged.
+            WriterMessage::Produce(first) => {
+                // Group commit. The writer is the single serial appender for
+                // this partition, so instead of one append (lock + ack + HW
+                // recompute) per produce, drain every Produce job already queued
+                // and append them all under one lock acquisition, then fan out
+                // their acks. Under small-record load the per-message task
+                // handoff dominates CPU (futex wakeups); collapsing it is the
+                // win. A non-Produce message met while draining is stashed in
+                // `pending` so control messages keep their channel order relative
+                // to these appends.
                 //
-                // Two append shapes:
-                //   * Verbatim — the produce handler proved passthrough is
-                //     safe (v≥3, magic==2, CreateTime, no recompression),
-                //     so the producer's exact bytes go straight to
-                //     `append_verbatim` (no decode/re-encode/CRC).
-                //   * Owned — the fallback path. Broker-side recompression
-                //     (topic `compression.type` is a concrete codec, not
-                //     Kafka's `producer` pass-through) is applied here by
-                //     forcing the batch's attributes, which the
-                //     `RecordBatch::encode` inside `Log::append` then honors.
-                let (result, leo) = match run_produce_append(log.clone(), data).await {
+                // `try_recv` only pulls already-queued messages, so a lone
+                // produce still appends immediately (no added latency); the
+                // batch only grows when the broker is actually backed up.
+                let mut jobs = vec![first];
+                while jobs.len() < MAX_PRODUCE_GROUP {
+                    match rx.try_recv() {
+                        Ok(WriterMessage::Produce(j)) => jobs.push(j),
+                        Ok(other) => {
+                            pending = Some(other);
+                            break;
+                        }
+                        Err(_) => break, // Empty or Disconnected
+                    }
+                }
+
+                // Split acks from data: the (Send) data moves into the blocking
+                // append; the acks stay here, paired by index, to be resolved
+                // after it returns.
+                let mut acks = Vec::with_capacity(jobs.len());
+                let mut datas = Vec::with_capacity(jobs.len());
+                for ProduceJob { data, ack } in jobs {
+                    acks.push(ack);
+                    datas.push(data);
+                }
+
+                // Append the whole group under one lock, off the async poller
+                // (`block_in_place` on the multi-thread runtime, `spawn_blocking`
+                // on current-thread test runtimes — see `run_produce_append_batch`).
+                let (results, leo) = match run_produce_append_batch(log.clone(), datas).await {
                     Ok(v) => v,
                     Err(err) => {
+                        // The whole append section panicked — treat it as a
+                        // storage failure and fail every ack in the group.
+                        // `BrokerError` is not `Clone`, so build one per ack.
                         flag_storage_failure(&err, &log_dir, &log_dir_status);
-                        let _ = ack.send(Err(err));
+                        for ack in acks {
+                            let _ = ack.send(Err(storage_failure_error(
+                                "append task panicked",
+                                "group append panic",
+                            )));
+                        }
                         continue;
                     }
                 };
-                let ok = result.is_ok();
-                if let Err(ref e) = result {
-                    flag_storage_failure(e, &log_dir, &log_dir_status);
+
+                let mut any_ok = false;
+                for (ack, result) in acks.into_iter().zip(results) {
+                    match &result {
+                        Ok(_) => any_ok = true,
+                        Err(e) => flag_storage_failure(e, &log_dir, &log_dir_status),
+                    }
+                    // If the receiver dropped, the handler timed out — fine.
+                    let _ = ack.send(result);
                 }
-                // If the receiver dropped, the handler timed out — that's
-                // fine, we don't care if the ack is ignored.
-                let _ = ack.send(result);
-                if ok {
+
+                if any_ok {
+                    // Wake long-poll fetchers once for the whole group.
                     append_notify.notify_waiters();
-                    // Update HW from the LEO read inside the blocking
-                    // closure. The replica_state mutex is tokio::sync so
-                    // we .await it cooperatively.
-                    let leader_leo = leo.expect("LEO present on successful append");
+                    // Advance HW from the final LEO (covers every append in the
+                    // group); recompute is idempotent so one notify suffices.
                     let advanced = {
                         let mut st = replica_state.lock().await;
                         let prev = st.hw;
-                        let new = st.recompute_hw_for_leader_append(leader_leo);
+                        let new = st.recompute_hw_for_leader_append(leo);
                         new > prev
                     };
                     if advanced {

@@ -358,16 +358,20 @@ impl Graph {
         reuse_source_topics: &std::collections::HashSet<String>,
     ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>, Option<i64>)> {
         let mut out = Vec::new();
-        for name in self.stores.names() {
-            if let Some(store) = self.stores.get_mut(&name) {
-                let topic = store.changelog_topic().to_string();
-                let entries = store.take_changelog_ts();
-                if reuse_source_topics.contains(&topic) {
-                    continue; // reuse-source store: drained, but never re-produced
-                }
-                for (k, v, ts) in entries {
-                    out.push((topic.clone(), k, v, ts));
-                }
+        // Iterate stores directly (no per-record `names()` Vec + re-lookup) and
+        // only materialise the changelog topic String when a store actually has
+        // entries to drain — most records touch a single store.
+        for store in self.stores.iter_mut() {
+            let entries = store.take_changelog_ts();
+            if entries.is_empty() {
+                continue;
+            }
+            let topic = store.changelog_topic();
+            if reuse_source_topics.contains(topic) {
+                continue; // reuse-source store: drained, but never re-produced
+            }
+            for (k, v, ts) in entries {
+                out.push((topic.to_string(), k, v, ts));
             }
         }
         out
