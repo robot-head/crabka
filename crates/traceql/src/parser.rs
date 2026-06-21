@@ -919,12 +919,29 @@ mod tests {
     }
 
     #[test]
-    fn structural_descendant_parses() {
-        let q = parse("{ .a = 1 } >> { .b = 2 }").unwrap();
-        let SpansetExpr::Structural { op, .. } = &q.root else {
-            panic!()
-        };
-        assert!(*op == StructuralOp::Descendant);
+    fn structural_operators_parse() {
+        for (query, expected) in [
+            ("{ .a = 1 } >> { .b = 2 }", StructuralOp::Descendant),
+            ("{ .a = 1 } << { .b = 2 }", StructuralOp::Ancestor),
+            ("{ .a = 1 } > { .b = 2 }", StructuralOp::Child),
+            ("{ .a = 1 } < { .b = 2 }", StructuralOp::Parent),
+            ("{ .a = 1 } ~ { .b = 2 }", StructuralOp::Sibling),
+            ("{ .a = 1 } !>> { .b = 2 }", StructuralOp::NegDescendant),
+            ("{ .a = 1 } !<< { .b = 2 }", StructuralOp::NegAncestor),
+            ("{ .a = 1 } !> { .b = 2 }", StructuralOp::NegChild),
+            ("{ .a = 1 } !< { .b = 2 }", StructuralOp::NegParent),
+            ("{ .a = 1 } &>> { .b = 2 }", StructuralOp::UnionDescendant),
+            ("{ .a = 1 } &<< { .b = 2 }", StructuralOp::UnionAncestor),
+            ("{ .a = 1 } &> { .b = 2 }", StructuralOp::UnionChild),
+            ("{ .a = 1 } &< { .b = 2 }", StructuralOp::UnionParent),
+            ("{ .a = 1 } &~ { .b = 2 }", StructuralOp::UnionSibling),
+        ] {
+            let q = parse(query).unwrap();
+            let SpansetExpr::Structural { op, .. } = &q.root else {
+                panic!("expected structural expression for {query}")
+            };
+            assert!(*op == expected);
+        }
     }
 
     #[test]

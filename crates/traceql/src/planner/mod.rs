@@ -1258,6 +1258,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negated_descendant_returns_rhs_spans_without_descendant_match() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"c\" } !>> { .svc = \"b\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+    }
+
+    #[tokio::test]
+    async fn negated_child_returns_rhs_spans_without_direct_child_match() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"a\" } !> { .svc = \"c\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[4; 8]]);
+    }
+
+    #[tokio::test]
     async fn negated_parent_uses_parent_id_anti_join() {
         let store = structural_store();
         let out = planned("{ .svc = \"c\" } !< { .svc = \"b\" }", &store)
@@ -1270,6 +1288,33 @@ mod tests {
     async fn union_descendant_returns_rhs_and_anchor_spans() {
         let store = structural_store();
         let out = planned("{ .svc = \"b\" } &>> { .svc = \"c\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
+    }
+
+    #[tokio::test]
+    async fn union_ancestor_returns_rhs_and_anchor_spans() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"c\" } &<< { .svc = \"a\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[1; 8], [4; 8]]);
+    }
+
+    #[tokio::test]
+    async fn union_child_returns_rhs_and_anchor_spans() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"a\" } &> { .svc = \"b\" }", &store)
+            .await
+            .unwrap();
+        assert!(span_ids(&out) == vec![[1; 8], [2; 8], [3; 8]]);
+    }
+
+    #[tokio::test]
+    async fn union_parent_returns_rhs_and_anchor_spans() {
+        let store = structural_store();
+        let out = planned("{ .svc = \"c\" } &< { .svc = \"b\" }", &store)
             .await
             .unwrap();
         assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
