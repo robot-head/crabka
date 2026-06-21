@@ -59,7 +59,7 @@ use datafusion::arrow::array::{Array, Int64Array, MapArray, StringArray, UInt64A
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
-use flate2::read::GzDecoder;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts};
@@ -3111,16 +3111,27 @@ fn previous_char_boundary(value: &str, mut offset: usize) -> usize {
 }
 
 fn decode_loki_http_body(headers: &HeaderMap, body: &[u8]) -> Result<Vec<u8>, DistributorError> {
-    if headers
+    let Some(encoding) = headers
         .get(CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|encoding| encoding.eq_ignore_ascii_case("gzip"))
-    {
+    else {
+        return Ok(body.to_vec());
+    };
+
+    if encoding.eq_ignore_ascii_case("gzip") {
         let mut decoder = GzDecoder::new(body);
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
             .map_err(DistributorError::LokiGzipDecode)?;
+        return Ok(decompressed);
+    }
+    if encoding.eq_ignore_ascii_case("deflate") {
+        let mut decoder = DeflateDecoder::new(body);
+        let mut decompressed = Vec::new();
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(DistributorError::LokiDeflateDecode)?;
         return Ok(decompressed);
     }
 
@@ -13286,6 +13297,8 @@ enum DistributorError {
     LokiSnappyDecode(snap::Error),
     #[error("invalid gzip-compressed Loki payload: {0}")]
     LokiGzipDecode(std::io::Error),
+    #[error("invalid deflate-compressed Loki payload: {0}")]
+    LokiDeflateDecode(std::io::Error),
     #[error("invalid OTLP protobuf payload: {0}")]
     OtlpDecode(prost::DecodeError),
     #[error("wal append timed out")]
@@ -13321,6 +13334,7 @@ impl IntoResponse for DistributorError {
             | Self::TimestampTooNew { .. }
             | Self::Http(_)
             | Self::LokiDecode(_)
+            | Self::LokiDeflateDecode(_)
             | Self::LokiGzipDecode(_)
             | Self::LokiSnappyDecode(_)
             | Self::OtlpDecode(_) => StatusCode::BAD_REQUEST,
@@ -13375,6 +13389,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::TimestampTooNew { .. }
         | DistributorError::Http(_)
         | DistributorError::LokiDecode(_)
+        | DistributorError::LokiDeflateDecode(_)
         | DistributorError::LokiGzipDecode(_)
         | DistributorError::LokiSnappyDecode(_)
         | DistributorError::OtlpDecode(_) => tonic::Status::invalid_argument(message),

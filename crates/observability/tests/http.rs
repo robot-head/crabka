@@ -25,6 +25,7 @@ use crabka_observability::{
     write_compaction_frontier_to_object_store,
 };
 use flate2::Compression;
+use flate2::write::DeflateEncoder;
 use flate2::write::GzEncoder;
 use futures_util::StreamExt as _;
 use object_store::local::LocalFileSystem;
@@ -262,6 +263,63 @@ async fn loki_push_endpoint_accepts_gzipped_json_payloads() {
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/json")
                 .header("content-encoding", "gzip")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(
+        records[0].labels
+            == labels([
+                ("app", "api"),
+                ("detected_level", "error"),
+                ("env", "prod"),
+                ("service_name", "api"),
+            ])
+    );
+    assert!(records[0].timestamp_ns == 19);
+    assert!(records[0].line == "api error");
+    assert!(
+        records[0].structured_metadata
+            == BTreeMap::from([("trace_id".to_string(), "abc".to_string())])
+    );
+}
+
+#[tokio::test]
+async fn loki_push_endpoint_accepts_deflated_json_payloads() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+    let payload = json!({
+        "streams": [
+            {
+                "stream": {
+                    "app": "api",
+                    "env": "prod"
+                },
+                "values": [
+                    ["19", "api error", {"trace_id": "abc"}]
+                ]
+            }
+        ]
+    })
+    .to_string();
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload.as_bytes()).unwrap();
+    let payload = encoder.finish().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .header("content-encoding", "deflate")
                 .body(Body::from(payload))
                 .unwrap(),
         )
