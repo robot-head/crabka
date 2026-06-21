@@ -127,6 +127,9 @@ where
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if end_ns < start_ns {
+        return (StatusCode::BAD_REQUEST, "end must be >= start").into_response();
+    }
     let limit = query_param(&uri, "limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -1863,6 +1866,15 @@ mod tests {
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_end_before_start() {
+        let (status, body) =
+            get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=2&end=1").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
