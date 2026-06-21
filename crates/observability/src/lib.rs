@@ -5661,6 +5661,7 @@ struct PrometheusRulesFilters {
     rule_names: BTreeSet<String>,
     rule_groups: BTreeSet<String>,
     files: BTreeSet<String>,
+    label_selectors: Vec<StreamQuery>,
     exclude_alerts: bool,
     evaluation_time: Option<i64>,
 }
@@ -5689,6 +5690,17 @@ impl PrometheusRulesFilters {
                 "file" | "file[]" if !value.is_empty() => {
                     filters.files.insert(value.into_owned());
                 }
+                "match" | "match[]" if !value.is_empty() => {
+                    let selector = value.into_owned();
+                    filters
+                        .label_selectors
+                        .push(parse_query(&selector).map_err(|source| {
+                            HttpQueryError::LokiParse {
+                                query: selector.clone(),
+                                source,
+                            }
+                        })?);
+                }
                 _ => {}
             }
         }
@@ -5696,21 +5708,40 @@ impl PrometheusRulesFilters {
     }
 
     fn has_rule_filter(&self) -> bool {
-        self.rule_kind.is_some() || !self.rule_names.is_empty()
+        self.rule_kind.is_some() || !self.rule_names.is_empty() || !self.label_selectors.is_empty()
     }
 
-    fn matches_rule(&self, rule: &Value) -> bool {
+    fn matches_rule(&self, rule: &Value, source_rule: &serde_yaml::Value) -> bool {
         if self
             .rule_kind
             .is_some_and(|kind| rule.get("type").and_then(Value::as_str) != Some(kind))
         {
             return false;
         }
-        self.rule_names.is_empty()
-            || rule
+        if !self.rule_names.is_empty()
+            && !rule
                 .get("name")
                 .and_then(Value::as_str)
                 .is_some_and(|name| self.rule_names.contains(name))
+        {
+            return false;
+        }
+        self.matches_rule_labels(source_rule)
+    }
+
+    fn matches_rule_labels(&self, source_rule: &serde_yaml::Value) -> bool {
+        if self.label_selectors.is_empty() {
+            return true;
+        }
+        let labels = loki_yaml_mapping(source_rule)
+            .map(|fields| yaml_string_labels_field(fields, "labels"))
+            .unwrap_or_default();
+        self.label_selectors.iter().any(|selector| {
+            selector
+                .matchers
+                .iter()
+                .all(|matcher| matcher.matches(&labels))
+        })
     }
 }
 
@@ -5768,7 +5799,7 @@ async fn prometheus_rules_for_group(
         let Some(mut rule) = prometheus_rule_response(source_rule) else {
             continue;
         };
-        if !filters.matches_rule(&rule) {
+        if !filters.matches_rule(&rule, source_rule) {
             continue;
         }
         if !filters.exclude_alerts && rule.get("type").and_then(Value::as_str) == Some("alerting") {
@@ -5844,6 +5875,21 @@ fn yaml_string_map_field(fields: &serde_yaml::Mapping, name: &'static str) -> Va
         })
         .unwrap_or_default();
     Value::Object(values)
+}
+
+fn yaml_string_labels_field(fields: &serde_yaml::Mapping, name: &'static str) -> Labels {
+    fields
+        .get(serde_yaml_key(name))
+        .and_then(loki_yaml_mapping)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| {
+                    Some((key.as_str()?.to_string(), value.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn loki_yaml_mapping(value: &serde_yaml::Value) -> Option<&serde_yaml::Mapping> {
