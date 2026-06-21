@@ -6764,9 +6764,10 @@ async fn query(
 async fn query_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6784,9 +6785,10 @@ async fn api_prom_query(
 async fn api_prom_query_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6804,9 +6806,10 @@ async fn query_range(
 async fn query_range_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6820,8 +6823,8 @@ async fn format_query(RawQuery(raw_query): RawQuery) -> Response {
     }
 }
 
-async fn format_query_post(body: Bytes) -> Response {
-    let raw_query = match form_body_query(&body) {
+async fn format_query_post(RawQuery(raw_query): RawQuery, body: Bytes) -> Response {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6845,9 +6848,10 @@ async fn patterns(
 async fn patterns_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6871,9 +6875,10 @@ async fn detected_fields(
 async fn detected_fields_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6897,9 +6902,10 @@ async fn detected_labels(
 async fn detected_labels_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6925,9 +6931,10 @@ async fn detected_field_values_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6955,9 +6962,10 @@ async fn label_names(
 async fn label_names_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6991,9 +6999,10 @@ async fn label_values_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7025,9 +7034,10 @@ async fn series(
 async fn series_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7059,9 +7069,10 @@ async fn api_prom_label_names(
 async fn api_prom_label_names_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7095,9 +7106,10 @@ async fn api_prom_label_values_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7129,9 +7141,10 @@ async fn api_prom_series(
 async fn api_prom_series_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7159,9 +7172,10 @@ async fn index_stats(
 async fn index_stats_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7187,9 +7201,10 @@ async fn index_volume(
 async fn index_volume_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7216,9 +7231,10 @@ async fn index_volume_range(
 async fn index_volume_range_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match form_body_query(&body) {
+    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -10564,6 +10580,13 @@ fn sample_time_bucket(sample_time: i64, start: i64, step: i64) -> i64 {
 
 fn form_body_query(body: &Bytes) -> Result<String, HttpQueryError> {
     String::from_utf8(body.to_vec()).map_err(|_| HttpQueryError::InvalidPercentEncoding)
+}
+
+fn post_query_params(raw_query: Option<&str>, body: &Bytes) -> Result<String, HttpQueryError> {
+    match raw_query {
+        Some(raw_query) if body.is_empty() && !raw_query.is_empty() => Ok(raw_query.to_owned()),
+        _ => form_body_query(body),
+    }
 }
 
 fn execute_format_query(raw_query: Option<&str>) -> Result<String, HttpQueryError> {
