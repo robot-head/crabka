@@ -79,6 +79,9 @@ struct Cli {
     #[arg(long)]
     edge_store_max_items: Option<usize>,
     #[arg(long)]
+    #[arg(value_delimiter = ',')]
+    histogram_buckets_ns: Option<Vec<f64>>,
+    #[arg(long)]
     enable_target_info: bool,
     #[arg(long)]
     enable_status_message: bool,
@@ -557,6 +560,9 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
     if let Some(max) = cli.edge_store_max_items {
         cfg.edge_store_max_items = max;
     }
+    if let Some(buckets) = &cli.histogram_buckets_ns {
+        cfg.histogram_buckets_ns.clone_from(buckets);
+    }
     cfg.enable_target_info |= cli.enable_target_info;
     cfg.enable_status_message |= cli.enable_status_message;
     cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
@@ -807,6 +813,8 @@ mod tests {
             "20",
             "--edge-store-max-items",
             "1234",
+            "--histogram-buckets-ns",
+            "1000,2000,5000",
             "--config",
             "metricsgen.yaml",
         ])
@@ -818,6 +826,7 @@ mod tests {
         assert!(cli.max_exemplars_per_series == Some(3));
         assert!(cli.edge_ttl_secs == Some(20));
         assert!(cli.edge_store_max_items == Some(1234));
+        assert!(cli.histogram_buckets_ns == Some(vec![1000.0, 2000.0, 5000.0]));
         assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
     }
 
@@ -846,6 +855,7 @@ mod tests {
             max_exemplars_per_series: 5,
             edge_ttl: Duration::from_mins(1),
             edge_store_max_items: 2_000,
+            histogram_buckets_ns: vec![1_000.0, 2_000.0],
             remote_write_url: "http://metrics.example/api/v1/push".into(),
             ..MetricsGenConfig::default()
         };
@@ -856,6 +866,7 @@ mod tests {
         assert!(cfg.max_exemplars_per_series == 5);
         assert!(cfg.edge_ttl == Duration::from_mins(1));
         assert!(cfg.edge_store_max_items == 2_000);
+        assert!(cfg.histogram_buckets_ns == vec![1_000.0, 2_000.0]);
         assert!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
 
         let cli = Cli::try_parse_from([
@@ -870,6 +881,8 @@ mod tests {
             "9",
             "--edge-store-max-items",
             "77",
+            "--histogram-buckets-ns",
+            "500,1000,2500",
             "--remote-write-url",
             "http://override.example/api/v1/push",
         ])
@@ -881,6 +894,7 @@ mod tests {
         assert!(cfg.max_exemplars_per_series == 2);
         assert!(cfg.edge_ttl == Duration::from_secs(9));
         assert!(cfg.edge_store_max_items == 77);
+        assert!(cfg.histogram_buckets_ns == vec![500.0, 1000.0, 2500.0]);
         assert!(cfg.remote_write_url == "http://override.example/api/v1/push");
     }
 
