@@ -4165,6 +4165,230 @@ rules:
 }
 
 #[tokio::test]
+async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for rule_group in [
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+",
+        "\
+name: worker-errors
+rules:
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [5m]) > 0
+",
+    ] {
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/loki/api/v1/rules/default")
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .header("content-type", "application/yaml")
+                    .body(Body::from(rule_group))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(create_response.status() == StatusCode::ACCEPTED);
+    }
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/loki/api/v1/rules/default/api-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
+
+    let deleted_group_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default/api-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(deleted_group_response.status() == StatusCode::NOT_FOUND);
+    assert!(text_body(deleted_group_response).await == "group does not exist\n");
+
+    let namespace_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(namespace_response.status() == StatusCode::OK);
+    let namespace_body = text_body(namespace_response).await;
+    assert!(!namespace_body.contains("api-errors"));
+    assert!(namespace_body.contains("worker-errors"));
+    assert!(namespace_body.contains("WorkerErrors"));
+}
+
+#[tokio::test]
+async fn ruler_namespace_delete_endpoint_removes_only_that_namespace() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (namespace, rule_group) in [
+        (
+            "default",
+            "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+",
+        ),
+        (
+            "jobs",
+            "\
+name: worker-errors
+rules:
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [5m]) > 0
+",
+        ),
+    ] {
+        let create_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/loki/api/v1/rules/{namespace}"))
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .header("content-type", "application/yaml")
+                    .body(Body::from(rule_group))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(create_response.status() == StatusCode::ACCEPTED);
+    }
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
+
+    let deleted_namespace_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(deleted_namespace_response.status() == StatusCode::NOT_FOUND);
+    assert!(text_body(deleted_namespace_response).await == "no rule groups found\n");
+
+    let other_namespace_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/jobs/worker-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(other_namespace_response.status() == StatusCode::OK);
+    let other_namespace_body = text_body(other_namespace_response).await;
+    assert!(other_namespace_body.contains("worker-errors"));
+    assert!(other_namespace_body.contains("WorkerErrors"));
+}
+
+#[tokio::test]
+async fn ruler_rule_group_delete_endpoint_removes_empty_namespace() {
+    let state = fixture();
+    let app = loki_router(state);
+    let rule_group = "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+";
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/yaml")
+                .body(Body::from(rule_group))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(create_response.status() == StatusCode::ACCEPTED);
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/loki/api/v1/rules/default/api-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
+
+    let namespace_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(namespace_response.status() == StatusCode::NOT_FOUND);
+    assert!(text_body(namespace_response).await == "no rule groups found\n");
+}
+
+#[tokio::test]
 async fn ruler_ring_endpoint_returns_loki_status_page() {
     let state = fixture();
     let app = loki_router(state);

@@ -4622,11 +4622,13 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/loki/api/v1/rules", get(loki_rules))
         .route(
             "/loki/api/v1/rules/{namespace}",
-            get(loki_rule_namespace).post(create_loki_rule_group),
+            get(loki_rule_namespace)
+                .post(create_loki_rule_group)
+                .delete(delete_loki_rule_namespace),
         )
         .route(
             "/loki/api/v1/rules/{namespace}/{group_name}",
-            get(loki_rule_group),
+            get(loki_rule_group).delete(delete_loki_rule_group),
         )
         .route("/prometheus/api/v1/rules", get(prometheus_rules))
         .route("/prometheus/api/v1/alerts", get(prometheus_alerts))
@@ -4669,11 +4671,13 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/api/prom/rules", get(prometheus_rules))
         .route(
             "/api/prom/rules/{namespace}",
-            get(loki_rule_namespace).post(create_loki_rule_group),
+            get(loki_rule_namespace)
+                .post(create_loki_rule_group)
+                .delete(delete_loki_rule_namespace),
         )
         .route(
             "/api/prom/rules/{namespace}/{group_name}",
-            get(loki_rule_group),
+            get(loki_rule_group).delete(delete_loki_rule_group),
         )
         .route("/api/prom/tail", get(tail))
         .route(
@@ -5432,6 +5436,29 @@ async fn create_loki_rule_group(
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
+async fn delete_loki_rule_namespace(
+    State(state): State<QuerierState>,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let mut rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let Some(namespaces) = rules.get_mut(&tenant) else {
+        return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+    };
+    if namespaces.remove(&namespace).is_none() {
+        return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+    }
+    json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
+}
+
 async fn loki_rule_group(
     State(state): State<QuerierState>,
     Path((namespace, group_name)): Path<(String, String)>,
@@ -5454,6 +5481,35 @@ async fn loki_rule_group(
         return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
     };
     loki_yaml_response(StatusCode::OK, group)
+}
+
+async fn delete_loki_rule_group(
+    State(state): State<QuerierState>,
+    Path((namespace, group_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let mut rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let Some(namespaces) = rules.get_mut(&tenant) else {
+        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+    };
+    let Some(groups) = namespaces.get_mut(&namespace) else {
+        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+    };
+    if groups.remove(&group_name).is_none() {
+        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+    }
+    if groups.is_empty() {
+        namespaces.remove(&namespace);
+    }
+    json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
 fn loki_ruler_tenant(headers: &HeaderMap) -> Result<String, HttpQueryError> {
