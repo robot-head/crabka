@@ -11874,6 +11874,29 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_step_duration() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_returns_loki_error_for_excessive_resolution() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=vector%281%29&start=0&end=11001000000000&step=1s")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "exceeded maximum resolution of 11,000 points per time series. Try increasing the value of the step parameter"
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_returns_loki_error_for_invalid_start() {
     let state = fixture();
     let app = loki_router(state);

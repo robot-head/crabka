@@ -7312,6 +7312,7 @@ async fn execute_http_multi_tenant_query(
 ) -> Result<Value, HttpQueryError> {
     if let Some(result) = scalar_vector_expression_result(&params.query) {
         let time_range = time_range(params, kind)?;
+        validate_loki_query_range_resolution(params, kind, time_range)?;
         let value = match kind {
             QueryKind::Instant => loki_instant_scalar_or_vector_response(time_range.end_ns, result),
             QueryKind::Range => {
@@ -7352,6 +7353,7 @@ async fn execute_http_query_for_tenant(
     let time_range = time_range(params, kind)?;
     validate_query_range_limit(state, time_range)?;
     validate_query_length_limit(state, &params.query)?;
+    validate_loki_query_range_resolution(params, kind, time_range)?;
     let limit = params.limit;
     let direction = loki_direction(params.direction.as_deref())?;
     let interval = params.interval;
@@ -8287,6 +8289,30 @@ fn validate_loki_volume_query_range_limit(time_range: TimeRange) -> Result<(), H
         return Err(HttpQueryError::LokiQueryRangeTooLarge {
             query_length: format_loki_query_length(query_range_ns),
         });
+    }
+    Ok(())
+}
+
+fn validate_loki_query_range_resolution(
+    params: &QueryParams,
+    kind: QueryKind,
+    time_range: TimeRange,
+) -> Result<(), HttpQueryError> {
+    if !matches!(kind, QueryKind::Range) {
+        return Ok(());
+    }
+    let step_ns = params
+        .step
+        .unwrap_or_else(|| default_metric_range_step(time_range));
+    if step_ns <= 0 {
+        return Err(HttpQueryError::InvalidStep);
+    }
+    let query_range_ns = time_range
+        .end_ns
+        .checked_sub(time_range.start_ns)
+        .ok_or(HttpQueryError::QueryResolutionTooHigh)?;
+    if query_range_ns / step_ns > LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS {
+        return Err(HttpQueryError::QueryResolutionTooHigh);
     }
     Ok(())
 }
@@ -11779,6 +11805,7 @@ fn time_range(params: &QueryParams, kind: QueryKind) -> Result<TimeRange, HttpQu
 
 const LOKI_DEFAULT_QUERY_RANGE_NS: i64 = 3_600_000_000_000;
 const LOKI_DEFAULT_TAIL_LIMIT: usize = 100;
+const LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS: i64 = 11_000;
 const LOKI_MAX_TAIL_DELAY_NS: i64 = 5_000_000_000;
 const LOKI_VOLUME_MAX_QUERY_RANGE_NS: i64 = 2_595_600_000_000_000;
 
@@ -15181,6 +15208,10 @@ enum HttpQueryError {
     QueryRangeTooLarge { range_ns: i64, max_range_ns: i64 },
     #[error("the query time range exceeds the limit (query length: {query_length}, limit: 30d1h)")]
     LokiQueryRangeTooLarge { query_length: String },
+    #[error(
+        "exceeded maximum resolution of 11,000 points per time series. Try increasing the value of the step parameter"
+    )]
+    QueryResolutionTooHigh,
     #[error("query planned {planned_bytes} bytes, exceeding configured limit {max_bytes}")]
     QueryBytesTooLarge { planned_bytes: u64, max_bytes: u64 },
     #[error("query length {query_length} bytes exceeds configured limit {max_query_length}")]
@@ -15238,6 +15269,7 @@ impl IntoResponse for HttpQueryError {
             | Self::MissingTenant
             | Self::QueryRangeTooLarge { .. }
             | Self::LokiQueryRangeTooLarge { .. }
+            | Self::QueryResolutionTooHigh
             | Self::QueryBytesTooLarge { .. }
             | Self::QueryLengthTooLarge { .. }
             | Self::QuerySeriesTooLarge { .. }
@@ -15289,6 +15321,7 @@ impl IntoResponse for HttpQueryError {
                 | Self::InvalidSinceQueryParameter { .. }
                 | Self::InvalidTimestampQueryParameter { .. }
                 | Self::LokiQueryRangeTooLarge { .. }
+                | Self::QueryResolutionTooHigh
         ) {
             return text_response(status, &self.to_string());
         }
