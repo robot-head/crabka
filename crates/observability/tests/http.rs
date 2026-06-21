@@ -7036,6 +7036,50 @@ async fn tail_endpoint_accepts_delay_for_at_five_seconds() {
 }
 
 #[tokio::test]
+async fn tail_endpoint_delays_fresh_records_when_delay_for_is_set() {
+    let hot_tail = InMemoryWalSink::default();
+    let timestamp_ns = i64::try_from(current_unix_epoch_nanos()).unwrap();
+    hot_tail
+        .append(WalLogRecord {
+            tenant: "tenant-a".to_string(),
+            labels: labels([("app", "api"), ("env", "prod")]),
+            timestamp_ns,
+            line: "api fresh error".to_string(),
+            structured_metadata: BTreeMap::new(),
+            position: None,
+        })
+        .await
+        .unwrap();
+    let state = fixture().with_hot_tail(hot_tail, timestamp_ns.saturating_sub(1));
+    let app = loki_router(state);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request = format!(
+        "ws://{addr}/loki/api/v1/tail?delay_for=1&query=%7Bapp%3D%22api%22%7D&start={}&end={}",
+        timestamp_ns.saturating_sub(1),
+        timestamp_ns.saturating_add(1),
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert!(
+        timeout(Duration::from_millis(150), socket.next())
+            .await
+            .is_err()
+    );
+    let _ = socket.close(None).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_tail_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     let compactor_config = ServiceConfig {
