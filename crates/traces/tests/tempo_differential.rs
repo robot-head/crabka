@@ -75,6 +75,66 @@ impl WalSink for CapturingSink {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryCaseKind {
+    Selector,
+    Structural,
+    Pipeline,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QueryCase {
+    kind: QueryCaseKind,
+    encoded_query: &'static str,
+    expected_span_id: Option<&'static str>,
+}
+
+fn differential_search_corpus() -> Vec<QueryCase> {
+    vec![
+        QueryCase {
+            kind: QueryCaseKind::Selector,
+            encoded_query: "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D",
+            expected_span_id: None,
+        },
+        QueryCase {
+            kind: QueryCaseKind::Structural,
+            encoded_query: "%7B%20.http.method%20%3D%20%22GET%22%20%7D%20%3E%3E%20%7B%20.db.system%20%3D%20%22postgresql%22%20%7D",
+            expected_span_id: Some(CHILD_SPAN_ID_HEX),
+        },
+        QueryCase {
+            kind: QueryCaseKind::Pipeline,
+            encoded_query: "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D%20%7C%20count()%20%7C%20by%28span.http.method%29",
+            expected_span_id: None,
+        },
+    ]
+}
+
+#[test]
+fn differential_search_corpus_covers_selector_structural_and_pipeline_queries() {
+    let corpus = differential_search_corpus();
+
+    assert!(
+        corpus
+            .iter()
+            .any(|case| case.kind == QueryCaseKind::Selector)
+    );
+    assert!(
+        corpus
+            .iter()
+            .any(|case| case.kind == QueryCaseKind::Structural)
+    );
+    assert!(
+        corpus
+            .iter()
+            .any(|case| case.kind == QueryCaseKind::Pipeline)
+    );
+    assert!(
+        corpus
+            .iter()
+            .any(|case| case.expected_span_id == Some(CHILD_SPAN_ID_HEX))
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Docker and the grafana/tempo image"]
 async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
@@ -101,40 +161,31 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
         get_trace_by_id(&client, &crabka.base_url, Some(TENANT), query_range).await?;
     assert_trace_shape_matches(&tempo_trace, &crabka_trace);
 
-    let query = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
-    let tempo_search = get_json_until_non_empty_traces(
-        &client,
-        &format!("{tempo_query}/api/search?q={query}&{query_range}"),
-        None,
-    )
-    .await?;
-    let crabka_search = get_json(
-        &client,
-        &format!("{}/api/search?q={query}&{query_range}", crabka.base_url),
-        Some(TENANT),
-    )
-    .await?;
-    assert_search_shape_matches(&tempo_search, &crabka_search);
-
-    let structural_query = "%7B%20.http.method%20%3D%20%22GET%22%20%7D%20%3E%3E%20%7B%20.db.system%20%3D%20%22postgresql%22%20%7D";
-    let tempo_structural_search = get_json_until_non_empty_traces(
-        &client,
-        &format!("{tempo_query}/api/search?q={structural_query}&{query_range}"),
-        None,
-    )
-    .await?;
-    let crabka_structural_search = get_json(
-        &client,
-        &format!(
-            "{}/api/search?q={structural_query}&{query_range}",
-            crabka.base_url
-        ),
-        Some(TENANT),
-    )
-    .await?;
-    assert_search_shape_matches(&tempo_structural_search, &crabka_structural_search);
-    assert_search_contains_span_id(&tempo_structural_search, CHILD_SPAN_ID_HEX);
-    assert_search_contains_span_id(&crabka_structural_search, CHILD_SPAN_ID_HEX);
+    for case in differential_search_corpus() {
+        let tempo_search = get_json_until_non_empty_traces(
+            &client,
+            &format!(
+                "{tempo_query}/api/search?q={}&{query_range}",
+                case.encoded_query
+            ),
+            None,
+        )
+        .await?;
+        let crabka_search = get_json(
+            &client,
+            &format!(
+                "{}/api/search?q={}&{query_range}",
+                crabka.base_url, case.encoded_query
+            ),
+            Some(TENANT),
+        )
+        .await?;
+        assert_search_shape_matches(&tempo_search, &crabka_search);
+        if let Some(span_id) = case.expected_span_id {
+            assert_search_contains_span_id(&tempo_search, span_id);
+            assert_search_contains_span_id(&crabka_search, span_id);
+        }
+    }
 
     let tempo_tags = get_json(
         &client,
