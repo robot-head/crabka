@@ -4095,6 +4095,15 @@ struct SharedPrometheusAlertStates {
     active_at: Arc<Mutex<BTreeMap<PrometheusAlertKey, i64>>>,
 }
 
+impl SharedPrometheusAlertStates {
+    fn clear_tenant(&self, tenant: &str) {
+        self.active_at
+            .lock()
+            .expect("Prometheus alert state lock poisoned")
+            .retain(|key, _| key.tenant != tenant);
+    }
+}
+
 #[derive(Clone)]
 struct ColdObjectStoreState {
     store: Arc<dyn ObjectStore>,
@@ -5535,7 +5544,7 @@ async fn create_loki_rule_group(
             .lock()
             .expect("Loki rule store lock poisoned");
         rules
-            .entry(tenant)
+            .entry(tenant.clone())
             .or_default()
             .entry(namespace)
             .or_default()
@@ -5545,6 +5554,7 @@ async fn create_loki_rule_group(
     if let Err(error) = state.rules.persist_snapshot(&snapshot) {
         return HttpQueryError::from(error).into_response();
     }
+    state.alert_states.clear_tenant(&tenant);
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
@@ -5577,6 +5587,7 @@ async fn delete_loki_rule_namespace(
     if let Err(error) = state.rules.persist_snapshot(&snapshot) {
         return HttpQueryError::from(error).into_response();
     }
+    state.alert_states.clear_tenant(&tenant);
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
@@ -5639,6 +5650,7 @@ async fn delete_loki_rule_group(
     if let Err(error) = state.rules.persist_snapshot(&snapshot) {
         return HttpQueryError::from(error).into_response();
     }
+    state.alert_states.clear_tenant(&tenant);
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
