@@ -375,6 +375,8 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         merge_metrics(&mut metrics, body.get("metrics"));
     }
 
+    apply_search_limits(&mut merged_traces, search_limit(&uri), search_spss(&uri));
+
     axum::Json(json!({
         "traces": merged_traces,
         "metrics": metrics,
@@ -813,6 +815,54 @@ fn metric_point_sort_key(point: &Value) -> (i128, String) {
     let ts = metric_point_timestamp(point).unwrap_or_default();
     let parsed = ts.parse::<i128>().unwrap_or(i128::MAX);
     (parsed, ts)
+}
+
+/// Tempo's default maximum number of traces returned by `/api/search`.
+const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Tempo's default maximum number of spanSets returned per trace.
+const DEFAULT_SEARCH_SPSS: usize = 3;
+
+fn search_limit(uri: &Uri) -> usize {
+    bounded_count_param(uri, "limit", DEFAULT_SEARCH_LIMIT)
+}
+
+fn search_spss(uri: &Uri) -> usize {
+    bounded_count_param(uri, "spss", DEFAULT_SEARCH_SPSS)
+}
+
+/// Parse a positive integer query param, falling back to `default` when absent,
+/// unparseable, or zero (Tempo treats a non-positive value as "use the default").
+fn bounded_count_param(uri: &Uri, key: &str, default: usize) -> usize {
+    query_param(uri, key)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+/// Apply Tempo's post-merge `limit`/`spss` truncation: order traces newest-first
+/// by `startTimeUnixNano`, keep at most `limit`, then cap each kept trace's
+/// `spanSets` to `spss` (preserving each spanSet's `matched` count).
+fn apply_search_limits(traces: &mut Vec<Value>, limit: usize, spss: usize) {
+    traces.sort_by_key(|trace| std::cmp::Reverse(trace_start_sort_key(trace)));
+    traces.truncate(limit);
+    for trace in traces {
+        if let Some(span_sets) = trace.get_mut("spanSets").and_then(Value::as_array_mut) {
+            span_sets.truncate(spss);
+        }
+    }
+}
+
+/// Sort key for newest-first trace ordering: `startTimeUnixNano` is string-encoded
+/// nanos in the Tempo wire shape, so parse it; absent/unparseable sorts oldest.
+fn trace_start_sort_key(trace: &Value) -> i128 {
+    let Some(value) = trace.get("startTimeUnixNano") else {
+        return i128::MIN;
+    };
+    match value {
+        Value::String(value) => value.parse().unwrap_or(i128::MIN),
+        Value::Number(number) => number.as_i128().unwrap_or(i128::MIN),
+        _ => i128::MIN,
+    }
 }
 
 fn merge_trace(traces: &mut Vec<Value>, trace: Value) {

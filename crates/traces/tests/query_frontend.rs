@@ -179,6 +179,116 @@ async fn frontend_merges_duplicate_trace_results_across_shards() {
 }
 
 #[tokio::test]
+async fn frontend_caps_merged_traces_to_limit_newest_first() {
+    // Two shards (backend + live) each return three distinct traces whose
+    // startTimeUnixNano values, after merge, span 100..600. Unmerged that is six
+    // traces; Tempo applies the final `limit` AFTER merge, ordered newest-first.
+    let upstream_url = spawn_many_trace_search_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1&end=3&limit=2")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let traces = json["traces"].as_array().unwrap();
+    // limit=2, newest-first ⇒ the two most-recent traces only.
+    assert!(traces.len() == 2);
+    assert!(traces[0]["startTimeUnixNano"] == "600");
+    assert!(traces[1]["startTimeUnixNano"] == "500");
+}
+
+#[tokio::test]
+async fn frontend_defaults_merged_trace_limit_to_twenty() {
+    // No `limit` query param ⇒ Tempo's default of 20. The stub returns 25
+    // distinct traces per shard, so the merged set exceeds the default cap.
+    let upstream_url = spawn_overflow_trace_search_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["traces"].as_array().unwrap().len() == 20);
+}
+
+#[tokio::test]
+async fn frontend_caps_span_sets_per_trace_to_spss() {
+    // A single trace returned with four spanSets. Tempo caps the number of
+    // spanSets returned per trace to `spss` AFTER merge, preserving `matched`.
+    let upstream_url = spawn_many_span_set_search_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1&end=3&spss=2")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
+    // spss=2 ⇒ only the first two spanSets kept, in merge order.
+    assert!(span_sets.len() == 2);
+    assert!(span_sets[0]["matched"] == 1);
+    assert!(span_sets[0]["spans"][0]["spanID"] == "1111111111111111");
+    assert!(span_sets[1]["spans"][0]["spanID"] == "2222222222222222");
+}
+
+#[tokio::test]
+async fn frontend_defaults_span_sets_per_trace_to_three() {
+    // No `spss` query param ⇒ Tempo's default of 3.
+    let upstream_url = spawn_many_span_set_search_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["traces"][0]["spanSets"].as_array().unwrap().len() == 3);
+}
+
+#[tokio::test]
 async fn frontend_dispatches_search_shards_concurrently() {
     let upstream_url = spawn_concurrent_search_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -802,6 +912,42 @@ async fn spawn_overlapping_search_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_many_trace_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(many_trace_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_overflow_trace_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(overflow_trace_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_many_span_set_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(many_span_set_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_slow_search_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(slow_search_response))
@@ -1010,6 +1156,96 @@ async fn overlapping_search_response() -> axum::Json<Value> {
             "inspectedTraces": 1,
             "inspectedBytes": 0
         }
+    }))
+}
+
+async fn many_trace_search_response(State(()): State<()>, headers: HeaderMap) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    // Each tier returns three distinct traces; the merge keeps all six since the
+    // trace IDs differ across tiers. Start times are interleaved so the
+    // newest-first ordering is exercised across the shard boundary.
+    let traces: Vec<Value> = match tier {
+        "backend" => [("aa", "100"), ("bb", "300"), ("cc", "500")],
+        "live" => [("dd", "200"), ("ee", "400"), ("ff", "600")],
+        other => panic!("unexpected query tier {other}"),
+    }
+    .into_iter()
+    .map(|(prefix, start)| {
+        json!({
+            "traceID": prefix.repeat(16),
+            "rootServiceName": "svc",
+            "rootTraceName": "root",
+            "startTimeUnixNano": start,
+            "durationMs": 2,
+            "spanSets": [{
+                "spans": [{ "spanID": "1111111111111111" }],
+                "matched": 1
+            }]
+        })
+    })
+    .collect();
+
+    axum::Json(json!({
+        "traces": traces,
+        "metrics": { "totalBlocks": 1, "inspectedTraces": 1, "inspectedBytes": 0 }
+    }))
+}
+
+async fn overflow_trace_search_response() -> axum::Json<Value> {
+    // Twenty-five distinct traces from a single shard, more than Tempo's default
+    // limit of 20.
+    let traces: Vec<Value> = (0..25)
+        .map(|i| {
+            json!({
+                "traceID": format!("{i:032x}"),
+                "rootServiceName": "svc",
+                "rootTraceName": "root",
+                "startTimeUnixNano": i.to_string(),
+                "durationMs": 2,
+                "spanSets": [{
+                    "spans": [{ "spanID": "1111111111111111" }],
+                    "matched": 1
+                }]
+            })
+        })
+        .collect();
+
+    axum::Json(json!({
+        "traces": traces,
+        "metrics": { "totalBlocks": 1, "inspectedTraces": 1, "inspectedBytes": 0 }
+    }))
+}
+
+async fn many_span_set_search_response() -> axum::Json<Value> {
+    // One trace carrying four spanSets, more than Tempo's default spss of 3.
+    let span_sets: Vec<Value> = [
+        "1111111111111111",
+        "2222222222222222",
+        "3333333333333333",
+        "4444444444444444",
+    ]
+    .into_iter()
+    .map(|span_id| {
+        json!({
+            "spans": [{ "spanID": span_id }],
+            "matched": 1
+        })
+    })
+    .collect();
+
+    axum::Json(json!({
+        "traces": [{
+            "traceID": "0123456789abcdef0123456789abcdef",
+            "rootServiceName": "svc",
+            "rootTraceName": "root",
+            "startTimeUnixNano": "1000000000",
+            "durationMs": 2,
+            "spanSets": span_sets
+        }],
+        "metrics": { "totalBlocks": 1, "inspectedTraces": 1, "inspectedBytes": 0 }
     }))
 }
 
