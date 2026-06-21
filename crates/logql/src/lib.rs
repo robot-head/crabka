@@ -871,6 +871,18 @@ fn template_variable_path_value(
     Some(TemplateRuntimeValue::Json(current))
 }
 
+fn template_current_dot_field_value(
+    value: &TemplateRuntimeValue,
+    field: &str,
+) -> Option<TemplateRuntimeValue> {
+    let path = field
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    template_variable_path_value(value, &path)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateConditional {
     branches: Vec<(TemplateExpression, Vec<TemplatePart>)>,
@@ -896,7 +908,7 @@ struct TemplateAssignment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateRange {
-    variable: String,
+    variable: Option<String>,
     expression: TemplateExpression,
     parts: Vec<TemplatePart>,
     else_parts: Vec<TemplatePart>,
@@ -913,8 +925,12 @@ impl TemplateRange {
         }
         let mut rendered = String::new();
         for value in values {
-            let child_context =
-                context.with_variable(self.variable.clone(), TemplateRuntimeValue::Json(value));
+            let value = TemplateRuntimeValue::Json(value);
+            let child_context = if let Some(variable) = &self.variable {
+                context.with_variable(variable.clone(), value)
+            } else {
+                context.with_current_dot(value)
+            };
             rendered.push_str(&render_template_parts(&self.parts, &child_context));
         }
         rendered
@@ -1089,9 +1105,15 @@ impl TemplateValue {
                 .current_dot
                 .clone()
                 .unwrap_or_else(|| TemplateRuntimeValue::String(String::new())),
-            Self::Field(name) => {
-                TemplateRuntimeValue::String(context.fields.get(name).cloned().unwrap_or_default())
-            }
+            Self::Field(name) => context
+                .current_dot
+                .as_ref()
+                .and_then(|value| template_current_dot_field_value(value, name))
+                .unwrap_or_else(|| {
+                    TemplateRuntimeValue::String(
+                        context.fields.get(name).cloned().unwrap_or_default(),
+                    )
+                }),
             Self::Variable { name, path } => context
                 .variables
                 .get(name)
@@ -1434,12 +1456,15 @@ fn parse_template_with(
 
 fn parse_template_range_expression(
     range_expression: &str,
-) -> Result<(String, TemplateExpression), ParseError> {
+) -> Result<(Option<String>, TemplateExpression), ParseError> {
     let Some((variable, expression)) = range_expression.split_once(":=") else {
-        return Err(template_parse_error("expected template range assignment"));
+        return Ok((None, TemplateExpression::parse(range_expression.trim())?));
     };
     Ok((
-        parse_template_variable_name(variable.trim(), "expected template range variable")?,
+        Some(parse_template_variable_name(
+            variable.trim(),
+            "expected template range variable",
+        )?),
         TemplateExpression::parse(expression.trim())?,
     ))
 }

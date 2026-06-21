@@ -573,6 +573,24 @@ fn query_evaluator_line_format_ranges_over_from_json_arrays() {
 }
 
 #[test]
+fn query_evaluator_line_format_ranges_with_current_dot_over_from_json_arrays() {
+    let query = parse_query(
+        r#"{app="api"} | json queries="queries" | line_format `{{ range fromJson .queries }}{{ .query }}={{ .duration }};{{ end }}` |= "rate=30;sum=15;""#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches(
+        &labels,
+        r#"{"queries":[{"query":"rate","duration":30},{"query":"sum","duration":15}]}"#
+    ));
+    check!(!query.matches(
+        &labels,
+        r#"{"queries":[{"query":"rate","duration":20},{"query":"sum","duration":15}]}"#
+    ));
+}
+
+#[test]
 fn query_evaluator_line_format_uses_range_else_for_empty_from_json_arrays() {
     let query = parse_query(
         r#"{app="api"} | json queries="queries" | line_format `{{ range $q := fromJson .queries }}{{ $q.query }};{{ else }}none{{ end }}` |= "none""#,
