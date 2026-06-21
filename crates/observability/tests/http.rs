@@ -4073,6 +4073,98 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
 }
 
 #[tokio::test]
+async fn ruler_rule_group_endpoint_stores_and_returns_yaml_rule_groups() {
+    let state = fixture();
+    let app = loki_router(state);
+    let rule_group = "\
+name: api-errors
+interval: 1m
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [5m]) > 0
+    for: 2m
+    labels:
+      severity: page
+    annotations:
+      summary: API errors detected
+";
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/yaml")
+                .body(Body::from(rule_group))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(create_response.status() == StatusCode::ACCEPTED);
+    assert!(
+        json_body(create_response).await
+            == json!({
+                "status": "success"
+            })
+    );
+
+    let group_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default/api-errors")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(group_response.status() == StatusCode::OK);
+    let group_body = text_body(group_response).await;
+    assert!(group_body.contains("name: api-errors\n"));
+    assert!(group_body.contains("alert: ApiErrors\n"));
+    assert!(group_body.contains("severity: page\n"));
+
+    let namespace_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(namespace_response.status() == StatusCode::OK);
+    let namespace_body = text_body(namespace_response).await;
+    assert!(namespace_body.contains("- name: api-errors\n"));
+    assert!(namespace_body.contains("alert: ApiErrors\n"));
+
+    let all_rules_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(all_rules_response.status() == StatusCode::OK);
+    let all_rules_body = text_body(all_rules_response).await;
+    assert!(all_rules_body.contains("default:\n"));
+    assert!(all_rules_body.contains("- name: api-errors\n"));
+    assert!(all_rules_body.contains("alert: ApiErrors\n"));
+}
+
+#[tokio::test]
 async fn ruler_ring_endpoint_returns_loki_status_page() {
     let state = fixture();
     let app = loki_router(state);
