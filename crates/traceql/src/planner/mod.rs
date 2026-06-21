@@ -260,6 +260,12 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
             &aggregate_rank_expr_sql(agg)?,
             rank_limit(rank)?,
         ),
+        [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] if is_search_preserving_aggregate(agg) => {
+            Ok(ungrouped_rank_sql(spanset_sql, rank_limit(rank)?))
+        }
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
@@ -348,6 +354,13 @@ fn grouped_rank_sql(
          SELECT matched.* FROM matched JOIN passing ON {join_pred}",
         rank.k
     ))
+}
+
+fn ungrouped_rank_sql(spanset_sql: &str, rank: RankLimit) -> String {
+    if rank.k == 0 {
+        return format!("SELECT * FROM ({spanset_sql}) AS q WHERE FALSE");
+    }
+    format!("SELECT * FROM ({spanset_sql}) AS q")
 }
 
 fn aggregate_filter_sql_query(
@@ -1339,6 +1352,33 @@ mod tests {
                     "cache-b".to_string(),
                     "cache-c".to_string()
                 ]
+        );
+    }
+
+    #[tokio::test]
+    async fn count_topk_without_by_preserves_all_matched_spans() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+            ],
+        );
+
+        let top = planned("{ .svc != nil } | count() | topk(1)", &store)
+            .await
+            .unwrap();
+        assert!(names(&top) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+
+        let bottom = planned("{ .svc != nil } | count() | bottomk(1)", &store)
+            .await
+            .unwrap();
+        assert!(
+            names(&bottom) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
         );
     }
 }
