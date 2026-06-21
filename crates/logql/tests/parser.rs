@@ -573,6 +573,18 @@ fn query_evaluator_line_format_ranges_over_from_json_arrays() {
 }
 
 #[test]
+fn query_evaluator_line_format_uses_range_else_for_empty_from_json_arrays() {
+    let query = parse_query(
+        r#"{app="api"} | json queries="queries" | line_format `{{ range $q := fromJson .queries }}{{ $q.query }};{{ else }}none{{ end }}` |= "none""#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches(&labels, r#"{"queries":[]}"#));
+    check!(!query.matches(&labels, r#"{"queries":[{"query":"rate","duration":30}]}"#));
+}
+
+#[test]
 fn query_evaluator_line_format_applies_go_template_index_and_slice_helpers() {
     let query = parse_query(
         r#"{app="api"} | json payload="payload" | line_format `{{ index (fromJson .payload) "servers" 1 "name" }}|{{ index (fromJson .payload) "status" }}|{{ slice "abcdef" 1 4 }}|{{ slice (index (fromJson .payload) "servers") 0 1 }}`"#,

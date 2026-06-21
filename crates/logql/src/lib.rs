@@ -899,14 +899,18 @@ struct TemplateRange {
     variable: String,
     expression: TemplateExpression,
     parts: Vec<TemplatePart>,
+    else_parts: Vec<TemplatePart>,
 }
 
 impl TemplateRange {
     fn render(&self, context: &TemplateRenderContext<'_>) -> String {
         let value = self.expression.evaluate(context);
         let TemplateRuntimeValue::Json(serde_json::Value::Array(values)) = value else {
-            return String::new();
+            return render_template_parts(&self.else_parts, context);
         };
+        if values.is_empty() {
+            return render_template_parts(&self.else_parts, context);
+        }
         let mut rendered = String::new();
         for value in values {
             let child_context =
@@ -1342,20 +1346,42 @@ fn parse_template_range(
     range_expression: &str,
 ) -> Result<(TemplateRange, usize), ParseError> {
     let (variable, expression) = parse_template_range_expression(range_expression)?;
-    let Some((end_body, end_expression, end_next)) =
+    let Some((control_body, control_expression, control_next)) =
         find_template_control_action(template, body_start)?
+    else {
+        return Err(template_parse_error("expected template end action"));
+    };
+    let parts = parse_template_parts(&template[body_start..control_body])?;
+    if control_expression == "end" {
+        return Ok((
+            TemplateRange {
+                variable,
+                expression,
+                parts,
+                else_parts: Vec::new(),
+            },
+            control_next,
+        ));
+    }
+    if control_expression != "else" {
+        return Err(template_parse_error("unexpected template control action"));
+    }
+
+    let Some((end_body, end_expression, end_next)) =
+        find_template_control_action(template, control_next)?
     else {
         return Err(template_parse_error("expected template end action"));
     };
     if end_expression != "end" {
         return Err(template_parse_error("unexpected template control action"));
     }
-    let parts = parse_template_parts(&template[body_start..end_body])?;
+    let else_parts = parse_template_parts(&template[control_next..end_body])?;
     Ok((
         TemplateRange {
             variable,
             expression,
             parts,
+            else_parts,
         },
         end_next,
     ))
