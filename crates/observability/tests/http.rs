@@ -6883,6 +6883,63 @@ async fn tail_endpoint_streams_hot_wal_tail_over_websocket() {
 }
 
 #[tokio::test]
+async fn tail_endpoint_applies_limit_to_hot_wal_tail_frame() {
+    let hot_tail = InMemoryWalSink::default();
+    for (timestamp_ns, line) in [(20, "api first error"), (21, "api second error")] {
+        hot_tail
+            .append(WalLogRecord {
+                tenant: "tenant-a".to_string(),
+                labels: labels([("app", "api"), ("env", "prod")]),
+                timestamp_ns,
+                line: line.to_string(),
+                structured_metadata: BTreeMap::new(),
+                position: None,
+            })
+            .await
+            .unwrap();
+    }
+    let state = fixture().with_hot_tail(hot_tail, 19);
+    let app = loki_router(state);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request = format!(
+        "ws://{addr}/loki/api/v1/tail?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=0&end=30&limit=1"
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    let message = socket.next().await.unwrap().unwrap();
+    let frame: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+    server.abort();
+
+    assert!(
+        frame
+            == json!({
+                "streams": [
+                    {
+                        "stream": {
+                            "app": "api",
+                            "detected_level": "unknown",
+                            "env": "prod"
+                        },
+                        "values": [
+                            ["20", "api first error"]
+                        ]
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_tail_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     let compactor_config = ServiceConfig {

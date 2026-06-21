@@ -9543,6 +9543,7 @@ struct TailStream {
     source: Option<Arc<dyn LogHotTail>>,
     frontier: CompactionFrontierSource,
     delete_filters: Vec<ActiveLogDeleteFilter>,
+    limit: Option<usize>,
 }
 
 async fn prepare_http_tail(
@@ -9578,6 +9579,7 @@ async fn prepare_http_tail(
         source,
         frontier,
         delete_filters,
+        limit: params.limit,
     })
 }
 
@@ -9602,6 +9604,7 @@ async fn send_tail_stream(mut socket: WebSocket, tail: TailStream) {
                 &tail.delete_filters,
             );
             sent_records = records.len();
+            let frame = apply_loki_tail_frame_limit(frame, tail.limit);
             if !tail_frame_is_empty(&frame) && !send_tail_frame(&mut socket, frame).await {
                 return;
             }
@@ -9623,6 +9626,38 @@ fn tail_frame_is_empty(frame: &Value) -> bool {
         .get("streams")
         .and_then(Value::as_array)
         .is_none_or(Vec::is_empty)
+}
+
+fn apply_loki_tail_frame_limit(mut frame: Value, limit: Option<usize>) -> Value {
+    let Some(limit) = limit else {
+        return frame;
+    };
+    let Some(streams) = frame.get_mut("streams").and_then(Value::as_array_mut) else {
+        return frame;
+    };
+
+    let mut remaining = limit;
+    for stream in streams.iter_mut() {
+        let Some(values) = stream.get_mut("values").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        if remaining == 0 {
+            values.clear();
+            continue;
+        }
+        if values.len() > remaining {
+            values.truncate(remaining);
+        }
+        remaining = remaining.saturating_sub(values.len());
+    }
+    streams.retain(|stream| {
+        stream
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    });
+
+    frame
 }
 
 async fn execute_label_names_query(
