@@ -7,10 +7,10 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto = "proto/crabka/gateway/v1/gateway.proto";
-    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    let protoc_path = protoc_bin_vendored::protoc_bin_path()?;
     connectrpc_axum_build::compile_protos(&[proto], &["proto"])
         .with_prost_config(move |config| {
-            config.protoc_executable(protoc.clone());
+            config.protoc_executable(protoc_path.clone());
         })
         .compile()?;
     println!("cargo:rerun-if-changed={proto}");

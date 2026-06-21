@@ -14,10 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "proto/opentelemetry/proto/collector/profiles/v1development/profiles_service.proto",
     ];
     let includes = ["proto"];
-    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    let protoc_path = protoc_bin_vendored::protoc_bin_path()?;
     connectrpc_axum_build::compile_protos(&protos, &includes)
         .with_prost_config(move |config| {
-            config.protoc_executable(protoc.clone());
+            config.protoc_executable(protoc_path.clone());
         })
         .compile()?;
     for path in [
