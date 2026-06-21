@@ -59,10 +59,32 @@ struct EdgeAgg {
     failed: f64,
     client_seconds_sum: f64,
     client_seconds_count: f64,
+    client_bucket_counts: Vec<u64>,
     server_seconds_sum: f64,
     server_seconds_count: f64,
+    server_bucket_counts: Vec<u64>,
     messaging_seconds_sum: f64,
     messaging_seconds_count: f64,
+    messaging_bucket_counts: Vec<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct HistogramSnapshot<'a> {
+    sum: f64,
+    count: f64,
+    bucket_edges_ns: &'a [f64],
+    bucket_counts: &'a [u64],
+}
+
+impl EdgeAgg {
+    fn new(bucket_count: usize) -> Self {
+        Self {
+            client_bucket_counts: vec![0; bucket_count],
+            server_bucket_counts: vec![0; bucket_count],
+            messaging_bucket_counts: vec![0; bucket_count],
+            ..Self::default()
+        }
+    }
 }
 
 /// Bounded, TTL'd service-graph edge store.
@@ -71,6 +93,7 @@ pub struct EdgeStore {
     max_items: usize,
     ttl_ns: i64,
     enable_messaging_latency: bool,
+    bucket_edges_ns: Vec<f64>,
     edges: HashMap<EdgeKey, Edge>,
     aggregates: HashMap<LabelKey, EdgeAgg>,
     unpaired: HashMap<LabelKey, f64>,
@@ -84,6 +107,7 @@ impl EdgeStore {
             max_items: cfg.edge_store_max_items,
             ttl_ns: i64::try_from(cfg.edge_ttl.as_nanos()).unwrap_or(i64::MAX),
             enable_messaging_latency: cfg.enable_messaging_system_latency,
+            bucket_edges_ns: cfg.histogram_buckets_ns.clone(),
             edges: HashMap::new(),
             aggregates: HashMap::new(),
             unpaired: HashMap::new(),
@@ -189,16 +213,24 @@ impl EdgeStore {
                 &mut out,
                 "traces_service_graph_request_client_seconds",
                 &labels,
-                agg.client_seconds_sum,
-                agg.client_seconds_count,
+                HistogramSnapshot {
+                    sum: agg.client_seconds_sum,
+                    count: agg.client_seconds_count,
+                    bucket_edges_ns: &self.bucket_edges_ns,
+                    bucket_counts: &agg.client_bucket_counts,
+                },
                 timestamp_ms,
             );
             push_histogram(
                 &mut out,
                 "traces_service_graph_request_server_seconds",
                 &labels,
-                agg.server_seconds_sum,
-                agg.server_seconds_count,
+                HistogramSnapshot {
+                    sum: agg.server_seconds_sum,
+                    count: agg.server_seconds_count,
+                    bucket_edges_ns: &self.bucket_edges_ns,
+                    bucket_counts: &agg.server_bucket_counts,
+                },
                 timestamp_ms,
             );
             if self.enable_messaging_latency {
@@ -206,8 +238,12 @@ impl EdgeStore {
                     &mut out,
                     "traces_service_graph_request_messaging_system_seconds",
                     &labels,
-                    agg.messaging_seconds_sum,
-                    agg.messaging_seconds_count,
+                    HistogramSnapshot {
+                        sum: agg.messaging_seconds_sum,
+                        count: agg.messaging_seconds_count,
+                        bucket_edges_ns: &self.bucket_edges_ns,
+                        bucket_counts: &agg.messaging_bucket_counts,
+                    },
                     timestamp_ms,
                 );
             }
@@ -239,10 +275,11 @@ impl EdgeStore {
     fn complete(&mut self, edge: Edge) {
         let client = edge.client_service.unwrap_or_default();
         let server = edge.server_service.unwrap_or_default();
+        let bucket_count = self.bucket_edges_ns.len() + 1;
         let agg = self
             .aggregates
             .entry((client, server, edge.connection_type))
-            .or_default();
+            .or_insert_with(|| EdgeAgg::new(bucket_count));
         agg.requests += 1.0;
         if edge.failed {
             agg.failed += 1.0;
@@ -250,10 +287,12 @@ impl EdgeStore {
         if let Some(ns) = edge.client_latency_ns {
             agg.client_seconds_sum += ns_to_seconds(ns);
             agg.client_seconds_count += 1.0;
+            observe_latency(&self.bucket_edges_ns, &mut agg.client_bucket_counts, ns);
         }
         if let Some(ns) = edge.server_latency_ns {
             agg.server_seconds_sum += ns_to_seconds(ns);
             agg.server_seconds_count += 1.0;
+            observe_latency(&self.bucket_edges_ns, &mut agg.server_bucket_counts, ns);
         }
         if self.enable_messaging_latency
             && edge.connection_type == ConnectionType::MessagingSystem
@@ -261,6 +300,7 @@ impl EdgeStore {
         {
             agg.messaging_seconds_sum += ns_to_seconds(ns);
             agg.messaging_seconds_count += 1.0;
+            observe_latency(&self.bucket_edges_ns, &mut agg.messaging_bucket_counts, ns);
         }
     }
 }
@@ -338,17 +378,16 @@ fn push_histogram(
     out: &mut Vec<Series>,
     name: &str,
     labels: &[(String, String)],
-    sum: f64,
-    count: f64,
+    histogram: HistogramSnapshot<'_>,
     timestamp_ms: i64,
 ) {
     out.push(Series {
         name: name.to_string(),
         labels: labels.to_vec(),
         sample: SeriesSample::ClassicHistogram {
-            buckets: Vec::new(),
-            sum,
-            count,
+            buckets: cumulative_buckets_seconds(histogram.bucket_edges_ns, histogram.bucket_counts),
+            sum: histogram.sum,
+            count: histogram.count,
         },
         exemplars: Vec::new(),
         timestamp_ms,
@@ -369,6 +408,37 @@ fn classify(span: &SpanRecord) -> ConnectionType {
 
 fn has_attr(span: &SpanRecord, name: &str) -> bool {
     span.attributes.iter().any(|(key, _)| key == name)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Prometheus histogram bucket assignment uses f64 bucket edges"
+)]
+fn observe_latency(bucket_edges_ns: &[f64], bucket_counts: &mut [u64], ns: i64) {
+    let value_ns = ns.max(0) as f64;
+    let idx = bucket_edges_ns
+        .iter()
+        .position(|edge| value_ns <= *edge)
+        .unwrap_or(bucket_edges_ns.len());
+    if let Some(count) = bucket_counts.get_mut(idx) {
+        *count += 1;
+    }
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Prometheus histogram samples are f64 values on the output edge"
+)]
+fn cumulative_buckets_seconds(bucket_edges_ns: &[f64], bucket_counts: &[u64]) -> Vec<(f64, f64)> {
+    let mut cumulative = 0_u64;
+    bucket_edges_ns
+        .iter()
+        .enumerate()
+        .map(|(idx, edge_ns)| {
+            cumulative += bucket_counts.get(idx).copied().unwrap_or_default();
+            (*edge_ns / NS_PER_SEC, cumulative as f64)
+        })
+        .collect()
 }
 
 #[expect(
@@ -449,6 +519,19 @@ mod tests {
             })
     }
 
+    fn histogram_bucket_value(series: &[Series], name: &str, le: f64) -> f64 {
+        series
+            .iter()
+            .find(|s| s.name == name)
+            .map_or(0.0, |s| match &s.sample {
+                SeriesSample::ClassicHistogram { buckets, .. } => buckets
+                    .iter()
+                    .find(|(bucket_le, _)| (*bucket_le - le).abs() < 1e-9)
+                    .map_or(0.0, |(_, count)| *count),
+                _ => panic!("{name} not a histogram"),
+            })
+    }
+
     #[test]
     fn pairs_client_then_server_into_one_request() {
         let mut store = EdgeStore::new(&MetricsGenConfig::default());
@@ -501,6 +584,50 @@ mod tests {
         );
         assert!(
             (histogram_sum(&out, "traces_service_graph_request_server_seconds") - 0.008).abs()
+                < 1e-9
+        );
+    }
+
+    #[test]
+    fn request_latency_histograms_include_configured_buckets() {
+        let mut store = EdgeStore::new(&MetricsGenConfig::default());
+        let client = span(
+            "frontend",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            10_000_000,
+        );
+        let server = span(
+            "backend",
+            [0xB; 8],
+            [0xA; 8],
+            SpanKind::Server,
+            StatusCode::Ok,
+            8_000_000,
+        );
+
+        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+
+        let out = store.drain(1_000);
+        assert!(
+            (histogram_bucket_value(&out, "traces_service_graph_request_client_seconds", 0.008)
+                - 0.0)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (histogram_bucket_value(&out, "traces_service_graph_request_client_seconds", 0.016)
+                - 1.0)
+                .abs()
+                < 1e-9
+        );
+        assert!(
+            (histogram_bucket_value(&out, "traces_service_graph_request_server_seconds", 0.008)
+                - 1.0)
+                .abs()
                 < 1e-9
         );
     }
