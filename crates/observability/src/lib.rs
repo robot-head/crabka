@@ -9579,7 +9579,7 @@ async fn prepare_http_tail(
         source,
         frontier,
         delete_filters,
-        limit: params.limit,
+        limit: Some(params.limit.unwrap_or(LOKI_DEFAULT_TAIL_LIMIT)),
     })
 }
 
@@ -10412,6 +10412,7 @@ fn time_range(params: &QueryParams, kind: QueryKind) -> Result<TimeRange, HttpQu
 }
 
 const LOKI_DEFAULT_QUERY_RANGE_NS: i64 = 3_600_000_000_000;
+const LOKI_DEFAULT_TAIL_LIMIT: usize = 100;
 const LOKI_VOLUME_MAX_QUERY_RANGE_NS: i64 = 2_595_600_000_000_000;
 
 fn current_unix_time_ns() -> i64 {
