@@ -4043,11 +4043,21 @@ pub struct QuerierState {
     dynamic_index: Option<DynamicIndexSource>,
     hot_tail: Option<HotTailState>,
     delete_requests: Option<SharedLogDeleteRequests>,
+    rules: SharedLokiRules,
     query_authorizer: Arc<dyn LogQueryAuthorizer>,
     max_query_range_ns: Option<i64>,
     max_query_series: Option<usize>,
     max_query_bytes: Option<u64>,
     max_query_length: Option<usize>,
+}
+
+type LokiRuleGroupsByName = BTreeMap<String, serde_yaml::Value>;
+type LokiRuleNamespaces = BTreeMap<String, LokiRuleGroupsByName>;
+type LokiRuleTenants = BTreeMap<String, LokiRuleNamespaces>;
+
+#[derive(Clone, Default)]
+struct SharedLokiRules {
+    tenants: Arc<Mutex<LokiRuleTenants>>,
 }
 
 #[derive(Clone)]
@@ -4085,6 +4095,7 @@ impl QuerierState {
             dynamic_index: None,
             hot_tail: None,
             delete_requests: None,
+            rules: SharedLokiRules::default(),
             query_authorizer: Arc::new(AllowAllQueryAuthorizer),
             max_query_range_ns: None,
             max_query_series: None,
@@ -4609,7 +4620,10 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/services", get(querier_services))
         .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route("/loki/api/v1/rules", get(loki_rules))
-        .route("/loki/api/v1/rules/{namespace}", get(loki_rule_namespace))
+        .route(
+            "/loki/api/v1/rules/{namespace}",
+            get(loki_rule_namespace).post(create_loki_rule_group),
+        )
         .route(
             "/loki/api/v1/rules/{namespace}/{group_name}",
             get(loki_rule_group),
@@ -4653,7 +4667,10 @@ pub fn loki_router(state: QuerierState) -> Router {
             get(query_range).post(query_range_post),
         )
         .route("/api/prom/rules", get(prometheus_rules))
-        .route("/api/prom/rules/{namespace}", get(loki_rule_namespace))
+        .route(
+            "/api/prom/rules/{namespace}",
+            get(loki_rule_namespace).post(create_loki_rule_group),
+        )
         .route(
             "/api/prom/rules/{namespace}/{group_name}",
             get(loki_rule_group),
@@ -5341,21 +5358,151 @@ fn ruler_status_page() -> Response {
         .into_response()
 }
 
-async fn loki_rules() -> Response {
-    (
+async fn loki_rules(State(state): State<QuerierState>, headers: HeaderMap) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let namespaces = rules.get(&tenant).map(loki_rule_namespace_response);
+    loki_yaml_response(
         StatusCode::OK,
-        [("content-type", "application/yaml; charset=utf-8")],
-        "{}\n",
+        &namespaces.unwrap_or_else(BTreeMap::<String, Vec<serde_yaml::Value>>::new),
     )
-        .into_response()
 }
 
-async fn loki_rule_namespace() -> Response {
-    text_response(StatusCode::NOT_FOUND, "no rule groups found\n")
+async fn loki_rule_namespace(
+    State(state): State<QuerierState>,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let Some(groups) = rules
+        .get(&tenant)
+        .and_then(|namespaces| namespaces.get(&namespace))
+    else {
+        return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+    };
+    loki_yaml_response(
+        StatusCode::OK,
+        &groups.values().cloned().collect::<Vec<_>>(),
+    )
 }
 
-async fn loki_rule_group() -> Response {
-    text_response(StatusCode::NOT_FOUND, "group does not exist\n")
+async fn create_loki_rule_group(
+    State(state): State<QuerierState>,
+    Path(namespace): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let Ok(rule_group) = parse_loki_rule_group(&body) else {
+        return text_response(StatusCode::BAD_REQUEST, "unable to decoded rule group\n");
+    };
+    let name = match loki_rule_group_name(&rule_group) {
+        Some(name) => name.to_string(),
+        None => return text_response(StatusCode::BAD_REQUEST, "unable to decoded rule group\n"),
+    };
+    let mut rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    rules
+        .entry(tenant)
+        .or_default()
+        .entry(namespace)
+        .or_default()
+        .insert(name, rule_group);
+    json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
+}
+
+async fn loki_rule_group(
+    State(state): State<QuerierState>,
+    Path((namespace, group_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let tenant = match loki_ruler_tenant(&headers) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let rules = state
+        .rules
+        .tenants
+        .lock()
+        .expect("Loki rule store lock poisoned");
+    let Some(group) = rules
+        .get(&tenant)
+        .and_then(|namespaces| namespaces.get(&namespace))
+        .and_then(|groups| groups.get(&group_name))
+    else {
+        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+    };
+    loki_yaml_response(StatusCode::OK, group)
+}
+
+fn loki_ruler_tenant(headers: &HeaderMap) -> Result<String, HttpQueryError> {
+    match headers.get("X-Scope-OrgID") {
+        Some(value) => {
+            let tenant = value.to_str().map_err(|_| HttpQueryError::InvalidTenant)?;
+            if tenant.is_empty() {
+                Err(HttpQueryError::InvalidTenant)
+            } else {
+                Ok(tenant.to_string())
+            }
+        }
+        None => Ok("fake".to_string()),
+    }
+}
+
+fn loki_rule_namespace_response(
+    namespaces: &LokiRuleNamespaces,
+) -> BTreeMap<String, Vec<serde_yaml::Value>> {
+    namespaces
+        .iter()
+        .map(|(namespace, groups)| (namespace.clone(), groups.values().cloned().collect()))
+        .collect()
+}
+
+fn parse_loki_rule_group(body: &[u8]) -> Result<serde_yaml::Value, ()> {
+    serde_yaml::from_slice(body).map_err(|_| ())
+}
+
+fn loki_rule_group_name(rule_group: &serde_yaml::Value) -> Option<&str> {
+    let serde_yaml::Value::Mapping(fields) = rule_group else {
+        return None;
+    };
+    fields
+        .get(serde_yaml::Value::String("name".to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        .filter(|name| !name.is_empty())
+}
+
+fn loki_yaml_response(status: StatusCode, value: &impl Serialize) -> Response {
+    match serde_yaml::to_string(value) {
+        Ok(body) => (
+            status,
+            [("content-type", "application/yaml; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(source) => text_response(StatusCode::INTERNAL_SERVER_ERROR, &source.to_string()),
+    }
 }
 
 async fn prometheus_rules() -> Response {
