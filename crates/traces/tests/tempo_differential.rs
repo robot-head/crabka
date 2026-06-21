@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use assert2::assert;
 use axum::body::Body;
@@ -84,6 +84,7 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
     wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
 
+    let query_range = "start=0&end=1";
     let otlp_body = sample_otlp_body();
     let crabka = start_crabka_pair(&otlp_body).await?;
 
@@ -95,20 +96,21 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     )
     .await?;
 
-    let tempo_trace = get_trace_by_id(&client, &tempo_query, None).await?;
-    let crabka_trace = get_trace_by_id(&client, &crabka.base_url, Some(TENANT)).await?;
+    let tempo_trace = get_trace_by_id(&client, &tempo_query, None, query_range).await?;
+    let crabka_trace =
+        get_trace_by_id(&client, &crabka.base_url, Some(TENANT), query_range).await?;
     assert_trace_shape_matches(&tempo_trace, &crabka_trace);
 
     let query = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
     let tempo_search = get_json_until_non_empty_traces(
         &client,
-        &format!("{tempo_query}/api/search?q={query}&start=0&end=1"),
+        &format!("{tempo_query}/api/search?q={query}&{query_range}"),
         None,
     )
     .await?;
     let crabka_search = get_json(
         &client,
-        &format!("{}/api/search?q={query}&start=0&end=1", crabka.base_url),
+        &format!("{}/api/search?q={query}&{query_range}", crabka.base_url),
         Some(TENANT),
     )
     .await?;
@@ -117,14 +119,14 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let structural_query = "%7B%20.http.method%20%3D%20%22GET%22%20%7D%20%3E%3E%20%7B%20.db.system%20%3D%20%22postgresql%22%20%7D";
     let tempo_structural_search = get_json_until_non_empty_traces(
         &client,
-        &format!("{tempo_query}/api/search?q={structural_query}&start=0&end=1"),
+        &format!("{tempo_query}/api/search?q={structural_query}&{query_range}"),
         None,
     )
     .await?;
     let crabka_structural_search = get_json(
         &client,
         &format!(
-            "{}/api/search?q={structural_query}&start=0&end=1",
+            "{}/api/search?q={structural_query}&{query_range}",
             crabka.base_url
         ),
         Some(TENANT),
@@ -136,13 +138,13 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 
     let tempo_tags = get_json(
         &client,
-        &format!("{tempo_query}/api/v2/search/tags?start=0&end=1"),
+        &format!("{tempo_query}/api/v2/search/tags?{query_range}"),
         None,
     )
     .await?;
     let crabka_tags = get_json(
         &client,
-        &format!("{}/api/v2/search/tags?start=0&end=1", crabka.base_url),
+        &format!("{}/api/v2/search/tags?{query_range}", crabka.base_url),
         Some(TENANT),
     )
     .await?;
@@ -150,20 +152,70 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
 
     let tempo_service_values = get_json(
         &client,
-        &format!("{tempo_query}/api/v2/search/tag/resource.service.name/values?start=0&end=1"),
+        &format!("{tempo_query}/api/v2/search/tag/resource.service.name/values?{query_range}"),
         None,
     )
     .await?;
     let crabka_service_values = get_json(
         &client,
         &format!(
-            "{}/api/v2/search/tag/resource.service.name/values?start=0&end=1",
+            "{}/api/v2/search/tag/resource.service.name/values?{query_range}",
             crabka.base_url
         ),
         Some(TENANT),
     )
     .await?;
     assert_required_tag_values_match(&tempo_service_values, &crabka_service_values, "checkout");
+
+    crabka.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the grafana/tempo image"]
+async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult {
+    let client = reqwest::Client::new();
+    let tempo = start_tempo().await?;
+    let tempo_query = mapped_base_url(&tempo, 3200).await?;
+    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
+
+    let trace_start_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(60);
+    let query_start = trace_start_secs.saturating_sub(60);
+    let query_end = trace_start_secs + 120;
+    let query_range = format!("start={query_start}&end={query_end}");
+    let otlp_body = sample_otlp_body_at(trace_start_secs * 1_000_000_000);
+    let crabka = start_crabka_pair(&otlp_body).await?;
+
+    post_otlp(
+        &client,
+        &format!("{tempo_otlp}/v1/traces"),
+        None,
+        &otlp_body,
+    )
+    .await?;
+
+    let metrics_query =
+        "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D%20%7C%20count_over_time()";
+    let tempo_metrics = get_json_until_positive_metric_total(
+        &client,
+        &format!("{tempo_query}/api/metrics/query_range?q={metrics_query}&{query_range}&step=30s"),
+        None,
+    )
+    .await?;
+    let crabka_metrics = get_json(
+        &client,
+        &format!(
+            "{}/api/metrics/query_range?q={metrics_query}&{query_range}&step=30s",
+            crabka.base_url
+        ),
+        Some(TENANT),
+    )
+    .await?;
+    assert_metric_totals_match(&tempo_metrics, &crabka_metrics);
 
     crabka.shutdown();
     Ok(())
@@ -472,10 +524,11 @@ async fn get_trace_by_id(
     client: &reqwest::Client,
     base: &str,
     tenant: Option<&str>,
+    query_range: &str,
 ) -> TestResult<JsonValue> {
     get_json(
         client,
-        &format!("{base}/api/v2/traces/{TRACE_ID_HEX}?start=0&end=1"),
+        &format!("{base}/api/v2/traces/{TRACE_ID_HEX}?{query_range}"),
         tenant,
     )
     .await
@@ -520,6 +573,24 @@ async fn get_json_until_non_empty_traces(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     Err(format!("timed out waiting for non-empty traces from {url}: {last}").into())
+}
+
+async fn get_json_until_positive_metric_total(
+    client: &reqwest::Client,
+    url: &str,
+    tenant: Option<&str>,
+) -> TestResult<JsonValue> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = JsonValue::Null;
+    while Instant::now() < deadline {
+        let json = get_json(client, url, tenant).await?;
+        if metric_points_total(&json) > 0.0 {
+            return Ok(json);
+        }
+        last = json;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!("timed out waiting for positive metric total from {url}: {last}").into())
 }
 
 fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
@@ -568,6 +639,38 @@ fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {
     );
 }
 
+fn assert_metric_totals_match(tempo: &JsonValue, crabka: &JsonValue) {
+    let tempo_total = metric_points_total(tempo);
+    let crabka_total = metric_points_total(crabka);
+    assert!(
+        tempo_total > 0.0,
+        "Tempo metrics response had no positive points: {tempo}"
+    );
+    assert!(
+        (tempo_total - crabka_total).abs() < f64::EPSILON,
+        "metric totals differed; Tempo={tempo_total}, Crabka={crabka_total}, Tempo response={tempo}, Crabka response={crabka}"
+    );
+}
+
+fn metric_points_total(value: &JsonValue) -> f64 {
+    let points_total: f64 = value["series"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|series| series["points"].as_array().into_iter().flatten())
+        .filter_map(|point| point.as_array().and_then(|items| items.get(1)))
+        .filter_map(JsonValue::as_f64)
+        .sum();
+    let samples_total: f64 = value["series"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|series| series["samples"].as_array().into_iter().flatten())
+        .filter_map(|sample| sample["value"].as_f64())
+        .sum();
+    points_total + samples_total
+}
+
 fn assert_required_tag_names_match(tempo: &JsonValue, crabka: &JsonValue) {
     let tempo_tags = tag_names(tempo);
     let crabka_tags = tag_names(crabka);
@@ -611,6 +714,10 @@ fn tag_values(value: &JsonValue) -> BTreeSet<String> {
 }
 
 fn sample_otlp_body() -> Vec<u8> {
+    sample_otlp_body_at(1_000)
+}
+
+fn sample_otlp_body_at(start_ns: u64) -> Vec<u8> {
     TracesData {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
@@ -628,8 +735,8 @@ fn sample_otlp_body() -> Vec<u8> {
                         trace_id: vec![1; 16],
                         span_id: vec![2; 8],
                         name: "GET /checkout".into(),
-                        start_time_unix_nano: 1_000,
-                        end_time_unix_nano: 1_500,
+                        start_time_unix_nano: start_ns,
+                        end_time_unix_nano: start_ns + 500_000_000,
                         attributes: vec![string_kv("http.method", "GET")],
                         ..OtlpSpan::default()
                     },
@@ -638,8 +745,8 @@ fn sample_otlp_body() -> Vec<u8> {
                         span_id: vec![3; 8],
                         parent_span_id: vec![2; 8],
                         name: "SELECT cart".into(),
-                        start_time_unix_nano: 1_100,
-                        end_time_unix_nano: 1_250,
+                        start_time_unix_nano: start_ns + 100_000_000,
+                        end_time_unix_nano: start_ns + 250_000_000,
                         attributes: vec![string_kv("db.system", "postgresql")],
                         ..OtlpSpan::default()
                     },
