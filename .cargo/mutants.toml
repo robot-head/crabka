@@ -268,13 +268,21 @@ exclude_re = [
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",
-    # `run_produce_append` dispatches the blocking append by runtime flavor. The
-    # `CurrentThread` arm is byte-identical to the `_` fallback (both
-    # `spawn_blocking`), and the `MultiThread` arm's `block_in_place` differs from
-    # that fallback only in scheduling — same append result, same panic→storage-
-    # failure mapping. Deleting either arm falls through to a behaviourally
-    # equivalent path, so the choice is a performance optimization (covered by the
-    # produce benches) with no signal a correctness test can assert.
+    # `run_produce_append_batch` dispatches the blocking group append by runtime
+    # flavor: the `MultiThread` arm uses `block_in_place`, the `_` fallback uses
+    # `spawn_blocking`. They differ only in scheduling — same append result, same
+    # panic→storage-failure mapping — so deleting the `MultiThread` arm falls
+    # through to a behaviourally equivalent path: a performance optimization
+    # (covered by the produce benches) with no signal a correctness test can
+    # assert. (The `run_produce_append` prefix also matches the `_batch` suffix.)
     "broker/src/partition_writer\\.rs.*delete match arm RuntimeFlavor::MultiThread in run_produce_append",
-    "broker/src/partition_writer\\.rs.*delete match arm RuntimeFlavor::CurrentThread in run_produce_append",
+    # The group-commit batch-drain caps one append batch at MAX_PRODUCE_GROUP
+    # jobs (`jobs.len() < MAX_PRODUCE_GROUP`). The cap is a memory/latency bound,
+    # not a correctness boundary: `<` vs `<=` changes the max batch size by one
+    # (1024 vs 1025) but both drain every queued job across loop iterations with
+    # identical acks / offsets / HW, so the boundary has no signal a correctness
+    # test can assert — the same equivalent-mutant category as the metadata image
+    # `< -> <=` exclusion above. The non-equivalent `< -> ==` / `< -> >`
+    # mutations on the same line are still generated and caught.
+    "broker/src/partition_writer\\.rs.*replace < with <= in run$",
 ]
