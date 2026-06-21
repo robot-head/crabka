@@ -9965,6 +9965,47 @@ async fn query_range_endpoint_returns_count_over_time_matrix_json() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_absent_over_time_uses_selector_labels_only() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=absent_over_time%28%7Bapp%3D%22missing%22%2Cenv%3D%22prod%22%7D%5B1ns%5D%29&start=1&end=2&step=1ns")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "missing",
+                                "env": "prod"
+                            },
+                            "values": [
+                                [0.000000001, "1"],
+                                [0.000000002, "1"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats()
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_applies_negative_count_over_time_offset() {
     let state = fixture();
     let app = loki_router(state);
