@@ -91,6 +91,13 @@ impl CrabkaSpanStore {
             return Ok(Vec::new());
         }
         let (ctx, table) = if let Some(job) = job {
+            if !self.trace_index.trace_blocks(tenant).iter().any(|block| {
+                block.object_key == job.object_key
+                    && block.min_ts <= end_ns
+                    && block.max_ts >= start_ns
+            }) {
+                return Ok(Vec::new());
+            }
             let row_groups = (job.row_group_start..job.row_group_end).collect::<Vec<_>>();
             self.blocks
                 .scan_block_row_groups(&job.object_key, &row_groups, span_block_schema())
@@ -2361,6 +2368,70 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names == vec!["second-rg"]);
+    }
+
+    #[tokio::test]
+    async fn cold_scan_rejects_backend_row_group_job_for_other_tenant() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let batch = encode_span_rows(&[block_attr_span_row(
+            [1; 16],
+            [1; 8],
+            "tenant-a-only",
+            false,
+            vec!["GET".into()],
+        )])
+        .unwrap();
+        let object_writer = ParquetObjectWriter::new(
+            object_store.clone(),
+            Path::from("blocks/tenant-a-row-groups.parquet"),
+        );
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), None).unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant-a",
+            TraceBlockStats {
+                object_key: "blocks/tenant-a-row-groups.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let scan = store
+            .scan_with_options(
+                "tenant-b",
+                &[],
+                0,
+                10,
+                &ScanOptions {
+                    job: Some(ScanJob {
+                        object_key: "blocks/tenant-a-row-groups.parquet".into(),
+                        row_group_start: 0,
+                        row_group_end: 1,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let rows: usize = collect_table(&scan.ctx, &scan.span_table)
+            .await
+            .unwrap()
+            .iter()
+            .map(RecordBatch::num_rows)
+            .sum();
+
+        assert!(rows == 0);
     }
 
     #[tokio::test]
