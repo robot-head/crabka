@@ -261,13 +261,33 @@ impl SpanStore for CrabkaSpanStore {
             .trace_index
             .candidate_blocks(tenant, start_ns, end_ns)
             .is_empty();
-        if matches!(scope, None | Some(TagScope::Span)) {
-            by_scope.insert("span", (TagScope::Span, BTreeSet::new()));
-            for tag in self.trace_index.tag_names(tenant, start_ns, end_ns) {
-                if !is_intrinsic_tag(&tag) {
-                    by_scope.get_mut("span").expect("span scope").1.insert(tag);
-                }
-            }
+        let cold_index_tags = self.trace_index.tag_names(tenant, start_ns, end_ns);
+        let needs_scoped_cold_scan = matches!(
+            scope,
+            None | Some(TagScope::Resource | TagScope::Event | TagScope::Link)
+        );
+        if has_cold_blocks && !cold_index_tags.is_empty() && needs_scoped_cold_scan {
+            let cold_scoped = self
+                .cold_attribute_tag_names(tenant, start_ns, end_ns)
+                .await?;
+            merge_dynamic_scope(
+                &mut by_scope,
+                scope,
+                TagScope::Resource,
+                cold_scoped.resource,
+            );
+            merge_dynamic_scope(&mut by_scope, scope, TagScope::Span, cold_scoped.span);
+            merge_dynamic_scope(&mut by_scope, scope, TagScope::Event, cold_scoped.event);
+            merge_dynamic_scope(&mut by_scope, scope, TagScope::Link, cold_scoped.link);
+        } else if matches!(scope, None | Some(TagScope::Span)) {
+            let (_, tags) = by_scope
+                .entry("span")
+                .or_insert((TagScope::Span, BTreeSet::new()));
+            tags.extend(
+                cold_index_tags
+                    .into_iter()
+                    .filter(|tag| !is_intrinsic_tag(tag)),
+            );
         }
         if has_cold_blocks {
             merge_static_scope(&mut by_scope, scope, TagScope::Intrinsic, INTRINSIC_TAGS);
@@ -338,6 +358,14 @@ impl SpanStore for CrabkaSpanStore {
     }
 }
 
+#[derive(Default)]
+struct ColdAttributeTagNames {
+    resource: BTreeSet<String>,
+    span: BTreeSet<String>,
+    event: BTreeSet<String>,
+    link: BTreeSet<String>,
+}
+
 fn attr_typed_value_parts(value: &AttrValue) -> (String, String) {
     match value {
         AttrValue::Str(value) => ("string".into(), value.clone()),
@@ -354,6 +382,26 @@ fn unscoped_attribute_tag(tag: &str) -> &str {
 }
 
 impl CrabkaSpanStore {
+    async fn cold_attribute_tag_names(
+        &self,
+        tenant: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<ColdAttributeTagNames, TraceqlError> {
+        let keys = self.trace_index.candidate_blocks(tenant, start_ns, end_ns);
+        let (ctx, table) = self
+            .blocks
+            .scan_block_keys(&keys, span_block_schema())
+            .await
+            .map_err(|err| block_err(&err))?;
+        let batches = collect_table(&ctx, &table).await?;
+        let mut names = ColdAttributeTagNames::default();
+        for batch in &batches {
+            collect_attribute_tag_names(batch, &mut names)?;
+        }
+        Ok(names)
+    }
+
     async fn cold_attribute_tag_values(
         &self,
         tenant: &str,
@@ -406,6 +454,32 @@ impl CrabkaSpanStore {
     }
 }
 
+fn collect_attribute_tag_names(
+    batch: &RecordBatch,
+    names: &mut ColdAttributeTagNames,
+) -> Result<(), TraceqlError> {
+    for row in 0..batch.num_rows() {
+        for (key, _) in attr_values_with_resource(batch, row, true)? {
+            if let Some(key) = key.strip_prefix(RESOURCE_ATTR_PREFIX) {
+                names.resource.insert(key.to_string());
+            } else {
+                names.span.insert(key);
+            }
+        }
+        for event in event_values(batch, row)? {
+            names
+                .event
+                .extend(event.attributes.into_iter().map(|(key, _)| key));
+        }
+        for link in link_values(batch, row)? {
+            names
+                .link
+                .extend(link.attributes.into_iter().map(|(key, _)| key));
+        }
+    }
+    Ok(())
+}
+
 fn collect_attribute_tag_values(
     batch: &RecordBatch,
     tag: &str,
@@ -439,6 +513,21 @@ fn collect_attribute_tag_values(
         }
     }
     Ok(())
+}
+
+fn merge_dynamic_scope(
+    by_scope: &mut BTreeMap<&'static str, (TagScope, BTreeSet<String>)>,
+    requested: Option<TagScope>,
+    scope: TagScope,
+    tags: BTreeSet<String>,
+) {
+    if requested.is_some_and(|requested| requested != scope) || tags.is_empty() {
+        return;
+    }
+    let (_, out) = by_scope
+        .entry(tag_scope_key(scope))
+        .or_insert((scope, BTreeSet::new()));
+    out.extend(tags);
 }
 
 fn merge_static_scope(
@@ -2417,6 +2506,74 @@ mod tests {
                     type_: "string".into(),
                     value: "retry".into(),
                 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_nested_tag_names_scan_event_and_link_attributes() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/nested-tag-names.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::from(["exception.type".into(), "link.kind".into()]),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let event_tags = store
+            .tag_names("tenant", Some(TagScope::Event), 0, 10_000)
+            .await
+            .unwrap();
+        let link_tags = store
+            .tag_names("tenant", Some(TagScope::Link), 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!(event_tags.len() == 1);
+        assert!(event_tags[0].scope == TagScope::Event);
+        assert!(
+            event_tags[0].tags
+                == vec![
+                    "event:name".to_string(),
+                    "event:timeSinceStart".to_string(),
+                    "exception.type".to_string(),
+                ]
+        );
+        assert!(link_tags.len() == 1);
+        assert!(link_tags[0].scope == TagScope::Link);
+        assert!(
+            link_tags[0].tags
+                == vec![
+                    "link.kind".to_string(),
+                    "link:spanID".to_string(),
+                    "link:traceID".to_string(),
+                ]
         );
     }
 
