@@ -36,8 +36,14 @@ struct Cli {
     listen: String,
     #[arg(long, default_value = "127.0.0.1:4317")]
     grpc_listen: String,
+    #[arg(long, default_value = "127.0.0.1:4318")]
+    otlp_http_listen: String,
     #[arg(long, default_value = "127.0.0.1:6831")]
     jaeger_compact_listen: String,
+    #[arg(long, default_value = "127.0.0.1:14268")]
+    jaeger_http_listen: String,
+    #[arg(long, default_value = "127.0.0.1:9411")]
+    zipkin_listen: String,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
@@ -132,7 +138,10 @@ async fn run_distributor(
     )))));
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
+    let otlp_http_addr: SocketAddr = cli.otlp_http_listen.parse()?;
     let jaeger_compact_addr: SocketAddr = cli.jaeger_compact_listen.parse()?;
+    let jaeger_http_addr: SocketAddr = cli.jaeger_http_listen.parse()?;
+    let zipkin_addr: SocketAddr = cli.zipkin_listen.parse()?;
     let grpc_shutdown = shutdown.clone();
     let grpc_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -147,6 +156,15 @@ async fn run_distributor(
     )
     .await?;
     tracing::info!(%jaeger_compact_bound, "traces distributor Jaeger compact UDP listening");
+    let otlp_http_bound =
+        distributor::serve(otlp_http_addr, Arc::clone(&state), shutdown.clone()).await?;
+    tracing::info!(%otlp_http_bound, "traces distributor OTLP/HTTP listening");
+    let jaeger_http_bound =
+        distributor::serve(jaeger_http_addr, Arc::clone(&state), shutdown.clone()).await?;
+    tracing::info!(%jaeger_http_bound, "traces distributor Jaeger thrift HTTP listening");
+    let zipkin_bound =
+        distributor::serve(zipkin_addr, Arc::clone(&state), shutdown.clone()).await?;
+    tracing::info!(%zipkin_bound, "traces distributor Zipkin HTTP listening");
     let bound = distributor::serve(addr, state, shutdown.clone()).await?;
     tracing::info!(%bound, "traces distributor listening");
     shutdown.cancelled().await;
@@ -380,6 +398,15 @@ mod tests {
 
         assert!(matches!(cli.target, Target::Distributor));
         assert!(cli.jaeger_compact_listen == "127.0.0.1:6831");
+    }
+
+    #[test]
+    fn distributor_defaults_include_tempo_push_ports() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
+
+        assert!(cli.otlp_http_listen == "127.0.0.1:4318");
+        assert!(cli.jaeger_http_listen == "127.0.0.1:14268");
+        assert!(cli.zipkin_listen == "127.0.0.1:9411");
     }
 
     #[test]
