@@ -3341,6 +3341,43 @@ async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_use_same_index_volume_duplicate_query_precedence() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let valid_query = r#"{app="api"}"#;
+    let invalid_query = "{app=";
+
+    let params = [
+        ("query", valid_query.to_string()),
+        ("query", invalid_query.to_string()),
+        ("start", "0".to_string()),
+        ("end", "1".to_string()),
+    ];
+    let loki_response =
+        loki_index_volume_params_response(&http, &loki_base, "index/volume", &params).await;
+    let crabka_response =
+        crabka_index_volume_params_response(querier, "index/volume", &params).await;
+    assert_eq!(crabka_response, loki_response);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())

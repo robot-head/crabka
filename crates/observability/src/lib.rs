@@ -7206,7 +7206,7 @@ async fn index_volume_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -7236,7 +7236,7 @@ async fn index_volume_range_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -11458,7 +11458,7 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
     let mut step = None;
     let mut limit = None;
     let mut target_labels = None;
-    let mut aggregate_by = VolumeAggregateBy::Series;
+    let mut aggregate_by = None;
     let Some(raw_query) = raw_query else {
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
@@ -11480,12 +11480,18 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
         let value = decode_form_component(value)?;
 
         match key.as_str() {
-            "query" => query = Some(value),
-            "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
-            "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
-            "step" => step = Some(parse_loki_duration_query_param("step", &value)?),
-            "limit" => limit = Some(parse_usize_query_param("limit", &value)?),
-            "targetLabels" => {
+            "query" if query.is_none() => query = Some(value),
+            "start" if start.is_none() => {
+                start = Some(parse_loki_timestamp_query_param("start", &value)?);
+            }
+            "end" if end.is_none() => {
+                end = Some(parse_loki_timestamp_query_param("end", &value)?);
+            }
+            "step" if step.is_none() => {
+                step = Some(parse_loki_duration_query_param("step", &value)?);
+            }
+            "limit" if limit.is_none() => limit = Some(parse_usize_query_param("limit", &value)?),
+            "targetLabels" if target_labels.is_none() => {
                 target_labels = Some(
                     value
                         .split(',')
@@ -11494,12 +11500,12 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
                         .collect(),
                 );
             }
-            "aggregateBy" => {
-                aggregate_by = match value.as_str() {
+            "aggregateBy" if aggregate_by.is_none() => {
+                aggregate_by = Some(match value.as_str() {
                     "series" => VolumeAggregateBy::Series,
                     "labels" => VolumeAggregateBy::Labels,
                     _ => return Err(HttpQueryError::InvalidVolumeAggregation),
-                };
+                });
             }
             _ => {}
         }
@@ -11512,7 +11518,7 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
         step,
         limit: limit.unwrap_or(100),
         target_labels,
-        aggregate_by,
+        aggregate_by: aggregate_by.unwrap_or(VolumeAggregateBy::Series),
     })
 }
 
