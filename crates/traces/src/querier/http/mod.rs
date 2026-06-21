@@ -1606,17 +1606,40 @@ fn span_status_json(code: i32, message: &str) -> Option<Value> {
 }
 
 fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
+    let mut grouped: Vec<(&str, Vec<&AttrValue>)> = Vec::new();
+    for (key, value) in attrs {
+        if let Some((_, values)) = grouped
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == key)
+        {
+            values.push(value);
+        } else {
+            grouped.push((key.as_str(), vec![value]));
+        }
+    }
+
     Value::Array(
-        attrs
-            .iter()
-            .map(|(key, value)| {
+        grouped
+            .into_iter()
+            .map(|(key, values)| {
                 json!({
                     "key": key,
-                    "value": attr_value_json(value),
+                    "value": attr_values_json(&values),
                 })
             })
             .collect(),
     )
+}
+
+fn attr_values_json(values: &[&AttrValue]) -> Value {
+    if let [value] = values {
+        return attr_value_json(value);
+    }
+    json!({
+        "arrayValue": {
+            "values": values.iter().map(|value| attr_value_json(value)).collect::<Vec<_>>(),
+        }
+    })
 }
 
 fn attr_value_json(value: &AttrValue) -> Value {
@@ -2480,6 +2503,37 @@ mod tests {
                     "key": "service.name",
                     "value": {"stringValue": "db"}
                 }))
+        );
+    }
+
+    #[test]
+    fn attrs_json_projects_repeated_keys_as_otlp_array_values() {
+        let attrs = vec![
+            ("http.method".into(), AttrValue::Str("GET".into())),
+            ("http.method".into(), AttrValue::Str("POST".into())),
+            ("attempt".into(), AttrValue::Int(1)),
+        ];
+
+        let body = attrs_json(&attrs);
+
+        assert!(
+            body == json!([
+                {
+                    "key": "http.method",
+                    "value": {
+                        "arrayValue": {
+                            "values": [
+                                {"stringValue": "GET"},
+                                {"stringValue": "POST"}
+                            ]
+                        }
+                    }
+                },
+                {
+                    "key": "attempt",
+                    "value": {"intValue": "1"}
+                }
+            ])
         );
     }
 
