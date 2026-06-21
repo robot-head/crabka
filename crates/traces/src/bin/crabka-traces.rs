@@ -194,6 +194,7 @@ async fn run_distributor(
     state.limits.max_ingest_spans_per_second = cli.max_ingest_spans_per_second;
     state.limits.ingest_rate_burst = cli.ingest_rate_burst;
     state.limits.max_attr_value_len = cli.max_attr_value_len;
+    state.shared_limits = state.limits.to_shared_limits();
     state.max_decompressed = cli.max_decompressed_bytes;
     let state = Arc::new(state);
     let addr: SocketAddr = cli.listen.parse()?;

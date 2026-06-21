@@ -3,8 +3,7 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -26,6 +25,7 @@ use tonic::transport::Server as GrpcServer;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStatus};
 
 use crate::error::TracesError;
+use crate::limits::{IngestEnforcer, LimitError, Limits};
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
 use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
@@ -58,6 +58,20 @@ impl Default for TenantLimits {
             max_ingest_spans_per_second: usize::MAX,
             ingest_rate_burst: usize::MAX,
             max_attr_value_len: 64 * 1024,
+        }
+    }
+}
+
+impl TenantLimits {
+    #[must_use]
+    pub fn to_shared_limits(&self) -> Limits {
+        Limits {
+            ingestion_rate_spans_per_sec: f64_limit_from_usize(self.max_ingest_spans_per_second),
+            ingestion_burst_spans: u64_limit_from_usize(self.ingest_rate_burst),
+            max_traces_per_search: Limits::default().max_traces_per_search,
+            max_spans_per_trace: u64_limit_from_usize(self.max_spans_per_trace),
+            max_attribute_bytes: u64_limit_from_usize(self.max_attr_value_len),
+            max_search_duration_secs: Limits::default().max_search_duration_secs,
         }
     }
 }
@@ -105,8 +119,9 @@ impl WalSink for KafkaSink {
 pub struct DistributorState {
     pub sink: Arc<dyn WalSink>,
     pub limits: TenantLimits,
+    pub shared_limits: Limits,
+    pub ingest_enforcer: IngestEnforcer,
     pub max_decompressed: usize,
-    rate_buckets: Mutex<BTreeMap<String, RateBucket>>,
 }
 
 impl DistributorState {
@@ -115,16 +130,11 @@ impl DistributorState {
         Self {
             sink,
             limits: TenantLimits::default(),
+            shared_limits: TenantLimits::default().to_shared_limits(),
+            ingest_enforcer: IngestEnforcer::new(),
             max_decompressed: 10 * 1024 * 1024,
-            rate_buckets: Mutex::new(BTreeMap::new()),
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct RateBucket {
-    tokens: usize,
-    updated: Instant,
 }
 
 /// Build the distributor HTTP router.
@@ -255,10 +265,9 @@ impl CollectorService for JaegerGrpcService {
             .ok_or_else(|| GrpcStatus::invalid_argument("missing jaeger batch"))?;
         let spans = decode_jaeger_grpc_batch(batch)
             .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
-        validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
         self.state
-            .check_ingest_rate(&tenant, spans.len())
+            .enforce_ingest(&tenant, &spans)
             .map_err(|err| grpc_status_from_error(&err))?;
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
@@ -279,10 +288,9 @@ impl TraceService for OtlpGrpcService {
         };
         let spans =
             decode_otlp(&data).map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
-        validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
         self.state
-            .check_ingest_rate(&tenant, spans.len())
+            .enforce_ingest(&tenant, &spans)
             .map_err(|err| grpc_status_from_error(&err))?;
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
@@ -365,8 +373,7 @@ async fn handle_jaeger_compact_datagram(
     body: &[u8],
 ) -> Result<(), TracesError> {
     let spans = decode_jaeger_thrift(body)?;
-    validate(&spans, &state.limits)?;
-    state.check_ingest_rate(tenant, spans.len())?;
+    state.enforce_ingest(tenant, &spans)?;
     produce_spans(state.sink.as_ref(), tenant, spans).await
 }
 
@@ -386,10 +393,7 @@ async fn append_decoded_response(
     success: Response,
 ) -> Response {
     let tenant = tenant(headers);
-    if let Err(err) = validate(&spans, &state.limits) {
-        return error_response(&err);
-    }
-    if let Err(err) = state.check_ingest_rate(&tenant, spans.len()) {
+    if let Err(err) = state.enforce_ingest(&tenant, &spans) {
         return error_response(&err);
     }
     match produce_spans(state.sink.as_ref(), &tenant, spans).await {
@@ -489,44 +493,16 @@ fn tenant_metadata(metadata: &MetadataMap) -> String {
 }
 
 impl DistributorState {
-    fn check_ingest_rate(&self, tenant: &str, spans: usize) -> Result<(), TracesError> {
-        if self.limits.max_ingest_spans_per_second == usize::MAX
-            && self.limits.ingest_rate_burst == usize::MAX
-        {
-            return Ok(());
-        }
-        let burst = self.limits.ingest_rate_burst;
-        if spans > burst {
-            return Err(TracesError::RateLimit(format!(
-                "ingest rate {spans} spans exceeds burst {burst}"
-            )));
-        }
-
-        let now = Instant::now();
-        let mut buckets = self
-            .rate_buckets
-            .lock()
-            .map_err(|_| TracesError::Limit("ingest rate state unavailable".into()))?;
-        let bucket = buckets.entry(tenant.to_string()).or_insert(RateBucket {
-            tokens: burst,
-            updated: now,
-        });
-        let elapsed = now.duration_since(bucket.updated).as_secs();
-        if elapsed > 0 {
-            let refill = self
-                .limits
-                .max_ingest_spans_per_second
-                .saturating_mul(usize::try_from(elapsed).unwrap_or(usize::MAX));
-            bucket.tokens = bucket.tokens.saturating_add(refill).min(burst);
-            bucket.updated = now;
-        }
-        if spans > bucket.tokens {
-            return Err(TracesError::RateLimit(format!(
-                "ingest rate exceeded for tenant {tenant}"
-            )));
-        }
-        bucket.tokens -= spans;
-        Ok(())
+    fn enforce_ingest(&self, tenant: &str, spans: &[Span]) -> Result<(), TracesError> {
+        validate(spans, &self.limits)?;
+        validate_shared(spans, &self.shared_limits)?;
+        self.ingest_enforcer
+            .check_span_rate(
+                &self.shared_limits,
+                tenant,
+                u64::try_from(spans.len()).unwrap_or(u64::MAX),
+            )
+            .map_err(|err| limit_error_to_traces_error(&err))
     }
 }
 
@@ -561,6 +537,69 @@ pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError
         }
     }
     Ok(())
+}
+
+fn validate_shared(spans: &[Span], limits: &Limits) -> Result<(), TracesError> {
+    let mut spans_per_trace = BTreeMap::new();
+    for span in spans {
+        let count = spans_per_trace
+            .entry(span.trace_id)
+            .and_modify(|count| *count += 1_u64)
+            .or_insert(1_u64);
+        IngestEnforcer::check_trace_size(limits, *count)
+            .map_err(|err| limit_error_to_traces_error(&err))?;
+        check_shared_attrs(limits, &span.resource_attrs)?;
+        check_shared_attrs(limits, &span.span_attrs)?;
+        for event in &span.events {
+            check_shared_attrs(limits, &event.attrs)?;
+        }
+        for link in &span.links {
+            check_shared_attrs(limits, &link.attrs)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_shared_attrs(limits: &Limits, attrs: &[KeyValue]) -> Result<(), TracesError> {
+    let flattened = attrs.iter().map(shared_attr_pair).collect::<Vec<_>>();
+    IngestEnforcer::check_attributes(limits, &flattened)
+        .map_err(|err| limit_error_to_traces_error(&err))
+}
+
+fn shared_attr_pair(attr: &KeyValue) -> (String, String) {
+    let value = match &attr.value {
+        AttrValue::Str(value) => value.clone(),
+        AttrValue::Bytes(_) | AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => {
+            String::new()
+        }
+    };
+    (attr.key.clone(), value)
+}
+
+fn limit_error_to_traces_error(err: &LimitError) -> TracesError {
+    match err {
+        LimitError::IngestionRateExceeded { .. } => TracesError::RateLimit(err.message()),
+        LimitError::MaxSpansPerTrace { .. }
+        | LimitError::AttributeTooLong { .. }
+        | LimitError::TracesPerSearchExceeded { .. }
+        | LimitError::SearchDurationExceeded { .. } => TracesError::Limit(err.message()),
+    }
+}
+
+fn u64_limit_from_usize(value: usize) -> u64 {
+    if value == usize::MAX {
+        0
+    } else {
+        u64::try_from(value).unwrap_or(u64::MAX)
+    }
+}
+
+fn f64_limit_from_usize(value: usize) -> f64 {
+    if value == usize::MAX {
+        0.0
+    } else {
+        value.to_string().parse().unwrap_or(f64::INFINITY)
+    }
 }
 
 fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), TracesError> {
@@ -675,7 +714,18 @@ mod tests {
     fn test_state_with_limits(limits: TenantLimits) -> (Arc<DistributorState>, Arc<RecordingSink>) {
         let sink = Arc::new(RecordingSink::default());
         let mut state = DistributorState::new(sink.clone());
+        state.shared_limits = limits.to_shared_limits();
         state.limits = limits;
+        state.max_decompressed = 1024 * 1024;
+        (Arc::new(state), sink)
+    }
+
+    fn test_state_with_shared_limits(
+        limits: crate::limits::Limits,
+    ) -> (Arc<DistributorState>, Arc<RecordingSink>) {
+        let sink = Arc::new(RecordingSink::default());
+        let mut state = DistributorState::new(sink.clone());
+        state.shared_limits = limits;
         state.max_decompressed = 1024 * 1024;
         (Arc::new(state), sink)
     }
@@ -692,6 +742,29 @@ mod tests {
                         end_time_unix_nano: 1_500,
                         ..OtlpSpan::default()
                     }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        }
+        .encode_to_vec()
+    }
+
+    fn otlp_body_with_spans(n: u8) -> Vec<u8> {
+        let spans = (0..n)
+            .map(|idx| OtlpSpan {
+                trace_id: vec![1; 16],
+                span_id: vec![idx.saturating_add(1); 8],
+                name: format!("span-{idx}"),
+                start_time_unix_nano: 1_000 + u64::from(idx),
+                end_time_unix_nano: 1_500 + u64::from(idx),
+                ..OtlpSpan::default()
+            })
+            .collect();
+        TracesData {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans,
                     ..ScopeSpans::default()
                 }],
                 ..ResourceSpans::default()
@@ -1018,6 +1091,83 @@ mod tests {
 
         assert!(resp.status() == StatusCode::BAD_REQUEST);
         assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn shared_trace_span_limit_is_enforced_before_append() {
+        let limits = crate::limits::Limits {
+            max_spans_per_trace: 1,
+            ..crate::limits::Limits::default()
+        };
+        let (state, sink) = test_state_with_shared_limits(limits);
+
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .body(Body::from(otlp_body_with_spans(2)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn shared_ingest_rate_limit_is_per_tenant() {
+        let limits = crate::limits::Limits {
+            ingestion_rate_spans_per_sec: 1.0,
+            ingestion_burst_spans: 1,
+            ..crate::limits::Limits::default()
+        };
+        let (state, sink) = test_state_with_shared_limits(limits);
+        let app = router(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let other_tenant = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("x-scope-orgid", "tenant-b")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(first.status() == StatusCode::OK);
+        assert!(second.status() == StatusCode::TOO_MANY_REQUESTS);
+        assert!(other_tenant.status() == StatusCode::OK);
+        assert!(sink.count() == 2);
+        assert!(sink.tenant(0) == "tenant-a");
+        assert!(sink.tenant(1) == "tenant-b");
     }
 
     #[tokio::test]
