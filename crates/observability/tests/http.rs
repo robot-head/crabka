@@ -14551,6 +14551,56 @@ async fn detected_labels_endpoint_defaults_missing_query_to_all_streams() {
 }
 
 #[tokio::test]
+async fn detected_labels_endpoint_ignores_malformed_step_and_limit_like_loki() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api_prod = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let api_stage =
+        label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "stage")]));
+    let block = write_log_block(
+        &dir,
+        &BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(10, 20).unwrap()),
+        vec![
+            LogRow::new(api_prod, 10, "api prod", BTreeMap::new()),
+            LogRow::new(api_stage, 11, "api stage", BTreeMap::new()),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/detected_labels?query=%7Bapp%3D%22api%22%7D&start=10&end=20&step=not-a-duration&limit=not-a-limit")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "detectedLabels": [
+                    {
+                        "label": "app",
+                        "cardinality": 1
+                    },
+                    {
+                        "label": "env",
+                        "cardinality": 2
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_detected_fields_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     create_secret_delete_request(&delete_requests).await;
