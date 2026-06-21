@@ -74,6 +74,9 @@ impl TraceIndex {
         let mut carried_tag_names = BTreeSet::new();
         let mut carried_tag_values: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         tenant_index.blocks.retain(|block| {
+            if block.object_key == replacement.object_key {
+                return false;
+            }
             if !old_keys.contains(block.object_key.as_str()) {
                 return true;
             }
@@ -343,6 +346,25 @@ mod tests {
             BlockIndex::candidate_blocks(&idx, "t", 0, 100)
                 == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
         );
+    }
+
+    #[test]
+    fn replace_trace_blocks_is_idempotent_by_replacement_object_key() {
+        let mut idx = seed();
+        let replacement = stats(
+            "compacted-b1-b2",
+            0,
+            300,
+            &[1, 2, 3],
+            &[("service.name", "api")],
+        );
+        let old_keys = vec!["b1".to_string(), "b2".to_string()];
+
+        idx.replace_trace_blocks("t", &old_keys, replacement.clone());
+        idx.replace_trace_blocks("t", &old_keys, replacement);
+
+        assert!(idx.trace_blocks("t").len() == 1);
+        assert!(idx.trace_blocks("t")[0].object_key == "compacted-b1-b2");
     }
 
     #[tokio::test]
