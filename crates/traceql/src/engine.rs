@@ -481,6 +481,11 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
             Pipeline::Compare,
         ]
         | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(aggregate),
+            Pipeline::Compare,
+        ]
+        | [
             Pipeline::Aggregate(aggregate),
             Pipeline::Compare,
             Pipeline::By(by),
@@ -3129,6 +3134,53 @@ mod tests {
             .query_range(
                 "t",
                 "{ .svc = \"api\" } | count_over_time() | compare() | by(span.svc)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.len() == 2);
+        assert!(
+            series[0].labels
+                == vec![
+                    ("comparison".into(), "current".into()),
+                    ("svc".into(), "api".into())
+                ]
+        );
+        assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
+        assert!(
+            series[1].labels
+                == vec![
+                    ("comparison".into(), "previous".into()),
+                    ("svc".into(), "api".into())
+                ]
+        );
+        assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn by_before_count_over_time_compare_groups_metric_series() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(1, 1, None, "api", -120_000)]);
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(2, 1, None, "api", 0),
+                sp_at(2, 2, None, "api", 10_000),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let mut series = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | by(span.svc) | count_over_time() | compare()",
                 0,
                 60_000,
                 60_000,
