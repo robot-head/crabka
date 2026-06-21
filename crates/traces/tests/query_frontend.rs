@@ -650,6 +650,51 @@ async fn frontend_search_preserves_upstream_text_errors() {
     assert!(body == "parse error: expected selector");
 }
 
+#[tokio::test]
+async fn frontend_queues_when_request_capacity_is_busy() {
+    let upstream_url = spawn_slow_search_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.max_queue_depth = 1;
+    let app = router(cfg);
+    let first_app = app.clone();
+    let second_app = app;
+
+    let first = tokio::spawn(async move {
+        first_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    });
+    tokio::task::yield_now().await;
+    let second = tokio::spawn(async move {
+        second_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    });
+
+    let (first, second) = timeout(Duration::from_secs(1), async {
+        (first.await.unwrap(), second.await.unwrap())
+    })
+    .await
+    .expect("queued frontend requests should drain");
+
+    assert!(first == StatusCode::OK);
+    assert!(second == StatusCode::OK);
+}
+
 async fn get_text(app: Router, uri: &str) -> (axum::http::StatusCode, String) {
     let response = app
         .oneshot(
@@ -720,6 +765,18 @@ async fn spawn_concurrent_search_querier() -> String {
 async fn spawn_overlapping_search_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(overlapping_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_slow_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(slow_search_response))
         .with_state(());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -911,6 +968,18 @@ async fn overlapping_search_response() -> axum::Json<Value> {
         "metrics": {
             "totalBlocks": 1,
             "inspectedTraces": 1,
+            "inspectedBytes": 0
+        }
+    }))
+}
+
+async fn slow_search_response() -> axum::Json<Value> {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    axum::Json(json!({
+        "traces": [],
+        "metrics": {
+            "totalBlocks": 0,
+            "inspectedTraces": 0,
             "inspectedBytes": 0
         }
     }))

@@ -14,7 +14,7 @@ use crabka_blockstore::{
 };
 use reqwest::Url;
 use serde_json::{Value, json};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,8 +332,12 @@ fn planned_shards(
 }
 
 async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     let (start_ns, end_ns) = match required_time_bounds(&uri) {
@@ -370,8 +374,12 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
 }
 
 async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     let (start_ns, end_ns) = match required_time_bounds(&uri) {
@@ -477,8 +485,12 @@ async fn fetch_shard_json(
 }
 
 async fn query_instant(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     if query_param(&uri, "start").is_none() && query_param(&uri, "end").is_none() {
@@ -522,8 +534,12 @@ async fn merged_metric_query_response(
 }
 
 async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
@@ -562,8 +578,12 @@ async fn search_tag_values_v2(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
@@ -598,11 +618,19 @@ async fn search_tag_values_v2(
 }
 
 async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
-    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    let Ok(_permit) = acquire_queue_permit(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "query frontend queue closed",
+        )
+            .into_response();
     };
 
     proxy_querier_response(&state, &headers, &uri).await
+}
+
+async fn acquire_queue_permit(state: &AppState) -> Result<OwnedSemaphorePermit, ()> {
+    state.permits.clone().acquire_owned().await.map_err(|_| ())
 }
 
 async fn proxy_querier_response(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Response {
