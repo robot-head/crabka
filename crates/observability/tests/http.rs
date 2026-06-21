@@ -10414,6 +10414,26 @@ async fn series_endpoint_returns_loki_error_for_invalid_time_bound() {
 }
 
 #[tokio::test]
+async fn series_endpoint_requires_matcher_parameter() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/series")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(&json_body(response).await, "bad_data", "match[]");
+}
+
+#[tokio::test]
 async fn labels_endpoint_returns_tenant_label_names() {
     let state = fixture();
     let app = loki_router(state);
