@@ -498,6 +498,32 @@ async fn frontend_shards_v2_tag_discovery_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_dispatches_tag_discovery_shards_concurrently() {
+    let upstream_url = spawn_concurrent_tags_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = timeout(
+        Duration::from_millis(500),
+        router(cfg).oneshot(
+            axum::http::Request::builder()
+                .uri("/api/v2/search/tags?scope=span&start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("sharded tag discovery should not serialize shard requests")
+    .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["scopes"][0]["tags"].as_array().unwrap().len() == 2);
+}
+
+#[tokio::test]
 async fn frontend_shards_v2_tag_values_across_live_frontier() {
     let upstream_url = spawn_sharded_tag_values_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -527,6 +553,32 @@ async fn frontend_shards_v2_tag_values_across_live_frontier() {
     );
     assert!(json["metrics"]["totalBlocks"] == 3);
     assert!(json["metrics"]["inspectedTraces"] == 12);
+}
+
+#[tokio::test]
+async fn frontend_dispatches_tag_value_shards_concurrently() {
+    let upstream_url = spawn_concurrent_tag_values_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = timeout(
+        Duration::from_millis(500),
+        router(cfg).oneshot(
+            axum::http::Request::builder()
+                .uri("/api/v2/search/tag/.svc/values?start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("sharded tag values should not serialize shard requests")
+    .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["tagValues"].as_array().unwrap().len() == 2);
 }
 
 #[tokio::test]
@@ -698,10 +750,36 @@ async fn spawn_sharded_tags_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_concurrent_tags_querier() -> String {
+    let barrier = Arc::new(Barrier::new(2));
+    let app = Router::new()
+        .route("/{*path}", get(concurrent_tags_response))
+        .with_state(barrier);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_sharded_tag_values_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(sharded_tag_values_response))
         .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_concurrent_tag_values_querier() -> String {
+    let barrier = Arc::new(Barrier::new(2));
+    let app = Router::new()
+        .route("/{*path}", get(concurrent_tag_values_response))
+        .with_state(barrier);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -914,6 +992,35 @@ async fn sharded_tags_response(State(()): State<()>, headers: HeaderMap) -> axum
     }))
 }
 
+async fn concurrent_tags_response(
+    State(barrier): State<Arc<Barrier>>,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    barrier.wait().await;
+    let tag = if tier == "backend" {
+        "backend.tag"
+    } else {
+        "live.tag"
+    };
+
+    axum::Json(json!({
+        "scopes": [{
+            "name": "span",
+            "tags": [{ "name": tag, "type": "string" }]
+        }],
+        "metrics": {
+            "totalBlocks": 1,
+            "inspectedTraces": 0,
+            "inspectedBytes": 1
+        }
+    }))
+}
+
 async fn sharded_tag_values_response(
     State(()): State<()>,
     headers: HeaderMap,
@@ -933,6 +1040,28 @@ async fn sharded_tag_values_response(
         "metrics": {
             "totalBlocks": total_blocks,
             "inspectedTraces": inspected_traces,
+            "inspectedBytes": 0
+        }
+    }))
+}
+
+async fn concurrent_tag_values_response(
+    State(barrier): State<Arc<Barrier>>,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    barrier.wait().await;
+    let value = if tier == "backend" { "backend" } else { "live" };
+
+    axum::Json(json!({
+        "tagValues": [{ "type": "string", "value": value }],
+        "metrics": {
+            "totalBlocks": 1,
+            "inspectedTraces": 1,
             "inspectedBytes": 0
         }
     }))

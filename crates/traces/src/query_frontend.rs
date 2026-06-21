@@ -551,27 +551,13 @@ async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: 
         "inspectedBytes": 0,
     });
 
-    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
-        .into_iter()
-        .enumerate()
+    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
     {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
-            .send()
-            .await
-        else {
-            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
-        };
-        let status = resp.status();
-        let Ok(bytes) = resp.bytes().await else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
-        if !status.is_success() {
-            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            return (status, bytes).into_response();
-        }
-        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
+        Ok(bodies) => bodies,
+        Err(err) => return err.into_response(),
+    };
+
+    for body in shard_bodies {
         if let Some(scopes) = body.get("scopes").and_then(Value::as_array) {
             merge_scopes(&mut merged_scopes, scopes);
         }
@@ -605,27 +591,13 @@ async fn search_tag_values_v2(
         "inspectedBytes": 0,
     });
 
-    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
-        .into_iter()
-        .enumerate()
+    let shard_bodies = match fetch_shard_json_bodies(&state, &headers, &uri, start_ns, end_ns).await
     {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
-            .send()
-            .await
-        else {
-            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
-        };
-        let status = resp.status();
-        let Ok(bytes) = resp.bytes().await else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
-        if !status.is_success() {
-            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            return (status, bytes).into_response();
-        }
-        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
-            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
-        };
+        Ok(bodies) => bodies,
+        Err(err) => return err.into_response(),
+    };
+
+    for body in shard_bodies {
         if let Some(values) = body.get("tagValues").and_then(Value::as_array) {
             merge_tag_values(&mut merged_values, values);
         }
