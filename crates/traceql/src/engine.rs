@@ -354,6 +354,18 @@ impl<S: SpanStore> TraceqlEngine<S> {
         self.store.trace_by_id(tenant, trace_id).await
     }
 
+    pub async fn trace_by_id_within(
+        &self,
+        tenant: &str,
+        trace_id: &[u8; 16],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Option<TraceSpans>> {
+        self.store
+            .trace_by_id_within(tenant, trace_id, start_ns, end_ns)
+            .await
+    }
+
     pub async fn tag_names(
         &self,
         tenant: &str,

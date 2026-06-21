@@ -154,6 +154,48 @@ impl CrabkaSpanStore {
             span_table: "spans".into(),
         })
     }
+
+    async fn trace_by_id_inner(
+        &self,
+        tenant: &str,
+        trace_id: &[u8; 16],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Option<TraceSpans>, TraceqlError> {
+        let keys = self
+            .trace_index
+            .candidate_blocks_for_trace(tenant, trace_id, start_ns, end_ns);
+        let (ctx, table) = self
+            .blocks
+            .scan_block_keys(&keys, span_block_schema())
+            .await
+            .map_err(|err| block_err(&err))?;
+        let mut spans = trace_from_batches(trace_id, collect_table(&ctx, &table).await?)?;
+
+        if let Some(live_trace) = match &self.live {
+            Some(live) => live.trace_spans(tenant, trace_id).await?,
+            None => None,
+        } {
+            if spans.is_none() {
+                spans = Some(TraceSpans {
+                    trace_id: live_trace.trace_id,
+                    root_service_name: live_trace.root_service_name.clone(),
+                    root_trace_name: live_trace.root_trace_name.clone(),
+                    resource_attributes: live_trace.resource_attributes.clone(),
+                    spans: Vec::new(),
+                });
+            }
+            if let Some(out) = &mut spans {
+                if out.resource_attributes.is_empty() {
+                    out.resource_attributes = live_trace.resource_attributes;
+                }
+                out.spans.extend(live_trace.spans);
+                deduplicate_trace_spans(&mut out.spans);
+            }
+        }
+
+        Ok(spans.map(|trace| crabka_traceql::filter_trace_spans_by_time(trace, start_ns, end_ns)))
+    }
 }
 
 #[async_trait::async_trait]
@@ -186,39 +228,18 @@ impl SpanStore for CrabkaSpanStore {
         tenant: &str,
         trace_id: &[u8; 16],
     ) -> Result<Option<TraceSpans>, TraceqlError> {
-        let keys = self
-            .trace_index
-            .candidate_blocks_for_trace(tenant, trace_id, 0, i64::MAX);
-        let (ctx, table) = self
-            .blocks
-            .scan_block_keys(&keys, span_block_schema())
+        self.trace_by_id_inner(tenant, trace_id, 0, i64::MAX).await
+    }
+
+    async fn trace_by_id_within(
+        &self,
+        tenant: &str,
+        trace_id: &[u8; 16],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Option<TraceSpans>, TraceqlError> {
+        self.trace_by_id_inner(tenant, trace_id, start_ns, end_ns)
             .await
-            .map_err(|err| block_err(&err))?;
-        let mut spans = trace_from_batches(trace_id, collect_table(&ctx, &table).await?)?;
-
-        if let Some(live_trace) = match &self.live {
-            Some(live) => live.trace_spans(tenant, trace_id).await?,
-            None => None,
-        } {
-            if spans.is_none() {
-                spans = Some(TraceSpans {
-                    trace_id: live_trace.trace_id,
-                    root_service_name: live_trace.root_service_name.clone(),
-                    root_trace_name: live_trace.root_trace_name.clone(),
-                    resource_attributes: live_trace.resource_attributes.clone(),
-                    spans: Vec::new(),
-                });
-            }
-            if let Some(out) = &mut spans {
-                if out.resource_attributes.is_empty() {
-                    out.resource_attributes = live_trace.resource_attributes;
-                }
-                out.spans.extend(live_trace.spans);
-                deduplicate_trace_spans(&mut out.spans);
-            }
-        }
-
-        Ok(spans)
     }
 
     async fn tag_names(
@@ -2553,6 +2574,74 @@ mod tests {
                     attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
                 }]
         );
+    }
+
+    #[tokio::test]
+    async fn cold_trace_by_id_within_prefilters_blocks_by_time_range() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let mut early = span_with_nested_refs();
+        early.span_id = [2; 8];
+        early.start_ns = 1_000;
+        let mut late = span_with_nested_refs();
+        late.span_id = [3; 8];
+        late.start_ns = 5_000;
+
+        let early_batch = span_batch(std::slice::from_ref(&early)).unwrap();
+        let early_meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/early.parquet",
+                span_block_schema(),
+                &[early_batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let late_batch = span_batch(std::slice::from_ref(&late)).unwrap();
+        let late_meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/late.parquet",
+                span_block_schema(),
+                &[late_batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+
+        let mut index = TraceIndex::new();
+        for (span, meta) in [(&early, early_meta), (&late, late_meta)] {
+            let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+            bloom.insert(&span.trace_id);
+            index.add_trace_block(
+                "tenant",
+                TraceBlockStats {
+                    object_key: meta.object_key,
+                    min_ts: meta.min_ts,
+                    max_ts: meta.max_ts,
+                    bloom,
+                    tag_names: BTreeSet::new(),
+                    tag_values: BTreeMap::new(),
+                },
+            );
+        }
+
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let trace = store
+            .trace_by_id_within("tenant", &early.trace_id, 5_000, 5_000)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(trace.spans.len() == 1);
+        assert!(trace.spans[0].span_id == late.span_id);
     }
 
     #[tokio::test]

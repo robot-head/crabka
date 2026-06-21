@@ -39,4 +39,5 @@ pub use span_columns::{
 };
 pub use store::{
     MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, SpanMatcher, SpanStore,
+    filter_trace_spans_by_time,
 };

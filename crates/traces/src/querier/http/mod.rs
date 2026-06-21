@@ -440,9 +440,12 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    match state.engine.trace_by_id(&tenant, &trace_id).await {
+    match state
+        .engine
+        .trace_by_id_within(&tenant, &trace_id, start_ns, end_ns)
+        .await
+    {
         Ok(Some(trace)) => {
-            let trace = filter_trace_spans(trace, start_ns, end_ns);
             if wants_protobuf(&headers) {
                 match trace_protobuf(&trace, state.cfg.max_trace_spans) {
                     Ok(bytes) => {
@@ -982,9 +985,11 @@ where
     let mut traces = Vec::new();
     for trace in resp.traces {
         if seen.insert(trace.trace_id)
-            && let Some(trace) = engine.trace_by_id(tenant, &trace.trace_id).await?
+            && let Some(trace) = engine
+                .trace_by_id_within(tenant, &trace.trace_id, start_ns, end_ns)
+                .await?
         {
-            traces.push(filter_trace_spans(trace, start_ns, end_ns));
+            traces.push(trace);
         }
     }
     Ok(traces)
@@ -1597,13 +1602,6 @@ fn instrumentation_scope_json(name: &str, version: &str) -> Value {
         scope.insert("version".into(), json!(version));
     }
     Value::Object(scope)
-}
-
-fn filter_trace_spans(mut trace: TraceSpans, start_ns: i64, end_ns: i64) -> TraceSpans {
-    trace.spans.retain(|span| {
-        i64::try_from(span.start_time_unix_nano).is_ok_and(|ts| ts >= start_ns && ts <= end_ns)
-    });
-    trace
 }
 
 fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {

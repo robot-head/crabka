@@ -88,6 +88,19 @@ pub trait SpanStore: Send + Sync {
 
     async fn trace_by_id(&self, tenant: &str, trace_id: &[u8; 16]) -> Result<Option<TraceSpans>>;
 
+    async fn trace_by_id_within(
+        &self,
+        tenant: &str,
+        trace_id: &[u8; 16],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<Option<TraceSpans>> {
+        Ok(self
+            .trace_by_id(tenant, trace_id)
+            .await?
+            .map(|trace| filter_trace_spans_by_time(trace, start_ns, end_ns)))
+    }
+
     async fn tag_names(
         &self,
         tenant: &str,
@@ -103,6 +116,17 @@ pub trait SpanStore: Send + Sync {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<TypedValue>>;
+}
+
+#[must_use]
+pub fn filter_trace_spans_by_time(mut trace: TraceSpans, start_ns: i64, end_ns: i64) -> TraceSpans {
+    trace.spans.retain(|span| {
+        let Ok(start) = i64::try_from(span.start_time_unix_nano) else {
+            return false;
+        };
+        start >= start_ns && start <= end_ns
+    });
+    trace
 }
 
 #[cfg(test)]
