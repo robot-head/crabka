@@ -16,7 +16,7 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, RawQuery, State};
-use axum::http::header::{CONTENT_ENCODING, CONTENT_TYPE};
+use axum::http::header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -55,7 +55,12 @@ use crabka_logql::{
     parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query, parse_query,
     plan_stream_query,
 };
-use datafusion::arrow::array::{Array, Int64Array, MapArray, StringArray, UInt64Array};
+use datafusion::arrow::array::builder::{MapBuilder, StringBuilder};
+use datafusion::arrow::array::{
+    Array, ArrayRef, Float64Array, Int64Array, MapArray, StringArray, TimestampNanosecondArray,
+    UInt64Array,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::prelude::SessionContext;
@@ -72,6 +77,7 @@ use opentelemetry_proto::tonic::common::v1::{
     AnyValue as ProtoAnyValue, KeyValue as ProtoKeyValue, any_value as proto_any_value,
 };
 use opentelemetry_proto::tonic::logs::v1::LogRecord as ProtoLogRecord;
+use parquet::arrow::arrow_writer::ArrowWriter;
 use prost::Message as _;
 use regex::Regex;
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -6015,12 +6021,17 @@ async fn handle_query(
     raw_query: Option<&str>,
     kind: QueryKind,
 ) -> Response {
+    let wants_parquet = wants_loki_parquet(&headers);
     let params = match parse_query_params(raw_query) {
         Ok(params) => params,
         Err(error) => return error.into_response(),
     };
 
     match execute_http_query(&state, &headers, params, kind).await {
+        Ok(value) if wants_parquet => match loki_parquet_response(&value) {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
     }
@@ -12884,6 +12895,246 @@ fn apply_loki_stream_limit(mut value: Value, limit: Option<usize>) -> Value {
     value
 }
 
+const LOKI_PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
+
+fn wants_loki_parquet(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                part.trim()
+                    .split(';')
+                    .next()
+                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(LOKI_PARQUET_CONTENT_TYPE))
+            })
+        })
+}
+
+fn loki_parquet_response(value: &Value) -> Result<Response, HttpQueryError> {
+    match value.pointer("/data/resultType").and_then(Value::as_str) {
+        Some("streams") => loki_streams_parquet_response(value),
+        Some("matrix") => loki_metrics_parquet_response(value, LokiMetricParquetKind::Matrix),
+        Some("vector") => loki_metrics_parquet_response(value, LokiMetricParquetKind::Vector),
+        _ => Err(HttpQueryError::LokiParquet(
+            "only stream and metric query results can be encoded as parquet",
+        )),
+    }
+}
+
+fn loki_streams_parquet_response(value: &Value) -> Result<Response, HttpQueryError> {
+    let results = value
+        .pointer("/data/result")
+        .and_then(Value::as_array)
+        .ok_or(HttpQueryError::LokiParquet("missing stream result array"))?;
+    let mut timestamps = Vec::new();
+    let mut label_sets = Vec::new();
+    let mut lines = Vec::new();
+    for stream in results {
+        let labels = loki_parquet_labels(stream.get("stream"), "stream labels")?;
+        let values = stream
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or(HttpQueryError::LokiParquet("missing stream values array"))?;
+        for entry in values {
+            let entry = entry
+                .as_array()
+                .ok_or(HttpQueryError::LokiParquet("stream value is not an array"))?;
+            let timestamp = entry
+                .first()
+                .and_then(Value::as_str)
+                .ok_or(HttpQueryError::LokiParquet(
+                    "stream timestamp is not a string",
+                ))?
+                .parse::<i64>()
+                .map_err(|_| HttpQueryError::LokiParquet("stream timestamp is not an integer"))?;
+            let line = entry
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or(HttpQueryError::LokiParquet("stream line is not a string"))?;
+            timestamps.push(timestamp);
+            label_sets.push(labels.clone());
+            lines.push(line.to_string());
+        }
+    }
+
+    let timestamp_data_type = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+    let timestamp_array =
+        TimestampNanosecondArray::from(timestamps).with_data_type(timestamp_data_type.clone());
+    let labels_array = loki_parquet_label_array(&label_sets)?;
+    let line_array = StringArray::from(lines);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp", timestamp_data_type, false),
+        Field::new("labels", labels_array.data_type().clone(), false),
+        Field::new("line", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(timestamp_array) as ArrayRef,
+            Arc::new(labels_array) as ArrayRef,
+            Arc::new(line_array) as ArrayRef,
+        ],
+    )?;
+    loki_parquet_batch_response(&batch)
+}
+
+#[derive(Clone, Copy)]
+enum LokiMetricParquetKind {
+    Matrix,
+    Vector,
+}
+
+fn loki_metrics_parquet_response(
+    value: &Value,
+    kind: LokiMetricParquetKind,
+) -> Result<Response, HttpQueryError> {
+    let results = value
+        .pointer("/data/result")
+        .and_then(Value::as_array)
+        .ok_or(HttpQueryError::LokiParquet("missing metric result array"))?;
+    let mut timestamps = Vec::new();
+    let mut label_sets = Vec::new();
+    let mut values = Vec::new();
+    for series in results {
+        let labels = loki_parquet_labels(series.get("metric"), "metric labels")?;
+        match kind {
+            LokiMetricParquetKind::Matrix => {
+                let samples = series
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .ok_or(HttpQueryError::LokiParquet("missing matrix values array"))?;
+                for sample in samples {
+                    let (timestamp_ns, value) = loki_parquet_metric_sample(sample)?;
+                    timestamps.push(timestamp_ns);
+                    label_sets.push(labels.clone());
+                    values.push(value);
+                }
+            }
+            LokiMetricParquetKind::Vector => {
+                let sample = series
+                    .get("value")
+                    .ok_or(HttpQueryError::LokiParquet("missing vector value"))?;
+                let (timestamp_ns, value) = loki_parquet_metric_sample(sample)?;
+                timestamps.push(timestamp_ns);
+                label_sets.push(labels.clone());
+                values.push(value);
+            }
+        }
+    }
+
+    let timestamp_data_type = DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()));
+    let timestamp_array =
+        TimestampNanosecondArray::from(timestamps).with_data_type(timestamp_data_type.clone());
+    let labels_array = loki_parquet_label_array(&label_sets)?;
+    let value_array = Float64Array::from(values);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp", timestamp_data_type, false),
+        Field::new("labels", labels_array.data_type().clone(), false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(timestamp_array) as ArrayRef,
+            Arc::new(labels_array) as ArrayRef,
+            Arc::new(value_array) as ArrayRef,
+        ],
+    )?;
+    loki_parquet_batch_response(&batch)
+}
+
+fn loki_parquet_metric_sample(sample: &Value) -> Result<(i64, f64), HttpQueryError> {
+    let sample = sample
+        .as_array()
+        .ok_or(HttpQueryError::LokiParquet("metric sample is not an array"))?;
+    let timestamp_ns = loki_parquet_metric_timestamp_ns(
+        sample
+            .first()
+            .ok_or(HttpQueryError::LokiParquet("missing metric timestamp"))?,
+    )?;
+    let value = sample
+        .get(1)
+        .and_then(Value::as_str)
+        .and_then(parse_metric_sample_value)
+        .and_then(MetricValue::to_f64)
+        .ok_or(HttpQueryError::LokiParquet("metric value is not numeric"))?;
+    Ok((timestamp_ns, value))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    reason = "Loki metric JSON timestamps are seconds floats; Parquet timestamps are integer nanoseconds"
+)]
+fn loki_parquet_metric_timestamp_ns(value: &Value) -> Result<i64, HttpQueryError> {
+    if let Some(seconds) = value.as_i64() {
+        return seconds
+            .checked_mul(1_000_000_000)
+            .ok_or(HttpQueryError::LokiParquet(
+                "metric timestamp is out of range",
+            ));
+    }
+    let seconds = value.as_f64().ok_or(HttpQueryError::LokiParquet(
+        "metric timestamp is not numeric",
+    ))?;
+    let timestamp_ns = (seconds * 1_000_000_000.0).round();
+    if !timestamp_ns.is_finite() || timestamp_ns < i64::MIN as f64 || timestamp_ns > i64::MAX as f64
+    {
+        return Err(HttpQueryError::LokiParquet(
+            "metric timestamp is out of range",
+        ));
+    }
+    Ok(timestamp_ns as i64)
+}
+
+fn loki_parquet_labels(
+    labels: Option<&Value>,
+    field: &'static str,
+) -> Result<Vec<(String, String)>, HttpQueryError> {
+    let labels = labels
+        .and_then(Value::as_object)
+        .ok_or(HttpQueryError::LokiParquet(field))?;
+    labels
+        .iter()
+        .map(|(key, value)| {
+            value.as_str().map_or_else(
+                || Err(HttpQueryError::LokiParquet("label value is not a string")),
+                |value| Ok((key.clone(), value.to_string())),
+            )
+        })
+        .collect()
+}
+
+fn loki_parquet_label_array(
+    label_sets: &[Vec<(String, String)>],
+) -> Result<MapArray, HttpQueryError> {
+    let mut builder = MapBuilder::new(None, StringBuilder::new(), StringBuilder::new());
+    for labels in label_sets {
+        for (key, value) in labels {
+            builder.keys().append_value(key);
+            builder.values().append_value(value);
+        }
+        builder.append(true)?;
+    }
+    Ok(builder.finish())
+}
+
+fn loki_parquet_batch_response(batch: &RecordBatch) -> Result<Response, HttpQueryError> {
+    let mut body = Vec::new();
+    {
+        let mut writer = ArrowWriter::try_new(&mut body, batch.schema(), None)?;
+        writer.write(&batch)?;
+        writer.close()?;
+    }
+    Ok((
+        StatusCode::OK,
+        [("content-type", LOKI_PARQUET_CONTENT_TYPE)],
+        body,
+    )
+        .into_response())
+}
+
 fn loki_success(data: impl serde::Serialize) -> Response {
     json_response(StatusCode::OK, &loki_success_value(data))
 }
@@ -13592,6 +13843,8 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
 #[derive(Debug, Error)]
 enum HttpQueryError {
     #[error(transparent)]
+    Arrow(#[from] datafusion::arrow::error::ArrowError),
+    #[error(transparent)]
     BlockStore(#[from] BlockStoreError),
     #[error("invalid percent-encoded query parameter")]
     InvalidPercentEncoding,
@@ -13648,6 +13901,10 @@ enum HttpQueryError {
     LokiFormatParse { query: String, source: ParseError },
     #[error("missing query parameter `query`")]
     LokiFormatMissingQuery,
+    #[error("cannot encode Loki query result as parquet: {0}")]
+    LokiParquet(&'static str),
+    #[error(transparent)]
+    Parquet(#[from] parquet::errors::ParquetError),
     #[error(transparent)]
     Parse(#[from] ParseError),
     #[error(transparent)]
@@ -13689,10 +13946,13 @@ impl IntoResponse for HttpQueryError {
                 StatusCode::FORBIDDEN
             }
             Self::Query(QueryError::MetricPipelineError { .. }) => StatusCode::BAD_REQUEST,
-            Self::QueryAuthorization(QueryAuthorizationError::Unavailable { .. })
+            Self::Arrow(_)
+            | Self::QueryAuthorization(QueryAuthorizationError::Unavailable { .. })
             | Self::Query(_)
             | Self::DeleteRequests(_)
-            | Self::DeleteFilter(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | Self::DeleteFilter(_)
+            | Self::LokiParquet(_)
+            | Self::Parquet(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::LokiParse { query, source } => {
                 return loki_parse_error(StatusCode::BAD_REQUEST, query, source);
             }

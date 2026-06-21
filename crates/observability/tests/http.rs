@@ -24,6 +24,8 @@ use crabka_observability::{
     otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter, serve_service_listener,
     write_compaction_frontier_to_object_store,
 };
+use datafusion::arrow::array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray};
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 use flate2::write::GzEncoder;
@@ -36,6 +38,7 @@ use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsSe
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
 use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use opentelemetry_proto::tonic::resource::v1::Resource;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use prost::Message as _;
 use serde_json::{Value, json};
 use snap::raw::Encoder as SnappyEncoder;
@@ -5344,6 +5347,56 @@ async fn query_endpoint_returns_metric_query_as_loki_vector_json() {
 }
 
 #[tokio::test]
+async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=2%2Avector%283%29&time=20")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("accept", "application/vnd.apache.parquet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some("application/vnd.apache.parquet")
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert!(reader.next().is_none());
+
+    assert!(batch.num_rows() == 1);
+    assert!(batch.schema().field(0).name() == "timestamp");
+    assert!(batch.schema().field(1).name() == "labels");
+    assert!(batch.schema().field(2).name() == "value");
+    let timestamps = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .unwrap();
+    assert!(timestamps.value(0) == 20);
+    let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(labels.value_offsets() == &[0, 0]);
+    let values = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!((values.value(0) - 6.0).abs() < f64::EPSILON);
+}
+
+#[tokio::test]
 async fn query_endpoint_filters_metric_query_with_scalar_comparison() {
     let state = fixture();
     let app = loki_router(state);
@@ -7244,6 +7297,78 @@ async fn query_range_endpoint_applies_start_end_and_tenant() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=0&end=30&direction=forward")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("accept", "application/vnd.apache.parquet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some("application/vnd.apache.parquet")
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert!(reader.next().is_none());
+
+    assert!(batch.num_rows() == 1);
+    assert!(batch.schema().field(0).name() == "timestamp");
+    assert!(
+        batch.schema().field(0).data_type()
+            == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+    );
+    assert!(batch.schema().field(1).name() == "labels");
+    assert!(batch.schema().field(2).name() == "line");
+    assert!(batch.schema().field(2).data_type() == &DataType::Utf8);
+
+    let timestamps = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .unwrap();
+    assert!(timestamps.value(0) == 19);
+    let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(labels.value_offsets() == &[0, 3]);
+    let keys = labels
+        .keys()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let values = labels
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(keys.value(0) == "app");
+    assert!(values.value(0) == "api");
+    assert!(keys.value(1) == "detected_level");
+    assert!(values.value(1) == "unknown");
+    assert!(keys.value(2) == "env");
+    assert!(values.value(2) == "prod");
+    let lines = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(lines.value(0) == "api error");
+}
+
+#[tokio::test]
 async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
     let (state, tenant_a_bytes, tenant_b_bytes) = multi_tenant_fixture();
     let app = loki_router(state);
@@ -7298,6 +7423,66 @@ async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
                 }
             })
     );
+}
+
+#[tokio::test]
+async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=2%2Avector%283%29&start=0&end=20&step=10ns")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("accept", "application/vnd.apache.parquet")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some("application/vnd.apache.parquet")
+    );
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
+    let batch = reader.next().unwrap().unwrap();
+    assert!(reader.next().is_none());
+
+    assert!(batch.num_rows() == 3);
+    assert!(batch.schema().field(0).name() == "timestamp");
+    assert!(
+        batch.schema().field(0).data_type()
+            == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+    );
+    assert!(batch.schema().field(1).name() == "labels");
+    assert!(batch.schema().field(2).name() == "value");
+    assert!(batch.schema().field(2).data_type() == &DataType::Float64);
+
+    let timestamps = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .unwrap();
+    assert!(timestamps.value(0) == 0);
+    assert!(timestamps.value(1) == 10);
+    assert!(timestamps.value(2) == 20);
+    let labels = batch.column(1).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(labels.value_offsets() == &[0, 0, 0, 0]);
+    let values = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!((values.value(0) - 6.0).abs() < f64::EPSILON);
+    assert!((values.value(1) - 6.0).abs() < f64::EPSILON);
+    assert!((values.value(2) - 6.0).abs() < f64::EPSILON);
 }
 
 #[tokio::test]
