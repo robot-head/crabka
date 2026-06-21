@@ -512,6 +512,9 @@ fn time_bounds(uri: &Uri) -> (i64, i64) {
 fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
     let start_ns = optional_seconds_param(uri, "start")?.unwrap_or(0);
     let end_ns = optional_seconds_param(uri, "end")?.unwrap_or(i64::MAX);
+    if end_ns < start_ns {
+        return Err("end must be >= start".to_string());
+    }
     Ok((start_ns, end_ns))
 }
 
@@ -2448,6 +2451,15 @@ mod tests {
             get_text("/api/v2/traces/09090909090909090909090909090909?end=bogus").await;
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "invalid query parameter end");
+    }
+
+    #[tokio::test]
+    async fn by_id_rejects_end_before_start() {
+        let (status, body) =
+            get_text("/api/v2/traces/09090909090909090909090909090909?start=2&end=1").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
