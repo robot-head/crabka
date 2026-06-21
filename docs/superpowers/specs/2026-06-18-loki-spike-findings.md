@@ -264,9 +264,9 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
   compacting new WAL batches into blocks, so matching rows are omitted from newly
   written block objects while committed offsets still advance through the full
   batch. The compactor maintenance path also rewrites overlapping existing
-  object-store tenant-manifest and shard-catalog blocks for active delete
-  requests and leaves fully deleted blocks out of the rewritten manifests.
-  Local-manifest historical rewrite remains future hardening.
+  local manifests, object-store tenant manifests, and object-store shard-catalog
+  blocks for active delete requests and leaves fully deleted blocks out of the
+  rewritten manifests.
   Real-Loki differential coverage now records that the default Loki 3.4.2
   container does not mount `/loki/api/v1/delete` and returns `404 page not
   found`; Crabka intentionally serves the delete lifecycle API because the
@@ -1114,9 +1114,9 @@ calculating metric samples, streaming live tail frames, or aggregating discovery
 output. Compaction now applies the same active registry when writing new WAL
 batches into blocks, omitting matching rows while still committing the full
 compacted offset range. The compactor maintenance path also rewrites overlapping
-existing object-store tenant-manifest and shard-catalog blocks for active delete
-requests and omits fully deleted blocks from the rewritten manifests.
-Local-manifest historical rewrite remains future hardening.
+existing local manifests, object-store tenant manifests, and object-store
+shard-catalog blocks for active delete requests and omits fully deleted blocks
+from the rewritten manifests.
 Real-Loki differential coverage records that the default Loki 3.4.2 container
 does not mount `/loki/api/v1/delete`, returning `404 page not found`, while
 Crabka intentionally serves create/list/cancel lifecycle operations because the
