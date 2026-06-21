@@ -13159,6 +13159,32 @@ async fn query_endpoint_accepts_label_join_vector_function() {
 }
 
 #[tokio::test]
+async fn query_endpoint_rejects_unsupported_scalar_vector_function_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=abs%28vector%28-1.2%29%29&time=4000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        response.status() == StatusCode::BAD_REQUEST,
+        "unsupported scalar functions must stay aligned with Loki's parser"
+    );
+    assert!(
+        text_body(response).await
+            == "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER"
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_accepts_vector_filter_comparison_expression() {
     let state = fixture();
     let app = loki_router(state);
