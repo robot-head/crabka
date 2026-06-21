@@ -10,6 +10,13 @@ use wincode::{Deserialize as WincodeDeserialize, Serialize as WincodeSerialize};
 use crate::error::ProfileError;
 use crate::frame::{Frame, SymbolSource};
 
+/// Stacktrace id reserved for samples with no frames (e.g. a goroutine profile's
+/// occasional stackless record). It is kept distinct from node `0` — the first
+/// real stacktrace's root — so stackless samples resolve to no frames instead of
+/// borrowing another stack's root, and are thus excluded from flamegraph totals
+/// while remaining counted in series sums.
+pub const EMPTY_STACKTRACE_ID: u32 = u32::MAX;
+
 /// One inlined line within a location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LineRec {
@@ -162,6 +169,9 @@ impl SymbolDb {
     }
 
     pub fn intern_stacktrace(&mut self, partition: u64, location_refs: &[u32]) -> u32 {
+        if location_refs.is_empty() {
+            return EMPTY_STACKTRACE_ID;
+        }
         let part = self.partitions.entry(partition).or_default();
         let mut parent = -1;
         for location_ref in location_refs.iter().rev() {
@@ -284,6 +294,9 @@ impl SymbolDb {
 
     #[must_use]
     pub fn resolve(&self, partition: u64, stacktrace_id: u32) -> Vec<Frame> {
+        if stacktrace_id == EMPTY_STACKTRACE_ID {
+            return Vec::new();
+        }
         let Some(part) = self.partitions.get(&partition) else {
             return Vec::new();
         };
@@ -324,6 +337,9 @@ impl SymbolDb {
 
     #[must_use]
     pub fn raw_locations(&self, partition: u64, stacktrace_id: u32) -> Vec<RawLocation> {
+        if stacktrace_id == EMPTY_STACKTRACE_ID {
+            return Vec::new();
+        }
         let Some(part) = self.partitions.get(&partition) else {
             return Vec::new();
         };
@@ -509,6 +525,22 @@ mod tests {
         assert!(abc != ab);
         let other = db.intern_stacktrace(1, &[a, b, c]);
         assert!(db.resolve(1, other).len() == 3);
+    }
+
+    #[test]
+    fn empty_stack_interns_to_sentinel_and_resolves_to_no_frames() {
+        let (mut db, [a, _b, _c]) = db_with_abc();
+        // The first real stacktrace owns node 0; an empty stack must not collide
+        // with it (which would borrow node 0's root frame) — it gets the sentinel.
+        let first = db.intern_stacktrace(0, &[a]);
+        let empty = db.intern_stacktrace(0, &[]);
+        assert!(first == 0);
+        assert!(empty == EMPTY_STACKTRACE_ID);
+        assert!(empty != first);
+        assert!(db.resolve(0, empty).is_empty());
+        assert!(db.raw_locations(0, empty).is_empty());
+        // The real stack still resolves to its single frame.
+        assert!(db.resolve(0, first).len() == 1);
     }
 
     #[test]

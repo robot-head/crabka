@@ -72,6 +72,13 @@ impl Tree {
     }
 
     pub fn add_stack(&mut self, frames: &[Frame], value: i64) {
+        // Stackless samples (a goroutine profile occasionally emits one with no
+        // frames) carry no position in the flamegraph, so they contribute
+        // nothing to the tree — matching Pyroscope, which keeps them in series
+        // sums but excludes them from flamegraph/merge-stacktrace totals.
+        if frames.is_empty() {
+            return;
+        }
         let mut current = self.root;
         self.nodes[current].total += value;
         for frame in frames.iter().rev() {
@@ -95,9 +102,7 @@ impl Tree {
             current = child;
             self.nodes[current].total += value;
         }
-        if !frames.is_empty() {
-            self.nodes[current].self_ += value;
-        }
+        self.nodes[current].self_ += value;
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -455,6 +460,20 @@ mod tests {
         assert!(tree.total_of(&["total", "main", "work"]) == 10);
         assert!(tree.self_of(&["total", "main", "work"]) == 10);
         assert!(tree.self_of(&["total", "main", "other"]) == 3);
+    }
+
+    #[test]
+    fn add_stack_ignores_stackless_samples() {
+        // Pyroscope keeps stackless samples in series sums but excludes them
+        // from flamegraph totals; a stackless sample must not inflate the tree.
+        let mut tree = Tree::new();
+        tree.add_stack(&stack(&["work", "main"]), 10);
+        tree.add_stack(&[], 1);
+
+        assert!(tree.total_of(&["total"]) == 10);
+        assert!(tree.self_of(&["total"]) == 0);
+        let fg = tree.to_flamegraph(2048);
+        assert!(fg.total == 10);
     }
 
     #[test]
