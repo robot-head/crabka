@@ -8441,7 +8441,13 @@ async fn execute_index_stats_query(
 ) -> Result<Value, HttpQueryError> {
     let params = parse_query_params(raw_query)?;
     let tenant = authorized_tenant(state, headers).await?;
-    let time_range = time_range(&params, QueryKind::Range)?;
+    let start = params
+        .start
+        .ok_or(HttpQueryError::MissingQueryParameter("start"))?;
+    let end = params
+        .end
+        .ok_or(HttpQueryError::MissingQueryParameter("end"))?;
+    let time_range = TimeRange::new(start, end).map_err(HttpQueryError::from)?;
     validate_query_range_limit(state, time_range)?;
     validate_query_length_limit(state, &params.query)?;
     let state = state.with_request_tenant_index(tenant, time_range).await?;
