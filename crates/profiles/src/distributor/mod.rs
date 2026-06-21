@@ -100,7 +100,7 @@ pub async fn process_raw(
                 labels: profile
                     .labels
                     .iter()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .map(|(name, value)| (name.clone(), value.clone()))
                     .collect(),
                 profile_type: profile.profile_type,
                 samples: profile

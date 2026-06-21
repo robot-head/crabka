@@ -15,6 +15,21 @@ impl Labels {
         Self(BTreeMap::new())
     }
 
+    /// Build a label set from an iterator of `(name, value)` pairs.
+    #[must_use]
+    pub fn from_pairs<I, K, V>(pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        let mut labels = Self::new();
+        for (name, value) in pairs {
+            labels.insert(name, value);
+        }
+        labels
+    }
+
     pub fn insert(&mut self, name: impl Into<String>, value: impl Into<String>) {
         self.0.insert(name.into(), value.into());
     }

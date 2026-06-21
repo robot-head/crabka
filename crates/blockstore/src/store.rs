@@ -9,7 +9,7 @@ use object_store::ObjectStore;
 use url::Url;
 
 use crate::error::Result;
-use crate::index::Index;
+use crate::index::SeriesIndex;
 use crate::matcher::LabelMatcher;
 use crate::reader::read_block_row_groups;
 use crate::writer::BlockWriter;
@@ -20,7 +20,7 @@ const TABLE_NAME: &str = "logs";
 pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,
-    index: Index,
+    index: SeriesIndex,
 }
 
 impl BlockStore {
@@ -29,7 +29,7 @@ impl BlockStore {
         Self {
             store,
             base,
-            index: Index::new(),
+            index: SeriesIndex::new(),
         }
     }
 
@@ -39,7 +39,7 @@ impl BlockStore {
     }
 
     #[must_use]
-    pub fn index(&self) -> &Index {
+    pub fn index(&self) -> &SeriesIndex {
         &self.index
     }
 
@@ -48,7 +48,7 @@ impl BlockStore {
         self.store.clone()
     }
 
-    pub fn index_mut(&mut self) -> &mut Index {
+    pub fn index_mut(&mut self) -> &mut SeriesIndex {
         &mut self.index
     }
 

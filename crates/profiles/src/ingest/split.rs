@@ -146,7 +146,7 @@ fn labels_with_sample_labels(
 fn labels_key(labels: &Labels) -> Vec<(String, String)> {
     labels
         .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
 

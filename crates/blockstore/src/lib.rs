@@ -15,6 +15,9 @@ mod index;
 mod labels;
 mod matcher;
 mod nested_set;
+mod profile_block;
+mod profile_index;
+mod profile_schema;
 mod reader;
 mod span_block;
 mod span_schema;
@@ -28,10 +31,16 @@ pub use block::{
 pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_schema};
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
-pub use index::Index;
+pub use index::SeriesIndex;
 pub use labels::{Labels, SeriesFingerprint};
 pub use matcher::{LabelMatcher, MatchOp};
 pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
+pub use profile_block::{ProfileSampleRow, encode_profile_samples};
+pub use profile_index::{LABEL_PROFILE_TYPE, ProfileIndex};
+pub use profile_schema::{
+    PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION,
+    PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_decl, profile_samples_schema,
+};
 pub use reader::{RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata};
 pub use span_block::{
     AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows,
