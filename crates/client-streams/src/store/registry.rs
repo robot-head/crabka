@@ -34,6 +34,13 @@ impl StoreRegistry {
         self.stores.keys().cloned().collect()
     }
 
+    /// Iterate every store mutably without allocating a `Vec<String>` of names
+    /// and re-looking-up each one. Used on the per-record changelog-drain hot
+    /// path (`Graph::drain_changelogs`).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut dyn StateStore> {
+        self.stores.values_mut().map(std::convert::AsMut::as_mut)
+    }
+
     /// Typed mutable access: downcast the erased store to the window store
     /// of the requested types. `None` if absent or the types don't match.
     pub fn get_window<K: Send + Sync + 'static, V: Send + 'static>(
