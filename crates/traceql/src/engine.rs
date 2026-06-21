@@ -20,10 +20,11 @@ use crate::result::{
     TraceMetricSeries, TraceMetricsResponse, TraceResult, TraceSpans, TypedValue,
 };
 use crate::span_columns::{
-    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_INSTRUMENTATION_NAME,
-    COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
-    COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
-    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
+    ATTR_PREFIX, COL_CHILD_COUNT, COL_DURATION, COL_EVENT_NAME, COL_EVENT_TIME_SINCE_START,
+    COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND, COL_LINK_SPAN_ID,
+    COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
+    COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
+    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
 use crate::store::{ScanOptions, SpanStore};
 
@@ -1078,6 +1079,12 @@ fn metric_field_column(field: &Field) -> Result<String> {
         Scope::Intrinsic(Intrinsic::InstrumentationVersion) => {
             Ok(COL_INSTRUMENTATION_VERSION.to_string())
         }
+        Scope::Intrinsic(Intrinsic::EventName) => Ok(COL_EVENT_NAME.to_string()),
+        Scope::Intrinsic(Intrinsic::EventTimeSinceStart) => {
+            Ok(COL_EVENT_TIME_SINCE_START.to_string())
+        }
+        Scope::Intrinsic(Intrinsic::LinkTraceId) => Ok(COL_LINK_TRACE_ID.to_string()),
+        Scope::Intrinsic(Intrinsic::LinkSpanId) => Ok(COL_LINK_SPAN_ID.to_string()),
         _ => Err(TraceqlError::Unsupported(format!(
             "metrics by() field {field:?} is not supported yet"
         ))),
@@ -2501,6 +2508,73 @@ mod tests {
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("service.name".into(), "checkout".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_event_name_intrinsic() {
+        let mut miss = sp_at(1, 1, None, "api", 0);
+        miss.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let mut hit = sp_at(1, 2, None, "api", 10_000);
+        hit.events = vec![EventRef {
+            time_since_start_nano: 60,
+            name: "cache.hit".into(),
+            attributes: Vec::new(),
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![miss, hit]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ event:name != nil } | count_over_time() | by(event:name)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("name".into(), "cache.hit".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("name".into(), "cache.miss".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_link_trace_id_intrinsic_uses_hex_label() {
+        let mut span = sp_at(1, 1, None, "api", 0);
+        span.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: Vec::new(),
+        }];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![span]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let got = e
+            .query_range(
+                "t",
+                "{ link:traceID != nil } | count_over_time() | by(link:traceID)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        assert!(got.len() == 1);
+        assert!(
+            got[0].labels == vec![("traceID".into(), "09090909090909090909090909090909".into())]
+        );
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
