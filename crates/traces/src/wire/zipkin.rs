@@ -35,6 +35,8 @@ struct ZipkinSpan {
     kind: Option<String>,
     #[serde(rename = "localEndpoint")]
     local_endpoint: Option<ZipkinEndpoint>,
+    #[serde(rename = "remoteEndpoint")]
+    remote_endpoint: Option<ZipkinEndpoint>,
     #[serde(default)]
     tags: BTreeMap<String, String>,
     #[serde(default)]
@@ -94,14 +96,23 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
             })
             .unwrap_or_default();
         let (status, status_message) = zipkin_status(&span.tags);
-        let span_attrs = span
+        let mut span_attrs = span
             .tags
             .into_iter()
             .map(|(key, value)| KeyValue {
                 key,
                 value: AttrValue::Str(value),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(service) = span
+            .remote_endpoint
+            .and_then(|endpoint| endpoint.service_name)
+        {
+            span_attrs.push(KeyValue {
+                key: "peer.service".into(),
+                value: AttrValue::Str(service),
+            });
+        }
         let events = span
             .annotations
             .into_iter()
@@ -208,6 +219,27 @@ mod tests {
 
         assert!(spans[0].status == StatusCode::Error);
         assert!(spans[0].status_message == "deadline exceeded");
+    }
+
+    #[test]
+    fn remote_endpoint_service_name_becomes_peer_service_attribute() {
+        let body = r#"[
+          {
+            "traceId": "0000000000000001",
+            "id": "0000000000000002",
+            "remoteEndpoint": { "serviceName": "postgres" }
+          }
+        ]"#;
+
+        let spans = decode_zipkin(body.as_bytes()).unwrap();
+
+        assert!(
+            spans[0]
+                .span_attrs
+                .iter()
+                .any(|attr| attr.key == "peer.service"
+                    && attr.value == AttrValue::Str("postgres".into()))
+        );
     }
 
     #[test]
