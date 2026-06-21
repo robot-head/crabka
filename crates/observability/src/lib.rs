@@ -4064,6 +4064,7 @@ pub struct QuerierState {
     hot_tail: Option<HotTailState>,
     delete_requests: Option<SharedLogDeleteRequests>,
     rules: SharedLokiRules,
+    alert_states: SharedPrometheusAlertStates,
     query_authorizer: Arc<dyn LogQueryAuthorizer>,
     max_query_range_ns: Option<i64>,
     max_query_series: Option<usize>,
@@ -4079,6 +4080,19 @@ type LokiRuleTenants = BTreeMap<String, LokiRuleNamespaces>;
 struct SharedLokiRules {
     tenants: Arc<Mutex<LokiRuleTenants>>,
     storage_path: Option<Arc<PathBuf>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct PrometheusAlertKey {
+    tenant: String,
+    alert_name: String,
+    query: String,
+    labels: Labels,
+}
+
+#[derive(Clone, Default)]
+struct SharedPrometheusAlertStates {
+    active_at: Arc<Mutex<BTreeMap<PrometheusAlertKey, i64>>>,
 }
 
 #[derive(Clone)]
@@ -4117,6 +4131,7 @@ impl QuerierState {
             hot_tail: None,
             delete_requests: None,
             rules: SharedLokiRules::default(),
+            alert_states: SharedPrometheusAlertStates::default(),
             query_authorizer: Arc::new(AllowAllQueryAuthorizer),
             max_query_range_ns: None,
             max_query_series: None,
@@ -6039,9 +6054,13 @@ fn prometheus_rule_group_interval_seconds(group: &serde_yaml::Value) -> i64 {
 }
 
 fn yaml_duration_seconds_field(fields: &serde_yaml::Mapping, name: &'static str) -> Option<i64> {
+    yaml_duration_ns_field(fields, name)
+        .and_then(|duration_ns| duration_ns.checked_div(1_000_000_000))
+}
+
+fn yaml_duration_ns_field(fields: &serde_yaml::Mapping, name: &'static str) -> Option<i64> {
     let duration = yaml_string_field(fields, name)?;
     parse_prometheus_duration(duration)
-        .and_then(|duration_ns| duration_ns.checked_div(1_000_000_000))
 }
 
 fn yaml_string_field<'a>(fields: &'a serde_yaml::Mapping, name: &'static str) -> Option<&'a str> {
@@ -6159,23 +6178,29 @@ async fn prometheus_alerts_for_rule(
     };
     let result = execute_http_query_for_tenant(state, tenant, &params, QueryKind::Instant).await?;
     Ok(prometheus_alerts_from_query_result(
+        &state.alert_states,
+        tenant,
         alert_name,
         fields,
+        query,
         evaluation_time,
         &result,
     ))
 }
 
 fn prometheus_alerts_from_query_result(
+    alert_states: &SharedPrometheusAlertStates,
+    tenant: &str,
     alert_name: &str,
     fields: &serde_yaml::Mapping,
+    query: &str,
     evaluation_time: i64,
     result: &Value,
 ) -> Vec<Value> {
-    let active_at = prometheus_active_at(evaluation_time);
+    let hold_duration_ns = yaml_duration_ns_field(fields, "for").unwrap_or(0);
     let annotations = yaml_string_map_field(fields, "annotations");
-    let rule_labels = yaml_string_map_field(fields, "labels");
-    result
+    let rule_labels = yaml_string_labels_field(fields, "labels");
+    let samples = result
         .pointer("/data/result")
         .and_then(Value::as_array)
         .into_iter()
@@ -6194,23 +6219,51 @@ fn prometheus_alerts_from_query_result(
                     }
                 }
             }
-            if let Some(rule_labels) = rule_labels.as_object() {
-                for (key, value) in rule_labels {
-                    if let Some(value) = value.as_str() {
-                        labels.insert(key.clone(), value.to_string());
-                    }
-                }
+            for (key, value) in &rule_labels {
+                labels.insert(key.clone(), value.clone());
             }
             labels.insert("alertname".to_string(), alert_name.to_string());
-            Some(json!({
-                "activeAt": active_at,
+            Some((labels, value.to_string()))
+        })
+        .collect::<Vec<_>>();
+
+    let mut states = alert_states
+        .active_at
+        .lock()
+        .expect("Prometheus alert state lock poisoned");
+    let mut active_keys = BTreeSet::new();
+    let alerts = samples
+        .into_iter()
+        .map(|(labels, value)| {
+            let key = PrometheusAlertKey {
+                tenant: tenant.to_string(),
+                alert_name: alert_name.to_string(),
+                query: query.to_string(),
+                labels: labels.clone(),
+            };
+            let active_at = *states.entry(key.clone()).or_insert(evaluation_time);
+            let state = if evaluation_time.saturating_sub(active_at) >= hold_duration_ns {
+                "firing"
+            } else {
+                "pending"
+            };
+            active_keys.insert(key);
+            json!({
+                "activeAt": prometheus_active_at(active_at),
                 "annotations": annotations,
                 "labels": labels,
-                "state": "firing",
+                "state": state,
                 "value": value,
-            }))
+            })
         })
-        .collect()
+        .collect();
+    states.retain(|key, _| {
+        key.tenant != tenant
+            || key.alert_name != alert_name
+            || key.query != query
+            || active_keys.contains(key)
+    });
+    alerts
 }
 
 fn prometheus_active_at(timestamp_ns: i64) -> String {
