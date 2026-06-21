@@ -497,7 +497,7 @@ impl DistributorState {
         }
         let burst = self.limits.ingest_rate_burst;
         if spans > burst {
-            return Err(TracesError::Limit(format!(
+            return Err(TracesError::RateLimit(format!(
                 "ingest rate {spans} spans exceeds burst {burst}"
             )));
         }
@@ -521,7 +521,7 @@ impl DistributorState {
             bucket.updated = now;
         }
         if spans > bucket.tokens {
-            return Err(TracesError::Limit(format!(
+            return Err(TracesError::RateLimit(format!(
                 "ingest rate exceeded for tenant {tenant}"
             )));
         }
@@ -583,7 +583,9 @@ fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), Trace
 
 fn grpc_status_from_error(err: &TracesError) -> GrpcStatus {
     match err {
-        TracesError::Limit(_) => GrpcStatus::resource_exhausted(err.to_string()),
+        TracesError::Limit(_) | TracesError::RateLimit(_) => {
+            GrpcStatus::resource_exhausted(err.to_string())
+        }
         TracesError::Invalid(_) | TracesError::Decode(_) | TracesError::TooLarge { .. } => {
             GrpcStatus::invalid_argument(err.to_string())
         }
@@ -976,7 +978,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_span_limit_is_429() {
+    async fn over_span_limit_is_400() {
         let limits = TenantLimits {
             max_spans_per_request: 0,
             ..TenantLimits::default()
@@ -992,7 +994,29 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.status() == StatusCode::BAD_REQUEST);
+        assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_trace_limit_is_400() {
+        let limits = TenantLimits {
+            max_spans_per_trace: 0,
+            ..TenantLimits::default()
+        };
+        let (state, sink) = test_state_with_limits(limits);
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::BAD_REQUEST);
         assert!(sink.count() == 0);
     }
 
