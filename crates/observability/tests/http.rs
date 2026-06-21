@@ -4165,6 +4165,47 @@ rules:
 }
 
 #[tokio::test]
+async fn ruler_rule_groups_persist_across_service_rebuilds() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    write_log_index_manifest(&dir, &LabelIndex::default(), &BlockIndex::default()).unwrap();
+    let config = test_service_config(Role::Querier, dir);
+
+    let app = build_service_router(&config, ServiceDependencies::default(), None)
+        .await
+        .unwrap();
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+",
+    )
+    .await;
+
+    let rebuilt_app = build_service_router(&config, ServiceDependencies::default(), None)
+        .await
+        .unwrap();
+    let response = rebuilt_app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = text_body(response).await;
+    assert!(body.contains("- name: api-errors\n"));
+    assert!(body.contains("alert: ApiErrors\n"));
+}
+
+#[tokio::test]
 async fn prometheus_rules_endpoint_lists_stored_loki_rule_groups() {
     let state = fixture();
     let app = loki_router(state);
