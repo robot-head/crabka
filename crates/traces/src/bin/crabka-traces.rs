@@ -20,7 +20,7 @@ use crabka_traces::{
     querier::{
         self as trace_querier,
         http::HttpConfig,
-        live::{LiveSource, LiveTier},
+        live::{LiveSource, LiveTier, RemoteLiveSource},
         store::CrabkaSpanStore,
     },
     query_frontend::{self, QueryFrontendConfig, backend_blocks_by_tenant_from_trace_index},
@@ -64,6 +64,8 @@ struct Cli {
     block_builder_window_secs: u64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
+    #[arg(long)]
+    querier_live_store_url: Option<String>,
     #[arg(long, default_value = "index/traces.json")]
     trace_index_key: String,
     #[arg(long, default_value = "memory:///")]
@@ -346,12 +348,19 @@ async fn build_querier_router_with_live(
             .unwrap_or_else(|_| TraceIndex::new()),
     );
     let blocks = Arc::new(BlockStore::new(configured.store, configured.root));
-    let live = live_store.map(|store| {
-        LiveTier::new(Arc::new(IndexedLiveSource::new(
+    let live = if let Some(store) = live_store {
+        Some(LiveTier::new(Arc::new(IndexedLiveSource::new(
             store,
             Arc::clone(&trace_index),
-        )))
-    });
+        ))))
+    } else if let Some(url) = &cli.querier_live_store_url {
+        Some(LiveTier::new(Arc::new(RemoteLiveSource::new(
+            Url::parse(url)?,
+            Arc::clone(&trace_index),
+        ))))
+    } else {
+        None
+    };
     let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, live));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     Ok(trace_querier::http::router_with_config(
@@ -372,17 +381,87 @@ fn build_live_store_router(
         Url::parse("memory:///")?,
     ));
     let live = LiveTier::new(Arc::new(IndexedLiveSource::new(
-        live_store,
+        Arc::clone(&live_store),
         Arc::clone(&trace_index),
     )));
     let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, Some(live)));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
-    Ok(trace_querier::http::router_with_config(
+    let tempo_router = trace_querier::http::router_with_config(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
         },
-    ))
+    );
+    let internal_router = axum::Router::new()
+        .route(
+            "/api/crabka/live/span-batches",
+            axum::routing::get(live_span_batches),
+        )
+        .with_state(live_store);
+    Ok(tempo_router.merge(internal_router))
+}
+
+async fn live_span_batches(
+    axum::extract::State(live_store): axum::extract::State<Arc<RwLock<LiveStore>>>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    let start = match live_i64_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (axum::http::StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end = match live_i64_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (axum::http::StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    if end < start {
+        return (axum::http::StatusCode::BAD_REQUEST, "end must be >= start").into_response();
+    }
+    let tenant = headers
+        .get("x-scope-orgid")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("anonymous");
+    let guard = live_store.read().await;
+    let batches = match guard.span_batches(tenant, start, end).await {
+        Ok(batches) => batches,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                err.to_string(),
+            )
+                .into_response();
+        }
+    };
+    match trace_querier::live::encode_span_batches(&batches) {
+        Ok(bytes) => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/vnd.apache.arrow.stream",
+            )],
+            bytes,
+        )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+        )
+            .into_response(),
+    }
+}
+
+fn live_i64_param(uri: &axum::http::Uri, name: &str) -> Result<i64, String> {
+    uri.query()
+        .and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.into_owned())
+        })
+        .ok_or_else(|| format!("missing query parameter {name}"))?
+        .parse::<i64>()
+        .map_err(|_| format!("invalid query parameter {name}"))
 }
 
 fn engine_opts_from_cli(cli: &Cli) -> EngineOpts {
@@ -806,6 +885,21 @@ mod tests {
         assert!(cli.retention_ns == 42);
     }
 
+    #[test]
+    fn parses_querier_remote_live_store_url() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--querier-live-store-url",
+            "http://127.0.0.1:3201",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Querier));
+        assert!(cli.querier_live_store_url.as_deref() == Some("http://127.0.0.1:3201"));
+    }
+
     #[tokio::test]
     async fn live_store_router_serves_recent_trace_by_id() {
         let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
@@ -837,6 +931,168 @@ mod tests {
         assert!(
             json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["name"] == "GET /live"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_live_source_reads_batches_from_live_store_router() {
+        let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
+        store.write().await.ingest(crabka_traces::SpanRecord {
+            tenant: "tenant-a".into(),
+            span: test_span([8; 16], [4; 8]),
+        });
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "live-store"]).unwrap();
+        let router = build_live_store_router(&cli, store).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant-a",
+            crabka_blockstore::TraceBlockStats {
+                object_key: "blocks/cold.parquet".into(),
+                min_ts: 0,
+                max_ts: 999,
+                bloom: crabka_blockstore::ShardedTraceBloom::new(1, 1, 0.01),
+                tag_names: std::collections::BTreeSet::default(),
+                tag_values: std::collections::BTreeMap::default(),
+            },
+        );
+        let source = trace_querier::live::RemoteLiveSource::new(
+            Url::parse(&format!("http://{addr}")).unwrap(),
+            Arc::new(index),
+        );
+
+        let batches = source.span_batches("tenant-a", 1_000, 2_000).await.unwrap();
+
+        assert!(source.block_builder_frontier_ns("tenant-a") == 1_000);
+        assert!(
+            batches
+                .iter()
+                .map(arrow::record_batch::RecordBatch::num_rows)
+                .sum::<usize>()
+                == 1
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_live_source_reads_trace_by_id_from_live_store_router() {
+        let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
+        store.write().await.ingest(crabka_traces::SpanRecord {
+            tenant: "tenant-a".into(),
+            span: test_span([9; 16], [5; 8]),
+        });
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "live-store"]).unwrap();
+        let router = build_live_store_router(&cli, store).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let source = trace_querier::live::RemoteLiveSource::new(
+            Url::parse(&format!("http://{addr}")).unwrap(),
+            Arc::new(TraceIndex::new()),
+        );
+
+        let trace = source
+            .trace_spans("tenant-a", &[9; 16])
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(trace.trace_id == [9; 16]);
+        assert!(trace.root_service_name == "live-api");
+        assert!(trace.spans[0].span_id == [5; 8]);
+        assert!(trace.spans[0].name == "GET /live");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_live_source_reads_tags_and_values_from_live_store_router() {
+        let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
+        store.write().await.ingest(crabka_traces::SpanRecord {
+            tenant: "tenant-a".into(),
+            span: test_span([11; 16], [7; 8]),
+        });
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "live-store"]).unwrap();
+        let router = build_live_store_router(&cli, store).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let source = trace_querier::live::RemoteLiveSource::new(
+            Url::parse(&format!("http://{addr}")).unwrap(),
+            Arc::new(TraceIndex::new()),
+        );
+
+        let tags = source
+            .tag_names(
+                "tenant-a",
+                Some(crabka_traceql::TagScope::Resource),
+                0,
+                2_000,
+            )
+            .await
+            .unwrap();
+        let values = source
+            .tag_values("tenant-a", "resource.service.name", 0, 2_000)
+            .await
+            .unwrap();
+
+        assert!(
+            tags.iter()
+                .any(|scope| scope.tags.iter().any(|tag| tag == "service.name"))
+        );
+        assert!(values.iter().any(|value| value.value == "live-api"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn querier_router_federates_remote_live_store_by_id() {
+        let store = Arc::new(RwLock::new(LiveStore::new(i64::MAX)));
+        store.write().await.ingest(crabka_traces::SpanRecord {
+            tenant: "tenant-a".into(),
+            span: test_span([10; 16], [6; 8]),
+        });
+        let live_cli = Cli::try_parse_from(["crabka-traces", "--target", "live-store"]).unwrap();
+        let live_router = build_live_store_router(&live_cli, store).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, live_router).await.unwrap();
+        });
+        let querier_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "querier",
+            "--querier-live-store-url",
+            &format!("http://{addr}"),
+        ])
+        .unwrap();
+        let router = build_querier_router(&querier_cli).await.unwrap();
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v2/traces/0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == HttpStatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"]
+                == "BgYGBgYGBgY="
+        );
+        server.abort();
     }
 
     #[tokio::test]
