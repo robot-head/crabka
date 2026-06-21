@@ -1,10 +1,12 @@
 //! Metrics-generator service loop.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::metricsgen::checkpoint::EdgeCheckpointStore;
 use crate::metricsgen::clock::Clock;
 use crate::metricsgen::config::MetricsGenConfig;
 use crate::metricsgen::processor::MetricsGenerator;
@@ -21,6 +23,8 @@ where
     pub(crate) sink: Arc<Snk>,
     generator: Mutex<MetricsGenerator>,
     pending_payloads: Mutex<Vec<SeriesPayload>>,
+    checkpoint_store: Option<Arc<dyn EdgeCheckpointStore>>,
+    checkpoint_keys: Mutex<HashMap<String, BTreeSet<Vec<u8>>>>,
     clock: Arc<dyn Clock>,
     cfg: MetricsGenConfig,
 }
@@ -40,11 +44,19 @@ where
         Self {
             generator: Mutex::new(MetricsGenerator::new(cfg.clone(), clock.clone())),
             pending_payloads: Mutex::new(Vec::new()),
+            checkpoint_store: None,
+            checkpoint_keys: Mutex::new(HashMap::new()),
             cfg,
             clock,
             source,
             sink,
         }
+    }
+
+    #[must_use]
+    pub fn with_checkpoint_store(mut self, store: Arc<dyn EdgeCheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
+        self
     }
 
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
@@ -67,6 +79,8 @@ where
             for span in &spans {
                 generator.process(span);
             }
+            drop(generator);
+            self.sync_edge_checkpoints();
         }
         Ok(count)
     }
@@ -117,6 +131,35 @@ where
             .remove(0);
     }
 
+    fn sync_edge_checkpoints(&self) {
+        let Some(store) = &self.checkpoint_store else {
+            return;
+        };
+
+        let checkpoints = self
+            .generator
+            .lock()
+            .expect("metrics generator mutex poisoned")
+            .edge_checkpoints();
+        let mut previous = self
+            .checkpoint_keys
+            .lock()
+            .expect("metrics generator checkpoint key mutex poisoned");
+
+        for (tenant, entries) in checkpoints {
+            let current: BTreeSet<Vec<u8>> = entries.iter().map(|(key, _)| key.clone()).collect();
+            for (key, value) in entries {
+                store.save(&tenant, &key, &value);
+            }
+            if let Some(old_keys) = previous.get(&tenant) {
+                for old_key in old_keys.difference(&current) {
+                    store.save(&tenant, old_key, b"");
+                }
+            }
+            previous.insert(tenant, current);
+        }
+    }
+
     pub async fn run(self, shutdown: CancellationToken) {
         let interval = self.cfg.collection_interval.max(Duration::from_secs(1));
         let mut ticker = tokio::time::interval(interval);
@@ -153,6 +196,7 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+    use crate::metricsgen::checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore};
     use crate::metricsgen::clock::MockClock;
     use crate::metricsgen::config::MetricsGenConfig;
     use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
@@ -274,5 +318,21 @@ mod tests {
         assert!(svc.poll_once(100).await.unwrap() == 0);
         assert!(svc.collect_once().await.unwrap() == 0);
         assert!(svc.sink.writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_updates_edge_checkpoints_for_pending_and_completed_edges() {
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        let svc = service().with_checkpoint_store(store.clone());
+
+        svc.source
+            .push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
+        assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").len() == 1);
+
+        svc.source
+            .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
+        assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").is_empty());
     }
 }

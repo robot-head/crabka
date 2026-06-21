@@ -16,6 +16,9 @@ struct TenantState {
     edges: EdgeStore,
 }
 
+pub type EdgeCheckpointEntry = (Vec<u8>, Vec<u8>);
+pub type TenantEdgeCheckpoints = (String, Vec<EdgeCheckpointEntry>);
+
 /// Composes span-metrics and service-graph processors per tenant.
 pub struct MetricsGenerator {
     cfg: MetricsGenConfig,
@@ -65,6 +68,17 @@ impl MetricsGenerator {
         }
 
         payloads
+    }
+
+    #[must_use]
+    pub fn edge_checkpoints(&self) -> Vec<TenantEdgeCheckpoints> {
+        let mut checkpoints: Vec<_> = self
+            .per_tenant
+            .iter()
+            .map(|(tenant, state)| (tenant.clone(), state.edges.checkpoint_entries(tenant)))
+            .collect();
+        checkpoints.sort_by(|a, b| a.0.cmp(&b.0));
+        checkpoints
     }
 }
 

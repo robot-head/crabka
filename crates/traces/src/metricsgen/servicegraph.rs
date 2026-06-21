@@ -2,6 +2,9 @@
 
 use std::collections::HashMap;
 
+use bytes::{BufMut, BytesMut};
+
+use crate::metricsgen::checkpoint::encode_checkpoint_key;
 use crate::metricsgen::config::MetricsGenConfig;
 use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
 use crate::metricsgen::series::{Series, SeriesSample, sorted_labels};
@@ -185,6 +188,22 @@ impl EdgeStore {
     }
 
     #[must_use]
+    pub fn checkpoint_entries(&self, tenant: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut entries: Vec<_> = self
+            .edges
+            .iter()
+            .map(|((trace_id, edge_id), edge)| {
+                (
+                    encode_checkpoint_key(tenant, trace_id, edge_id).to_vec(),
+                    encode_checkpoint_value(edge),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    #[must_use]
     pub fn drain(&mut self, timestamp_ms: i64) -> Vec<Series> {
         let mut out = Vec::new();
 
@@ -302,6 +321,40 @@ impl EdgeStore {
             agg.messaging_seconds_count += 1.0;
             observe_latency(&self.bucket_edges_ns, &mut agg.messaging_bucket_counts, ns);
         }
+    }
+}
+
+fn encode_checkpoint_value(edge: &Edge) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    buf.put_u8(edge.connection_type as u8);
+    buf.put_i64(edge.first_seen_ns);
+    buf.put_u8(u8::from(edge.failed));
+    put_optional_string(&mut buf, edge.client_service.as_deref());
+    put_optional_string(&mut buf, edge.server_service.as_deref());
+    put_optional_i64(&mut buf, edge.client_latency_ns);
+    put_optional_i64(&mut buf, edge.server_latency_ns);
+    buf.to_vec()
+}
+
+fn put_optional_string(buf: &mut BytesMut, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            buf.put_u8(1);
+            let len = u32::try_from(value.len()).expect("service name too long");
+            buf.put_u32(len);
+            buf.put_slice(value.as_bytes());
+        }
+        None => buf.put_u8(0),
+    }
+}
+
+fn put_optional_i64(buf: &mut BytesMut, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            buf.put_u8(1);
+            buf.put_i64(value);
+        }
+        None => buf.put_u8(0),
     }
 }
 
