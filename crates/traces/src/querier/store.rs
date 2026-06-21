@@ -320,12 +320,9 @@ impl SpanStore for CrabkaSpanStore {
             let batches = collect_table(&scan.ctx, &scan.span_table).await?;
             return intrinsic_values_from_batches(tag, &batches);
         }
-        let mut values: BTreeSet<(String, String)> = self
-            .trace_index
-            .tag_values(tenant, index_tag, start_ns, end_ns)
-            .into_iter()
-            .map(|value| ("string".to_string(), value))
-            .collect();
+        let mut values = self
+            .cold_attribute_tag_values(tenant, tag, index_tag, start_ns, end_ns)
+            .await?;
         if let Some(live) = &self.live {
             values.extend(
                 live.tag_values(tenant, tag, start_ns, end_ns)
@@ -341,6 +338,15 @@ impl SpanStore for CrabkaSpanStore {
     }
 }
 
+fn attr_typed_value_parts(value: &AttrValue) -> (String, String) {
+    match value {
+        AttrValue::Str(value) => ("string".into(), value.clone()),
+        AttrValue::Int(value) => ("int".into(), value.to_string()),
+        AttrValue::Float(value) => ("float".into(), value.to_string()),
+        AttrValue::Bool(value) => ("bool".into(), value.to_string()),
+    }
+}
+
 fn unscoped_attribute_tag(tag: &str) -> &str {
     tag.strip_prefix("resource.")
         .or_else(|| tag.strip_prefix("span."))
@@ -348,6 +354,30 @@ fn unscoped_attribute_tag(tag: &str) -> &str {
 }
 
 impl CrabkaSpanStore {
+    async fn cold_attribute_tag_values(
+        &self,
+        tenant: &str,
+        tag: &str,
+        index_tag: &str,
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<BTreeSet<(String, String)>, TraceqlError> {
+        let keys = self
+            .trace_index
+            .prune_blocks_by_tag(tenant, index_tag, None, start_ns, end_ns);
+        let (ctx, table) = self
+            .blocks
+            .scan_block_keys(&keys, span_block_schema())
+            .await
+            .map_err(|err| block_err(&err))?;
+        let batches = collect_table(&ctx, &table).await?;
+        let mut values = BTreeSet::new();
+        for batch in &batches {
+            collect_attribute_tag_values(batch, tag, index_tag, &mut values)?;
+        }
+        Ok(values)
+    }
+
     async fn nested_intrinsic_tag_values(
         &self,
         tenant: &str,
@@ -374,6 +404,27 @@ impl CrabkaSpanStore {
             .map(|(type_, value)| TypedValue { type_, value })
             .collect())
     }
+}
+
+fn collect_attribute_tag_values(
+    batch: &RecordBatch,
+    tag: &str,
+    index_tag: &str,
+    values: &mut BTreeSet<(String, String)>,
+) -> Result<(), TraceqlError> {
+    for row in 0..batch.num_rows() {
+        for (key, value) in attr_values_with_resource(batch, row, true)? {
+            let matches = key == tag
+                || key == index_tag
+                || key
+                    .strip_prefix(RESOURCE_ATTR_PREFIX)
+                    .is_some_and(|key| key == index_tag || key == tag);
+            if matches {
+                values.insert(attr_typed_value_parts(&value));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn merge_static_scope(
@@ -2160,11 +2211,28 @@ mod tests {
 
     #[tokio::test]
     async fn tag_discovery_unions_cold_index_values() {
+        let object_store = Arc::new(InMemory::new());
         let blocks = Arc::new(BlockStore::new(
-            Arc::new(InMemory::new()),
+            object_store.clone(),
             Url::parse("memory:///").unwrap(),
         ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/tags.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
         let mut index = TraceIndex::new();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
         let mut tags = BTreeSet::new();
         tags.insert("service.name".to_string());
         let mut values = BTreeMap::new();
@@ -2175,10 +2243,10 @@ mod tests {
         index.add_trace_block(
             "tenant",
             TraceBlockStats {
-                object_key: "blocks/none.parquet".into(),
-                min_ts: 0,
-                max_ts: 10,
-                bloom: ShardedTraceBloom::new(1, 8, 0.01),
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
                 tag_names: tags,
                 tag_values: values,
             },
@@ -2186,15 +2254,90 @@ mod tests {
 
         let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
         assert!(
-            store.tag_names("tenant", None, 0, 10).await.unwrap()[0].tags == vec!["service.name"]
+            store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0].tags
+                == vec!["service.name"]
         );
         assert!(
             store
-                .tag_values("tenant", "service.name", 0, 10)
+                .tag_values("tenant", "service.name", 0, 10_000)
                 .await
                 .unwrap()[0]
                 .value
                 == "api"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_attribute_tag_values_preserve_static_types() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/typed-tags.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::from([
+                    "http.status_code".to_string(),
+                    "retryable".to_string(),
+                ]),
+                tag_values: BTreeMap::from([
+                    (
+                        "http.status_code".to_string(),
+                        BTreeSet::from(["504".to_string()]),
+                    ),
+                    (
+                        "retryable".to_string(),
+                        BTreeSet::from(["true".to_string()]),
+                    ),
+                ]),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let status_values = store
+            .tag_values("tenant", "http.status_code", 0, 10_000)
+            .await
+            .unwrap();
+        let retryable_values = store
+            .tag_values("tenant", "retryable", 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!(
+            status_values
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "504".into(),
+                }]
+        );
+        assert!(
+            retryable_values
+                == vec![TypedValue {
+                    type_: "bool".into(),
+                    value: "true".into(),
+                }]
         );
     }
 
