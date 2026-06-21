@@ -4522,6 +4522,45 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_alerts_endpoint_expands_loki_rule_label_and_annotation_templates() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    labels:
+      route: '{{ $labels.app }}-{{ $labels.env }}'
+    annotations:
+      summary: 'service={{ $labels.app }} value={{ $value }}'
+",
+    )
+    .await;
+
+    let alerts_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/alerts?time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(alerts_response.status() == StatusCode::OK);
+    let body = json_body(alerts_response).await;
+    assert!(body["data"]["alerts"].as_array().unwrap().len() == 1);
+    assert!(body["data"]["alerts"][0]["labels"]["route"] == "api-prod");
+    assert!(body["data"]["alerts"][0]["annotations"]["summary"] == "service=api value=1");
+}
+
+#[tokio::test]
 async fn prometheus_alerts_endpoint_tracks_pending_alerts_until_for_duration_elapses() {
     let state = fixture();
     let app = loki_router(state);
