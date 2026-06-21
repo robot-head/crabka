@@ -1,5 +1,6 @@
 //! Distributor role: push-door HTTP routes into the traces WAL.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -42,6 +43,7 @@ const CONTENT_ENCODING: &str = "content-encoding";
 #[derive(Clone, Debug)]
 pub struct TenantLimits {
     pub max_spans_per_request: usize,
+    pub max_spans_per_trace: usize,
     pub max_attr_value_len: usize,
 }
 
@@ -49,6 +51,7 @@ impl Default for TenantLimits {
     fn default() -> Self {
         Self {
             max_spans_per_request: 10_000,
+            max_spans_per_trace: usize::MAX,
             max_attr_value_len: 64 * 1024,
         }
     }
@@ -471,7 +474,18 @@ pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError
             limits.max_spans_per_request
         )));
     }
+    let mut spans_per_trace = BTreeMap::new();
     for span in spans {
+        let count = spans_per_trace
+            .entry(span.trace_id)
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        if *count > limits.max_spans_per_trace {
+            return Err(TracesError::Limit(format!(
+                "trace span count {} exceeds limit {}",
+                count, limits.max_spans_per_trace
+            )));
+        }
         validate_attrs(&span.resource_attrs, limits)?;
         validate_attrs(&span.span_attrs, limits)?;
         for event in &span.events {
@@ -967,6 +981,42 @@ mod tests {
             instrumentation_version: String::new(),
         };
         assert!(validate(&[span], &limits).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_traces_over_span_limit() {
+        let limits = TenantLimits {
+            max_spans_per_trace: 1,
+            ..TenantLimits::default()
+        };
+        let first = Span {
+            trace_id: [1; 16],
+            span_id: [1; 8],
+            parent_span_id: None,
+            name: "root".into(),
+            kind: crate::span::SpanKind::Internal,
+            start_ns: 0,
+            duration_ns: 1,
+            status: crate::span::StatusCode::Unset,
+            status_message: String::new(),
+            resource_attrs: Vec::new(),
+            span_attrs: Vec::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+            instrumentation_scope: String::new(),
+            instrumentation_version: String::new(),
+        };
+        let second = Span {
+            span_id: [2; 8],
+            ..first.clone()
+        };
+        let other_trace = Span {
+            trace_id: [2; 16],
+            ..first.clone()
+        };
+
+        assert!(validate(&[first.clone(), other_trace], &limits).is_ok());
+        assert!(validate(&[first, second], &limits).is_err());
     }
 
     fn jaeger_binary_batch() -> Vec<u8> {

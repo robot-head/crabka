@@ -74,6 +74,8 @@ struct Cli {
     max_search_traces: usize,
     #[arg(long, default_value_t = 10_000)]
     max_spans_per_request: usize,
+    #[arg(long, default_value_t = usize::MAX)]
+    max_spans_per_trace: usize,
     #[arg(long, default_value_t = 64 * 1024)]
     max_attr_value_len: usize,
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
@@ -145,6 +147,7 @@ async fn run_distributor(
     let producer = Producer::builder().bootstrap(cli.bootstrap).build().await?;
     let mut state = DistributorState::new(Arc::new(KafkaSink::new(Arc::new(producer))));
     state.limits.max_spans_per_request = cli.max_spans_per_request;
+    state.limits.max_spans_per_trace = cli.max_spans_per_trace;
     state.limits.max_attr_value_len = cli.max_attr_value_len;
     state.max_decompressed = cli.max_decompressed_bytes;
     let state = Arc::new(state);
@@ -560,6 +563,21 @@ mod tests {
         assert!(matches!(cli.target, Target::Querier));
         assert!(cli.max_search_traces == 42);
         assert!(build_querier_router(&cli).await.is_ok());
+    }
+
+    #[test]
+    fn parses_distributor_trace_span_limit() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--max-spans-per-trace",
+            "42",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Distributor));
+        assert!(cli.max_spans_per_trace == 42);
     }
 
     #[test]
