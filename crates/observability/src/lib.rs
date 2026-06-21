@@ -5405,6 +5405,7 @@ struct QueryParams {
     interval: Option<i64>,
     limit: Option<usize>,
     direction: Option<String>,
+    delay_for: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -9553,6 +9554,9 @@ async fn prepare_http_tail(
 ) -> Result<TailStream, HttpQueryError> {
     let tenant = authorized_tenant(state, headers).await?;
     let time_range = optional_start_end_range(params.start, params.since, params.end)?;
+    if let Some(delay_for) = params.delay_for {
+        validate_loki_tail_delay_for(delay_for)?;
+    }
     validate_query_length_limit(state, &params.query)?;
     let query = parse_query(&params.query).map_err(|source| HttpQueryError::LokiParse {
         query: params.query.clone(),
@@ -9910,6 +9914,7 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
     let mut interval = None;
     let mut limit = None;
     let mut direction = None;
+    let mut delay_for = None;
     let Some(raw_query) = raw_query else {
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
@@ -9926,6 +9931,7 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
             "interval",
             "limit",
             "direction",
+            "delay_for",
         ],
     ) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -9942,6 +9948,7 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
             "interval" => interval = Some(parse_loki_duration_query_param("interval", &value)?),
             "limit" => limit = Some(parse_usize_query_param("limit", &value)?),
             "direction" => direction = Some(value),
+            "delay_for" => delay_for = Some(parse_loki_tail_delay_for_query_param(&value)?),
             _ => {}
         }
     }
@@ -9956,6 +9963,7 @@ fn parse_query_params(raw_query: Option<&str>) -> Result<QueryParams, HttpQueryE
         interval,
         limit,
         direction,
+        delay_for,
     })
 }
 
@@ -10181,6 +10189,36 @@ fn parse_loki_duration_query_param(
     parse_prometheus_duration(value).ok_or_else(|| HttpQueryError::InvalidDurationQueryParameter {
         value: value.to_string(),
     })
+}
+
+fn parse_loki_tail_delay_for_query_param(value: &str) -> Result<i64, HttpQueryError> {
+    if let Ok(seconds) = value.parse::<i64>() {
+        seconds
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| HttpQueryError::InvalidQueryParameter {
+                name: "delay_for",
+                value: value.to_string(),
+            })
+    } else if let Some(duration_ns) = parse_decimal_seconds_timestamp(value) {
+        Ok(duration_ns)
+    } else {
+        parse_prometheus_duration(value).ok_or_else(|| {
+            HttpQueryError::InvalidDurationQueryParameter {
+                value: value.to_string(),
+            }
+        })
+    }
+}
+
+fn validate_loki_tail_delay_for(delay_for: i64) -> Result<(), HttpQueryError> {
+    if !(0..=LOKI_MAX_TAIL_DELAY_NS).contains(&delay_for) {
+        return Err(HttpQueryError::InvalidQueryParameter {
+            name: "delay_for",
+            value: delay_for.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn parse_prometheus_duration(value: &str) -> Option<i64> {
@@ -10413,6 +10451,7 @@ fn time_range(params: &QueryParams, kind: QueryKind) -> Result<TimeRange, HttpQu
 
 const LOKI_DEFAULT_QUERY_RANGE_NS: i64 = 3_600_000_000_000;
 const LOKI_DEFAULT_TAIL_LIMIT: usize = 100;
+const LOKI_MAX_TAIL_DELAY_NS: i64 = 5_000_000_000;
 const LOKI_VOLUME_MAX_QUERY_RANGE_NS: i64 = 2_595_600_000_000_000;
 
 fn current_unix_time_ns() -> i64 {
