@@ -3173,6 +3173,35 @@ async fn status_services_endpoint_returns_loki_service_states() {
 }
 
 #[tokio::test]
+async fn status_memberlist_endpoint_reports_memberlist_not_configured() {
+    let state = fixture();
+    let querier = loki_router(state);
+    let distributor = distributor_router(InMemoryWalSink::default());
+    let compactor = build_service_router(
+        &test_service_config(Role::Compactor, tempfile::tempdir().unwrap().keep()),
+        ServiceDependencies::default(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for app in [querier, distributor, compactor] {
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/memberlist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(text_body(response).await == "This instance doesn't use memberlist.");
+    }
+}
+
+#[tokio::test]
 async fn status_metrics_endpoint_returns_prometheus_text_for_loki_router() {
     let state = fixture();
     let app = loki_router(state);
