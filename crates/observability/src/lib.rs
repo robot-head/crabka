@@ -11335,9 +11335,15 @@ fn parse_series_params(raw_query: Option<&str>) -> Result<SeriesParams, HttpQuer
 
         match key.as_str() {
             "match[]" | "query" => params.matchers.push(value),
-            "start" => params.start = Some(parse_loki_timestamp_query_param("start", &value)?),
-            "end" => params.end = Some(parse_loki_timestamp_query_param("end", &value)?),
-            "since" => params.since = Some(parse_loki_duration_query_param("since", &value)?),
+            "start" if params.start.is_none() => {
+                params.start = Some(parse_loki_timestamp_query_param("start", &value)?);
+            }
+            "end" if params.end.is_none() => {
+                params.end = Some(parse_loki_timestamp_query_param("end", &value)?);
+            }
+            "since" if params.since.is_none() => {
+                params.since = Some(parse_loki_duration_query_param("since", &value)?);
+            }
             _ => {}
         }
     }

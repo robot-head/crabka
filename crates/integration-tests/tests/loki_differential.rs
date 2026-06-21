@@ -3875,6 +3875,7 @@ async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
         "label/app/values?query=%7Bapp%3D",
         "series?match[]=%7Bapp%3D",
         "series?start=not-a-number",
+        "labels?start=0&start=not-a-number",
     ];
 
     for path in paths {
