@@ -204,6 +204,9 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
     if let Some(by) = grouped_no_filter_by(pipeline) {
         return grouped_aggregate_sql(spanset_sql, by, None);
     }
+    if let Some(sql) = grouped_rank_pipeline_sql(spanset_sql, pipeline)? {
+        return Ok(sql);
+    }
 
     match pipeline {
         [
@@ -242,26 +245,6 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
         ),
         [
             Pipeline::Aggregate(agg),
-            Pipeline::By(by),
-            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
-        ]
-        | [
-            Pipeline::By(by),
-            Pipeline::Aggregate(agg),
-            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
-        ]
-        | [
-            Pipeline::Aggregate(agg),
-            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
-            Pipeline::By(by),
-        ] if is_search_preserving_aggregate(agg) => grouped_rank_sql(
-            spanset_sql,
-            by,
-            &aggregate_rank_expr_sql(agg)?,
-            rank_limit(rank)?,
-        ),
-        [
-            Pipeline::Aggregate(agg),
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
         ] if is_search_preserving_aggregate(agg) => {
             Ok(ungrouped_rank_sql(spanset_sql, rank_limit(rank)?))
@@ -269,6 +252,79 @@ fn grouped_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Stri
         _ => Err(TraceqlError::Unsupported(format!(
             "pipeline shape {pipeline:?} is not implemented yet"
         ))),
+    }
+}
+
+fn grouped_rank_pipeline_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<Option<String>> {
+    let Some((agg, by, rank, pre_filter, post_filter)) = grouped_rank_pipeline_parts(pipeline)
+    else {
+        return Ok(None);
+    };
+    if !is_search_preserving_aggregate(agg) {
+        return Ok(None);
+    }
+    Ok(Some(grouped_rank_sql(
+        spanset_sql,
+        by,
+        &aggregate_rank_expr_sql(agg)?,
+        rank_limit(rank)?,
+        pre_filter,
+        post_filter,
+    )?))
+}
+
+type RankFilter = Option<(ComparisonOp, f64)>;
+
+fn grouped_rank_pipeline_parts(
+    pipeline: &[Pipeline],
+) -> Option<(&Aggregate, &[Field], &Pipeline, RankFilter, RankFilter)> {
+    match pipeline {
+        [
+            Pipeline::Aggregate(agg),
+            Pipeline::By(by),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
+        ] => Some((agg, by, rank, None, None)),
+        [
+            Pipeline::Aggregate(agg),
+            Pipeline::By(by),
+            Pipeline::Filter { op, value },
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(agg),
+            Pipeline::Filter { op, value },
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ] => Some((agg, by, rank, Some((*op, *value)), None)),
+        [
+            Pipeline::Aggregate(agg),
+            Pipeline::By(by),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::By(by),
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
+            Pipeline::Filter { op, value },
+        ] => Some((agg, by, rank, None, Some((*op, *value)))),
+        _ => None,
     }
 }
 
@@ -332,6 +388,8 @@ fn grouped_rank_sql(
     by: &[Field],
     expr: &str,
     rank: RankLimit,
+    pre_filter: Option<(ComparisonOp, f64)>,
+    post_filter: Option<(ComparisonOp, f64)>,
 ) -> Result<String> {
     let group_cols = by
         .iter()
@@ -347,10 +405,22 @@ fn grouped_rank_sql(
         RankDirection::Top => "DESC",
         RankDirection::Bottom => "ASC",
     };
+    let having = if let Some((op, value)) = pre_filter {
+        format!(" HAVING {}", aggregate_filter_sql(expr, op, value)?)
+    } else {
+        String::new()
+    };
+    let passing_source = if let Some((op, value)) = post_filter {
+        let pred = aggregate_filter_sql("rank_value", op, value)?;
+        format!("SELECT * FROM ranked WHERE {pred}")
+    } else {
+        "SELECT * FROM ranked".to_string()
+    };
     Ok(format!(
         "WITH matched AS ({spanset_sql}), \
-         passing AS (SELECT {group_exprs}, {expr} AS rank_value FROM matched GROUP BY {group_exprs} \
-                     ORDER BY rank_value {direction} LIMIT {}) \
+         ranked AS (SELECT {group_exprs}, {expr} AS rank_value FROM matched GROUP BY {group_exprs} \
+                    {having} ORDER BY rank_value {direction} LIMIT {}), \
+         passing AS ({passing_source}) \
          SELECT matched.* FROM matched JOIN passing ON {join_pred}",
         rank.k
     ))
@@ -1308,6 +1378,102 @@ mod tests {
         .await
         .unwrap();
         assert!(names(&bottom) == vec!["db-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn count_by_topk_filter_keeps_spans_from_ranked_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc != nil } | count() | by(span.svc) | topk(2) > 2",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            names(&out)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn count_by_filter_topk_ranks_spans_from_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc != nil } | count() by(span.svc) > 1 | topk(1)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            names(&out)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
     }
 
     #[tokio::test]
