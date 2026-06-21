@@ -310,11 +310,16 @@ fn planned_shards(
     start_ns: i64,
     end_ns: i64,
 ) -> Vec<QueryShard> {
-    let backend_blocks = state
-        .cfg
-        .backend_blocks_by_tenant
-        .get(request_tenant(headers))
-        .unwrap_or(&state.cfg.backend_blocks);
+    let no_backend_blocks = Vec::new();
+    let backend_blocks = if state.cfg.backend_blocks_by_tenant.is_empty() {
+        &state.cfg.backend_blocks
+    } else {
+        state
+            .cfg
+            .backend_blocks_by_tenant
+            .get(request_tenant(headers))
+            .unwrap_or(&no_backend_blocks)
+    };
     plan_query_shards(
         start_ns,
         end_ns,
@@ -1088,6 +1093,41 @@ mod tests {
                     json!({"type": "string", "value": "zeta"}),
                 ]
         );
+    }
+
+    fn backend_block(object_key: &str, min_time_ns: i64, max_time_ns: i64) -> BackendBlock {
+        BackendBlock {
+            object_key: object_key.to_string(),
+            min_time_ns,
+            max_time_ns,
+            row_groups: vec![BackendRowGroup {
+                index: 0,
+                compressed_bytes: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn planned_shards_do_not_fall_back_to_global_blocks_for_unknown_tenant() {
+        let mut cfg = QueryFrontendConfig::new("http://querier:3200").unwrap();
+        cfg.target_bytes_per_job = 1;
+        cfg.backend_blocks = vec![backend_block("global-block.parquet", 0, 10)];
+        cfg.backend_blocks_by_tenant.insert(
+            "tenant-a".into(),
+            vec![backend_block("tenant-a-block.parquet", 0, 10)],
+        );
+        let state = AppState {
+            cfg,
+            http: reqwest::Client::new(),
+            permits: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "tenant-b".parse().unwrap());
+
+        let shards = planned_shards(&state, &headers, 0, 10);
+
+        assert!(shards.len() == 1);
+        assert!(shards[0].backend_job.is_none());
     }
 
     #[test]
