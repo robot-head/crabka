@@ -724,6 +724,12 @@ fn apply_metric_filter(
             series
                 .points
                 .retain(|(_, value)| metric_filter_passes(*value, filter));
+            series.exemplars.retain(|exemplar| {
+                series
+                    .points
+                    .iter()
+                    .any(|(ts, _)| *ts == exemplar.timestamp_ns)
+            });
             if series.points.is_empty() {
                 None
             } else {
@@ -3468,6 +3474,51 @@ mod tests {
         );
         assert!(got.series[0].exemplars[0].timestamp_ns == 0);
         assert!((got.series[0].exemplars[0].value - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn metric_comparison_filter_removes_exemplars_for_filtered_samples() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_at(0x11, 0x22, None, "api", 0),
+                sp_at(0x11, 0x33, None, "api", 10_000),
+                sp_at(0x44, 0x55, None, "api", 60_000),
+            ],
+        );
+        let e = TraceqlEngine::new(
+            Arc::new(s),
+            EngineOpts {
+                max_exemplars: 10,
+                ..EngineOpts::default()
+            },
+        );
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc != nil } | count_over_time() | by(span.svc) > 1",
+                0,
+                120_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got.series[0].points == vec![(0, 2.0)]);
+        assert!(got.series[0].exemplars.len() == 1);
+        assert!(got.series[0].exemplars[0].timestamp_ns == 0);
+        assert!(
+            got.series[0].exemplars[0].labels
+                == vec![
+                    ("trace_id".into(), "11111111111111111111111111111111".into()),
+                    ("span_id".into(), "2222222222222222".into())
+                ]
+        );
     }
 
     #[tokio::test]
