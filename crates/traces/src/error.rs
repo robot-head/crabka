@@ -9,6 +9,8 @@ pub enum TracesError {
     Decode(String),
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("limit exceeded: {0}")]
+    Limit(String),
     #[error("payload exceeds limit {limit} bytes")]
     TooLarge { limit: usize },
     #[error("wal codec: {0}")]
@@ -26,6 +28,7 @@ impl TracesError {
         match self {
             Self::UnsupportedContentType(_) => 415,
             Self::Decode(_) | Self::Invalid(_) | Self::TooLarge { .. } => 400,
+            Self::Limit(_) => 429,
             Self::Wal(_) | Self::Produce(_) | Self::Block(_) => 500,
         }
     }
@@ -42,6 +45,7 @@ mod tests {
         assert!(TracesError::UnsupportedContentType("x".into()).status_code() == 415);
         assert!(TracesError::Decode("x".into()).status_code() == 400);
         assert!(TracesError::Invalid("x".into()).status_code() == 400);
+        assert!(TracesError::Limit("x".into()).status_code() == 429);
         assert!(TracesError::TooLarge { limit: 1 }.status_code() == 400);
         assert!(TracesError::Wal("x".into()).status_code() == 500);
         assert!(TracesError::Produce("x".into()).status_code() == 500);

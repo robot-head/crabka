@@ -239,8 +239,7 @@ impl CollectorService for JaegerGrpcService {
             .ok_or_else(|| GrpcStatus::invalid_argument("missing jaeger batch"))?;
         let spans = decode_jaeger_grpc_batch(batch)
             .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
-        validate(&spans, &self.state.limits)
-            .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
@@ -261,8 +260,7 @@ impl TraceService for OtlpGrpcService {
         };
         let spans =
             decode_otlp(&data).map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
-        validate(&spans, &self.state.limits)
-            .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        validate(&spans, &self.state.limits).map_err(|err| grpc_status_from_error(&err))?;
         let tenant = tenant_metadata(&metadata);
         produce_spans(self.state.sink.as_ref(), &tenant, spans)
             .await
@@ -467,7 +465,7 @@ fn tenant_metadata(metadata: &MetadataMap) -> String {
 /// Validate decoded spans against per-tenant structural limits.
 pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError> {
     if spans.len() > limits.max_spans_per_request {
-        return Err(TracesError::Invalid(format!(
+        return Err(TracesError::Limit(format!(
             "span count {} exceeds limit {}",
             spans.len(),
             limits.max_spans_per_request
@@ -494,13 +492,26 @@ fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), Trace
             AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => 0,
         };
         if len > limits.max_attr_value_len {
-            return Err(TracesError::Invalid(format!(
+            return Err(TracesError::Limit(format!(
                 "attribute `{}` exceeds limit {}",
                 attr.key, limits.max_attr_value_len
             )));
         }
     }
     Ok(())
+}
+
+fn grpc_status_from_error(err: &TracesError) -> GrpcStatus {
+    match err {
+        TracesError::Limit(_) => GrpcStatus::resource_exhausted(err.to_string()),
+        TracesError::Invalid(_) | TracesError::Decode(_) | TracesError::TooLarge { .. } => {
+            GrpcStatus::invalid_argument(err.to_string())
+        }
+        TracesError::UnsupportedContentType(_) => GrpcStatus::unimplemented(err.to_string()),
+        TracesError::Wal(_) | TracesError::Produce(_) | TracesError::Block(_) => {
+            GrpcStatus::internal(err.to_string())
+        }
+    }
 }
 
 /// Append decoded spans to the WAL sink.
@@ -889,7 +900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn over_span_limit_is_400() {
+    async fn over_span_limit_is_429() {
         let limits = TenantLimits {
             max_spans_per_request: 0,
             ..TenantLimits::default()
@@ -905,7 +916,27 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::BAD_REQUEST);
+        assert!(resp.status() == StatusCode::TOO_MANY_REQUESTS);
+        assert!(sink.count() == 0);
+    }
+
+    #[tokio::test]
+    async fn otlp_grpc_limit_errors_are_resource_exhausted() {
+        let limits = TenantLimits {
+            max_spans_per_request: 0,
+            ..TenantLimits::default()
+        };
+        let (state, sink) = test_state_with_limits(limits);
+        let service = OtlpGrpcService::new(state);
+        let req = GrpcRequest::new(ExportTraceServiceRequest {
+            resource_spans: TracesData::decode(otlp_body().as_slice())
+                .unwrap()
+                .resource_spans,
+        });
+
+        let err = service.export(req).await.unwrap_err();
+
+        assert!(err.code() == tonic::Code::ResourceExhausted);
         assert!(sink.count() == 0);
     }
 
