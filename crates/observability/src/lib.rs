@@ -4911,25 +4911,45 @@ fn parse_log_level_param(raw_query: Option<&str>) -> Result<String, HttpQueryErr
     Err(HttpQueryError::MissingQueryParameter("log_level"))
 }
 
-async fn querier_config() -> Response {
-    status_config("querier")
+async fn querier_config(RawQuery(raw_query): RawQuery) -> Response {
+    status_config("querier", raw_query.as_deref())
 }
 
-async fn distributor_config() -> Response {
-    status_config("distributor")
+async fn distributor_config(RawQuery(raw_query): RawQuery) -> Response {
+    status_config("distributor", raw_query.as_deref())
 }
 
-async fn compactor_config() -> Response {
-    status_config("compactor")
+async fn compactor_config(RawQuery(raw_query): RawQuery) -> Response {
+    status_config("compactor", raw_query.as_deref())
 }
 
-fn status_config(_target: &'static str) -> Response {
+fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
+    if query_param_value(raw_query, "mode").as_deref() == Some("diff") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain; charset=utf-8")],
+            "unsupported type <nil>\n",
+        )
+            .into_response();
+    }
+
     (
         StatusCode::OK,
         [("content-type", "application/yaml; charset=utf-8")],
         "target: all\n",
     )
         .into_response()
+}
+
+fn query_param_value(raw_query: Option<&str>, name: &str) -> Option<String> {
+    let raw_query = raw_query?;
+    for pair in raw_query.split('&') {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if decode_form_component(key).ok()? == name {
+            return decode_form_component(value).ok();
+        }
+    }
+    None
 }
 
 async fn querier_services() -> Response {

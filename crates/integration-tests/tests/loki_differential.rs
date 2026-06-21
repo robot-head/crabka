@@ -236,9 +236,14 @@ async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
     ));
 
     let loki_result = loki_config_result(&http, &loki_base).await;
-    let crabka_result = crabka_config_result(querier).await;
+    let crabka_result = crabka_config_result(querier.clone()).await;
 
     assert!(crabka_result == loki_result);
+
+    let loki_diff_result = loki_config_result_with_query(&http, &loki_base, "mode=diff").await;
+    let crabka_diff_result = crabka_config_result_with_query(querier, "mode=diff").await;
+
+    assert!(crabka_diff_result == loki_diff_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5204,8 +5209,21 @@ async fn crabka_status_probe_result(app: axum::Router, path: &str) -> Value {
 }
 
 async fn loki_config_result(http: &reqwest::Client, base: &str) -> Value {
+    loki_config_result_with_query(http, base, "").await
+}
+
+async fn loki_config_result_with_query(
+    http: &reqwest::Client,
+    base: &str,
+    raw_query: &str,
+) -> Value {
+    let suffix = if raw_query.is_empty() {
+        String::new()
+    } else {
+        format!("?{raw_query}")
+    };
     let response = http
-        .get(format!("{base}/config"))
+        .get(format!("{base}/config{suffix}"))
         .send()
         .await
         .expect("query Loki config");
@@ -5215,13 +5233,17 @@ async fn loki_config_result(http: &reqwest::Client, base: &str) -> Value {
 }
 
 async fn crabka_config_result(app: axum::Router) -> Value {
+    crabka_config_result_with_query(app, "").await
+}
+
+async fn crabka_config_result_with_query(app: axum::Router, raw_query: &str) -> Value {
+    let uri = if raw_query.is_empty() {
+        "/config".to_string()
+    } else {
+        format!("/config?{raw_query}")
+    };
     let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/config")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status().as_u16();
@@ -6079,6 +6101,7 @@ fn stable_config_response(status: u16, body: &str) -> Value {
     lines.sort();
     json!({
         "httpStatus": status,
+        "body": if lines.is_empty() { body } else { "" },
         "stableLines": lines,
     })
 }
