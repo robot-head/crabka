@@ -53,6 +53,7 @@ pub struct QueryShard {
 #[derive(Clone, Debug)]
 pub struct QueryFrontendConfig {
     pub querier_url: Url,
+    pub querier_urls: Vec<Url>,
     pub live_frontier_ns: Option<i64>,
     pub max_queue_depth: usize,
     pub target_bytes_per_job: u64,
@@ -62,8 +63,10 @@ pub struct QueryFrontendConfig {
 
 impl QueryFrontendConfig {
     pub fn new(querier_url: &str) -> Result<Self, url::ParseError> {
+        let querier_urls = parse_querier_urls(querier_url)?;
         Ok(Self {
-            querier_url: Url::parse(querier_url)?,
+            querier_url: querier_urls[0].clone(),
+            querier_urls,
             live_frontier_ns: None,
             max_queue_depth: 128,
             target_bytes_per_job: 0,
@@ -71,6 +74,21 @@ impl QueryFrontendConfig {
             backend_blocks_by_tenant: BTreeMap::new(),
         })
     }
+}
+
+fn parse_querier_urls(value: &str) -> Result<Vec<Url>, url::ParseError> {
+    let mut urls = Vec::new();
+    for url in value
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        urls.push(Url::parse(url)?);
+    }
+    if urls.is_empty() {
+        urls.push(Url::parse(value)?);
+    }
+    Ok(urls)
 }
 
 #[derive(Clone)]
@@ -322,8 +340,11 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
+    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
             .send()
             .await
         else {
@@ -367,8 +388,11 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
+    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
             .send()
             .await
         else {
@@ -423,8 +447,11 @@ async fn merged_metric_query_response(
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
+    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
             .send()
             .await
         else {
@@ -468,8 +495,11 @@ async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: 
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
+    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
             .send()
             .await
         else {
@@ -519,8 +549,11 @@ async fn search_tag_values_v2(
         "inspectedBytes": 0,
     });
 
-    for shard in planned_shards(&state, &headers, start_ns, end_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
+    for (shard_index, shard) in planned_shards(&state, &headers, start_ns, end_ns)
+        .into_iter()
+        .enumerate()
+    {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard_index, &shard)
             .send()
             .await
         else {
@@ -773,9 +806,10 @@ fn build_querier_request(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
+    shard_index: usize,
     shard: &QueryShard,
 ) -> reqwest::RequestBuilder {
-    let mut url = state.cfg.querier_url.clone();
+    let mut url = querier_url_for_shard(&state.cfg, shard_index);
     url.set_path(uri.path());
     {
         let mut pairs = url.query_pairs_mut();
@@ -811,6 +845,13 @@ fn build_querier_request(
             QueryTier::Live => "live",
         },
     )
+}
+
+fn querier_url_for_shard(cfg: &QueryFrontendConfig, shard_index: usize) -> Url {
+    cfg.querier_urls
+        .get(shard_index % cfg.querier_urls.len().max(1))
+        .unwrap_or(&cfg.querier_url)
+        .clone()
 }
 
 fn build_plain_querier_request(
@@ -1047,6 +1088,47 @@ mod tests {
                     json!({"type": "string", "value": "zeta"}),
                 ]
         );
+    }
+
+    #[test]
+    fn frontend_config_parses_multiple_querier_urls() {
+        let cfg = QueryFrontendConfig::new("http://querier-a:3200,http://querier-b:3200").unwrap();
+
+        assert!(cfg.querier_urls.len() == 2);
+        assert!(cfg.querier_urls[0] == Url::parse("http://querier-a:3200").unwrap());
+        assert!(cfg.querier_urls[1] == Url::parse("http://querier-b:3200").unwrap());
+    }
+
+    #[test]
+    fn sharded_requests_round_robin_across_querier_urls() {
+        let cfg = QueryFrontendConfig::new("http://querier-a:3200,http://querier-b:3200").unwrap();
+        let state = AppState {
+            cfg,
+            http: reqwest::Client::new(),
+            permits: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let uri: Uri = "/api/search?q=%7B%7D&start=0&end=1".parse().unwrap();
+        let headers = HeaderMap::new();
+        let shard = QueryShard {
+            tier: QueryTier::Backend,
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            backend_job: None,
+        };
+
+        let first = build_querier_request(&state, &headers, &uri, 0, &shard)
+            .build()
+            .unwrap();
+        let second = build_querier_request(&state, &headers, &uri, 1, &shard)
+            .build()
+            .unwrap();
+        let third = build_querier_request(&state, &headers, &uri, 2, &shard)
+            .build()
+            .unwrap();
+
+        assert!(first.url().host_str() == Some("querier-a"));
+        assert!(second.url().host_str() == Some("querier-b"));
+        assert!(third.url().host_str() == Some("querier-a"));
     }
 
     #[tokio::test]

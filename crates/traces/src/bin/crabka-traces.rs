@@ -652,7 +652,7 @@ mod tests {
             "--target",
             "query-frontend",
             "--querier-url",
-            "http://querier.example:3200",
+            "http://querier-a.example:3200,http://querier-b.example:3200",
             "--live-frontier-ns",
             "60000000000",
             "--query-queue-depth",
@@ -663,7 +663,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::QueryFrontend));
-        assert!(cli.querier_url == "http://querier.example:3200");
+        assert!(cli.querier_url == "http://querier-a.example:3200,http://querier-b.example:3200");
         assert!(cli.live_frontier_ns == Some(60_000_000_000));
         assert!(cli.query_queue_depth == 4);
         assert!(cli.target_bytes_per_job == 4096);
