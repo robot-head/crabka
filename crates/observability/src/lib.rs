@@ -4733,6 +4733,10 @@ pub fn loki_router(state: QuerierState) -> Router {
             get(label_names).post(label_names_post),
         )
         .route(
+            "/loki/api/v1/label",
+            get(label_names).post(label_names_post),
+        )
+        .route(
             "/loki/api/v1/label/{name}/values",
             get(label_values).post(label_values_post),
         )

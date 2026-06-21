@@ -1173,6 +1173,12 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let crabka_labels = crabka_metadata_result(querier.clone(), "labels", base_ns, end_ns).await;
     assert!(crabka_labels == loki_labels);
 
+    let loki_singular_labels =
+        loki_metadata_result(&http, &loki_base, "label", base_ns, end_ns).await;
+    let crabka_singular_labels =
+        crabka_metadata_result(querier.clone(), "label", base_ns, end_ns).await;
+    assert!(crabka_singular_labels == loki_singular_labels);
+
     let loki_alias_labels =
         loki_api_prom_metadata_result(&http, &loki_base, "label", base_ns, end_ns).await;
     let crabka_alias_labels =
