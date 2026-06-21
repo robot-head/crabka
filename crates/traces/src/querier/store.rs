@@ -423,6 +423,20 @@ fn collect_attribute_tag_values(
                 values.insert(attr_typed_value_parts(&value));
             }
         }
+        for event in event_values(batch, row)? {
+            for (key, value) in event.attributes {
+                if key == tag || key == index_tag {
+                    values.insert(attr_typed_value_parts(&value));
+                }
+            }
+        }
+        for link in link_values(batch, row)? {
+            for (key, value) in link.attributes {
+                if key == tag || key == index_tag {
+                    values.insert(attr_typed_value_parts(&value));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2337,6 +2351,71 @@ mod tests {
                 == vec![TypedValue {
                     type_: "bool".into(),
                     value: "true".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_nested_tag_values_scan_event_and_link_attributes() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let span = span_with_nested_refs();
+        let batch = span_batch(std::slice::from_ref(&span)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/nested-tag-values.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&span.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::from(["exception.type".into(), "link.kind".into()]),
+                tag_values: BTreeMap::from([
+                    ("exception.type".into(), BTreeSet::from(["timeout".into()])),
+                    ("link.kind".into(), BTreeSet::from(["retry".into()])),
+                ]),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let event_values = store
+            .tag_values("tenant", "exception.type", 0, 10_000)
+            .await
+            .unwrap();
+        let link_values = store
+            .tag_values("tenant", "link.kind", 0, 10_000)
+            .await
+            .unwrap();
+
+        assert!(
+            event_values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "timeout".into(),
+                }]
+        );
+        assert!(
+            link_values
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "retry".into(),
                 }]
         );
     }
