@@ -2,7 +2,7 @@
 //! base offset.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom};
+use std::io::{IoSlice, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,6 +35,22 @@ fn read_full_at(file: &File, mut offset: u64, buf: &mut [u8]) -> std::io::Result
         }
     }
     Ok(total)
+}
+
+fn seek_to_log_size(file: &File, log_size: u64) -> std::io::Result<()> {
+    (&*file).seek(SeekFrom::Start(log_size))?;
+    Ok(())
+}
+
+fn write_all_vectored(mut writer: impl Write, mut bufs: &mut [IoSlice<'_>]) -> std::io::Result<()> {
+    while !bufs.is_empty() {
+        let written = writer.write_vectored(bufs)?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        IoSlice::advance_slices(&mut bufs, written);
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -219,6 +235,7 @@ impl Segment {
             self.log_file.set_len(valid_end)?;
             self.log_size = valid_end;
         }
+        seek_to_log_size(&self.log_file, self.log_size)?;
         self.last_offset = last_offset;
         self.max_timestamp = max_ts;
         Ok(())
@@ -233,6 +250,7 @@ impl Segment {
         let log_path = name::log_path(dir, base_offset);
         let log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
         let log_size = log_file.metadata()?.len();
+        seek_to_log_size(&log_file, log_size)?;
         let offset_index = OffsetIndex::open(&name::index_path(dir, base_offset))?;
         let time_index = TimeIndex::open(&name::timeindex_path(dir, base_offset))?;
         Ok(Self {
@@ -665,8 +683,6 @@ impl Segment {
         batch: &RecordBatch,
         index_interval_bytes: u32,
     ) -> Result<u64, LogError> {
-        use std::io::Write;
-
         if self.sealed {
             return Err(LogError::Io(std::io::Error::other("segment is sealed")));
         }
@@ -676,9 +692,8 @@ impl Segment {
         let bytes = buf.freeze();
 
         let position = self.log_size;
-        // `std::fs::File` implements `Write`/`Seek` for `&File`; go through the
-        // shared `Arc<File>` by reference so no `&mut File` is needed.
-        (&*self.log_file).seek(SeekFrom::End(0))?;
+        // The active file cursor is kept at log_size by open/recovery/truncate,
+        // so the hot append path does not need an lseek before every write.
         (&*self.log_file).write_all(&bytes)?;
         self.log_size += bytes.len() as u64;
 
@@ -732,8 +747,6 @@ impl Segment {
         leader_epoch: i32,
         index_interval_bytes: u32,
     ) -> Result<u64, LogError> {
-        use std::io::Write;
-
         if self.sealed {
             return Err(LogError::Io(std::io::Error::other("segment is sealed")));
         }
@@ -749,17 +762,16 @@ impl Segment {
         // recompute). The batch BODY is written straight from the input slice
         // with no copy: the previous `bytes.to_vec()` was a full-payload memcpy
         // on the produce hot path (100 KiB+ per batch for large messages), the
-        // dominant remaining produce-side cost. Two `write_all`s (header, then
-        // body) cost one extra syscall per batch — negligible vs the avoided
-        // copy, and batches are never tiny (the producer coalesces records).
+        // dominant remaining produce-side cost. The active file cursor is kept
+        // at log_size, so one writev appends the patched header plus original
+        // body without an lseek or full-payload copy.
         let mut header = [0u8; HEADER_LEN];
         header.copy_from_slice(&bytes[..HEADER_LEN]);
         patch_base_offset_and_leader_epoch(&mut header, base_offset, leader_epoch);
 
         let position = self.log_size;
-        (&*self.log_file).seek(SeekFrom::End(0))?;
-        (&*self.log_file).write_all(&header)?;
-        (&*self.log_file).write_all(&bytes[HEADER_LEN..])?;
+        let mut bufs = [IoSlice::new(&header), IoSlice::new(&bytes[HEADER_LEN..])];
+        write_all_vectored(&*self.log_file, &mut bufs)?;
         self.log_size += bytes.len() as u64;
 
         let last_offset = base_offset + i64::from(last_offset_delta);
@@ -862,6 +874,7 @@ impl Segment {
         }
 
         self.log_file.set_len(pos)?;
+        seek_to_log_size(&self.log_file, pos)?;
         self.log_size = pos;
         self.last_offset = last_kept_offset;
         self.max_timestamp = last_kept_ts;
@@ -1013,6 +1026,46 @@ mod tests {
         assert!(read.len() == 2);
         assert!(read[0].records.len() == 3);
         assert!(read[1].records.len() == 2);
+    }
+
+    #[test]
+    fn append_after_open_active_writes_at_eof() {
+        let dir = tempdir().unwrap();
+        {
+            let mut seg = Segment::create(dir.path(), 0).unwrap();
+            seg.append(&sample_batch(0, 1, 100), 0).unwrap();
+            seg.append(&sample_batch(1, 1, 200), 0).unwrap();
+        }
+
+        let mut seg = Segment::open_active(dir.path(), 0, true).unwrap();
+        let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
+
+        assert!(position > 0);
+        assert!(seg.last_offset() == 2);
+        let read = seg.read(0, usize::MAX).unwrap();
+        assert!(read.len() == 3);
+        assert!(read[0].base_offset == 0);
+        assert!(read[1].base_offset == 1);
+        assert!(read[2].base_offset == 2);
+    }
+
+    #[test]
+    fn append_after_truncate_writes_at_new_eof() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), 0).unwrap();
+        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
+        let expected_position = seg.size_bytes();
+        seg.append(&sample_batch(1, 1, 200), 0).unwrap();
+
+        seg.truncate_to_relative(1).unwrap();
+        let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
+
+        assert!(position == expected_position);
+        assert!(seg.last_offset() == 1);
+        let read = seg.read(0, usize::MAX).unwrap();
+        assert!(read.len() == 2);
+        assert!(read[0].base_offset == 0);
+        assert!(read[1].base_offset == 1);
     }
 
     #[test]

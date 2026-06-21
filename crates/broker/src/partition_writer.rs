@@ -5,11 +5,13 @@
 //! contribution is: ordered acks back to producers + waking long-poll
 //! Fetch consumers via a shared `Notify` after every successful append.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use crabka_log::Log;
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::{Notify, mpsc};
 
 use crate::log_dir_status::LogDirRegistry;
@@ -68,10 +70,56 @@ fn lock_log(log: &Mutex<Log>) -> std::sync::MutexGuard<'_, Log> {
 /// recognizes and uses to mark the owning log dir offline.
 fn storage_failure_error(
     context: &str,
-    join_err: &tokio::task::JoinError,
+    detail: impl std::fmt::Display,
 ) -> crate::error::BrokerError {
-    let io = std::io::Error::other(format!("{context}: {join_err}"));
+    let io = std::io::Error::other(format!("{context}: {detail}"));
     crate::error::BrokerError::Log(crabka_log::LogError::Io(io))
+}
+
+fn append_produce_data(
+    log: &Mutex<Log>,
+    data: ProduceData,
+) -> (Result<i64, crate::error::BrokerError>, Option<i64>) {
+    let mut guard = lock_log(log);
+    let result = match data {
+        ProduceData::Verbatim(batch) => guard
+            .append_verbatim(&batch)
+            .map_err(crate::error::BrokerError::from),
+        ProduceData::Owned(mut batch) => {
+            let target = guard.config_snapshot().compression_type;
+            if let Some(target) = target {
+                let current = batch.attributes.compression();
+                if current != target {
+                    batch.attributes = batch.attributes.with_compression(target);
+                }
+            }
+            guard
+                .append(&mut batch)
+                .map_err(crate::error::BrokerError::from)
+        }
+    };
+    let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
+    (result, leo)
+}
+
+async fn run_produce_append(
+    log: Arc<Mutex<Log>>,
+    data: ProduceData,
+) -> Result<(Result<i64, crate::error::BrokerError>, Option<i64>), crate::error::BrokerError> {
+    match Handle::current().runtime_flavor() {
+        RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || append_produce_data(&log, data))
+        }))
+        .map_err(|_| storage_failure_error("append task panicked", "block_in_place panic")),
+        RuntimeFlavor::CurrentThread => {
+            tokio::task::spawn_blocking(move || append_produce_data(&log, data))
+                .await
+                .map_err(|join_err| storage_failure_error("append task panicked", &join_err))
+        }
+        _ => tokio::task::spawn_blocking(move || append_produce_data(&log, data))
+            .await
+            .map_err(|join_err| storage_failure_error("append task panicked", &join_err)),
+    }
 }
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
@@ -92,12 +140,14 @@ pub async fn run(
     while let Some(msg) = rx.recv().await {
         match msg {
             WriterMessage::Produce(ProduceJob { data, ack }) => {
-                // Run the blocking `write_all` + `fsync` off the reactor.
-                // The loop is a single serial task per partition, so the
-                // `.await` on the `JoinHandle` preserves append ordering.
-                // We fold the post-append LEO read into the same closure
-                // (it needs the lock anyway) and return it alongside the
-                // append result.
+                // Run the blocking append away from normal async polling.
+                // On the broker's multi-thread runtime, `block_in_place`
+                // avoids the per-batch `spawn_blocking` scheduling hop while
+                // letting Tokio hand the worker's other tasks to a replacement
+                // thread. Current-thread test runtimes keep the old
+                // `spawn_blocking` fallback because `block_in_place` is not
+                // legal there. The writer loop is still the single serializer
+                // for this partition, so append ordering is unchanged.
                 //
                 // Two append shapes:
                 //   * Verbatim — the produce handler proved passthrough is
@@ -109,44 +159,9 @@ pub async fn run(
                 //     Kafka's `producer` pass-through) is applied here by
                 //     forcing the batch's attributes, which the
                 //     `RecordBatch::encode` inside `Log::append` then honors.
-                let log_for_blocking = log.clone();
-                let join = match data {
-                    ProduceData::Verbatim(batch) => tokio::task::spawn_blocking(move || {
-                        let mut guard = lock_log(&log_for_blocking);
-                        let result = guard
-                            .append_verbatim(&batch)
-                            .map_err(crate::error::BrokerError::from);
-                        let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
-                        (result, leo)
-                    }),
-                    ProduceData::Owned(mut batch) => {
-                        let target = lock_log(&log).config_snapshot().compression_type;
-                        if let Some(target) = target {
-                            let current = batch.attributes.compression();
-                            if current != target {
-                                batch.attributes = batch.attributes.with_compression(target);
-                            }
-                        }
-                        tokio::task::spawn_blocking(move || {
-                            let mut guard = lock_log(&log_for_blocking);
-                            let result = guard
-                                .append(&mut batch)
-                                .map_err(crate::error::BrokerError::from);
-                            // LEO is only meaningful on success; read it under the
-                            // same lock so the HW recompute below sees this append.
-                            let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
-                            (result, leo)
-                        })
-                    }
-                };
-                let (result, leo) = match join.await {
+                let (result, leo) = match run_produce_append(log.clone(), data).await {
                     Ok(v) => v,
-                    Err(join_err) => {
-                        // A panic inside the closure poisoned/aborted the
-                        // append. Treat it as a storage failure for this
-                        // message rather than propagating the panic and
-                        // killing the writer task.
-                        let err = storage_failure_error("append task panicked", &join_err);
+                    Err(err) => {
                         flag_storage_failure(&err, &log_dir, &log_dir_status);
                         let _ = ack.send(Err(err));
                         continue;
@@ -525,6 +540,44 @@ mod tests {
         .await
         .expect("send job 2");
         assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn writer_appends_and_acks_on_multi_thread_runtime() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (tx, rx) = mpsc::channel(1);
+        let notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            "t".to_string(),
+            0,
+            log.clone(),
+            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            rx,
+            notify.clone(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::replica_state::ReplicaState::new(),
+            )),
+            Arc::new(Notify::new()),
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(ProducerState::new()),
+        ));
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Owned(sample_batch(3)),
+            ack,
+        }))
+        .await
+        .expect("send job");
+
+        let assigned = ack_rx.await.expect("ack recv").expect("append ok");
+        assert!(assigned == 0);
 
         drop(tx);
         writer.await.expect("writer join");

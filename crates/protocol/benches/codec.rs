@@ -11,6 +11,7 @@
 use bytes::{Bytes, BytesMut};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
+use crabka_compression::CompressionType;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
@@ -22,7 +23,7 @@ use crabka_protocol::owned::produce_request::{
 };
 use crabka_protocol::primitives::uuid::{Uuid, get_uuid, put_uuid};
 use crabka_protocol::primitives::{array, fixed, string_bytes, varint};
-use crabka_protocol::records::{Record, RecordBatch};
+use crabka_protocol::records::{Attributes, Record, RecordBatch, produce_framing};
 use crabka_protocol::tagged_fields::{
     UnknownTaggedField, UnknownTaggedFields, WriteTaggedFields, tagged_fields_len,
 };
@@ -75,12 +76,42 @@ fn make_record(offset_delta: i32, payload: usize) -> Record {
     }
 }
 
+fn make_ramp_record(offset_delta: i32, payload: usize) -> Record {
+    let mut value = vec![0u8; payload];
+    for (i, byte) in value.iter_mut().enumerate() {
+        *byte = i.to_le_bytes()[0];
+    }
+    Record {
+        attributes: 0,
+        timestamp_delta: i64::from(offset_delta) * 1000,
+        offset_delta,
+        key: Some(Bytes::from(format!("k{offset_delta:08}"))),
+        value: Some(Bytes::from(value)),
+        headers: vec![],
+    }
+}
+
 fn make_record_batch(n: i32, payload: usize) -> RecordBatch {
     let records: Vec<Record> = (0..n).map(|i| make_record(i, payload)).collect();
     RecordBatch {
         base_offset: 0,
         last_offset_delta: (n - 1).max(0),
         records,
+        ..RecordBatch::default()
+    }
+}
+
+fn make_large_record_batch(payload: usize, codec: CompressionType, ramp: bool) -> RecordBatch {
+    let record = if ramp {
+        make_ramp_record(0, payload)
+    } else {
+        make_record(0, payload)
+    };
+    RecordBatch {
+        base_offset: 0,
+        attributes: Attributes::default().with_compression(codec),
+        last_offset_delta: 0,
+        records: vec![record],
         ..RecordBatch::default()
     }
 }
@@ -106,6 +137,29 @@ fn make_produce_request(num_topics: usize, partitions_per_topic: usize) -> Produ
         acks: -1,
         timeout_ms: 30_000,
         topic_data,
+        unknown_tagged_fields: UnknownTaggedFields::default(),
+    }
+}
+
+fn make_single_large_produce_request(
+    payload: usize,
+    codec: CompressionType,
+    ramp: bool,
+) -> ProduceRequest {
+    ProduceRequest {
+        transactional_id: None,
+        acks: 1,
+        timeout_ms: 10_000,
+        topic_data: vec![TopicProduceData {
+            name: "bench-topic".to_string(),
+            topic_id: Uuid([0u8; 16]),
+            partition_data: vec![PartitionProduceData {
+                index: 0,
+                records: Some(make_large_record_batch(payload, codec, ramp).into()),
+                unknown_tagged_fields: UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        }],
         unknown_tagged_fields: UnknownTaggedFields::default(),
     }
 }
@@ -700,6 +754,41 @@ fn bench_produce_request(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_produce_framing_large(c: &mut Criterion) {
+    let mut group = c.benchmark_group("produce_request_large");
+    let version: i16 = 12;
+
+    for (label, payload, codec, ramp) in [
+        (
+            "1rec_100KiB_lz4_ramp",
+            100 * 1024usize,
+            CompressionType::Lz4,
+            true,
+        ),
+        ("1rec_512KiB_none", 512 * 1024, CompressionType::None, false),
+    ] {
+        let req = make_single_large_produce_request(payload, codec, ramp);
+        let encoded = encode_to_bytes(&req, version);
+        let body = Bytes::from(encoded.clone());
+
+        group.bench_function(format!("decode_owned_v12_{label}"), |b| {
+            b.iter(|| {
+                let mut cur: &[u8] = black_box(&encoded);
+                ProduceRequest::decode(&mut cur, version).unwrap()
+            });
+        });
+
+        group.bench_function(format!("produce_framing_v12_{label}"), |b| {
+            b.iter(|| {
+                let framing = produce_framing(black_box(body.clone()), version).unwrap();
+                black_box(framing.topics.len())
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // FetchRequest (owned, flexible v17 — modern KIP-1166 default)
 // ---------------------------------------------------------------------------
@@ -794,6 +883,7 @@ criterion_group!(
     bench_api_versions_response,
     bench_produce_request,
     bench_fetch_request,
+    bench_produce_framing_large,
     bench_metadata_response,
 );
 criterion_main!(benches);

@@ -20,8 +20,8 @@ use crabka_protocol::owned::produce_response::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{
-    Attributes, RecordBatch, RecordsPayload, TimestampType, ValidatedBatch, produce_framing,
-    validate_one_v2_batch,
+    Attributes, RecordBatch, RecordsPayload, TimestampType, ValidatedBatch,
+    count_records_in_v2_batches, produce_framing, validate_one_v2_batch,
 };
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
@@ -852,7 +852,7 @@ impl PartitionPayload {
     /// decompressing; owned payloads sum `records.len()` over their v2 batches.
     fn message_count(&self) -> u64 {
         match self {
-            Self::Slice(b) => count_records_in_slice(b),
+            Self::Slice(b) => count_records_in_v2_batches(b),
             Self::Owned(p) => p.as_v2().map_or(0, |batches| {
                 batches.iter().map(|b| b.records.len() as u64).sum()
             }),
@@ -960,52 +960,6 @@ fn produce_bytes_by_qos_tier(
         *out.entry(qos_tier).or_default() += topic_bytes;
     }
     out
-}
-
-/// Sum the `records_count` header field of every concatenated v2 batch in a
-/// records-field slice WITHOUT decompressing or parsing any record. Used only
-/// for the `messages_in_total` metric; a malformed/short slice (already
-/// rejected by `validate_one_v2_batch` on the real append path) contributes
-/// whatever whole batches it could walk and stops.
-///
-/// Returns 0 for a non-v2 (legacy v0/v1 `MessageSet`) slice — matching the
-/// prior owned-decode metric, which counted only `RecordsPayload::as_v2`
-/// records and left legacy `MessageSet` arrivals to the up-conversion-time
-/// accounting (`record_produce_message_conversion`).
-fn count_records_in_slice(bytes: &Bytes) -> u64 {
-    use crabka_protocol::records::{HEADER_LEN, RecordBatchHeader};
-    use zerocopy::FromBytes as _;
-
-    // Magic byte sits at offset 16; only v2 (magic == 2) carries a
-    // `records_count` header. Legacy slices contribute 0 here.
-    const MAGIC_OFFSET: usize = 16;
-    if bytes.len() <= MAGIC_OFFSET || bytes[MAGIC_OFFSET] != 2 {
-        return 0;
-    }
-
-    let mut total: u64 = 0;
-    let mut buf: &[u8] = bytes;
-    while buf.len() >= HEADER_LEN {
-        // Stop at the first non-v2 / mis-magicked batch so a concatenation of
-        // a v2 batch followed by junk doesn't read a bogus records_count.
-        if buf[MAGIC_OFFSET] != 2 {
-            break;
-        }
-        let Ok(hdr) = RecordBatchHeader::ref_from_bytes(&buf[..HEADER_LEN]) else {
-            break;
-        };
-        // batch_length covers the bytes after itself; total batch = 12 + that.
-        let Ok(after_len) = usize::try_from(hdr.batch_length.get()) else {
-            break;
-        };
-        let total_len = 12 + after_len;
-        if total_len < HEADER_LEN || total_len > buf.len() {
-            break;
-        }
-        total += u64::try_from(hdr.records_count.get().max(0)).unwrap_or(0);
-        buf = &buf[total_len..];
-    }
-    total
 }
 
 /// Resolve a topic's broker-side `compression.type` from the metadata
@@ -1471,6 +1425,34 @@ mod tests {
                 }],
                 ..Default::default()
             }
+        }
+
+        #[test]
+        fn message_count_reports_v2_record_total() {
+            // Multi-record batch so the count can't be mistaken for a constant.
+            let batch = RecordBatch {
+                last_offset_delta: 2,
+                records: vec![
+                    Record {
+                        value: Some(Bytes::from_static(b"a")),
+                        ..Default::default()
+                    },
+                    Record {
+                        value: Some(Bytes::from_static(b"b")),
+                        ..Default::default()
+                    },
+                    Record {
+                        value: Some(Bytes::from_static(b"c")),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            };
+            let wire = encode(&batch);
+            assert!(PartitionPayload::Slice(wire).message_count() == 3);
+            // A null field and a non-v2 (zeroed) slice both contribute zero.
+            assert!(PartitionPayload::Null.message_count() == 0);
+            assert!(PartitionPayload::Slice(Bytes::from_static(&[0u8; 64])).message_count() == 0);
         }
 
         /// Run the full dispatch over a v≥3 records slice: `prepare_batch`
