@@ -193,18 +193,17 @@ impl TraceIndex {
 
 impl BlockIndex for TraceIndex {
     fn add_block(&mut self, meta: &BlockMeta) {
-        self.tenants
-            .entry(meta.tenant.clone())
-            .or_default()
-            .blocks
-            .push(TraceBlockStats {
+        self.add_trace_block(
+            &meta.tenant,
+            TraceBlockStats {
                 object_key: meta.object_key.clone(),
                 min_ts: meta.min_ts,
                 max_ts: meta.max_ts,
                 bloom: ShardedTraceBloom::new(1, 1, 0.01),
                 tag_names: BTreeSet::new(),
                 tag_values: BTreeMap::new(),
-            });
+            },
+        );
     }
 
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
@@ -319,6 +318,31 @@ mod tests {
         got.sort();
         assert!(got == vec!["b1".to_string(), "b2".to_string()]);
         assert!(idx.block_count("t") == 2);
+    }
+
+    #[test]
+    fn block_index_trait_add_block_is_idempotent_by_object_key() {
+        use crate::block::BlockMeta;
+        use crate::block_index::BlockIndex;
+
+        let mut idx = TraceIndex::new();
+        let meta = BlockMeta {
+            tenant: "t".into(),
+            object_key: "traces/t/00000/00000000000000000001.parquet".into(),
+            min_ts: 10,
+            max_ts: 20,
+            row_count: 1,
+            fingerprints: Vec::new(),
+        };
+
+        BlockIndex::add_block(&mut idx, &meta);
+        BlockIndex::add_block(&mut idx, &meta);
+
+        assert!(idx.block_count("t") == 1);
+        assert!(
+            BlockIndex::candidate_blocks(&idx, "t", 0, 100)
+                == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
+        );
     }
 
     #[tokio::test]
