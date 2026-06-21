@@ -257,7 +257,10 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let (start_ns, end_ns) = time_bounds(&uri);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     match state
         .engine
         .tag_values(&tenant, &tag, start_ns, end_ns)
@@ -513,16 +516,6 @@ fn traceql_tag_field(key: &str) -> String {
     } else {
         format!(".{}", key.strip_prefix('.').unwrap_or(key))
     }
-}
-
-fn time_bounds(uri: &Uri) -> (i64, i64) {
-    let start_ns = query_param(uri, "start")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(0);
-    let end_ns = query_param(uri, "end")
-        .and_then(|v| parse_seconds_to_ns(&v))
-        .unwrap_or(i64::MAX);
-    (start_ns, end_ns)
 }
 
 fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
@@ -3126,6 +3119,14 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_rejects_invalid_time_bounds() {
+        let (status, body) = get_text("/api/search/tag/service.name/values?end=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
