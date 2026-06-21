@@ -9228,18 +9228,24 @@ fn format_label_matcher(matcher: &crabka_logql::LabelMatcher) -> String {
 
 fn format_pipeline_stage(stage: &PipelineStage) -> String {
     match stage {
-        PipelineStage::LineFilter(filter) => format!(
-            "{} {}",
-            match filter.op {
-                LineFilterOp::Contains => "|=",
-                LineFilterOp::NotContains => "!=",
-                LineFilterOp::Regex => "|~",
-                LineFilterOp::NotRegex => "!~",
-                LineFilterOp::Pattern => "|>",
-                LineFilterOp::NotPattern => "!>",
-            },
-            quote_logql_string(&filter.pattern)
-        ),
+        PipelineStage::LineFilter(filter) => {
+            let value = if filter.is_ip_matcher() {
+                format!("ip({})", quote_logql_string(&filter.pattern))
+            } else {
+                quote_logql_string(&filter.pattern)
+            };
+            format!(
+                "{} {value}",
+                match filter.op {
+                    LineFilterOp::Contains => "|=",
+                    LineFilterOp::NotContains => "!=",
+                    LineFilterOp::Regex => "|~",
+                    LineFilterOp::NotRegex => "!~",
+                    LineFilterOp::Pattern => "|>",
+                    LineFilterOp::NotPattern => "!>",
+                }
+            )
+        }
         PipelineStage::Decolorize => "decolorize".to_string(),
         PipelineStage::Parser(ParserStage::Json) => "json".to_string(),
         PipelineStage::Parser(ParserStage::JsonSelected(config)) => {
@@ -9388,6 +9394,7 @@ fn format_field_filter(filter: &FieldFilter) -> String {
             FieldValue::Duration(value) => format!("{value}ns"),
             FieldValue::Bytes(value) => format!("{value}B"),
             FieldValue::String(value) => quote_logql_string(value),
+            FieldValue::Ip(value) => format!("ip({})", quote_logql_string(value.pattern())),
         }
     )
 }
@@ -10447,6 +10454,9 @@ fn literal_line_filter_sql_predicates(pipeline: &[PipelineStage]) -> Vec<String>
             let PipelineStage::LineFilter(filter) = stage else {
                 continue;
             };
+            if filter.is_ip_matcher() {
+                continue;
+            }
             match filter.op {
                 LineFilterOp::Contains => Some(format!(
                     "line like '%{}%'",

@@ -10,6 +10,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
+use std::net::IpAddr;
 
 use base64::Engine as _;
 use base64::prelude::BASE64_STANDARD;
@@ -3970,6 +3971,11 @@ impl FieldFilter {
             FieldValue::Bytes(expected) => parse_bytes_literal(&candidate)
                 .is_some_and(|candidate| self.op.compare_numbers(candidate, *expected)),
             FieldValue::String(expected) => self.op.compare_strings(&candidate, expected),
+            FieldValue::Ip(expected) => match self.op {
+                ComparisonOp::Equal => expected.matches_ip_text(&candidate),
+                ComparisonOp::NotEqual => !expected.matches_ip_text(&candidate),
+                _ => false,
+            },
         }
     }
 
@@ -3988,6 +3994,14 @@ impl FieldFilter {
                 pattern: pattern.clone(),
                 source,
             })?;
+        }
+        if matches!(self.value, FieldValue::Ip(_))
+            && !matches!(self.op, ComparisonOp::Equal | ComparisonOp::NotEqual)
+        {
+            return Err(ParseError::Syntax {
+                message: "ip field comparisons only support = and !=".to_string(),
+                position: 0,
+            });
         }
         Ok(())
     }
@@ -4042,12 +4056,14 @@ pub enum FieldValue {
     Duration(i64),
     Bytes(f64),
     String(String),
+    Ip(IpMatcher),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LineFilter {
     pub op: LineFilterOp,
     pub pattern: String,
+    ip_matcher: Option<IpMatcher>,
 }
 
 impl LineFilter {
@@ -4055,13 +4071,37 @@ impl LineFilter {
         let filter = Self {
             op,
             pattern: pattern.into(),
+            ip_matcher: None,
+        };
+        filter.validate()?;
+        Ok(filter)
+    }
+
+    pub fn ip(op: LineFilterOp, pattern: impl Into<String>) -> Result<Self, ParseError> {
+        let pattern = pattern.into();
+        let filter = Self {
+            op,
+            ip_matcher: Some(IpMatcher::parse(&pattern)?),
+            pattern,
         };
         filter.validate()?;
         Ok(filter)
     }
 
     #[must_use]
+    pub fn is_ip_matcher(&self) -> bool {
+        self.ip_matcher.is_some()
+    }
+
+    #[must_use]
     pub fn matches(&self, line: &str) -> bool {
+        if let Some(matcher) = &self.ip_matcher {
+            return match self.op {
+                LineFilterOp::Contains => matcher.matches_line(line),
+                LineFilterOp::NotContains => !matcher.matches_line(line),
+                _ => false,
+            };
+        }
         match self.op {
             LineFilterOp::Contains => line.contains(&self.pattern),
             LineFilterOp::NotContains => !line.contains(&self.pattern),
@@ -4073,6 +4113,14 @@ impl LineFilter {
     }
 
     fn validate(&self) -> Result<(), ParseError> {
+        if self.ip_matcher.is_some()
+            && !matches!(self.op, LineFilterOp::Contains | LineFilterOp::NotContains)
+        {
+            return Err(ParseError::Syntax {
+                message: "ip line filters only support |= and !=".to_string(),
+                position: 0,
+            });
+        }
         if matches!(self.op, LineFilterOp::Regex | LineFilterOp::NotRegex) {
             Regex::new(&self.pattern).map_err(|source| ParseError::InvalidRegex {
                 pattern: self.pattern.clone(),
@@ -4085,6 +4133,151 @@ impl LineFilter {
     fn regex(&self) -> Regex {
         Regex::new(&self.pattern).expect("line regex filter validated at construction")
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IpMatcher {
+    pattern: String,
+    range: IpRange,
+}
+
+impl IpMatcher {
+    pub fn parse(pattern: &str) -> Result<Self, ParseError> {
+        let range = if let Some((start, end)) = pattern.split_once('-') {
+            IpRange::range(parse_ip_addr(start)?, parse_ip_addr(end)?)?
+        } else if let Some((base, prefix)) = pattern.split_once('/') {
+            let base = parse_ip_addr(base)?;
+            let prefix = prefix.parse::<u8>().map_err(|_| ParseError::Syntax {
+                message: "invalid ip CIDR prefix".to_string(),
+                position: 0,
+            })?;
+            IpRange::cidr(base, prefix)?
+        } else {
+            IpRange::single(parse_ip_addr(pattern)?)
+        };
+
+        Ok(Self {
+            pattern: pattern.to_string(),
+            range,
+        })
+    }
+
+    #[must_use]
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    #[must_use]
+    fn matches_ip_text(&self, value: &str) -> bool {
+        value
+            .parse::<IpAddr>()
+            .is_ok_and(|addr| self.range.contains(addr))
+    }
+
+    #[must_use]
+    fn matches_line(&self, line: &str) -> bool {
+        ip_candidate_tokens(line).any(|candidate| self.matches_ip_text(candidate))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IpRange {
+    family: IpFamily,
+    start: u128,
+    end: u128,
+}
+
+impl IpRange {
+    fn single(addr: IpAddr) -> Self {
+        let (family, value) = ip_to_value(addr);
+        Self {
+            family,
+            start: value,
+            end: value,
+        }
+    }
+
+    fn range(start: IpAddr, end: IpAddr) -> Result<Self, ParseError> {
+        let (start_family, start) = ip_to_value(start);
+        let (end_family, end) = ip_to_value(end);
+        if start_family != end_family || start > end {
+            return Err(ParseError::Syntax {
+                message: "invalid ip range".to_string(),
+                position: 0,
+            });
+        }
+        Ok(Self {
+            family: start_family,
+            start,
+            end,
+        })
+    }
+
+    fn cidr(base: IpAddr, prefix: u8) -> Result<Self, ParseError> {
+        let (family, value) = ip_to_value(base);
+        let bits = family.bits();
+        if prefix > bits {
+            return Err(ParseError::Syntax {
+                message: "invalid ip CIDR prefix".to_string(),
+                position: 0,
+            });
+        }
+        let host_bits = bits - prefix;
+        let mask = if prefix == 0 {
+            0
+        } else {
+            (!0_u128) << u32::from(host_bits)
+        } & family.mask();
+        let start = value & mask;
+        let end = start | (!mask & family.mask());
+        Ok(Self { family, start, end })
+    }
+
+    fn contains(&self, addr: IpAddr) -> bool {
+        let (family, value) = ip_to_value(addr);
+        family == self.family && value >= self.start && value <= self.end
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IpFamily {
+    V4,
+    V6,
+}
+
+impl IpFamily {
+    fn bits(self) -> u8 {
+        match self {
+            Self::V4 => 32,
+            Self::V6 => 128,
+        }
+    }
+
+    fn mask(self) -> u128 {
+        match self {
+            Self::V4 => u128::from(u32::MAX),
+            Self::V6 => u128::MAX,
+        }
+    }
+}
+
+fn parse_ip_addr(value: &str) -> Result<IpAddr, ParseError> {
+    value.parse().map_err(|_| ParseError::Syntax {
+        message: "invalid ip pattern".to_string(),
+        position: 0,
+    })
+}
+
+fn ip_to_value(addr: IpAddr) -> (IpFamily, u128) {
+    match addr {
+        IpAddr::V4(addr) => (IpFamily::V4, u128::from(u32::from(addr))),
+        IpAddr::V6(addr) => (IpFamily::V6, u128::from(addr)),
+    }
+}
+
+fn ip_candidate_tokens(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|ch: char| !(ch.is_ascii_hexdigit() || ch == '.' || ch == ':'))
+        .filter(|candidate| !candidate.is_empty())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5513,6 +5706,12 @@ impl<'a> Parser<'a> {
             return Ok(None);
         };
         self.skip_ws();
+        if self.consume_keyword("ip") {
+            self.expect('(')?;
+            let pattern = self.parse_quoted()?;
+            self.expect(')')?;
+            return LineFilter::ip(op, pattern).map(Some);
+        }
         let pattern = self.parse_quoted()?;
         LineFilter::new(op, pattern).map(Some)
     }
@@ -5682,6 +5881,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_field_value(&mut self) -> Result<FieldValue, ParseError> {
+        if self.consume_keyword("ip") {
+            self.expect('(')?;
+            let pattern = self.parse_quoted()?;
+            self.expect(')')?;
+            return Ok(FieldValue::Ip(IpMatcher::parse(&pattern)?));
+        }
         if matches!(self.peek(), Some('"') | Some('`')) {
             return Ok(FieldValue::String(self.parse_quoted()?));
         }

@@ -1535,6 +1535,36 @@ fn query_evaluator_applies_backtick_string_field_filters() {
 }
 
 #[test]
+fn query_evaluator_applies_ip_line_filters_to_complete_ip_tokens() {
+    let query = parse_query(r#"{app="api"} |= ip("192.168.4.0/24")"#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches(&labels, "client=192.168.4.20 status=200"));
+    check!(!query.matches(&labels, "client=192.168.5.20 status=200"));
+
+    let query = parse_query(r#"{app="api"} != ip("3.180.71.3")"#).unwrap();
+
+    check!(query.matches(&labels, "client=93.180.71.3 status=200"));
+    check!(!query.matches(&labels, "client=3.180.71.3 status=200"));
+}
+
+#[test]
+fn query_evaluator_applies_ip_label_filters() {
+    let query =
+        parse_query(r#"{app="api"} | logfmt | remote_addr = ip("192.168.4.5-192.168.4.20")"#)
+            .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches(&labels, "remote_addr=192.168.4.12"));
+    check!(!query.matches(&labels, "remote_addr=192.168.4.21"));
+
+    let query = parse_query(r#"{app="api"} | logfmt | remote_addr != ip("192.168.4.2")"#).unwrap();
+
+    check!(query.matches(&labels, "remote_addr=192.168.4.12"));
+    check!(!query.matches(&labels, "remote_addr=192.168.4.2"));
+}
+
+#[test]
 fn parses_regex_field_filters() {
     let query =
         parse_query(r#"{app="api"} | logfmt | method=~"GET|POST" | path!~"/health.*""#).unwrap();
