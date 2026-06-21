@@ -31,6 +31,8 @@ pub const COL_EVENT_TIME_SINCE_START: &str = "event_time_since_start_nanos";
 pub const COL_LINK_TRACE_ID: &str = "link_trace_id";
 pub const COL_LINK_SPAN_ID: &str = "link_span_id";
 pub const ATTR_PREFIX: &str = "attr.";
+pub const EVENT_ATTR_PREFIX: &str = "__event.";
+pub const LINK_ATTR_PREFIX: &str = "__link.";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputSpan {

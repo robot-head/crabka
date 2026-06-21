@@ -16,7 +16,10 @@ use crate::error::{Result, TraceqlError};
 use crate::result::{
     AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue,
 };
-use crate::span_columns::{InputSpan, NestedSet, assign_nested_set, span_schema_with_attrs};
+use crate::span_columns::{
+    EVENT_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set,
+    span_schema_with_attrs,
+};
 use crate::store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
 
 const INTRINSIC_TAGS: &[&str] = &[
@@ -92,7 +95,10 @@ impl InMemorySpanStore {
             });
     }
 
-    fn attr_columns(traces: &[&StoredTrace]) -> Vec<(String, DataType)> {
+    fn attr_columns(
+        traces: &[&StoredTrace],
+        projection_matchers: &[SpanMatcher],
+    ) -> Vec<(String, DataType)> {
         let mut cols = BTreeMap::new();
         for trace in traces {
             for span in &trace.spans {
@@ -103,6 +109,40 @@ impl InMemorySpanStore {
                         AttrValue::Float(_) => DataType::Float64,
                         AttrValue::Bool(_) => DataType::Boolean,
                     });
+                }
+                for matcher in projection_matchers {
+                    match matcher.scope {
+                        MatchScope::Event => {
+                            let Some((_, value)) = span
+                                .events
+                                .iter()
+                                .flat_map(|event| event.attributes.iter())
+                                .find(|(key, _)| key == &matcher.key)
+                            else {
+                                continue;
+                            };
+                            cols.entry(format!("{EVENT_ATTR_PREFIX}{}", matcher.key))
+                                .or_insert_with(|| attr_data_type(value));
+                        }
+                        MatchScope::Link => {
+                            let Some((_, value)) = span
+                                .links
+                                .iter()
+                                .flat_map(|link| link.attributes.iter())
+                                .find(|(key, _)| key == &matcher.key)
+                            else {
+                                continue;
+                            };
+                            cols.entry(format!("{LINK_ATTR_PREFIX}{}", matcher.key))
+                                .or_insert_with(|| attr_data_type(value));
+                        }
+                        MatchScope::Both
+                        | MatchScope::Span
+                        | MatchScope::Resource
+                        | MatchScope::Parent
+                        | MatchScope::Instrumentation
+                        | MatchScope::Intrinsic => {}
+                    }
                 }
             }
         }
@@ -193,7 +233,7 @@ impl InMemorySpanStore {
             })
             .collect();
         let row_count: usize = in_range.iter().map(|trace| trace.spans.len()).sum();
-        let attr_cols = Self::attr_columns(&in_range);
+        let attr_cols = Self::attr_columns(&in_range, projection_matchers);
         let schema = span_schema_with_attrs(&attr_cols);
 
         let mut trace_id = FixedSizeBinaryBuilder::with_capacity(row_count, 16);
@@ -285,7 +325,7 @@ impl InMemorySpanStore {
                         }
 
                         for (key, builder) in &mut attr_builders {
-                            let value = span.attrs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                            let value = nested_attr_value(key, span, event, *link);
                             builder.append(value);
                         }
                     }
@@ -531,6 +571,44 @@ fn span_matches(
         .iter()
         .filter(|matcher| !is_event_matcher(matcher) && !is_link_matcher(matcher))
         .all(|matcher| matcher_matches(trace, span, nested_sets, idx, matcher))
+}
+
+fn attr_data_type(value: &AttrValue) -> DataType {
+    match value {
+        AttrValue::Str(_) => DataType::Utf8,
+        AttrValue::Int(_) => DataType::Int64,
+        AttrValue::Float(_) => DataType::Float64,
+        AttrValue::Bool(_) => DataType::Boolean,
+    }
+}
+
+fn nested_attr_value<'a>(
+    key: &str,
+    span: &'a InputSpan,
+    event: Option<&'a EventRef>,
+    link: Option<&'a LinkRef>,
+) -> Option<&'a AttrValue> {
+    if let Some(key) = key.strip_prefix(EVENT_ATTR_PREFIX) {
+        return event.and_then(|event| {
+            event
+                .attributes
+                .iter()
+                .find(|(attr_key, _)| attr_key == key)
+                .map(|(_, value)| value)
+        });
+    }
+    if let Some(key) = key.strip_prefix(LINK_ATTR_PREFIX) {
+        return link.and_then(|link| {
+            link.attributes
+                .iter()
+                .find(|(attr_key, _)| attr_key == key)
+                .map(|(_, value)| value)
+        });
+    }
+    span.attrs
+        .iter()
+        .find(|(attr_key, _)| attr_key == key)
+        .map(|(_, value)| value)
 }
 
 fn expansion_matchers(

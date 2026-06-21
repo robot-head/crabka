@@ -24,7 +24,8 @@ use crate::span_columns::{
     COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND, COL_LINK_SPAN_ID,
     COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_PARENT_SPAN_ID,
     COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
-    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
+    COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START, EVENT_ATTR_PREFIX,
+    LINK_ATTR_PREFIX,
 };
 use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
@@ -1108,6 +1109,8 @@ fn metric_field_column(field: &Field) -> Result<String> {
             Ok(COL_ROOT_SERVICE_NAME.to_string())
         }
         Scope::Both | Scope::Span | Scope::Resource => Ok(format!("{ATTR_PREFIX}{}", field.key)),
+        Scope::Event => Ok(format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}{}", field.key)),
+        Scope::Link => Ok(format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}{}", field.key)),
         Scope::Intrinsic(Intrinsic::Name) => Ok(COL_NAME.to_string()),
         Scope::Intrinsic(Intrinsic::Duration) => Ok(COL_DURATION.to_string()),
         Scope::Intrinsic(Intrinsic::Id) => Ok(COL_SPAN_ID.to_string()),
@@ -2632,6 +2635,44 @@ mod tests {
         assert!(got[0].labels == vec![("name".into(), "cache.hit".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("name".into(), "cache.miss".into())]);
+        assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_by_event_attribute_counts_each_event_attribute() {
+        let mut span = sp_at(1, 1, None, "api", 0);
+        span.events = vec![
+            EventRef {
+                time_since_start_nano: 50,
+                name: "cache.lookup".into(),
+                attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
+            },
+            EventRef {
+                time_since_start_nano: 60,
+                name: "cache.lookup".into(),
+                attributes: vec![("cache.key".into(), AttrValue::Str("orders".into()))],
+            },
+        ];
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root", vec![span]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+        let mut got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() | by(event.cache.key)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        got.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(got.len() == 2);
+        assert!(got[0].labels == vec![("cache.key".into(), "orders".into())]);
+        assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
+        assert!(got[1].labels == vec![("cache.key".into(), "users".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 

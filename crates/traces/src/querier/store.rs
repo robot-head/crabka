@@ -21,9 +21,10 @@ use crabka_traceql::{
     COL_EVENT_TIME_SINCE_START, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, COL_KIND,
     COL_LINK_SPAN_ID, COL_LINK_TRACE_ID, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
-    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EventRef, LinkRef,
-    MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, ScopedTag, SpanMatcher,
-    SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
+    COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EVENT_ATTR_PREFIX,
+    EventRef, LINK_ATTR_PREFIX, LinkRef, MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions,
+    ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
+    TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -1302,11 +1303,15 @@ fn add_nested_intrinsic_columns_to_batch(
     .into_iter()
     .filter(|name| schema.column_with_name(name).is_none())
     .collect::<Vec<_>>();
-    if missing.is_empty() {
+    let missing_attrs = nested_attr_columns(matchers)
+        .into_iter()
+        .filter(|(column, _)| schema.column_with_name(column).is_none())
+        .collect::<Vec<_>>();
+    if missing.is_empty() && missing_attrs.is_empty() {
         return Ok(batch.clone());
     }
 
-    let nested = nested_intrinsic_rows(batch, matchers)?;
+    let nested = nested_intrinsic_rows(batch, matchers, &missing_attrs)?;
     let mut fields = schema
         .fields()
         .iter()
@@ -1353,6 +1358,16 @@ fn add_nested_intrinsic_columns_to_batch(
             _ => {}
         }
     }
+    for (column, _) in missing_attrs {
+        fields.push(Field::new(&column, DataType::Utf8, true));
+        columns.push(
+            nested
+                .attr_columns
+                .get(&column)
+                .ok_or_else(|| TraceqlError::Store(format!("missing nested attr column {column}")))?
+                .clone(),
+        );
+    }
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
         .map_err(|err| TraceqlError::Store(format!("add nested intrinsic columns: {err}")))
 }
@@ -1363,16 +1378,22 @@ struct NestedIntrinsicRows {
     event_time_since_start: ArrayRef,
     link_trace_id: ArrayRef,
     link_span_id: ArrayRef,
+    attr_columns: BTreeMap<String, ArrayRef>,
 }
 
 fn nested_intrinsic_rows(
     batch: &RecordBatch,
     matchers: &[SpanMatcher],
+    attr_columns: &[(String, NestedAttrColumn)],
 ) -> Result<NestedIntrinsicRows, TraceqlError> {
     let mut event_name = StringBuilder::new();
     let mut event_time_since_start = Int64Builder::new();
     let mut link_trace_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 16);
     let mut link_span_id = FixedSizeBinaryBuilder::with_capacity(batch.num_rows(), 8);
+    let mut attr_builders = attr_columns
+        .iter()
+        .map(|(column, attr)| (column.clone(), *attr, StringBuilder::new()))
+        .collect::<Vec<_>>();
     let mut row_indices = Vec::new();
     for row in 0..batch.num_rows() {
         let events = matching_events_for_scan(batch, row, matchers)?;
@@ -1385,16 +1406,64 @@ fn nested_intrinsic_rows(
                     })?);
                 append_nested_event(event.as_ref(), &mut event_name, &mut event_time_since_start);
                 append_nested_link(link.as_ref(), &mut link_trace_id, &mut link_span_id)?;
+                for (_, attr, builder) in &mut attr_builders {
+                    append_nested_attr(event.as_ref(), link.as_ref(), *attr, builder);
+                }
             }
         }
     }
+    let attr_columns = attr_builders
+        .into_iter()
+        .map(|(column, _, mut builder)| (column, Arc::new(builder.finish()) as ArrayRef))
+        .collect();
     Ok(NestedIntrinsicRows {
         indices: UInt32Array::from(row_indices),
         event_name: Arc::new(event_name.finish()),
         event_time_since_start: Arc::new(event_time_since_start.finish()),
         link_trace_id: Arc::new(link_trace_id.finish()),
         link_span_id: Arc::new(link_span_id.finish()),
+        attr_columns,
     })
+}
+
+#[derive(Clone, Copy)]
+enum NestedAttrScope {
+    Event,
+    Link,
+}
+
+#[derive(Clone, Copy)]
+struct NestedAttrColumn<'a> {
+    scope: NestedAttrScope,
+    key: &'a str,
+}
+
+fn nested_attr_columns(matchers: &[SpanMatcher]) -> Vec<(String, NestedAttrColumn<'_>)> {
+    let mut out = Vec::new();
+    for matcher in matchers {
+        let (scope, prefix) = match matcher.scope {
+            MatchScope::Event => (NestedAttrScope::Event, EVENT_ATTR_PREFIX),
+            MatchScope::Link => (NestedAttrScope::Link, LINK_ATTR_PREFIX),
+            MatchScope::Both
+            | MatchScope::Span
+            | MatchScope::Resource
+            | MatchScope::Parent
+            | MatchScope::Instrumentation
+            | MatchScope::Intrinsic => continue,
+        };
+        let column = format!("{ATTR_PREFIX}{prefix}{}", matcher.key);
+        if out.iter().any(|(existing, _)| existing == &column) {
+            continue;
+        }
+        out.push((
+            column,
+            NestedAttrColumn {
+                scope,
+                key: &matcher.key,
+            },
+        ));
+    }
+    out
 }
 
 fn append_nested_event(
@@ -1429,6 +1498,34 @@ fn append_nested_link(
         link_span_id.append_null();
     }
     Ok(())
+}
+
+fn append_nested_attr(
+    event: Option<&EventRef>,
+    link: Option<&LinkRef>,
+    attr: NestedAttrColumn<'_>,
+    builder: &mut StringBuilder,
+) {
+    let value = match attr.scope {
+        NestedAttrScope::Event => event.and_then(|event| {
+            event
+                .attributes
+                .iter()
+                .find(|(key, _)| key == attr.key)
+                .map(|(_, value)| value)
+        }),
+        NestedAttrScope::Link => link.and_then(|link| {
+            link.attributes
+                .iter()
+                .find(|(key, _)| key == attr.key)
+                .map(|(_, value)| value)
+        }),
+    };
+    if let Some(value) = value {
+        builder.append_value(attr_typed_value_parts(value).1);
+    } else {
+        builder.append_null();
+    }
 }
 
 fn matching_events_for_scan(
@@ -3735,6 +3832,23 @@ mod tests {
             .find(|series| series.labels == vec![("name".into(), "cache.hit".into())])
             .unwrap();
         assert!(cache_hit.points == vec![(0, 2.0), (10_000, 0.0)]);
+
+        let mut series = engine
+            .query_range(
+                "tenant",
+                "{ span:name = \"GET /users\" } | count_over_time() | by(event.exception.type)",
+                0,
+                10_000,
+                10_000,
+            )
+            .await
+            .unwrap()
+            .series;
+
+        series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        assert!(series.iter().any(|series| series.labels
+            == vec![("exception.type".into(), "timeout".into())]
+            && series.points == vec![(0, 3.0), (10_000, 0.0)]));
 
         let mut series = engine
             .query_range(
