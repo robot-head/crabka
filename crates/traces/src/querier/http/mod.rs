@@ -211,13 +211,35 @@ where
         Ok(scope) => scope,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    match state
-        .engine
-        .tag_names(&tenant, scope, start_ns, end_ns)
+    if let Some(query) = query_param(&uri, "q") {
+        let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        match matching_traces(
+            state.engine.as_ref(),
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            scan_options,
+        )
         .await
-    {
-        Ok(tags) => Json(search_tags_json(&tags)).into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        {
+            Ok(traces) => {
+                Json(search_tags_json(&scoped_tags_from_traces(&traces, scope))).into_response()
+            }
+            Err(err) => traceql_query_error_response(&err),
+        }
+    } else {
+        match state
+            .engine
+            .tag_names(&tenant, scope, start_ns, end_ns)
+            .await
+        {
+            Ok(tags) => Json(search_tags_json(&tags)).into_response(),
+            Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        }
     }
 }
 
@@ -286,13 +308,36 @@ where
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    match state
-        .engine
-        .tag_values(&tenant, &tag, start_ns, end_ns)
+    if let Some(query) = query_param(&uri, "q") {
+        let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        match matching_traces(
+            state.engine.as_ref(),
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            scan_options,
+        )
         .await
-    {
-        Ok(values) => Json(search_tag_values_json(&values)).into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        {
+            Ok(traces) => Json(search_tag_values_json(&tag_values_from_traces(
+                &traces, &tag,
+            )))
+            .into_response(),
+            Err(err) => traceql_query_error_response(&err),
+        }
+    } else {
+        match state
+            .engine
+            .tag_values(&tenant, &tag, start_ns, end_ns)
+            .await
+        {
+            Ok(values) => Json(search_tag_values_json(&values)).into_response(),
+            Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        }
     }
 }
 
@@ -3256,6 +3301,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tags_legacy_respects_query_filter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at_with_attrs(
+                    1,
+                    1,
+                    None,
+                    "a",
+                    1_000,
+                    vec![("env".into(), AttrValue::Str("prod".into()))],
+                ),
+                span_at_with_attrs(
+                    1,
+                    2,
+                    Some(1),
+                    "b",
+                    2_000,
+                    vec![("target".into(), AttrValue::Str("kept".into()))],
+                ),
+            ],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "c",
+                3_000,
+                vec![
+                    ("env".into(), AttrValue::Str("dev".into())),
+                    ("noise".into(), AttrValue::Str("dropped".into())),
+                ],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search/tags?q=%7B%20.env%20%3D%20%22prod%22%20%7D&scope=span")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagNames": ["env", "svc", "target"],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn search_tags_rejects_invalid_scope_parameter() {
         let (status, body) = get_text("/api/search/tags?scope=bogus").await;
 
@@ -3621,6 +3735,78 @@ mod tests {
         assert!(
             body == json!({
                 "tagValues": ["svc-a"],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_legacy_respects_query_filter() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![
+                span_at_with_attrs(
+                    1,
+                    1,
+                    None,
+                    "a",
+                    1_000,
+                    vec![
+                        ("env".into(), AttrValue::Str("prod".into())),
+                        ("target".into(), AttrValue::Str("kept".into())),
+                    ],
+                ),
+                span_at_with_attrs(
+                    1,
+                    2,
+                    Some(1),
+                    "b",
+                    2_000,
+                    vec![("target".into(), AttrValue::Str("also-kept".into()))],
+                ),
+            ],
+        );
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "c",
+                3_000,
+                vec![
+                    ("env".into(), AttrValue::Str("dev".into())),
+                    ("target".into(), AttrValue::Str("dropped".into())),
+                ],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search/tag/target/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": ["also-kept", "kept"],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
