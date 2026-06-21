@@ -224,7 +224,10 @@ async fn otlp_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Err(err) = require_content_type(&headers, &["application/x-protobuf"]) {
+    if let Err(err) = require_content_type(
+        &headers,
+        &["application/x-protobuf", "application/protobuf"],
+    ) {
         return error_response(&err);
     }
     match decode_body(&headers, &body, state.max_decompressed)
@@ -585,6 +588,25 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let response = ExportTraceServiceResponse::decode(body.as_ref()).unwrap();
         assert!(response.partial_success.is_none());
+        assert!(sink.count() == 1);
+    }
+
+    #[tokio::test]
+    async fn otlp_push_accepts_application_protobuf_content_type() {
+        let (state, sink) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/traces")
+                    .header("content-type", "application/protobuf")
+                    .body(Body::from(otlp_body()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::OK);
         assert!(sink.count() == 1);
     }
 
