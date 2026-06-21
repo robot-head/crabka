@@ -931,12 +931,9 @@ fn build_querier_request(
         let mut pairs = url.query_pairs_mut();
         for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         {
-            if key != "start"
-                && key != "end"
-                && key != "block"
-                && key != "rowGroupStart"
-                && key != "rowGroupEnd"
-            {
+            let generated_job_param = shard.backend_job.is_some()
+                && matches!(key.as_ref(), "block" | "rowGroupStart" | "rowGroupEnd");
+            if key != "start" && key != "end" && !generated_job_param {
                 pairs.append_pair(&key, &value);
             }
         }

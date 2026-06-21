@@ -425,6 +425,34 @@ async fn frontend_limits_merged_metric_exemplars_across_shards() {
 }
 
 #[tokio::test]
+async fn frontend_preserves_explicit_metric_row_group_job_params() {
+    let upstream_url = spawn_query_echo_metrics_querier().await;
+    let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1&block=blocks%2Frow-groups.parquet&rowGroupStart=1&rowGroupEnd=2",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let received_query = json["series"][0]["labels"]["query"].as_str().unwrap();
+
+    assert!(received_query.contains("block=blocks%2Frow-groups.parquet"));
+    assert!(received_query.contains("rowGroupStart=1"));
+    assert!(received_query.contains("rowGroupEnd=2"));
+}
+
+#[tokio::test]
 async fn frontend_shards_instant_metrics_query_across_live_frontier() {
     let upstream_url = spawn_sharded_metrics_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -798,6 +826,18 @@ async fn spawn_query_echo_search_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_query_echo_metrics_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(query_echo_metrics_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_sharded_metrics_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(sharded_metrics_response))
@@ -1003,6 +1043,18 @@ async fn query_echo_search_response(State(()): State<()>, uri: Uri) -> axum::Jso
             "inspectedTraces": 1,
             "inspectedBytes": 100
         }
+    }))
+}
+
+async fn query_echo_metrics_response(State(()): State<()>, uri: Uri) -> axum::Json<Value> {
+    axum::Json(json!({
+        "series": [{
+            "labels": {
+                "query": uri.query().unwrap_or_default(),
+            },
+            "points": [["0", 1.0]],
+            "exemplars": [],
+        }]
     }))
 }
 
