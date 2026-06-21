@@ -5661,6 +5661,7 @@ struct PrometheusRulesFilters {
     rule_names: BTreeSet<String>,
     rule_groups: BTreeSet<String>,
     files: BTreeSet<String>,
+    exclude_alerts: bool,
     evaluation_time: Option<i64>,
 }
 
@@ -5674,6 +5675,7 @@ impl PrometheusRulesFilters {
             match key.as_ref() {
                 "type" if value == "alert" => filters.rule_kind = Some("alerting"),
                 "type" if value == "record" => filters.rule_kind = Some("recording"),
+                "exclude_alerts" if value == "true" => filters.exclude_alerts = true,
                 "time" if !value.is_empty() => {
                     filters.evaluation_time =
                         Some(parse_loki_timestamp_query_param("time", &value)?);
@@ -5769,7 +5771,7 @@ async fn prometheus_rules_for_group(
         if !filters.matches_rule(&rule) {
             continue;
         }
-        if rule.get("type").and_then(Value::as_str) == Some("alerting") {
+        if !filters.exclude_alerts && rule.get("type").and_then(Value::as_str) == Some("alerting") {
             let alerts =
                 prometheus_alerts_for_rule(state, tenant, source_rule, evaluation_time).await?;
             rule["alerts"] = json!(alerts);
