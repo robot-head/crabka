@@ -1229,6 +1229,15 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
         crabka_detected_labels_result(querier.clone(), detected_labels_path, base_ns, end_ns).await;
     assert!(crabka_detected_labels == loki_detected_labels);
 
+    let all_detected_labels_path = "detected_labels?limit=10";
+    let loki_all_detected_labels =
+        loki_detected_labels_result(&http, &loki_base, all_detected_labels_path, base_ns, end_ns)
+            .await;
+    let crabka_all_detected_labels =
+        crabka_detected_labels_result(querier.clone(), all_detected_labels_path, base_ns, end_ns)
+            .await;
+    assert!(crabka_all_detected_labels == loki_all_detected_labels);
+
     let series_path = "series?match%5B%5D=%7Bapp%3D%22api%22%7D";
     let loki_series = loki_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_series = crabka_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
@@ -6018,8 +6027,13 @@ async fn crabka_detected_labels_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    assert!(
+        status == StatusCode::OK,
+        "Crabka detected_labels failed: {}",
+        std::str::from_utf8(&body).unwrap()
+    );
     stable_detected_labels_result(&serde_json::from_slice(&body).unwrap())
 }
 

@@ -14501,6 +14501,56 @@ async fn detected_labels_endpoint_returns_empty_object_without_matches() {
 }
 
 #[tokio::test]
+async fn detected_labels_endpoint_defaults_missing_query_to_all_streams() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let mut label_index = LabelIndex::default();
+    let api_prod = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let worker =
+        label_index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    let block = write_log_block(
+        &dir,
+        &BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(10, 20).unwrap()),
+        vec![
+            LogRow::new(api_prod, 10, "api prod", BTreeMap::new()),
+            LogRow::new(worker, 11, "worker prod", BTreeMap::new()),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(block);
+    let state = QuerierState::new(dir, label_index, block_index);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/detected_labels?start=10&end=20&limit=10")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "detectedLabels": [
+                    {
+                        "label": "app",
+                        "cardinality": 2
+                    },
+                    {
+                        "label": "env",
+                        "cardinality": 1
+                    }
+                ]
+            })
+    );
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_detected_fields_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     create_secret_delete_request(&delete_requests).await;

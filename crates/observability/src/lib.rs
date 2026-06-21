@@ -6659,6 +6659,14 @@ struct DetectedFieldsParams {
 }
 
 #[derive(Debug)]
+struct DetectedLabelsParams {
+    query: Option<String>,
+    start: i64,
+    end: i64,
+    limit: usize,
+}
+
+#[derive(Debug)]
 struct PatternsParams {
     query: String,
     start: i64,
@@ -9948,10 +9956,12 @@ async fn execute_detected_labels_query(
     headers: &HeaderMap,
     raw_query: Option<&str>,
 ) -> Result<Value, HttpQueryError> {
-    let params = parse_detected_fields_params(raw_query)?;
-    validate_query_length_limit(state, &params.query)?;
+    let params = parse_detected_labels_params(raw_query)?;
+    if let Some(query) = &params.query {
+        validate_query_length_limit(state, query)?;
+    }
     let series_params = SeriesParams {
-        matchers: vec![params.query],
+        matchers: params.query.into_iter().collect(),
         start: Some(params.start),
         end: Some(params.end),
         since: None,
@@ -11469,6 +11479,62 @@ fn parse_detected_fields_params(
         end,
         limit: limit.unwrap_or(1000),
         line_limit: line_limit.unwrap_or(100),
+    })
+}
+
+fn parse_detected_labels_params(
+    raw_query: Option<&str>,
+) -> Result<DetectedLabelsParams, HttpQueryError> {
+    let mut query = None;
+    let mut start = None;
+    let mut end = None;
+    let mut since = None;
+    let mut step = None;
+    let mut limit = None;
+
+    if let Some(raw_query) = raw_query {
+        for pair in split_query_param_pairs(
+            raw_query,
+            &[
+                "query",
+                "start",
+                "end",
+                "since",
+                "step",
+                "limit",
+                "field_limit",
+            ],
+        ) {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let key = decode_form_component(key)?;
+            let value = decode_form_component(value)?;
+
+            match key.as_str() {
+                "query" => query = Some(value),
+                "start" => start = Some(parse_loki_timestamp_query_param("start", &value)?),
+                "end" => end = Some(parse_loki_timestamp_query_param("end", &value)?),
+                "since" => since = Some(parse_loki_duration_query_param("since", &value)?),
+                "step" => step = Some(parse_loki_duration_query_param("step", &value)?),
+                "limit" | "field_limit" => limit = Some(parse_usize_query_param("limit", &value)?),
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(step) = step
+        && step <= 0
+    {
+        return Err(HttpQueryError::InvalidStep);
+    }
+    let end = end.unwrap_or_else(current_unix_time_ns);
+    let start = start_or_since(start, since, Some(end))?
+        .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+
+    Ok(DetectedLabelsParams {
+        query,
+        start,
+        end,
+        limit: limit.unwrap_or(1000),
     })
 }
 
