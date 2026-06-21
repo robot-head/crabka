@@ -3823,6 +3823,33 @@ async fn format_query_endpoint_accepts_form_encoded_post_body() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_accepts_form_post_query_with_raw_ampersand() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/format_query")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(r#"query={app="api"} |= "a&b""#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"{app="api"} |= "a&b""#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_regex_field_filters() {
     let state = fixture();
     let app = loki_router(state);
