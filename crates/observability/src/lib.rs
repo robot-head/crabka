@@ -4647,6 +4647,7 @@ pub fn loki_router(state: QuerierState) -> Router {
             "/api/prom/query_range",
             get(query_range).post(query_range_post),
         )
+        .route("/api/prom/rules", get(prometheus_rules))
         .route("/api/prom/tail", get(tail))
         .route(
             "/api/prom/label",
