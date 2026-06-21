@@ -3112,6 +3112,68 @@ async fn compactor_delete_endpoint_tracks_and_cancels_delete_requests() {
 }
 
 #[tokio::test]
+async fn compactor_delete_endpoint_accepts_form_post_query_with_raw_ampersand() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let config = ServiceConfig {
+        target: Role::Compactor,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        object_store_url: None,
+        wal_bootstrap_server: None,
+        wal_topic: "__crabka_observability_logs_wal".to_string(),
+        wal_group_id: "crabka-observability-compactor".to_string(),
+        data_root: dir,
+        querier_index_source: QuerierIndexSource::LocalManifest,
+        tenant: None,
+        index_prefix: Some("observability/logs".to_string()),
+        query_start_ns: None,
+        query_end_ns: None,
+        max_query_range_ns: None,
+        max_query_series: None,
+        max_query_bytes: None,
+        max_query_length: None,
+        max_ingest_body_bytes: None,
+        wal_append_timeout_ms: None,
+    };
+    let app = build_service_router(&config, ServiceDependencies::default(), None)
+        .await
+        .unwrap();
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/delete")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api&edge"} |= "secret"&start=1591616227&end=1591619692"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(create_response.status() == StatusCode::NO_CONTENT);
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/delete")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(list_response.status() == StatusCode::OK);
+    let body = json_body(list_response).await;
+    assert!(body.as_array().unwrap().len() == 1);
+    assert!(body[0]["query"] == r#"{app="api&edge"} |= "secret""#);
+    assert!(body[0]["start_time"] == 1_591_616_227_i64);
+    assert!(body[0]["end_time"] == 1_591_619_692_i64);
+}
+
+#[tokio::test]
 async fn compactor_delete_endpoint_rejects_invalid_requests() {
     let config = ServiceConfig {
         target: Role::Compactor,

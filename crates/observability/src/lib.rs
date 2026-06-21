@@ -5051,7 +5051,7 @@ fn parse_create_delete_request_params(
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(raw_query, &["query", "start", "end", "max_interval"]) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
