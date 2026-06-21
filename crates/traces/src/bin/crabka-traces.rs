@@ -227,6 +227,7 @@ async fn run_block_builder(
             object_key_prefix,
             index_key: trace_index_key,
             window: Duration::from_secs(5),
+            promoted_attrs: Vec::new(),
         },
         shutdown,
     )

@@ -4,15 +4,16 @@ use std::sync::Arc;
 
 use arrow::array::{
     ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder, Int64Builder,
-    ListBuilder, StringBuilder, StructBuilder,
+    ListBuilder, StringBuilder, StringDictionaryBuilder, StructBuilder,
 };
-use arrow::datatypes::{DataType, Field, Fields};
+use arrow::datatypes::{DataType, Field, Fields, Int32Type};
 use arrow::record_batch::RecordBatch;
 
 use crate::error::{BlockStoreError, Result};
 use crate::nested_set::NestedSet;
 use crate::span_schema::{
-    SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SpanKind, StatusCode, span_block_schema,
+    PromotedSpanAttr, PromotedSpanAttrType, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SpanKind, StatusCode,
+    span_block_schema_with_promoted_attrs,
 };
 
 /// A generic attribute value list. Scalars are represented as one-element lists.
@@ -83,25 +84,20 @@ fn new_str_list_list() -> ListBuilder<ListBuilder<StringBuilder>> {
 
 /// Encode rows into a record batch matching [`span_block_schema`].
 pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
-    let mut trace_id = FixedSizeBinaryBuilder::new(16);
-    let mut span_id = FixedSizeBinaryBuilder::new(8);
-    let mut parent_span_id = FixedSizeBinaryBuilder::new(8);
-    let mut ns_left = Int32Builder::new();
-    let mut ns_right = Int32Builder::new();
-    let mut parent_id = Int32Builder::new();
-    let mut child_count = Int32Builder::new();
-    let mut root_svc = StringBuilder::new();
-    let mut root_name = StringBuilder::new();
-    let mut trace_start = Int64Builder::new();
-    let mut trace_dur = Int64Builder::new();
-    let mut name = StringBuilder::new();
-    let mut kind = Int32Builder::new();
-    let mut start = Int64Builder::new();
-    let mut dur = Int64Builder::new();
-    let mut status = Int32Builder::new();
-    let mut status_msg = StringBuilder::new();
-    let mut instrumentation_name = StringBuilder::new();
-    let mut instrumentation_version = StringBuilder::new();
+    encode_span_rows_with_promoted_attrs(rows, &[])
+}
+
+/// Encode rows into a record batch with configured attribute columns promoted
+/// out of the generic attribute lists.
+pub fn encode_span_rows_with_promoted_attrs(
+    rows: &[SpanRow],
+    promoted_attrs: &[PromotedSpanAttr],
+) -> Result<RecordBatch> {
+    let mut span_columns = SpanColumnBuilders::new();
+    let mut promoted = promoted_attrs
+        .iter()
+        .map(PromotedAttrBuilder::new)
+        .collect::<Vec<_>>();
     let mut attr_keys = new_str_list();
     let mut attr_is_array = ListBuilder::new(BooleanBuilder::new());
     let mut attr_value = new_str_list_list();
@@ -112,34 +108,10 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
     let mut links = ListBuilder::new(new_link_struct_builder());
 
     for row in rows {
-        trace_id
-            .append_value(row.trace_id)
-            .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?;
-        span_id
-            .append_value(row.span_id)
-            .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?;
-        match row.parent_span_id {
-            Some(parent) => parent_span_id
-                .append_value(parent)
-                .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?,
-            None => parent_span_id.append_null(),
+        span_columns.append(row)?;
+        for builder in &mut promoted {
+            builder.append(&row.attrs);
         }
-        ns_left.append_value(row.nested_set.nested_set_left);
-        ns_right.append_value(row.nested_set.nested_set_right);
-        parent_id.append_value(row.nested_set.parent_id);
-        child_count.append_value(row.child_count);
-        root_svc.append_option(row.root_service_name.as_deref());
-        root_name.append_option(row.root_span_name.as_deref());
-        trace_start.append_value(row.trace_start_unix_nano);
-        trace_dur.append_value(row.trace_duration_nanos);
-        name.append_option(row.name.as_deref());
-        kind.append_value(row.kind.as_i32());
-        start.append_value(row.start_unix_nano);
-        dur.append_value(row.duration_nanos);
-        status.append_value(row.status_code.as_i32());
-        status_msg.append_option(row.status_message.as_deref());
-        instrumentation_name.append_option(row.instrumentation_name.as_deref());
-        instrumentation_version.append_option(row.instrumentation_version.as_deref());
 
         append_attrs(
             &row.attrs,
@@ -154,38 +126,210 @@ pub fn encode_span_rows(rows: &[SpanRow]) -> Result<RecordBatch> {
         append_links(&mut links, &row.links)?;
     }
 
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(trace_id.finish()),
-        Arc::new(span_id.finish()),
-        Arc::new(parent_span_id.finish()),
-        Arc::new(ns_left.finish()),
-        Arc::new(ns_right.finish()),
-        Arc::new(parent_id.finish()),
-        Arc::new(child_count.finish()),
-        Arc::new(root_svc.finish()),
-        Arc::new(root_name.finish()),
-        Arc::new(trace_start.finish()),
-        Arc::new(trace_dur.finish()),
-        Arc::new(name.finish()),
-        Arc::new(kind.finish()),
-        Arc::new(start.finish()),
-        Arc::new(dur.finish()),
-        Arc::new(status.finish()),
-        Arc::new(status_msg.finish()),
-        Arc::new(instrumentation_name.finish()),
-        Arc::new(instrumentation_version.finish()),
-        Arc::new(attr_keys.finish()),
-        Arc::new(attr_is_array.finish()),
-        Arc::new(attr_value.finish()),
-        Arc::new(attr_value_int.finish()),
-        Arc::new(attr_value_double.finish()),
-        Arc::new(attr_value_bool.finish()),
-        Arc::new(events.finish()),
-        Arc::new(links.finish()),
-    ];
+    let mut columns = span_columns.finish();
+    columns.extend(promoted.into_iter().map(PromotedAttrBuilder::finish));
+    columns.extend([
+        Arc::new(attr_keys.finish()) as ArrayRef,
+        Arc::new(attr_is_array.finish()) as ArrayRef,
+        Arc::new(attr_value.finish()) as ArrayRef,
+        Arc::new(attr_value_int.finish()) as ArrayRef,
+        Arc::new(attr_value_double.finish()) as ArrayRef,
+        Arc::new(attr_value_bool.finish()) as ArrayRef,
+        Arc::new(events.finish()) as ArrayRef,
+        Arc::new(links.finish()) as ArrayRef,
+    ]);
 
-    RecordBatch::try_new(span_block_schema(), columns)
-        .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))
+    RecordBatch::try_new(
+        span_block_schema_with_promoted_attrs(promoted_attrs),
+        columns,
+    )
+    .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))
+}
+
+struct SpanColumnBuilders {
+    trace_id: FixedSizeBinaryBuilder,
+    span_id: FixedSizeBinaryBuilder,
+    parent_span_id: FixedSizeBinaryBuilder,
+    ns_left: Int32Builder,
+    ns_right: Int32Builder,
+    parent_id: Int32Builder,
+    child_count: Int32Builder,
+    root_svc: StringBuilder,
+    root_name: StringBuilder,
+    trace_start: Int64Builder,
+    trace_dur: Int64Builder,
+    name: StringBuilder,
+    kind: Int32Builder,
+    start: Int64Builder,
+    dur: Int64Builder,
+    status: Int32Builder,
+    status_msg: StringBuilder,
+    instrumentation_name: StringBuilder,
+    instrumentation_version: StringBuilder,
+}
+
+impl SpanColumnBuilders {
+    fn new() -> Self {
+        Self {
+            trace_id: FixedSizeBinaryBuilder::new(16),
+            span_id: FixedSizeBinaryBuilder::new(8),
+            parent_span_id: FixedSizeBinaryBuilder::new(8),
+            ns_left: Int32Builder::new(),
+            ns_right: Int32Builder::new(),
+            parent_id: Int32Builder::new(),
+            child_count: Int32Builder::new(),
+            root_svc: StringBuilder::new(),
+            root_name: StringBuilder::new(),
+            trace_start: Int64Builder::new(),
+            trace_dur: Int64Builder::new(),
+            name: StringBuilder::new(),
+            kind: Int32Builder::new(),
+            start: Int64Builder::new(),
+            dur: Int64Builder::new(),
+            status: Int32Builder::new(),
+            status_msg: StringBuilder::new(),
+            instrumentation_name: StringBuilder::new(),
+            instrumentation_version: StringBuilder::new(),
+        }
+    }
+
+    fn append(&mut self, row: &SpanRow) -> Result<()> {
+        self.trace_id
+            .append_value(row.trace_id)
+            .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?;
+        self.span_id
+            .append_value(row.span_id)
+            .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?;
+        match row.parent_span_id {
+            Some(parent) => self
+                .parent_span_id
+                .append_value(parent)
+                .map_err(|e| BlockStoreError::InvalidBlock(e.to_string()))?,
+            None => self.parent_span_id.append_null(),
+        }
+        self.ns_left.append_value(row.nested_set.nested_set_left);
+        self.ns_right.append_value(row.nested_set.nested_set_right);
+        self.parent_id.append_value(row.nested_set.parent_id);
+        self.child_count.append_value(row.child_count);
+        self.root_svc
+            .append_option(row.root_service_name.as_deref());
+        self.root_name.append_option(row.root_span_name.as_deref());
+        self.trace_start.append_value(row.trace_start_unix_nano);
+        self.trace_dur.append_value(row.trace_duration_nanos);
+        self.name.append_option(row.name.as_deref());
+        self.kind.append_value(row.kind.as_i32());
+        self.start.append_value(row.start_unix_nano);
+        self.dur.append_value(row.duration_nanos);
+        self.status.append_value(row.status_code.as_i32());
+        self.status_msg.append_option(row.status_message.as_deref());
+        self.instrumentation_name
+            .append_option(row.instrumentation_name.as_deref());
+        self.instrumentation_version
+            .append_option(row.instrumentation_version.as_deref());
+        Ok(())
+    }
+
+    fn finish(mut self) -> Vec<ArrayRef> {
+        vec![
+            Arc::new(self.trace_id.finish()),
+            Arc::new(self.span_id.finish()),
+            Arc::new(self.parent_span_id.finish()),
+            Arc::new(self.ns_left.finish()),
+            Arc::new(self.ns_right.finish()),
+            Arc::new(self.parent_id.finish()),
+            Arc::new(self.child_count.finish()),
+            Arc::new(self.root_svc.finish()),
+            Arc::new(self.root_name.finish()),
+            Arc::new(self.trace_start.finish()),
+            Arc::new(self.trace_dur.finish()),
+            Arc::new(self.name.finish()),
+            Arc::new(self.kind.finish()),
+            Arc::new(self.start.finish()),
+            Arc::new(self.dur.finish()),
+            Arc::new(self.status.finish()),
+            Arc::new(self.status_msg.finish()),
+            Arc::new(self.instrumentation_name.finish()),
+            Arc::new(self.instrumentation_version.finish()),
+        ]
+    }
+}
+
+enum PromotedAttrBuilder {
+    String {
+        key: String,
+        builder: StringDictionaryBuilder<Int32Type>,
+    },
+    Int {
+        key: String,
+        builder: Int64Builder,
+    },
+    Double {
+        key: String,
+        builder: Float64Builder,
+    },
+    Bool {
+        key: String,
+        builder: BooleanBuilder,
+    },
+}
+
+impl PromotedAttrBuilder {
+    fn new(attr: &PromotedSpanAttr) -> Self {
+        match attr.value_type {
+            PromotedSpanAttrType::String => Self::String {
+                key: attr.key.clone(),
+                builder: StringDictionaryBuilder::new(),
+            },
+            PromotedSpanAttrType::Int => Self::Int {
+                key: attr.key.clone(),
+                builder: Int64Builder::new(),
+            },
+            PromotedSpanAttrType::Double => Self::Double {
+                key: attr.key.clone(),
+                builder: Float64Builder::new(),
+            },
+            PromotedSpanAttrType::Bool => Self::Bool {
+                key: attr.key.clone(),
+                builder: BooleanBuilder::new(),
+            },
+        }
+    }
+
+    fn append(&mut self, attrs: &[SpanAttr]) {
+        match self {
+            Self::String { key, builder } => match promoted_attr_value(attrs, key) {
+                Some(AttrValue::Str(values)) => builder.append_option(values.first()),
+                _ => builder.append_null(),
+            },
+            Self::Int { key, builder } => match promoted_attr_value(attrs, key) {
+                Some(AttrValue::Int(values)) => builder.append_option(values.first().copied()),
+                _ => builder.append_null(),
+            },
+            Self::Double { key, builder } => match promoted_attr_value(attrs, key) {
+                Some(AttrValue::Double(values)) => builder.append_option(values.first().copied()),
+                _ => builder.append_null(),
+            },
+            Self::Bool { key, builder } => match promoted_attr_value(attrs, key) {
+                Some(AttrValue::Bool(values)) => builder.append_option(values.first().copied()),
+                _ => builder.append_null(),
+            },
+        }
+    }
+
+    fn finish(self) -> ArrayRef {
+        match self {
+            Self::String { mut builder, .. } => Arc::new(builder.finish()),
+            Self::Int { mut builder, .. } => Arc::new(builder.finish()),
+            Self::Double { mut builder, .. } => Arc::new(builder.finish()),
+            Self::Bool { mut builder, .. } => Arc::new(builder.finish()),
+        }
+    }
+}
+
+fn promoted_attr_value<'a>(attrs: &'a [SpanAttr], key: &str) -> Option<&'a AttrValue> {
+    attrs
+        .iter()
+        .find_map(|attr| (attr.key == key && !attr.is_array).then_some(&attr.value))
 }
 
 fn append_attrs(

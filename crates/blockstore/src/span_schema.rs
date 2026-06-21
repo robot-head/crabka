@@ -31,8 +31,82 @@ pub const SCOL_ATTR_VALUE: &str = "attr_value";
 pub const SCOL_ATTR_VALUE_INT: &str = "attr_value_int";
 pub const SCOL_ATTR_VALUE_DOUBLE: &str = "attr_value_double";
 pub const SCOL_ATTR_VALUE_BOOL: &str = "attr_value_bool";
+pub const SCOL_PROMOTED_ATTR_PREFIX: &str = "attr.";
 pub const SCOL_EVENTS: &str = "events";
 pub const SCOL_LINKS: &str = "links";
+
+/// A configured attribute column promoted out of the generic attribute lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromotedSpanAttr {
+    pub key: String,
+    pub value_type: PromotedSpanAttrType,
+}
+
+impl PromotedSpanAttr {
+    #[must_use]
+    pub fn string(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value_type: PromotedSpanAttrType::String,
+        }
+    }
+
+    #[must_use]
+    pub fn int(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value_type: PromotedSpanAttrType::Int,
+        }
+    }
+
+    #[must_use]
+    pub fn double(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value_type: PromotedSpanAttrType::Double,
+        }
+    }
+
+    #[must_use]
+    pub fn bool(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value_type: PromotedSpanAttrType::Bool,
+        }
+    }
+
+    #[must_use]
+    pub fn column_name(&self) -> String {
+        format!("{SCOL_PROMOTED_ATTR_PREFIX}{}", self.key)
+    }
+
+    #[must_use]
+    pub fn data_type(&self) -> DataType {
+        self.value_type.data_type()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromotedSpanAttrType {
+    String,
+    Int,
+    Double,
+    Bool,
+}
+
+impl PromotedSpanAttrType {
+    #[must_use]
+    pub fn data_type(self) -> DataType {
+        match self {
+            Self::String => {
+                DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+            }
+            Self::Int => DataType::Int64,
+            Self::Double => DataType::Float64,
+            Self::Bool => DataType::Boolean,
+        }
+    }
+}
 
 /// OTLP span kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,7 +202,12 @@ fn link_struct() -> DataType {
 /// The flattened span-per-row Arrow schema.
 #[must_use]
 pub fn span_block_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
+    span_block_schema_with_promoted_attrs(&[])
+}
+
+#[must_use]
+pub fn span_block_schema_with_promoted_attrs(promoted_attrs: &[PromotedSpanAttr]) -> SchemaRef {
+    let mut fields = vec![
         Field::new(SCOL_TRACE_ID, DataType::FixedSizeBinary(16), false),
         Field::new(SCOL_SPAN_ID, DataType::FixedSizeBinary(8), false),
         Field::new(SCOL_PARENT_SPAN_ID, DataType::FixedSizeBinary(8), true),
@@ -148,6 +227,13 @@ pub fn span_block_schema() -> SchemaRef {
         Field::new(SCOL_STATUS_MESSAGE, DataType::Utf8, true),
         Field::new(SCOL_INSTRUMENTATION_NAME, DataType::Utf8, true),
         Field::new(SCOL_INSTRUMENTATION_VERSION, DataType::Utf8, true),
+    ];
+    fields.extend(
+        promoted_attrs
+            .iter()
+            .map(|attr| Field::new(attr.column_name(), attr.data_type(), true)),
+    );
+    fields.extend([
         Field::new(SCOL_ATTR_KEYS, list_of("item", DataType::Utf8, true), true),
         Field::new(
             SCOL_ATTR_IS_ARRAY,
@@ -164,7 +250,8 @@ pub fn span_block_schema() -> SchemaRef {
         Field::new(SCOL_ATTR_VALUE_BOOL, list_list_of(DataType::Boolean), true),
         Field::new(SCOL_EVENTS, list_of("item", event_struct(), true), true),
         Field::new(SCOL_LINKS, list_of("item", link_struct(), true), true),
-    ]))
+    ]);
+    Arc::new(Schema::new(fields))
 }
 
 /// Span block declaration used by generic schema validation.

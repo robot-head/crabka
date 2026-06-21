@@ -1,11 +1,14 @@
+use arrow::array::{DictionaryArray, StringArray};
+use arrow::datatypes::Int32Type;
 use assert2::assert;
 use bytes::Bytes;
-use crabka_blockstore::{BlockWriter, TraceIndex, read_block};
+use crabka_blockstore::{BlockWriter, PromotedSpanAttr, TraceIndex, read_block};
 use crabka_client_consumer::ConsumerRecord;
 use crabka_traces::{
     AttrValue, KeyValue, Span, SpanKind, SpanRecord, StatusCode,
     blockbuilder::{
-        build_blocks, build_blocks_with_prefix, decode_consumer_records, group_by_trace, object_key,
+        build_blocks, build_blocks_with_prefix, build_blocks_with_promoted_attrs,
+        decode_consumer_records, group_by_trace, object_key,
     },
 };
 use object_store::ObjectStore;
@@ -225,4 +228,39 @@ async fn build_blocks_with_prefix_scopes_block_keys() {
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![metas[0].object_key.clone()]
     );
+}
+
+#[tokio::test]
+async fn build_blocks_promotes_configured_attribute_columns() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = BlockWriter::new(store.clone());
+    let mut index = TraceIndex::new();
+    let records = vec![rec("tenant-a", [1; 16], 1, None, 100)];
+
+    let metas = build_blocks_with_promoted_attrs(
+        &writer,
+        &mut index,
+        "tenant-a",
+        7,
+        &records,
+        (10, 20),
+        &[PromotedSpanAttr::string("http.method")],
+    )
+    .await
+    .unwrap();
+
+    let batches = read_block(store, &metas[0].object_key).await.unwrap();
+    let methods = batches[0]
+        .column_by_name("attr.http.method")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int32Type>>()
+        .unwrap();
+    let values = methods
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let key = usize::try_from(methods.keys().value(0)).unwrap();
+    assert!(values.value(key) == "GET");
 }

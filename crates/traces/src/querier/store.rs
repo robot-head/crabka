@@ -3,13 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use arrow::array::DictionaryArray;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array,
     Int32Array, Int64Array, Int64Builder, LargeStringArray, ListArray, StringArray, StringBuilder,
     StringViewArray, StructArray, UInt32Array,
 };
 use arrow::compute::{cast, concat_batches, filter_record_batch, take};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockIndex, BlockStore, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
@@ -1904,6 +1905,7 @@ fn attr_values_with_resource(
     include_resource: bool,
 ) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
     let mut out = Vec::new();
+    let mut promoted_keys = BTreeSet::new();
     for (idx, field) in batch.schema().fields().iter().enumerate() {
         let Some(key) = field.name().strip_prefix(ATTR_PREFIX) else {
             continue;
@@ -1914,14 +1916,23 @@ fn attr_values_with_resource(
         }
         let value = match field.data_type() {
             DataType::Utf8 => AttrValue::Str(string_array_value(col.as_ref(), row)?),
+            DataType::Dictionary(_, value_type) if value_type.as_ref() == &DataType::Utf8 => {
+                AttrValue::Str(string_array_value(col.as_ref(), row)?)
+            }
             DataType::Int64 => AttrValue::Int(int64_array_value(col.as_ref(), row)?),
             DataType::Float64 => AttrValue::Float(float64_array_value(col.as_ref(), row)?),
             DataType::Boolean => AttrValue::Bool(bool_array_value(col.as_ref(), row)?),
             _ => continue,
         };
+        promoted_keys.insert(key.to_string());
         out.push((key.to_string(), value));
     }
-    out.extend(block_attr_values(batch, row, include_resource)?);
+    out.extend(block_attr_values(
+        batch,
+        row,
+        include_resource,
+        &promoted_keys,
+    )?);
     Ok(out)
 }
 
@@ -1929,6 +1940,7 @@ fn block_attr_values(
     batch: &RecordBatch,
     row: usize,
     include_resource: bool,
+    promoted_keys: &BTreeSet<String>,
 ) -> Result<Vec<(String, AttrValue)>, TraceqlError> {
     let Some(keys) = optional_list_column(batch, SCOL_ATTR_KEYS)? else {
         return Ok(Vec::new());
@@ -1961,8 +1973,9 @@ fn block_attr_values(
         )?;
         out.extend(values.into_iter().filter_map(|value| {
             let key = key_values.value(attr_idx);
-            (include_resource || !key.starts_with(RESOURCE_ATTR_PREFIX))
-                .then(|| (key.to_string(), value))
+            ((include_resource || !key.starts_with(RESOURCE_ATTR_PREFIX))
+                && !promoted_keys.contains(key))
+            .then(|| (key.to_string(), value))
         }));
     }
     Ok(out)
@@ -2353,6 +2366,17 @@ fn string_array_value(col: &dyn Array, row: usize) -> Result<String, TraceqlErro
                 .downcast_ref::<StringViewArray>()
                 .map(|a| a.value(row).to_string())
         })
+        .map(Ok)
+        .or_else(|| {
+            col.as_any()
+                .downcast_ref::<DictionaryArray<Int32Type>>()
+                .map(|a| {
+                    let key = usize::try_from(a.keys().value(row))
+                        .map_err(|err| TraceqlError::Store(err.to_string()))?;
+                    string_array_value(a.values().as_ref(), key)
+                })
+        })
+        .transpose()?
         .ok_or_else(|| TraceqlError::Store("unsupported string column type".into()))
 }
 
@@ -2423,13 +2447,16 @@ fn block_err(err: &crabka_blockstore::BlockStoreError) -> TraceqlError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use arrow::array::{ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+    use arrow::array::{
+        ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
+        StringDictionaryBuilder,
+    };
+    use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
     use assert2::assert;
     use crabka_blockstore::{
-        AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, SCOL_START_NANO,
-        SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind, SpanRow,
-        StatusCode as BlockStatusCode, SummaryColumns, TraceBlockStats, encode_span_rows,
+        AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, PromotedSpanAttr,
+        SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind,
+        SpanRow, StatusCode as BlockStatusCode, SummaryColumns, TraceBlockStats, encode_span_rows,
         span_block_decl, span_block_schema,
     };
     use crabka_traceql::{
@@ -2446,7 +2473,7 @@ mod tests {
     use crate::querier::live::LiveSource;
     use crate::span::{
         AttrValue as SpanAttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind, StatusCode,
-        batch::span_batch,
+        batch::{span_batch, span_batch_with_promoted_attrs},
     };
 
     use super::*;
@@ -2568,6 +2595,27 @@ mod tests {
         .unwrap()
     }
 
+    fn dictionary_attr_batch() -> RecordBatch {
+        let mut fields = test_schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(Field::new(
+            format!("{ATTR_PREFIX}http.method"),
+            DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8)),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(fields));
+        let base = batch();
+        let mut columns = base.columns().to_vec();
+        let mut methods = StringDictionaryBuilder::<Int32Type>::new();
+        methods.append_value("GET");
+        methods.append_value("POST");
+        columns.push(Arc::new(methods.finish()) as ArrayRef);
+        RecordBatch::try_new(schema, columns).unwrap()
+    }
+
     #[test]
     fn reconstructs_trace_from_candidate_batches() {
         let got = trace_from_batches(&[7; 16], vec![batch()])
@@ -2576,6 +2624,40 @@ mod tests {
         assert!(got.root_service_name == "api");
         assert!(got.spans.len() == 1);
         assert!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
+    }
+
+    #[test]
+    fn reconstructs_trace_from_dictionary_promoted_attr_columns() {
+        let got = trace_from_batches(&[7; 16], vec![dictionary_attr_batch()])
+            .unwrap()
+            .unwrap();
+        assert!(
+            got.spans[0]
+                .attributes
+                .iter()
+                .any(|(key, value)| key == "http.method" && value == &AttrValue::Str("GET".into()))
+        );
+    }
+
+    #[test]
+    fn generic_attrs_do_not_duplicate_promoted_attr_columns() {
+        let span = span_with_nested_refs();
+        let batch = span_batch_with_promoted_attrs(
+            std::slice::from_ref(&span),
+            &[PromotedSpanAttr::int("http.status_code")],
+        )
+        .unwrap();
+        let got = trace_from_batches(&span.trace_id, vec![batch])
+            .unwrap()
+            .unwrap();
+        assert!(
+            got.spans[0]
+                .attributes
+                .iter()
+                .filter(|(key, _)| key == "http.status_code")
+                .count()
+                == 1
+        );
     }
 
     #[test]

@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use arrow::compute::concat_batches;
 use crabka_blockstore::{
-    BlockMeta, BlockWriter, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SummaryColumns,
-    TraceBlockStats, TraceIndex, span_block_decl, span_block_schema,
+    BlockMeta, BlockWriter, PromotedSpanAttr, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
+    SummaryColumns, TraceBlockStats, TraceIndex, span_block_decl,
+    span_block_schema_with_promoted_attrs,
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use object_store::ObjectStore;
@@ -15,7 +16,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::TracesError;
-use crate::span::{AttrValue, Span, batch::span_batch};
+use crate::span::{AttrValue, Span, batch::span_batch_with_promoted_attrs};
 use crate::wal::SpanRecord;
 
 /// Decoded records from one Kafka partition and their inclusive offset range.
@@ -31,6 +32,12 @@ pub struct BlockBuilderConfig {
     pub object_key_prefix: String,
     pub index_key: String,
     pub window: Duration,
+    pub promoted_attrs: Vec<PromotedSpanAttr>,
+}
+
+struct BlockBuildOptions<'a> {
+    object_key_prefix: &'a str,
+    promoted_attrs: &'a [PromotedSpanAttr],
 }
 
 /// Deterministic object key for one block-builder flush window.
@@ -108,7 +115,8 @@ pub async fn build_blocks(
     records: &[SpanRecord],
     offset_range: (i64, i64),
 ) -> Result<Vec<BlockMeta>, TracesError> {
-    build_blocks_with_prefix(writer, index, "", tenant, partition, records, offset_range).await
+    build_blocks_with_promoted_attrs(writer, index, tenant, partition, records, offset_range, &[])
+        .await
 }
 
 /// Build and write one span block with an object-store prefix applied to its key.
@@ -120,6 +128,54 @@ pub async fn build_blocks_with_prefix(
     partition: i32,
     records: &[SpanRecord],
     offset_range: (i64, i64),
+) -> Result<Vec<BlockMeta>, TracesError> {
+    build_blocks_with_options(
+        writer,
+        index,
+        tenant,
+        partition,
+        records,
+        offset_range,
+        BlockBuildOptions {
+            object_key_prefix,
+            promoted_attrs: &[],
+        },
+    )
+    .await
+}
+
+pub async fn build_blocks_with_promoted_attrs(
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    tenant: &str,
+    partition: i32,
+    records: &[SpanRecord],
+    offset_range: (i64, i64),
+    promoted_attrs: &[PromotedSpanAttr],
+) -> Result<Vec<BlockMeta>, TracesError> {
+    build_blocks_with_options(
+        writer,
+        index,
+        tenant,
+        partition,
+        records,
+        offset_range,
+        BlockBuildOptions {
+            object_key_prefix: "",
+            promoted_attrs,
+        },
+    )
+    .await
+}
+
+async fn build_blocks_with_options(
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    tenant: &str,
+    partition: i32,
+    records: &[SpanRecord],
+    offset_range: (i64, i64),
+    options: BlockBuildOptions<'_>,
 ) -> Result<Vec<BlockMeta>, TracesError> {
     let grouped = group_by_trace(records);
     let mut batches = Vec::new();
@@ -136,14 +192,17 @@ pub async fn build_blocks_with_prefix(
             window_start_ns.min(spans.iter().map(|span| span.start_ns).min().unwrap_or(0));
         collect_tags(&spans, &mut tag_names, &mut tag_values);
         traces.push(trace_id);
-        batches.push(span_batch(&spans)?);
+        batches.push(span_batch_with_promoted_attrs(
+            &spans,
+            options.promoted_attrs,
+        )?);
     }
 
     if batches.is_empty() {
         return Ok(Vec::new());
     }
 
-    let schema = span_block_schema();
+    let schema = span_block_schema_with_promoted_attrs(options.promoted_attrs);
     let concatenated =
         concat_batches(&schema, &batches).map_err(|err| TracesError::Block(err.to_string()))?;
     let key = object_key(
@@ -153,7 +212,7 @@ pub async fn build_blocks_with_prefix(
         offset_range.1,
         window_start_ns,
     );
-    let key = prefixed_object_key(object_key_prefix, &key);
+    let key = prefixed_object_key(options.object_key_prefix, &key);
     let meta = writer
         .write_block_with_decl(
             tenant,
@@ -208,14 +267,17 @@ pub async fn run(
             let mut guard = index.lock().await;
             for (partition, partition_window) in windows {
                 for tenant in tenants_in_records(&partition_window.records) {
-                    build_blocks_with_prefix(
+                    build_blocks_with_options(
                         &writer,
                         &mut guard,
-                        &config.object_key_prefix,
                         &tenant,
                         partition,
                         &partition_window.records,
                         partition_window.offset_range,
+                        BlockBuildOptions {
+                            object_key_prefix: &config.object_key_prefix,
+                            promoted_attrs: &config.promoted_attrs,
+                        },
                     )
                     .await?;
                 }

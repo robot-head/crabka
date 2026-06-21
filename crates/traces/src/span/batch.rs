@@ -2,8 +2,8 @@
 
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    AttrValue as BlockAttrValue, NestedSet as BlockNestedSet, SpanAttr, SpanEvent, SpanKind,
-    SpanLink, SpanRow, StatusCode, encode_span_rows,
+    AttrValue as BlockAttrValue, NestedSet as BlockNestedSet, PromotedSpanAttr, SpanAttr,
+    SpanEvent, SpanKind, SpanLink, SpanRow, StatusCode, encode_span_rows_with_promoted_attrs,
 };
 
 use super::nested_set::assign_nested_set;
@@ -14,6 +14,15 @@ pub(crate) const RESOURCE_ATTR_PREFIX: &str = "__resource.";
 
 /// Build one span-block `RecordBatch` from spans of one trace.
 pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
+    span_batch_with_promoted_attrs(spans, &[])
+}
+
+/// Build one span-block `RecordBatch` from spans of one trace with configured
+/// attributes duplicated into dedicated columns.
+pub fn span_batch_with_promoted_attrs(
+    spans: &[Span],
+    promoted_attrs: &[PromotedSpanAttr],
+) -> Result<RecordBatch, TracesError> {
     let nested = assign_nested_set(spans);
     let child_counts = child_counts(&nested);
     let (root_service_name, root_span_name, trace_start, trace_duration) = root_info(spans);
@@ -49,7 +58,8 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
         })
         .collect::<Vec<_>>();
 
-    encode_span_rows(&rows).map_err(|err| TracesError::Block(err.to_string()))
+    encode_span_rows_with_promoted_attrs(&rows, promoted_attrs)
+        .map_err(|err| TracesError::Block(err.to_string()))
 }
 
 fn child_counts(nested: &[crate::span::nested_set::NestedSet]) -> Vec<i32> {

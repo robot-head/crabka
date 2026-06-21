@@ -3,11 +3,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::FixedSizeBinaryArray;
+use arrow::array::{DictionaryArray, FixedSizeBinaryArray, Int64Array, StringArray};
+use arrow::datatypes::{DataType, Int32Type};
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    AttrValue, BlockWriter, NestedSet, SpanAttr, SpanKind, SpanRow, StatusCode, SummaryColumns,
-    encode_span_rows, read_block, span_block_decl, span_block_schema, validate_against,
+    AttrValue, BlockWriter, NestedSet, PromotedSpanAttr, SpanAttr, SpanKind, SpanRow, StatusCode,
+    SummaryColumns, encode_span_rows, encode_span_rows_with_promoted_attrs, read_block,
+    span_block_decl, span_block_schema, span_block_schema_with_promoted_attrs, validate_against,
 };
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
@@ -43,6 +45,69 @@ fn row(trace: u8, span: u8, left: i32) -> SpanRow {
         events: vec![],
         links: vec![],
     }
+}
+
+#[tokio::test]
+async fn span_block_promotes_configured_attribute_columns() {
+    let schema = span_block_schema_with_promoted_attrs(&[
+        PromotedSpanAttr::string("http.method"),
+        PromotedSpanAttr::int("http.status_code"),
+    ]);
+    let batch = encode_span_rows_with_promoted_attrs(
+        &[SpanRow {
+            attrs: vec![
+                SpanAttr {
+                    key: "http.method".into(),
+                    is_array: false,
+                    value: AttrValue::Str(vec!["GET".into()]),
+                },
+                SpanAttr {
+                    key: "http.status_code".into(),
+                    is_array: false,
+                    value: AttrValue::Int(vec![200]),
+                },
+            ],
+            ..row(1, 1, 1)
+        }],
+        &[
+            PromotedSpanAttr::string("http.method"),
+            PromotedSpanAttr::int("http.status_code"),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(batch.schema(), schema);
+    assert_eq!(
+        batch
+            .schema()
+            .field_with_name("attr.http.method")
+            .unwrap()
+            .data_type(),
+        &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
+    );
+
+    let methods = batch
+        .column_by_name("attr.http.method")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<DictionaryArray<Int32Type>>()
+        .unwrap();
+    let method_values = methods
+        .values()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let method_key = usize::try_from(methods.keys().value(0)).unwrap();
+    assert_eq!(method_values.value(method_key), "GET");
+    let statuses = batch
+        .column_by_name("attr.http.status_code")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(statuses.value(0), 200);
+
+    validate_against(&batch.schema(), &span_block_decl()).unwrap();
 }
 
 #[tokio::test]

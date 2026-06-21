@@ -33,15 +33,19 @@ pub use labels::{Labels, SeriesFingerprint};
 pub use matcher::{LabelMatcher, MatchOp};
 pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
 pub use reader::{RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata};
-pub use span_block::{AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows};
+pub use span_block::{
+    AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows,
+    encode_span_rows_with_promoted_attrs,
+};
 pub use span_schema::{
-    SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
-    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_DURATION_NANOS,
-    SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_KIND, SCOL_LINKS,
-    SCOL_NAME, SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID,
-    SCOL_ROOT_SERVICE_NAME, SCOL_ROOT_SPAN_NAME, SCOL_SPAN_ID, SCOL_START_NANO, SCOL_STATUS_CODE,
-    SCOL_STATUS_MESSAGE, SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, SpanKind,
-    StatusCode, span_block_decl, span_block_schema,
+    PromotedSpanAttr, PromotedSpanAttrType, SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE,
+    SCOL_ATTR_VALUE_BOOL, SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT,
+    SCOL_DURATION_NANOS, SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION,
+    SCOL_KIND, SCOL_LINKS, SCOL_NAME, SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID,
+    SCOL_PARENT_SPAN_ID, SCOL_PROMOTED_ATTR_PREFIX, SCOL_ROOT_SERVICE_NAME, SCOL_ROOT_SPAN_NAME,
+    SCOL_SPAN_ID, SCOL_START_NANO, SCOL_STATUS_CODE, SCOL_STATUS_MESSAGE,
+    SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, SpanKind, StatusCode,
+    span_block_decl, span_block_schema, span_block_schema_with_promoted_attrs,
 };
 pub use store::BlockStore;
 pub use trace_index::{TraceBlockStats, TraceIndex};
