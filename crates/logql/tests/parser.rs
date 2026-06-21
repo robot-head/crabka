@@ -880,6 +880,25 @@ fn query_evaluator_line_format_applies_conditional_template_blocks() {
 }
 
 #[test]
+fn query_evaluator_line_format_applies_if_template_variable_declarations() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | line_format `{{ if $method := .method }}method={{ $method }}{{ else }}missing={{ $method }}{{ end }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let present = query
+        .evaluate_with_fields(&labels, r#"method=GET msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+    let absent = query
+        .evaluate_with_fields(&labels, r#"msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(present.line == "method=GET");
+    check!(absent.line == "missing=");
+}
+
+#[test]
 fn query_evaluator_line_format_applies_json_template_truthiness() {
     let query = parse_query(
         r#"{app="api"} | line_format `{{ if fromJson "[]" }}array{{ else }}empty-array{{ end }}|{{ if fromJson "{}" }}object{{ else }}empty-object{{ end }}|{{ if fromJson "null" }}null{{ else }}empty-null{{ end }}|{{ if fromJson "false" }}bool{{ else }}empty-bool{{ end }}|{{ if fromJson "0" }}number{{ else }}empty-number{{ end }}|{{ with fromJson "{\"method\":\"GET\"}" }}{{ .method }}{{ else }}missing{{ end }}|{{ not (fromJson "[]") }}|{{ or (fromJson "[]") (fromJson "{\"x\":1}") }}|{{ and (fromJson "{\"x\":1}") (fromJson "0") }}`"#,
@@ -914,6 +933,25 @@ fn query_evaluator_line_format_applies_with_template_blocks() {
 
     check!(present.line == "method=GET");
     check!(absent.line == "missing");
+}
+
+#[test]
+fn query_evaluator_line_format_applies_with_template_variable_declarations() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | line_format `{{ with $method := .method }}dot={{ . }} var={{ $method }}{{ else }}missing={{ $method }}{{ end }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let present = query
+        .evaluate_with_fields(&labels, r#"method=GET msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+    let absent = query
+        .evaluate_with_fields(&labels, r#"msg="request ok""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(present.line == "dot=GET var=GET");
+    check!(absent.line == "missing=");
 }
 
 #[test]
