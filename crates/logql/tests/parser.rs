@@ -1634,6 +1634,26 @@ fn query_evaluator_applies_and_or_field_filter_chains() {
 }
 
 #[test]
+fn query_evaluator_applies_parenthesized_field_filter_chains() {
+    let query = parse_query(
+        r#"{app="api"} | logfmt | duration >= 20ms or (method = "GET" and size <= 20KB)"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    check!(query.matches(&labels, "duration=10ms method=GET size=10KB"));
+    check!(query.matches(&labels, "duration=25ms method=POST size=40KB"));
+    check!(!query.matches(&labels, "duration=10ms method=GET size=30KB"));
+
+    let flat_query = parse_query(
+        r#"{app="api"} | logfmt | duration >= 20ms or method = "GET" and size <= 20KB"#,
+    )
+    .unwrap();
+
+    check!(!flat_query.matches(&labels, "duration=25ms method=POST size=40KB"));
+}
+
+#[test]
 fn query_evaluator_treats_comma_and_adjacent_field_filters_as_and() {
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
