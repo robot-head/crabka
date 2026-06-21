@@ -5492,6 +5492,33 @@ async fn format_query_endpoint_accepts_form_encoded_post_body() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_prefers_form_body_over_post_query_parameter() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/format_query?query=%7Bapp%3D%22api%22%7D")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("query=%7Bapp%3D%22worker%22%7D"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": "{app=\"worker\"}"
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_accepts_form_post_query_with_raw_ampersand() {
     let state = fixture();
     let app = loki_router(state);

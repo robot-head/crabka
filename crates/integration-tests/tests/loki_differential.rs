@@ -3765,9 +3765,24 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
     let query = r#"{app="api"} | logfmt | method=~"GET|POST" | path!~"/health.*""#;
 
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
-    let crabka_result = crabka_format_query_result(querier, query).await;
+    let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
     assert!(crabka_result == loki_result);
+
+    let loki_post_result = loki_format_query_post_result(
+        &http,
+        &loki_base,
+        r#"{app="api"}"#,
+        r#"query=%7Bapp%3D%22worker%22%7D"#,
+    )
+    .await;
+    let crabka_post_result = crabka_format_query_post_result(
+        querier,
+        r#"{app="api"}"#,
+        r#"query=%7Bapp%3D%22worker%22%7D"#,
+    )
+    .await;
+    assert!(crabka_post_result == loki_post_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6093,6 +6108,45 @@ async fn crabka_format_query_result(app: axum::Router, query: &str) -> Value {
     );
     let response = app
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+async fn loki_format_query_post_result(
+    http: &reqwest::Client,
+    base: &str,
+    query: &str,
+    form_body: &str,
+) -> Value {
+    http.post(format!("{base}/loki/api/v1/format_query"))
+        .query(&[("query", query.to_string())])
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(form_body.to_owned())
+        .send()
+        .await
+        .expect("post format Loki query")
+        .json()
+        .await
+        .expect("Loki format_query POST JSON response")
+}
+
+async fn crabka_format_query_post_result(app: axum::Router, query: &str, form_body: &str) -> Value {
+    let uri = format!(
+        "/loki/api/v1/format_query?query={}",
+        percent_encode_component(query)
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form_body.to_owned()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert!(response.status() == StatusCode::OK);

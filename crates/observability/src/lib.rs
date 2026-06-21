@@ -6826,7 +6826,7 @@ async fn format_query(RawQuery(raw_query): RawQuery) -> Response {
 }
 
 async fn format_query_post(RawQuery(raw_query): RawQuery, body: Bytes) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -10590,6 +10590,20 @@ fn post_query_params(raw_query: Option<&str>, body: &Bytes) -> Result<String, Ht
         (Some(raw_query), true) if !raw_query.is_empty() => Ok(raw_query.to_owned()),
         (Some(raw_query), false) if !raw_query.is_empty() => {
             Ok(format!("{raw_query}&{body_query}"))
+        }
+        _ => Ok(body_query),
+    }
+}
+
+fn post_query_params_body_first(
+    raw_query: Option<&str>,
+    body: &Bytes,
+) -> Result<String, HttpQueryError> {
+    let body_query = form_body_query(body)?;
+    match (raw_query, body_query.is_empty()) {
+        (Some(raw_query), true) if !raw_query.is_empty() => Ok(raw_query.to_owned()),
+        (Some(raw_query), false) if !raw_query.is_empty() => {
+            Ok(format!("{body_query}&{raw_query}"))
         }
         _ => Ok(body_query),
     }
