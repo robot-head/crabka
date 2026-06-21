@@ -4165,6 +4165,48 @@ rules:
 }
 
 #[tokio::test]
+async fn ruler_rule_group_endpoint_rejects_invalid_rule_shapes() {
+    let state = fixture();
+    let app = loki_router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/yaml")
+                .body(Body::from(
+                    "\
+name: bad-rules
+rules:
+  - alert: ApiErrors
+    record: job:api_errors:rate5m
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "unable to decoded rule group\n");
+
+    let namespace_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/rules/default")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(namespace_response.status() == StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn ruler_rule_groups_persist_across_service_rebuilds() {
     let dir = tempfile::tempdir().unwrap().keep();
     write_log_index_manifest(&dir, &LabelIndex::default(), &BlockIndex::default()).unwrap();
