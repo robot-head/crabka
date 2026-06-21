@@ -55,10 +55,10 @@ struct Cli {
     trace_index_key: String,
     #[arg(long, default_value = "memory:///")]
     object_store_url: String,
-    #[arg(long, default_value = "http://localhost:9009/api/v1/push")]
-    remote_write_url: String,
-    #[arg(long, default_value_t = 15)]
-    collection_interval_secs: u64,
+    #[arg(long)]
+    remote_write_url: Option<String>,
+    #[arg(long)]
+    collection_interval_secs: Option<u64>,
     #[arg(long)]
     enable_target_info: bool,
     #[arg(long)]
@@ -417,18 +417,26 @@ async fn run_metrics_generator(
     } else {
         MetricsGenConfig::default()
     };
-    cfg.collection_interval = Duration::from_secs(cli.collection_interval_secs);
-    cfg.remote_write_url = cli.remote_write_url.clone();
-    cfg.enable_target_info |= cli.enable_target_info;
-    cfg.enable_status_message |= cli.enable_status_message;
-    cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
+    apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
     let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator").await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
-    let sink = Arc::new(PrometheusRemoteWriteSink::new(cli.remote_write_url));
+    let sink = Arc::new(PrometheusRemoteWriteSink::new(cfg.remote_write_url.clone()));
     let service = MetricsGenService::new(cfg, Arc::new(SystemClock), source, sink);
     service.run(shutdown).await;
     Ok(())
+}
+
+fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) {
+    if let Some(secs) = cli.collection_interval_secs {
+        cfg.collection_interval = Duration::from_secs(secs);
+    }
+    if let Some(url) = &cli.remote_write_url {
+        cfg.remote_write_url.clone_from(url);
+    }
+    cfg.enable_target_info |= cli.enable_target_info;
+    cfg.enable_status_message |= cli.enable_status_message;
+    cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
 }
 
 async fn wal_consumer(
@@ -610,8 +618,8 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::MetricsGenerator));
-        assert!(cli.remote_write_url == "http://mimir.example/api/v1/push");
-        assert!(cli.collection_interval_secs == 30);
+        assert!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
+        assert!(cli.collection_interval_secs == Some(30));
         assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
     }
 
@@ -630,6 +638,37 @@ mod tests {
         assert!(cli.enable_target_info);
         assert!(cli.enable_status_message);
         assert!(cli.enable_messaging_system_latency);
+    }
+
+    #[test]
+    fn metrics_generator_config_preserves_file_values_without_cli_overrides() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "metrics-generator"]).unwrap();
+        let mut cfg = MetricsGenConfig {
+            collection_interval: Duration::from_secs(30),
+            remote_write_url: "http://metrics.example/api/v1/push".into(),
+            ..MetricsGenConfig::default()
+        };
+
+        apply_metrics_generator_cli_overrides(&mut cfg, &cli);
+
+        assert!(cfg.collection_interval == Duration::from_secs(30));
+        assert!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
+
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "metrics-generator",
+            "--collection-interval-secs",
+            "45",
+            "--remote-write-url",
+            "http://override.example/api/v1/push",
+        ])
+        .unwrap();
+
+        apply_metrics_generator_cli_overrides(&mut cfg, &cli);
+
+        assert!(cfg.collection_interval == Duration::from_secs(45));
+        assert!(cfg.remote_write_url == "http://override.example/api/v1/push");
     }
 
     #[tokio::test]
