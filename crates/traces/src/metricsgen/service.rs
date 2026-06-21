@@ -73,7 +73,7 @@ where
 
     pub async fn collect_once(&self) -> Result<usize, SinkError> {
         let timestamp_ms = self.clock.now_ns() / 1_000_000;
-        let payloads = {
+        let payload_count = {
             let mut pending = self
                 .pending_payloads
                 .lock()
@@ -85,22 +85,36 @@ where
                     .expect("metrics generator mutex poisoned");
                 *pending = generator.collect(timestamp_ms);
             }
-            pending.clone()
+            pending.len()
         };
 
-        if payloads.is_empty() {
+        if payload_count == 0 {
             return Ok(0);
         }
 
-        for payload in &payloads {
-            self.sink.write(payload).await?;
+        let mut written = 0;
+        while let Some(payload) = self.pending_payload() {
+            self.sink.write(&payload).await?;
+            self.mark_pending_payload_written();
+            written += 1;
         }
         self.source.commit().await?;
+        Ok(written)
+    }
+
+    fn pending_payload(&self) -> Option<SeriesPayload> {
         self.pending_payloads
             .lock()
             .expect("metrics generator pending payload mutex poisoned")
-            .clear();
-        Ok(payloads.len())
+            .first()
+            .cloned()
+    }
+
+    fn mark_pending_payload_written(&self) {
+        self.pending_payloads
+            .lock()
+            .expect("metrics generator pending payload mutex poisoned")
+            .remove(0);
     }
 
     pub async fn run(self, shutdown: CancellationToken) {
@@ -228,6 +242,29 @@ mod tests {
 
         assert!(retried == 1);
         assert!(svc.sink.writes().len() == 1);
+        assert!(svc.source.commits() == 1);
+    }
+
+    #[tokio::test]
+    async fn collect_retries_only_unwritten_payloads_after_partial_write_failure() {
+        let svc = service();
+        svc.source.push_batch(vec![
+            span("A", SpanKind::Server, [0xA; 8], [0; 8]),
+            span("B", SpanKind::Server, [0xB; 8], [0; 8]),
+        ]);
+        svc.poll_once(100).await.unwrap();
+        svc.sink.fail_after_successes(1);
+
+        assert!(svc.collect_once().await.is_err());
+        assert!(svc.source.commits() == 0);
+        assert!(svc.sink.writes().len() == 1);
+
+        let retried = svc.collect_once().await.unwrap();
+        let writes = svc.sink.writes();
+
+        assert!(retried == 1);
+        assert!(writes.len() == 2);
+        assert!(writes[0].tenant != writes[1].tenant);
         assert!(svc.source.commits() == 1);
     }
 

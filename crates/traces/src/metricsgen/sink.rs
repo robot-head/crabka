@@ -148,11 +148,19 @@ fn attr_value_to_string(value: &AttrValue) -> String {
 pub struct MockRemoteWriteSink {
     writes: Arc<Mutex<Vec<SeriesPayload>>>,
     fail_next: Arc<Mutex<bool>>,
+    fail_after_successes: Arc<Mutex<Option<usize>>>,
 }
 
 impl MockRemoteWriteSink {
     pub fn fail_next(&self) {
         *self.fail_next.lock().expect("mock sink mutex poisoned") = true;
+    }
+
+    pub fn fail_after_successes(&self, successes: usize) {
+        *self
+            .fail_after_successes
+            .lock()
+            .expect("mock sink mutex poisoned") = Some(successes);
     }
 
     #[must_use]
@@ -171,6 +179,17 @@ impl RemoteWriteSink for MockRemoteWriteSink {
             let mut fail_next = self.fail_next.lock().expect("mock sink mutex poisoned");
             if *fail_next {
                 *fail_next = false;
+                return Err(SinkError::Transport("forced mock failure".into()));
+            }
+        }
+        {
+            let successful_writes = self.writes.lock().expect("mock sink mutex poisoned").len();
+            let mut fail_after = self
+                .fail_after_successes
+                .lock()
+                .expect("mock sink mutex poisoned");
+            if fail_after.is_some_and(|limit| successful_writes >= limit) {
+                *fail_after = None;
                 return Err(SinkError::Transport("forced mock failure".into()));
             }
         }
