@@ -222,10 +222,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-rust
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
         if: matrix.os == 'ubuntu-latest'
       - uses: taiki-e/install-action@nextest
@@ -296,10 +292,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: jvm-differential
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
       - uses: actions/setup-java@v5
@@ -790,10 +782,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: broker-integration
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
       - name: Broker + client-admin integration coverage
@@ -837,10 +825,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: operator-integration
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
       - uses: taiki-e/install-action@nextest
       - name: Operator reconcile integration coverage
@@ -924,10 +908,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: mutants
-      - uses: arduino/setup-protoc@v3
-        with:
-          version: "31.x"
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,nextest

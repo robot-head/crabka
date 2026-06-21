@@ -71,7 +71,8 @@ url = "2"
 jsonschema = { version = "0.46", default-features = false }
 
 [build-dependencies]
-connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
+connectrpc-axum-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

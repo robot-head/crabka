@@ -53,7 +53,8 @@ crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
 crabka-broker = { path = "../broker", version = "0.3.7" }
 
 [build-dependencies]
-connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
+connectrpc-axum-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
