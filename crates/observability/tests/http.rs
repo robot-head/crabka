@@ -14971,6 +14971,87 @@ async fn detected_fields_endpoint_returns_loki_error_for_invalid_logql() {
 }
 
 #[tokio::test]
+async fn detected_fields_endpoint_rejects_loki_query_ranges_over_limit() {
+    let state = QuerierState::new(
+        tempfile::tempdir().unwrap().keep(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    );
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/detected_fields?query=%7Bapp%3D%22api%22%7D&start=0&end=2595601000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
+    );
+}
+
+#[tokio::test]
+async fn detected_labels_endpoint_rejects_loki_query_ranges_over_limit() {
+    let state = QuerierState::new(
+        tempfile::tempdir().unwrap().keep(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    );
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/detected_labels?start=0&end=2595601000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
+    );
+}
+
+#[tokio::test]
+async fn detected_field_values_endpoint_rejects_loki_query_ranges_over_limit() {
+    let state = QuerierState::new(
+        tempfile::tempdir().unwrap().keep(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    );
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/detected_field/status/values?query=%7Bapp%3D%22api%22%7D&start=0&end=2595601000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
+    );
+}
+
+#[tokio::test]
 async fn configured_object_store_index_stats_endpoint_counts_entries_from_object_store_blocks() {
     let object_dir = tempfile::tempdir().unwrap().keep();
     let data_root = tempfile::tempdir().unwrap().keep();
