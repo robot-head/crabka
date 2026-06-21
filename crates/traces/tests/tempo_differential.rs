@@ -353,6 +353,24 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
             .is_some_and(|spans| !spans.is_empty())
     );
 
+    let search_query = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
+    let search: JsonValue = client
+        .get(format!(
+            "{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/api/search?q={search_query}&start=0&end=1"
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        search["traces"]
+            .as_array()
+            .is_some_and(|traces| !traces.is_empty()),
+        "Grafana-proxied TraceQL search response was empty: {search}"
+    );
+
     crabka.shutdown();
     Ok(())
 }
