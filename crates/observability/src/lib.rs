@@ -11119,10 +11119,11 @@ fn metadata_time_range(params: &SeriesParams) -> Result<Option<TimeRange>, HttpQ
 }
 
 fn metadata_index_range(params: &SeriesParams) -> Result<TimeRange, HttpQueryError> {
-    metadata_time_range(params)?.map_or_else(
-        || TimeRange::new(i64::MIN, i64::MAX).map_err(HttpQueryError::from),
-        Ok,
-    )
+    let Some(time_range) = metadata_time_range(params)? else {
+        return TimeRange::new(i64::MIN, i64::MAX).map_err(HttpQueryError::from);
+    };
+    validate_loki_volume_query_range_limit(time_range)?;
+    Ok(time_range)
 }
 
 fn metadata_label_sets(
