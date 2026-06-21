@@ -59,6 +59,10 @@ struct Cli {
     remote_write_url: String,
     #[arg(long, default_value_t = 15)]
     collection_interval_secs: u64,
+    #[arg(long)]
+    enable_target_info: bool,
+    #[arg(long)]
+    enable_status_message: bool,
     #[arg(long, default_value_t = 0)]
     compaction_start_ns: i64,
     #[arg(long, default_value_t = i64::MAX)]
@@ -413,6 +417,8 @@ async fn run_metrics_generator(
     };
     cfg.collection_interval = Duration::from_secs(cli.collection_interval_secs);
     cfg.remote_write_url = cli.remote_write_url.clone();
+    cfg.enable_target_info |= cli.enable_target_info;
+    cfg.enable_status_message |= cli.enable_status_message;
 
     let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator").await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
@@ -604,6 +610,21 @@ mod tests {
         assert!(cli.remote_write_url == "http://mimir.example/api/v1/push");
         assert!(cli.collection_interval_secs == 30);
         assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
+    }
+
+    #[test]
+    fn parses_metrics_generator_optional_spanmetrics_switches() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "metrics-generator",
+            "--enable-target-info",
+            "--enable-status-message",
+        ])
+        .unwrap();
+
+        assert!(cli.enable_target_info);
+        assert!(cli.enable_status_message);
     }
 
     #[tokio::test]
