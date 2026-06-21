@@ -10203,8 +10203,12 @@ fn parse_loki_duration_query_param(
     _name: &'static str,
     value: &str,
 ) -> Result<i64, HttpQueryError> {
-    if let Ok(duration_ns) = value.parse::<i64>() {
-        return Ok(duration_ns);
+    if let Ok(seconds) = value.parse::<i64>() {
+        return seconds.checked_mul(1_000_000_000).ok_or_else(|| {
+            HttpQueryError::InvalidDurationQueryParameter {
+                value: value.to_string(),
+            }
+        });
     }
 
     if let Some(duration_ns) = parse_decimal_seconds_timestamp(value) {

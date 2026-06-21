@@ -7252,7 +7252,7 @@ async fn query_range_metric_endpoint_fans_out_pipe_separated_tenant_header() {
         .oneshot(
             Request::builder()
                 .uri(
-                    "/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D%29&start=29&end=29&step=1",
+                    "/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D%29&start=29&end=29&step=1ns",
                 )
                 .header("X-Scope-OrgID", "tenant-a|tenant-b")
                 .body(Body::empty())
@@ -8157,7 +8157,7 @@ async fn query_range_endpoint_applies_interval_to_stream_results() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=19&end=30&direction=forward&interval=10")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=19&end=30&direction=forward&interval=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8272,7 +8272,7 @@ async fn query_range_endpoint_applies_since_when_start_is_absent() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&end=30&since=5&direction=forward")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&end=30&since=5ns&direction=forward")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8333,7 +8333,7 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_since() {
     assert!(response.status() == StatusCode::BAD_REQUEST);
     assert!(
         text_body(response).await
-            == "could not parse 'since' parameter: not a valid duration string: \"-1\""
+            == "could not parse 'since' parameter: not a valid duration string: \"-1000000000\""
     );
 }
 
@@ -8416,7 +8416,7 @@ async fn query_range_endpoint_applies_negative_count_over_time_offset() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B1ns%5D%20offset%20-9ns%29&start=10&end=10&step=1")
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B1ns%5D%20offset%20-9ns%29&start=10&end=10&step=1ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8498,7 +8498,7 @@ async fn query_range_endpoint_accepts_vector_function_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=vector%28-2.5e-1%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=vector%28-2.5e-1%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8537,7 +8537,7 @@ async fn query_range_endpoint_accepts_scalar_expression_as_matrix() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=1%2B2&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=1%2B2&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8576,7 +8576,7 @@ async fn query_range_endpoint_accepts_vector_arithmetic_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=vector%286%29%2Fvector%284%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=vector%286%29%2Fvector%284%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8615,7 +8615,7 @@ async fn query_range_endpoint_accepts_vector_modulo_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=vector%285%29%25vector%282%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=vector%285%29%25vector%282%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8654,7 +8654,7 @@ async fn query_range_endpoint_accepts_parenthesized_vector_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=vector%288%29%2F%28vector%281%29%2Bvector%283%29%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=vector%288%29%2F%28vector%281%29%2Bvector%283%29%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8693,7 +8693,7 @@ async fn query_range_endpoint_accepts_literal_vector_arithmetic_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=2%2Avector%283%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=2%2Avector%283%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8732,7 +8732,7 @@ async fn query_range_endpoint_accepts_vector_bool_comparison_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=vector%281%29%3Ebool%20vector%282%29&start=0&end=20&step=10")
+                .uri("/loki/api/v1/query_range?query=vector%281%29%3Ebool%20vector%282%29&start=0&end=20&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8895,14 +8895,14 @@ async fn query_range_endpoint_includes_loki_stats_object() {
 }
 
 #[tokio::test]
-async fn query_range_endpoint_applies_step_for_count_over_time_matrix_json() {
+async fn query_range_endpoint_treats_integer_step_as_seconds() {
     let state = fixture();
     let app = loki_router(state);
 
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30s%5D%29&start=20&end=30&step=10")
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30s%5D%29&start=20&end=10000000020&step=10")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8926,7 +8926,7 @@ async fn query_range_endpoint_applies_step_for_count_over_time_matrix_json() {
                             },
                             "values": [
                                 [0.00000002, "1"],
-                                [0.00000003, "1"]
+                                [10.00000002, "1"]
                             ]
                         }
                     ],
@@ -9111,7 +9111,7 @@ async fn query_range_endpoint_accepts_compound_duration_range_selector() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B1m30s%5D%29&start=20&end=30&step=10")
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B1m30s%5D%29&start=20&end=30&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -10055,7 +10055,7 @@ async fn configured_object_store_metric_query_returns_partial_warning_for_missin
         .oneshot(
             Request::builder()
                 .uri(
-                    "/loki/api/v1/query_range?query=count_over_time(%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D)&start=30&end=30&step=1",
+                    "/loki/api/v1/query_range?query=count_over_time(%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D)&start=30&end=30&step=1ns",
                 )
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
@@ -10172,7 +10172,7 @@ async fn endpoints_return_loki_error_for_missing_query() {
         "/loki/api/v1/query_range?start=0&end=1",
         "/loki/api/v1/index/stats?start=0&end=1",
         "/loki/api/v1/index/volume?start=0&end=1",
-        "/loki/api/v1/index/volume_range?start=0&end=1&step=1",
+        "/loki/api/v1/index/volume_range?start=0&end=1&step=1ns",
         "/loki/api/v1/detected_fields?start=0&end=1",
         "/loki/api/v1/detected_field/status/values?start=0&end=1",
     ] {
@@ -10722,7 +10722,7 @@ async fn label_values_endpoint_applies_since_when_start_is_absent() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/label/app/values?end=29&since=9")
+                .uri("/loki/api/v1/label/app/values?end=29&since=9ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -11917,7 +11917,7 @@ async fn index_volume_range_endpoint_returns_matrix_with_target_labels() {
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "query=%7Bapp%3D%22api%22%7D&start=10&end=30&step=10&targetLabels=app",
+                    "query=%7Bapp%3D%22api%22%7D&start=10&end=30&step=10ns&targetLabels=app",
                 ))
                 .unwrap(),
         )
@@ -11974,7 +11974,7 @@ async fn index_volume_range_endpoint_accepts_form_post_query_with_raw_ampersand(
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    r#"query={app="api&edge"}&start=10&end=30&step=10"#,
+                    r#"query={app="api&edge"}&start=10&end=30&step=10ns"#,
                 ))
                 .unwrap(),
         )
@@ -12026,7 +12026,7 @@ async fn index_volume_range_endpoint_returns_matrix_without_target_labels() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/index/volume_range?query=%7Bapp%3D%22api%22%7D&start=10&end=30&step=10")
+                .uri("/loki/api/v1/index/volume_range?query=%7Bapp%3D%22api%22%7D&start=10&end=30&step=10ns")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -12075,7 +12075,7 @@ async fn index_volume_endpoints_require_start_parameter() {
             .oneshot(
                 Request::builder()
                     .uri(format!(
-                        "/loki/api/v1/{endpoint}?query=%7Bapp%3D%22api%22%7D&end=1000000000&step=1000000000"
+                        "/loki/api/v1/{endpoint}?query=%7Bapp%3D%22api%22%7D&end=1000000000&step=1s"
                     ))
                     .header("X-Scope-OrgID", "tenant-a")
                     .body(Body::empty())
@@ -12305,7 +12305,7 @@ async fn patterns_endpoint_groups_matching_logs_by_detected_pattern() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1000000000")
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1s")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -12369,7 +12369,7 @@ async fn patterns_endpoint_excludes_entries_at_end_bound() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1000000000")
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1s")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -12437,7 +12437,7 @@ async fn patterns_endpoint_accepts_form_encoded_post_body() {
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1000000000",
+                    "query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1s",
                 ))
                 .unwrap(),
         )
@@ -12505,7 +12505,7 @@ async fn patterns_endpoint_accepts_form_post_query_with_raw_ampersand() {
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    r#"query={app="api&edge"}&start=0&end=2000000000&step=1000000000"#,
+                    r#"query={app="api&edge"}&start=0&end=2000000000&step=1s"#,
                 ))
                 .unwrap(),
         )
@@ -12578,7 +12578,7 @@ async fn compactor_delete_requests_filter_querier_patterns_results() {
     let response = querier_app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000001&step=1000000000")
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000001&step=1s")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -13431,7 +13431,7 @@ async fn configured_object_store_patterns_endpoint_loads_request_tenant_manifest
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1000000000")
+                .uri("/loki/api/v1/patterns?query=%7Bapp%3D%22api%22%7D&start=0&end=2000000000&step=1s")
                 .header("X-Scope-OrgID", "tenant-b")
                 .body(Body::empty())
                 .unwrap(),
