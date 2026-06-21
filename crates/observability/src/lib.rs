@@ -5433,7 +5433,6 @@ struct VolumeParams {
     query: String,
     start: i64,
     end: i64,
-    start_was_defaulted: bool,
     step: Option<i64>,
     limit: usize,
     target_labels: Option<Vec<String>>,
@@ -9055,10 +9054,7 @@ async fn execute_index_volume_query(
             if step <= 0 {
                 return Err(HttpQueryError::InvalidStep);
             }
-            if params.start_was_defaulted
-                || (params.aggregate_by == VolumeAggregateBy::Series
-                    && params.target_labels.is_some())
-            {
+            if params.aggregate_by == VolumeAggregateBy::Series && params.target_labels.is_some() {
                 loki_volume_vector_response(volumes, params.end, params.limit)
             } else {
                 loki_volume_matrix_response(volumes, params.start, params.end, step, params.limit)
@@ -10082,15 +10078,10 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
         }
     }
 
-    let start_was_defaulted = start.is_none();
-    let end = end.unwrap_or_else(current_unix_time_ns);
-    let start = start.unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
-
     Ok(VolumeParams {
         query: query.ok_or(HttpQueryError::MissingQueryParameter("query"))?,
-        start,
-        end,
-        start_was_defaulted,
+        start: start.ok_or(HttpQueryError::MissingQueryParameter("start"))?,
+        end: end.ok_or(HttpQueryError::MissingQueryParameter("end"))?,
         step,
         limit: limit.unwrap_or(100),
         target_labels,
