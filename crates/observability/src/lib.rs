@@ -3023,24 +3023,24 @@ fn normalize_loki_http_push(
     creation_grace_period: Option<Duration>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let body = decode_loki_http_body(headers, body)?;
-    if is_protobuf_content_type(headers) {
-        let decompressed = SnappyDecoder::new()
-            .decompress_vec(&body)
-            .map_err(DistributorError::LokiSnappyDecode)?;
-        let payload = LokiProtoPushRequest::decode(decompressed.as_slice())
-            .map_err(DistributorError::LokiDecode)?;
-        normalize_loki_proto_push(
+    if is_loki_json_content_type(headers) {
+        let payload =
+            serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
+        validate_loki_json_push_duplicate_keys(&body)?;
+        validate_loki_json_structured_metadata_value_types(&payload, &body)?;
+        normalize_loki_push(
             headers,
             payload,
             reject_old_samples_max_age,
             creation_grace_period,
         )
     } else {
-        let payload =
-            serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
-        validate_loki_json_push_duplicate_keys(&body)?;
-        validate_loki_json_structured_metadata_value_types(&payload, &body)?;
-        normalize_loki_push(
+        let decompressed = SnappyDecoder::new()
+            .decompress_vec(&body)
+            .map_err(DistributorError::LokiSnappyDecode)?;
+        let payload = LokiProtoPushRequest::decode(decompressed.as_slice())
+            .map_err(DistributorError::LokiDecode)?;
+        normalize_loki_proto_push(
             headers,
             payload,
             reject_old_samples_max_age,
@@ -3165,6 +3165,14 @@ fn is_protobuf_content_type(headers: &HeaderMap) -> bool {
             "application/x-protobuf" | "application/protobuf"
         )
     })
+}
+
+fn is_loki_json_content_type(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|content_type| content_type.trim().eq_ignore_ascii_case("application/json"))
 }
 
 fn normalize_loki_push(
