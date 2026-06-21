@@ -58,7 +58,7 @@ pub fn router(cfg: QueryFrontendConfig) -> Router {
         .route("/api/search/tags", get(proxy))
         .route("/api/v2/search/tags", get(search_tags_v2))
         .route("/api/search/tag/{tag}/values", get(proxy))
-        .route("/api/v2/search/tag/{tag}/values", get(proxy))
+        .route("/api/v2/search/tag/{tag}/values", get(search_tag_values_v2))
         .route("/api/metrics/query_range", get(query_range))
         .route("/api/metrics/query", get(query_instant))
         .route("/api/v2/traces/{trace_id}", get(proxy))
@@ -313,6 +313,57 @@ async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: 
     .into_response()
 }
 
+async fn search_tag_values_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    };
+
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let mut merged_values = Vec::new();
+    let mut metrics = json!({
+        "totalBlocks": 0,
+        "inspectedTraces": 0,
+        "inspectedBytes": 0,
+    });
+
+    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+            .send()
+            .await
+        else {
+            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
+        };
+        let status = resp.status();
+        let Ok(bytes) = resp.bytes().await else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if !status.is_success() {
+            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            return (status, bytes).into_response();
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if let Some(values) = body.get("tagValues").and_then(Value::as_array) {
+            merge_tag_values(&mut merged_values, values);
+        }
+        merge_metrics(&mut metrics, body.get("metrics"));
+    }
+
+    axum::Json(json!({
+        "tagValues": merged_values,
+        "metrics": metrics,
+    }))
+    .into_response()
+}
+
 async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
@@ -368,6 +419,14 @@ fn merge_scopes(merged_scopes: &mut Vec<Value>, incoming_scopes: &[Value]) {
             if !existing_tags.iter().any(|existing| existing == tag) {
                 existing_tags.push(tag.clone());
             }
+        }
+    }
+}
+
+fn merge_tag_values(merged_values: &mut Vec<Value>, incoming_values: &[Value]) {
+    for value in incoming_values {
+        if !merged_values.iter().any(|existing| existing == value) {
+            merged_values.push(value.clone());
         }
     }
 }

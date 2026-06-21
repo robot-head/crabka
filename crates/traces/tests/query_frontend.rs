@@ -249,6 +249,38 @@ async fn frontend_shards_v2_tag_discovery_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_shards_v2_tag_values_across_live_frontier() {
+    let upstream_url = spawn_sharded_tag_values_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/v2/search/tag/.svc/values?start=1&end=3")
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(
+        json["tagValues"]
+            == json!([
+                { "type": "string", "value": "backend" },
+                { "type": "string", "value": "live" },
+            ])
+    );
+    assert!(json["metrics"]["totalBlocks"] == 3);
+    assert!(json["metrics"]["inspectedTraces"] == 12);
+}
+
+#[tokio::test]
 async fn frontend_search_requires_valid_start_and_end() {
     let upstream_url = spawn_sharded_search_querier().await;
     let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
@@ -379,6 +411,18 @@ async fn spawn_sharded_tags_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_sharded_tag_values_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(sharded_tag_values_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_text_error_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(text_error_response))
@@ -497,6 +541,30 @@ async fn sharded_tags_response(State(()): State<()>, headers: HeaderMap) -> axum
             "totalBlocks": total_blocks,
             "inspectedTraces": 0,
             "inspectedBytes": inspected_bytes
+        }
+    }))
+}
+
+async fn sharded_tag_values_response(
+    State(()): State<()>,
+    headers: HeaderMap,
+) -> axum::Json<Value> {
+    let tier = headers
+        .get("x-crabka-query-tier")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let (value, total_blocks, inspected_traces) = match tier {
+        "backend" => ("backend", 1, 5),
+        "live" => ("live", 2, 7),
+        _ => ("unsharded", 99, 99),
+    };
+
+    axum::Json(json!({
+        "tagValues": [{ "type": "string", "value": value }],
+        "metrics": {
+            "totalBlocks": total_blocks,
+            "inspectedTraces": inspected_traces,
+            "inspectedBytes": 0
         }
     }))
 }
