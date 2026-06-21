@@ -191,7 +191,10 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let (start_ns, end_ns) = time_bounds(&uri);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let scope = match scope_param(&uri) {
         Ok(scope) => scope,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -2758,6 +2761,14 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "invalid scope");
+    }
+
+    #[tokio::test]
+    async fn search_tags_rejects_invalid_time_bounds() {
+        let (status, body) = get_text("/api/search/tags?start=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter start");
     }
 
     #[tokio::test]
