@@ -4714,9 +4714,7 @@ impl<'a> Parser<'a> {
                 RangeAggregation::QuantileOverTime(quantile)
             }
         };
-        let stream = self.parse_stream_query(true)?;
-        let range_ns = self.parse_range_selector()?;
-        let offset_ns = self.parse_range_offset()?;
+        let (stream, range_ns, offset_ns) = self.parse_metric_range_stream_query()?;
         self.expect(')')?;
         let vector_aggregation = if let Some(mut vector_aggregation) = vector_aggregation {
             self.expect(')')?;
@@ -4756,6 +4754,49 @@ impl<'a> Parser<'a> {
             range_ns,
             offset_ns,
         })
+    }
+
+    fn parse_metric_range_stream_query(&mut self) -> Result<(StreamQuery, i64, i64), ParseError> {
+        self.skip_ws();
+        self.expect('{')?;
+        let matchers = self.parse_matchers()?;
+        self.expect('}')?;
+        self.validate_stream_selector(&matchers)?;
+
+        let mut pipeline = Vec::new();
+        let mut range_ns = None;
+        let mut offset_ns = 0;
+        let mut range_allows_following_pipeline = false;
+        loop {
+            self.skip_ws();
+            if self.pos == self.input.len() {
+                break;
+            }
+
+            if range_ns.is_none() && self.peek() == Some('[') {
+                range_allows_following_pipeline = pipeline.is_empty();
+                range_ns = Some(self.parse_range_selector()?);
+                offset_ns = self.parse_range_offset()?;
+                continue;
+            }
+
+            if range_ns.is_some() {
+                if self.peek() == Some(')') {
+                    break;
+                }
+                if !range_allows_following_pipeline {
+                    return Err(self.error("expected ')'"));
+                }
+            }
+
+            pipeline.push(self.parse_pipeline_stage()?);
+        }
+
+        let Some(range_ns) = range_ns else {
+            return Err(self.error("expected range selector"));
+        };
+
+        Ok((StreamQuery { matchers, pipeline }, range_ns, offset_ns))
     }
 
     fn parse_metric_label_replace(mut self) -> Result<MetricLabelReplace, ParseError> {
