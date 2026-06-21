@@ -1267,9 +1267,8 @@ fn dedup_attrs(
     let mut seen = BTreeSet::new();
     let mut attrs = Vec::new();
     for (key, value) in attrs_in {
-        if seen.insert(key.clone()) {
-            attrs.push((key.clone(), value.clone()));
-        }
+        seen.insert(key.clone());
+        attrs.push((key.clone(), value.clone()));
     }
     if !fallback_service_name.is_empty() && seen.insert("service.name".into()) {
         attrs.push((
@@ -2427,6 +2426,61 @@ mod tests {
                     "key": "cloud.region",
                     "value": {"stringValue": "us-east-1"}
                 }))
+        );
+    }
+
+    #[test]
+    fn trace_json_projects_repeated_resource_attributes_as_arrays() {
+        let trace = TraceSpans {
+            trace_id: [9; 16],
+            root_service_name: "api".into(),
+            root_trace_name: "GET /".into(),
+            resource_attributes: vec![
+                ("deployment.zone".into(), AttrValue::Str("a".into())),
+                ("deployment.zone".into(), AttrValue::Str("b".into())),
+            ],
+            spans: vec![SpanRef {
+                span_id: [1; 8],
+                parent_span_id: None,
+                name: "api".into(),
+                kind: 0,
+                nested_set_left: 1,
+                nested_set_right: 2,
+                nested_set_parent: 0,
+                start_time_unix_nano: 1_001,
+                duration_nanos: 200,
+                status_code: 0,
+                status_message: String::new(),
+                instrumentation_name: String::new(),
+                instrumentation_version: String::new(),
+                resource_attributes: Vec::new(),
+                attributes: Vec::new(),
+                events: Vec::new(),
+                links: Vec::new(),
+            }],
+        };
+
+        let body = trace_json(&trace, 10);
+
+        assert!(
+            body["trace"]["resourceSpans"][0]["resource"]["attributes"]
+                == json!([
+                    {
+                        "key": "deployment.zone",
+                        "value": {
+                            "arrayValue": {
+                                "values": [
+                                    {"stringValue": "a"},
+                                    {"stringValue": "b"}
+                                ]
+                            }
+                        }
+                    },
+                    {
+                        "key": "service.name",
+                        "value": {"stringValue": "api"}
+                    }
+                ])
         );
     }
 
