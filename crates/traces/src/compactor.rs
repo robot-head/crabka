@@ -10,7 +10,7 @@ use arrow::array::{
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
+    BlockIndex, BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
     SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_EVENTS,
     SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_NESTED_SET_LEFT,
     SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID, SCOL_SPAN_ID, SCOL_START_NANO,
@@ -19,6 +19,7 @@ use crabka_blockstore::{
 };
 use object_store::ObjectStore;
 
+use crate::blockbuilder::prefixed_object_key;
 use crate::error::TracesError;
 use crate::span::batch::RESOURCE_ATTR_PREFIX;
 
@@ -92,6 +93,45 @@ pub async fn compact_block_keys(
     );
 
     Ok(meta)
+}
+
+/// Compact every tenant in the selected time window independently.
+pub async fn compact_index_window(
+    store: Arc<dyn ObjectStore>,
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    object_key_prefix: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Result<Vec<BlockMeta>, TracesError> {
+    let mut metas = Vec::new();
+    for tenant in index.tenants() {
+        let candidate_keys = index.candidate_blocks(&tenant, start_ns, end_ns);
+        if candidate_keys.len() < 2 {
+            continue;
+        }
+        let output_key = prefixed_object_key(
+            object_key_prefix,
+            &compacted_object_key(
+                &tenant,
+                0,
+                0,
+                i64::try_from(candidate_keys.len()).unwrap_or(i64::MAX),
+                start_ns,
+            ),
+        );
+        let meta = compact_block_keys(
+            store.clone(),
+            writer,
+            index,
+            &tenant,
+            &candidate_keys,
+            &output_key,
+        )
+        .await?;
+        metas.push(meta);
+    }
+    Ok(metas)
 }
 
 fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError> {
@@ -639,6 +679,7 @@ fn insert_tag_value(
 
 #[cfg(test)]
 mod tests {
+    use crabka_blockstore::BlockIndex;
     use object_store::memory::InMemory;
 
     use super::*;
@@ -684,6 +725,61 @@ mod tests {
             instrumentation_scope: "otel-rust".into(),
             instrumentation_version: "1.2.3".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn compact_index_window_compacts_each_tenant_independently() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let writer = BlockWriter::new(store.clone());
+        let mut index = TraceIndex::new();
+        write_indexed_block(&writer, &mut index, "tenant-a", "tenant-a/input-1.parquet").await;
+        write_indexed_block(&writer, &mut index, "tenant-a", "tenant-a/input-2.parquet").await;
+        write_indexed_block(&writer, &mut index, "tenant-b", "tenant-b/input-1.parquet").await;
+        write_indexed_block(&writer, &mut index, "tenant-b", "tenant-b/input-2.parquet").await;
+
+        compact_index_window(store, &writer, &mut index, "", 0, 2_000)
+            .await
+            .unwrap();
+
+        let tenant_a = index.candidate_blocks("tenant-a", 0, 2_000);
+        let tenant_b = index.candidate_blocks("tenant-b", 0, 2_000);
+        assert!(tenant_a.len() == 1);
+        assert!(tenant_b.len() == 1);
+        assert!(tenant_a[0].contains("traces/tenant-a/"));
+        assert!(tenant_b[0].contains("traces/tenant-b/"));
+    }
+
+    async fn write_indexed_block(
+        writer: &BlockWriter,
+        index: &mut TraceIndex,
+        tenant: &str,
+        object_key: &str,
+    ) {
+        let batch = span_batch(&[span()]).unwrap();
+        let input = writer
+            .write_block_with_decl(
+                tenant,
+                object_key,
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&[1; 16]);
+        index.add_trace_block(
+            tenant,
+            TraceBlockStats {
+                object_key: input.object_key,
+                min_ts: input.min_ts,
+                max_ts: input.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
     }
 
     #[tokio::test]

@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use crabka_blockstore::{BlockIndex, BlockStore, BlockWriter, TraceIndex};
+use crabka_blockstore::{BlockStore, BlockWriter, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
 use crabka_traces::{
     LiveStore, TRACES_WAL_TOPIC, blockbuilder,
-    compactor::{compact_block_keys, compacted_object_key},
+    compactor::compact_index_window,
     distributor::{self, DistributorState, KafkaSink},
     livestore,
     metricsgen::{
@@ -334,27 +334,13 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let mut index = TraceIndex::load(&configured.store, &trace_index_key)
         .await
         .unwrap_or_else(|_| TraceIndex::new());
-    let candidate_keys =
-        index.candidate_blocks("anonymous", cli.compaction_start_ns, cli.compaction_end_ns);
-
-    if candidate_keys.len() < 2 {
-        return Ok(());
-    }
-
-    let output_key = configured.object_key(&compacted_object_key(
-        "anonymous",
-        0,
-        0,
-        i64::try_from(candidate_keys.len()).unwrap_or(i64::MAX),
-        cli.compaction_start_ns,
-    ));
-    compact_block_keys(
+    compact_index_window(
         configured.store.clone(),
         &writer,
         &mut index,
-        "anonymous",
-        &candidate_keys,
-        &output_key,
+        configured.prefix.as_ref(),
+        cli.compaction_start_ns,
+        cli.compaction_end_ns,
     )
     .await?;
     index.save(&configured.store, &trace_index_key).await?;
