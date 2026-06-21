@@ -1279,10 +1279,34 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
 
     let worker_series_path = "series?match%5B%5D=%7Bapp%3D%22worker%22%7D";
     let loki_post_series =
-        loki_metadata_post_result(&http, &loki_base, worker_series_path, base_ns, end_ns).await;
+        loki_metadata_post_result(&http, &loki_base, worker_series_path, None, base_ns, end_ns)
+            .await;
     let crabka_post_series =
-        crabka_metadata_post_result(querier, worker_series_path, base_ns, end_ns).await;
+        crabka_metadata_post_result(querier.clone(), worker_series_path, None, base_ns, end_ns)
+            .await;
     assert!(crabka_post_series == loki_post_series);
+
+    let form_series_path = "series";
+    let form_series_body = "match%5B%5D=%7Benv%3D%22prod%22%7D";
+    let form_series_start = base_ns + 1_000_000_001;
+    let loki_form_post_series = loki_metadata_post_result(
+        &http,
+        &loki_base,
+        form_series_path,
+        Some(form_series_body),
+        form_series_start,
+        end_ns,
+    )
+    .await;
+    let crabka_form_post_series = crabka_metadata_post_result(
+        querier,
+        form_series_path,
+        Some(form_series_body),
+        form_series_start,
+        end_ns,
+    )
+    .await;
+    assert!(crabka_form_post_series == loki_form_post_series);
 
     broker.shutdown().await;
 }
@@ -6243,17 +6267,24 @@ async fn loki_metadata_post_result(
     http: &reqwest::Client,
     base: &str,
     path: &str,
+    form_body: Option<&str>,
     start_ns: i64,
     end_ns: i64,
 ) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let separator = if path.contains('?') { '&' } else { '?' };
-        let body: Value = http
+        let mut request = http
             .post(format!(
                 "{base}/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}"
             ))
-            .header("X-Scope-OrgID", "tenant-a")
+            .header("X-Scope-OrgID", "tenant-a");
+        if let Some(form_body) = form_body {
+            request = request
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(form_body.to_owned());
+        }
+        let body: Value = request
             .send()
             .await
             .expect("post Loki metadata")
@@ -6274,18 +6305,23 @@ async fn loki_metadata_post_result(
 async fn crabka_metadata_post_result(
     app: axum::Router,
     path: &str,
+    form_body: Option<&str>,
     start_ns: i64,
     end_ns: i64,
 ) -> Value {
     let separator = if path.contains('?') { '&' } else { '?' };
     let uri = format!("/loki/api/v1/{path}{separator}start={start_ns}&end={end_ns}");
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("X-Scope-OrgID", "tenant-a");
+    if form_body.is_some() {
+        builder = builder.header("content-type", "application/x-www-form-urlencoded");
+    }
     let response = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("X-Scope-OrgID", "tenant-a")
-                .body(Body::empty())
+            builder
+                .body(Body::from(form_body.unwrap_or_default().to_owned()))
                 .unwrap(),
         )
         .await

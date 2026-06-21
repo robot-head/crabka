@@ -10583,9 +10583,13 @@ fn form_body_query(body: &Bytes) -> Result<String, HttpQueryError> {
 }
 
 fn post_query_params(raw_query: Option<&str>, body: &Bytes) -> Result<String, HttpQueryError> {
-    match raw_query {
-        Some(raw_query) if body.is_empty() && !raw_query.is_empty() => Ok(raw_query.to_owned()),
-        _ => form_body_query(body),
+    let body_query = form_body_query(body)?;
+    match (raw_query, body_query.is_empty()) {
+        (Some(raw_query), true) if !raw_query.is_empty() => Ok(raw_query.to_owned()),
+        (Some(raw_query), false) if !raw_query.is_empty() => {
+            Ok(format!("{raw_query}&{body_query}"))
+        }
+        _ => Ok(body_query),
     }
 }
 
@@ -11088,7 +11092,7 @@ async fn label_names_data(
         .with_request_tenant_index(tenant, metadata_index_range(params)?)
         .await?;
     let mut names = BTreeSet::new();
-    for labels in metadata_label_sets(&state, tenant, params)? {
+    for labels in metadata_label_sets(&state, tenant, params).await? {
         names.extend(labels.keys().cloned());
     }
 
@@ -11131,7 +11135,7 @@ async fn label_values_data(
         .with_request_tenant_index(tenant, metadata_index_range(params)?)
         .await?;
     let mut values = BTreeSet::new();
-    for labels in metadata_label_sets(&state, tenant, params)? {
+    for labels in metadata_label_sets(&state, tenant, params).await? {
         if let Some(value) = labels.get(name) {
             values.insert(value.clone());
         }
@@ -11156,20 +11160,17 @@ fn metadata_index_range(params: &SeriesParams) -> Result<TimeRange, HttpQueryErr
     Ok(time_range)
 }
 
-fn metadata_label_sets(
+async fn metadata_label_sets(
     state: &QuerierState,
     tenant: &str,
     params: &SeriesParams,
 ) -> Result<Vec<Labels>, HttpQueryError> {
     let time_range = metadata_time_range(params)?;
-    let mut time_fingerprints = None;
-    if let Some(time_range) = time_range {
-        let mut fingerprints = BTreeSet::new();
-        for block in state.block_index.match_blocks(tenant, time_range, &[]) {
-            fingerprints.extend(block.fingerprints);
-        }
-        time_fingerprints = Some(fingerprints);
-    }
+    let time_fingerprints = if let Some(time_range) = time_range {
+        Some(metadata_fingerprints_in_time_range(state, tenant, time_range).await?)
+    } else {
+        None
+    };
 
     let selectors = metadata_selectors(params)?;
     let mut label_sets = BTreeSet::new();
@@ -11203,6 +11204,38 @@ fn metadata_label_sets(
     }
 
     Ok(label_sets.into_iter().collect())
+}
+
+async fn metadata_fingerprints_in_time_range(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+) -> Result<BTreeSet<SeriesFingerprint>, HttpQueryError> {
+    let mut fingerprints = BTreeSet::new();
+    for block in state.block_index.match_blocks(tenant, time_range, &[]) {
+        let rows = if let Some(cold_store) = &state.cold_store {
+            read_log_block_from_object_store(
+                cold_store.store.as_ref(),
+                &cold_store.prefix,
+                &block.key,
+            )
+            .await?
+        } else {
+            match read_log_block(&state.root, &block.key) {
+                Ok(rows) => rows,
+                Err(BlockStoreError::Io(source)) if source.kind() == ErrorKind::NotFound => {
+                    fingerprints.extend(block.fingerprints);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
+        fingerprints.extend(rows.into_iter().filter_map(|row| {
+            (time_range.start_ns <= row.timestamp_ns && row.timestamp_ns <= time_range.end_ns)
+                .then_some(row.series_fingerprint)
+        }));
+    }
+    Ok(fingerprints)
 }
 
 fn metadata_visible_labels(labels: &Labels) -> Labels {
@@ -11267,7 +11300,7 @@ async fn series_data(
     let state = state
         .with_request_tenant_index(tenant, metadata_index_range(params)?)
         .await?;
-    metadata_label_sets(&state, tenant, params)
+    metadata_label_sets(&state, tenant, params).await
 }
 
 fn parse_series_params(raw_query: Option<&str>) -> Result<SeriesParams, HttpQueryError> {
