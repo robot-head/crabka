@@ -1,0 +1,26 @@
+[package]
+name = "crabka-observability-spike"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Throwaway Loki/observability storage and query spike for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-observability-spike"
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-logql = { version = "0.3.7", path = "../logql" }
+regex = { workspace = true }
+serde_json = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+datafusion = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
