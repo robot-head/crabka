@@ -36,6 +36,8 @@ struct Cli {
     listen: String,
     #[arg(long, default_value = "127.0.0.1:4317")]
     grpc_listen: String,
+    #[arg(long, default_value = "127.0.0.1:6831")]
+    jaeger_compact_listen: String,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
@@ -130,6 +132,7 @@ async fn run_distributor(
     )))));
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
+    let jaeger_compact_addr: SocketAddr = cli.jaeger_compact_listen.parse()?;
     let grpc_shutdown = shutdown.clone();
     let grpc_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -137,6 +140,13 @@ async fn run_distributor(
             tracing::warn!(error = %err, "traces distributor OTLP/gRPC server error");
         }
     });
+    let jaeger_compact_bound = distributor::serve_jaeger_compact_udp(
+        jaeger_compact_addr,
+        Arc::clone(&state),
+        shutdown.clone(),
+    )
+    .await?;
+    tracing::info!(%jaeger_compact_bound, "traces distributor Jaeger compact UDP listening");
     let bound = distributor::serve(addr, state, shutdown.clone()).await?;
     tracing::info!(%bound, "traces distributor listening");
     shutdown.cancelled().await;
@@ -355,6 +365,21 @@ mod tests {
 
         assert!(matches!(cli.target, Target::Distributor));
         assert!(cli.grpc_listen == "127.0.0.1:4317");
+    }
+
+    #[test]
+    fn parses_distributor_jaeger_compact_listener() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--jaeger-compact-listen",
+            "127.0.0.1:6831",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Distributor));
+        assert!(cli.jaeger_compact_listen == "127.0.0.1:6831");
     }
 
     #[test]

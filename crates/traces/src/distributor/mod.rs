@@ -150,6 +150,39 @@ pub async fn serve_otlp_grpc(
         .await
 }
 
+/// Serve the Jaeger compact-Thrift UDP receiver until cancelled.
+pub async fn serve_jaeger_compact_udp(
+    addr: SocketAddr,
+    state: Arc<DistributorState>,
+    shutdown: CancellationToken,
+) -> std::io::Result<SocketAddr> {
+    let socket = tokio::net::UdpSocket::bind(addr).await?;
+    let bound = socket.local_addr()?;
+    tokio::spawn(async move {
+        let mut buf = vec![0_u8; 65_535];
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                received = socket.recv_from(&mut buf) => {
+                    match received {
+                        Ok((len, peer)) => {
+                            if let Err(err) =
+                                handle_jaeger_compact_datagram(&state, "anonymous", &buf[..len]).await
+                            {
+                                tracing::warn!(%peer, error = %err, "jaeger compact datagram rejected");
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "jaeger compact UDP receive error");
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Ok(bound)
+}
+
 /// OTLP/gRPC trace export service backed by the traces WAL.
 pub struct OtlpGrpcService {
     state: Arc<DistributorState>,
@@ -239,6 +272,16 @@ async fn jaeger_push(
         Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await,
         Err(err) => error_response(&err),
     }
+}
+
+async fn handle_jaeger_compact_datagram(
+    state: &DistributorState,
+    tenant: &str,
+    body: &[u8],
+) -> Result<(), TracesError> {
+    let spans = decode_jaeger_thrift(body)?;
+    validate(&spans, &state.limits)?;
+    produce_spans(state.sink.as_ref(), tenant, spans).await
 }
 
 async fn append_decoded(
@@ -657,6 +700,23 @@ mod tests {
             .unwrap();
         assert!(resp.status() == StatusCode::ACCEPTED);
         assert!(sink.count() == 1);
+        assert!(sink.span_name(0) == "GET /");
+    }
+
+    #[tokio::test]
+    async fn jaeger_compact_datagram_appends() {
+        let (state, sink) = test_state();
+
+        handle_jaeger_compact_datagram(
+            &state,
+            "tenant-a",
+            &crate::wire::jaeger::test_support::encode_sample_batch(),
+        )
+        .await
+        .unwrap();
+
+        assert!(sink.count() == 1);
+        assert!(sink.tenant(0) == "tenant-a");
         assert!(sink.span_name(0) == "GET /");
     }
 
