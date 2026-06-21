@@ -16,6 +16,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["http2", "json", "query", "ws"] }
+base64 = { workspace = true }
 clap = { workspace = true }
 crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
 crabka-client-admin = { version = "0.3.7", path = "../client-admin" }

@@ -2617,6 +2617,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "axum",
+ "base64",
  "clap",
  "crabka-blockstore",
  "crabka-client-admin",

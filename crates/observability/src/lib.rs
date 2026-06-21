@@ -20,6 +20,8 @@ use axum::http::header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{
     BlockDescriptor, BlockIndex, BlockKey, BlockStoreError, LabelIndex, Labels, LogRow,
@@ -5582,7 +5584,7 @@ async fn prometheus_rules(
         .expect("Loki rule store lock poisoned")
         .get(&tenant)
         .cloned();
-    let groups = match namespaces {
+    let page = match namespaces {
         Some(namespaces) => {
             match prometheus_rule_groups_response(
                 &state,
@@ -5593,19 +5595,26 @@ async fn prometheus_rules(
             )
             .await
             {
-                Ok(groups) => groups,
+                Ok(page) => page,
                 Err(error) => return error.into_response(),
             }
         }
-        None => Vec::new(),
+        None => match filters.page_groups(Vec::new()) {
+            Ok(page) => page,
+            Err(error) => return error.into_response(),
+        },
     };
+    let mut data = json!({
+        "groups": page.groups
+    });
+    if let Some(token) = page.next_token {
+        data["groupNextToken"] = json!(token);
+    }
     json_response(
         StatusCode::OK,
         &json!({
             "status": "success",
-            "data": {
-                "groups": groups
-            },
+            "data": data,
             "errorType": "",
             "error": "",
         }),
@@ -5662,6 +5671,8 @@ struct PrometheusRulesFilters {
     rule_groups: BTreeSet<String>,
     files: BTreeSet<String>,
     label_selectors: Vec<StreamQuery>,
+    group_limit: Option<usize>,
+    group_next_token: Option<String>,
     exclude_alerts: bool,
     evaluation_time: Option<i64>,
 }
@@ -5690,6 +5701,12 @@ impl PrometheusRulesFilters {
                 "file" | "file[]" if !value.is_empty() => {
                     filters.files.insert(value.into_owned());
                 }
+                "group_limit" if !value.is_empty() => {
+                    filters.group_limit = Some(parse_usize_query_param("group_limit", &value)?);
+                }
+                "group_next_token" if !value.is_empty() => {
+                    filters.group_next_token = Some(value.into_owned());
+                }
                 "match" | "match[]" if !value.is_empty() => {
                     let selector = value.into_owned();
                     filters
@@ -5703,6 +5720,9 @@ impl PrometheusRulesFilters {
                 }
                 _ => {}
             }
+        }
+        if filters.group_next_token.is_some() && filters.group_limit.is_none() {
+            return Err(HttpQueryError::MissingQueryParameter("group_limit"));
         }
         Ok(filters)
     }
@@ -5743,6 +5763,55 @@ impl PrometheusRulesFilters {
                 .all(|matcher| matcher.matches(&labels))
         })
     }
+
+    fn page_groups(
+        &self,
+        groups: Vec<PrometheusRuleGroupResponse>,
+    ) -> Result<PrometheusRulesPage, HttpQueryError> {
+        let start_index = match &self.group_next_token {
+            Some(token) => groups
+                .iter()
+                .position(|group| group.token == *token)
+                .map(|index| index + 1)
+                .ok_or_else(|| HttpQueryError::InvalidQueryParameter {
+                    name: "group_next_token",
+                    value: token.clone(),
+                })?,
+            None => 0,
+        };
+        let Some(limit) = self.group_limit else {
+            return Ok(PrometheusRulesPage {
+                groups: groups
+                    .into_iter()
+                    .skip(start_index)
+                    .map(|group| group.value)
+                    .collect(),
+                next_token: None,
+            });
+        };
+        let next_token = (groups.len() > start_index.saturating_add(limit) && limit > 0)
+            .then(|| groups[start_index + limit - 1].token.clone());
+        Ok(PrometheusRulesPage {
+            groups: groups
+                .into_iter()
+                .skip(start_index)
+                .take(limit)
+                .map(|group| group.value)
+                .collect(),
+            next_token,
+        })
+    }
+}
+
+#[derive(Default)]
+struct PrometheusRulesPage {
+    groups: Vec<Value>,
+    next_token: Option<String>,
+}
+
+struct PrometheusRuleGroupResponse {
+    token: String,
+    value: Value,
 }
 
 async fn prometheus_rule_groups_response(
@@ -5751,7 +5820,7 @@ async fn prometheus_rule_groups_response(
     namespaces: &LokiRuleNamespaces,
     filters: &PrometheusRulesFilters,
     evaluation_time: i64,
-) -> Result<Vec<Value>, HttpQueryError> {
+) -> Result<PrometheusRulesPage, HttpQueryError> {
     let mut response_groups = Vec::new();
     for (namespace, groups) in namespaces {
         if !filters.files.is_empty() && !filters.files.contains(namespace) {
@@ -5769,16 +5838,23 @@ async fn prometheus_rule_groups_response(
             if filters.has_rule_filter() && rules.is_empty() {
                 continue;
             }
-            response_groups.push(json!({
-                "name": name,
-                "file": namespace,
-                "interval": prometheus_rule_group_interval_seconds(group),
-                "limit": 0,
-                "rules": rules,
-            }));
+            response_groups.push(PrometheusRuleGroupResponse {
+                token: prometheus_rule_group_page_token(namespace, name),
+                value: json!({
+                    "name": name,
+                    "file": namespace,
+                    "interval": prometheus_rule_group_interval_seconds(group),
+                    "limit": 0,
+                    "rules": rules,
+                }),
+            });
         }
     }
-    Ok(response_groups)
+    filters.page_groups(response_groups)
+}
+
+fn prometheus_rule_group_page_token(namespace: &str, group_name: &str) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{namespace}\n{group_name}"))
 }
 
 async fn prometheus_rules_for_group(

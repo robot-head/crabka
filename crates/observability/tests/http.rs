@@ -4501,6 +4501,157 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_rules_endpoint_paginates_rule_groups() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (namespace, rule_group) in [
+        (
+            "alpha",
+            "\
+name: api-rules
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+",
+        ),
+        (
+            "bravo",
+            "\
+name: worker-rules
+rules:
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [30ns]) > 0
+",
+        ),
+        (
+            "charlie",
+            "\
+name: search-rules
+rules:
+  - alert: SearchErrors
+    expr: count_over_time({app=\"search\"} |= \"error\" [30ns]) > 0
+",
+        ),
+    ] {
+        post_loki_rule_group_for_test(&app, namespace, rule_group).await;
+    }
+
+    let first_page = prometheus_rules_body_for_test(
+        &app,
+        "/prometheus/api/v1/rules?exclude_alerts=true&group_limit=2",
+    )
+    .await;
+    assert!(first_page["data"]["groups"].as_array().unwrap().len() == 2);
+    assert!(first_page["data"]["groups"][0]["name"] == "api-rules");
+    assert!(first_page["data"]["groups"][1]["name"] == "worker-rules");
+    let token = first_page["data"]["groupNextToken"]
+        .as_str()
+        .expect("expected next page token");
+
+    let second_page = prometheus_rules_body_for_test(
+        &app,
+        &format!(
+            "/prometheus/api/v1/rules?exclude_alerts=true&group_limit=2&group_next_token={token}"
+        ),
+    )
+    .await;
+    assert!(second_page["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(second_page["data"]["groups"][0]["name"] == "search-rules");
+    assert!(second_page["data"].get("groupNextToken").is_none());
+}
+
+#[tokio::test]
+async fn prometheus_rules_endpoint_rejects_stale_group_next_token() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "alpha",
+        "\
+name: api-rules
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+",
+    )
+    .await;
+    post_loki_rule_group_for_test(
+        &app,
+        "bravo",
+        "\
+name: worker-rules
+rules:
+  - alert: WorkerErrors
+    expr: count_over_time({app=\"worker\"} |= \"error\" [30ns]) > 0
+",
+    )
+    .await;
+
+    let first_page = prometheus_rules_body_for_test(
+        &app,
+        "/prometheus/api/v1/rules?exclude_alerts=true&group_limit=1",
+    )
+    .await;
+    let token = first_page["data"]["groupNextToken"]
+        .as_str()
+        .expect("expected next page token")
+        .to_string();
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/loki/api/v1/rules/alpha")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete_response.status() == StatusCode::ACCEPTED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/prometheus/api/v1/rules?exclude_alerts=true&group_limit=1&group_next_token={token}"
+                ))
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(&json_body(response).await, "bad_data", "group_next_token");
+}
+
+#[tokio::test]
+async fn prometheus_rules_endpoint_rejects_group_next_token_without_matching_rule_store() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/rules?group_limit=1&group_next_token=stale")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(&json_body(response).await, "bad_data", "group_next_token");
+}
+
+#[tokio::test]
 async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
     let state = fixture();
     let app = loki_router(state);
