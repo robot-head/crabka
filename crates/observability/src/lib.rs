@@ -6218,6 +6218,11 @@ async fn execute_http_query_for_tenant(
             direction,
             limit,
             interval,
+            if matches!(kind, QueryKind::Range) {
+                Some(time_range.end_ns)
+            } else {
+                None
+            },
         )
         .await
         .map_err(|error| match error {
@@ -8343,6 +8348,7 @@ async fn execute_http_stream_query(
     direction: LokiDirection,
     limit: Option<usize>,
     interval: Option<i64>,
+    end_exclusive: Option<i64>,
 ) -> Result<Value, HttpQueryError> {
     validate_loki_interval(interval)?;
     let query = parse_query(query)?;
@@ -8370,7 +8376,8 @@ async fn execute_http_stream_query(
         )
         .await
         .map_err(HttpQueryError::from)?;
-        let response = apply_loki_stream_options(response, direction, limit, interval);
+        let response =
+            apply_loki_stream_options(response, direction, limit, interval, end_exclusive);
         return Ok(add_loki_query_stats_for_stream_plan_with_hot_tail(
             response, &plan, &records, &frontier,
         ));
@@ -8388,7 +8395,8 @@ async fn execute_http_stream_query(
         )
         .await
         .map_err(HttpQueryError::from)?;
-        let response = apply_loki_stream_options(response, direction, limit, interval);
+        let response =
+            apply_loki_stream_options(response, direction, limit, interval, end_exclusive);
         return Ok(add_loki_query_stats_for_stream_plan_with_hot_tail(
             response, &plan, &records, &frontier,
         ));
@@ -8397,7 +8405,7 @@ async fn execute_http_stream_query(
         execute_stream_query_with_deletes(&state.root, &plan, &state.label_index, &delete_filters)
             .await
             .map_err(HttpQueryError::from)?;
-    let response = apply_loki_stream_options(response, direction, limit, interval);
+    let response = apply_loki_stream_options(response, direction, limit, interval, end_exclusive);
     Ok(add_loki_query_stats_for_stream_plan(response, &plan))
 }
 
@@ -12730,11 +12738,13 @@ fn apply_loki_stream_options(
     direction: LokiDirection,
     limit: Option<usize>,
     interval: Option<i64>,
+    end_exclusive: Option<i64>,
 ) -> Value {
     if value.pointer("/data/resultType").and_then(Value::as_str) != Some("streams") {
         return value;
     }
 
+    apply_loki_stream_end_bound(&mut value, end_exclusive);
     apply_loki_stream_interval(&mut value, interval);
 
     if matches!(direction, LokiDirection::Backward)
@@ -12750,6 +12760,38 @@ fn apply_loki_stream_options(
     }
 
     apply_loki_stream_limit(value, limit)
+}
+
+fn apply_loki_stream_end_bound(value: &mut Value, end_exclusive: Option<i64>) {
+    let Some(end_exclusive) = end_exclusive else {
+        return;
+    };
+    let Some(streams) = value
+        .pointer_mut("/data/result")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for stream in streams.iter_mut() {
+        let Some(values) = stream.get_mut("values").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        values.retain(|entry| {
+            entry
+                .as_array()
+                .and_then(|entry| entry.first())
+                .and_then(Value::as_str)
+                .and_then(|timestamp| timestamp.parse::<i64>().ok())
+                .is_none_or(|timestamp| timestamp < end_exclusive)
+        });
+    }
+    streams.retain(|stream| {
+        stream
+            .get("values")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    });
 }
 
 fn apply_loki_stream_interval(value: &mut Value, interval: Option<i64>) {

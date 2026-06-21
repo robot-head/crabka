@@ -7390,7 +7390,7 @@ async fn query_range_endpoint_logfmt_sanitizes_ansi_prefixed_field_names() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%20logfmt%20%7C%20line_format%20%60%7B%7B.msg%7D%7D%60&start=10&end=10")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%20logfmt%20%7C%20line_format%20%60%7B%7B.msg%7D%7D%60&start=10&end=11")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8157,7 +8157,7 @@ async fn query_range_endpoint_applies_interval_to_stream_results() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=19&end=29&direction=forward&interval=10")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=19&end=30&direction=forward&interval=10")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -8189,6 +8189,39 @@ async fn query_range_endpoint_applies_interval_to_stream_results() {
                 }
             })
     );
+}
+
+#[tokio::test]
+async fn query_range_endpoint_excludes_stream_entries_at_end_bound() {
+    let hot_tail = InMemoryWalSink::default();
+    hot_tail
+        .append(WalLogRecord {
+            tenant: "tenant-a".to_string(),
+            labels: labels([("app", "api"), ("env", "prod")]),
+            timestamp_ns: 29,
+            line: "api boundary error".to_string(),
+            structured_metadata: BTreeMap::new(),
+            position: None,
+        })
+        .await
+        .unwrap();
+    let state = fixture().with_hot_tail(hot_tail, 19);
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=19&end=29&direction=forward")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "api error"]])));
 }
 
 #[tokio::test]
