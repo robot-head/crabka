@@ -4859,12 +4859,14 @@ async fn log_level() -> Response {
 }
 
 async fn log_level_post(RawQuery(raw_query): RawQuery, body: Bytes) -> Response {
-    let raw_params = match raw_query {
-        Some(raw_query) if !raw_query.is_empty() => raw_query,
-        _ => match form_body_query(&body) {
-            Ok(raw_query) => raw_query,
-            Err(error) => return error.into_response(),
-        },
+    let body_query = match form_body_query(&body) {
+        Ok(body_query) => body_query,
+        Err(error) => return error.into_response(),
+    };
+    let raw_params = match (raw_query.as_deref(), body_query.is_empty()) {
+        (Some(raw_query), true) if !raw_query.is_empty() => raw_query.to_owned(),
+        (Some(raw_query), false) if !raw_query.is_empty() => format!("{body_query}&{raw_query}"),
+        _ => body_query,
     };
     match parse_log_level_param(Some(&raw_params)) {
         Ok(level) => json_response(

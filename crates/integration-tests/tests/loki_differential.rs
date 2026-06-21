@@ -311,8 +311,20 @@ async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
     let form_loki_result =
         loki_log_level_post_result(&http, &loki_base, None, Some("log_level=warn")).await;
     let form_crabka_result =
-        crabka_log_level_post_result(querier, None, Some("log_level=warn")).await;
+        crabka_log_level_post_result(querier.clone(), None, Some("log_level=warn")).await;
     assert!(form_crabka_result == form_loki_result);
+
+    let mixed_loki_result = loki_log_level_post_result(
+        &http,
+        &loki_base,
+        Some("log_level=debug"),
+        Some("log_level=warn"),
+    )
+    .await;
+    let mixed_crabka_result =
+        crabka_log_level_post_result(querier, Some("log_level=debug"), Some("log_level=warn"))
+            .await;
+    assert!(mixed_crabka_result == mixed_loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

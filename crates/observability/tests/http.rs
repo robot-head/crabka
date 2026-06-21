@@ -2978,6 +2978,30 @@ async fn status_log_level_endpoint_accepts_form_post_body_for_distributor_router
 }
 
 #[tokio::test]
+async fn status_log_level_endpoint_prefers_form_body_over_post_query_parameter() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/log_level?log_level=debug")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("log_level=warn"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({"status": "success", "message": "Log level set to warn"})
+    );
+}
+
+#[tokio::test]
 async fn status_log_level_endpoint_rejects_invalid_level() {
     let state = fixture();
     let app = loki_router(state);
