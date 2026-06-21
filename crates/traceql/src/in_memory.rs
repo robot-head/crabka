@@ -125,6 +125,7 @@ fn span_ref(span: &InputSpan, nested: &NestedSet) -> SpanRef {
         status_message: span.status_message.clone(),
         instrumentation_name: span.instrumentation_name.clone(),
         instrumentation_version: span.instrumentation_version.clone(),
+        resource_attributes: Vec::new(),
         attributes: span.attrs.clone(),
         events: span.events.clone(),
         links: span.links.clone(),

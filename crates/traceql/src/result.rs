@@ -41,6 +41,7 @@ pub struct SpanRef {
     pub status_message: String,
     pub instrumentation_name: String,
     pub instrumentation_version: String,
+    pub resource_attributes: Vec<(String, AttrValue)>,
     pub attributes: Vec<(String, AttrValue)>,
     pub events: Vec<EventRef>,
     pub links: Vec<LinkRef>,
@@ -150,6 +151,7 @@ mod tests {
             status_message: String::new(),
             instrumentation_name: String::new(),
             instrumentation_version: String::new(),
+            resource_attributes: Vec::new(),
             attributes: vec![
                 ("http.status_code".into(), AttrValue::Int(200)),
                 ("ok".into(), AttrValue::Bool(true)),

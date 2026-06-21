@@ -1212,20 +1212,54 @@ fn search_span_json(span: &SpanRef) -> Value {
 }
 
 fn trace_resource_attributes(trace: &TraceSpans) -> Vec<(String, AttrValue)> {
+    dedup_attrs(&trace.resource_attributes, trace.root_service_name.as_str())
+}
+
+fn span_resource_attributes(trace: &TraceSpans, span: &SpanRef) -> Vec<(String, AttrValue)> {
+    if span.resource_attributes.is_empty() {
+        trace_resource_attributes(trace)
+    } else {
+        dedup_attrs(&span.resource_attributes, "")
+    }
+}
+
+fn dedup_attrs(
+    attrs_in: &[(String, AttrValue)],
+    fallback_service_name: &str,
+) -> Vec<(String, AttrValue)> {
     let mut seen = BTreeSet::new();
     let mut attrs = Vec::new();
-    for (key, value) in &trace.resource_attributes {
+    for (key, value) in attrs_in {
         if seen.insert(key.clone()) {
             attrs.push((key.clone(), value.clone()));
         }
     }
-    if !trace.root_service_name.is_empty() && seen.insert("service.name".into()) {
+    if !fallback_service_name.is_empty() && seen.insert("service.name".into()) {
         attrs.push((
             "service.name".into(),
-            AttrValue::Str(trace.root_service_name.clone()),
+            AttrValue::Str(fallback_service_name.to_string()),
         ));
     }
     attrs
+}
+
+type ResourceAttrs = Vec<(String, AttrValue)>;
+type ResourceSpanGroup<'a> = (ResourceAttrs, Vec<&'a SpanRef>);
+
+fn resource_span_groups(trace: &TraceSpans, returned_spans: usize) -> Vec<ResourceSpanGroup<'_>> {
+    let mut groups: Vec<ResourceSpanGroup<'_>> = Vec::new();
+    for span in trace.spans.iter().take(returned_spans) {
+        let attrs = span_resource_attributes(trace, span);
+        if let Some((_, spans)) = groups
+            .iter_mut()
+            .find(|(existing_attrs, _)| existing_attrs == &attrs)
+        {
+            spans.push(span);
+        } else {
+            groups.push((attrs, vec![span]));
+        }
+    }
+    groups
 }
 
 fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
@@ -1244,12 +1278,17 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
 
     json!({
         "trace": {
-            "resourceSpans": [{
-                "resource": {
-                    "attributes": attrs_json(&trace_resource_attributes(trace)),
-                },
-                "scopeSpans": scope_spans_json(trace, returned_spans),
-            }],
+            "resourceSpans": resource_span_groups(trace, returned_spans)
+                .into_iter()
+                .map(|(attrs, spans)| {
+                    json!({
+                        "resource": {
+                            "attributes": attrs_json(&attrs),
+                        },
+                        "scopeSpans": scope_spans_json(trace.trace_id, spans),
+                    })
+                })
+                .collect::<Vec<_>>(),
         },
         "status": status,
         "message": message,
@@ -1260,16 +1299,18 @@ fn trace_protobuf(
     trace: &TraceSpans,
     max_trace_spans: usize,
 ) -> Result<Vec<u8>, prost::EncodeError> {
-    let resource_attributes = trace_resource_attributes(trace);
     let data = OtlpTracesData {
-        resource_spans: vec![OtlpResourceSpans {
-            resource: Some(OtlpResource {
-                attributes: otlp_attrs(&resource_attributes),
-                ..OtlpResource::default()
-            }),
-            scope_spans: otlp_scope_spans(trace, trace.spans.len().min(max_trace_spans)),
-            ..OtlpResourceSpans::default()
-        }],
+        resource_spans: resource_span_groups(trace, trace.spans.len().min(max_trace_spans))
+            .into_iter()
+            .map(|(attrs, spans)| OtlpResourceSpans {
+                resource: Some(OtlpResource {
+                    attributes: otlp_attrs(&attrs),
+                    ..OtlpResource::default()
+                }),
+                scope_spans: otlp_scope_spans(trace.trace_id, spans),
+                ..OtlpResourceSpans::default()
+            })
+            .collect(),
     };
     let mut bytes = Vec::with_capacity(data.encoded_len());
     data.encode(&mut bytes)?;
@@ -1278,9 +1319,9 @@ fn trace_protobuf(
 
 type OtlpTracesData = opentelemetry_proto::tonic::trace::v1::TracesData;
 
-fn otlp_scope_spans(trace: &TraceSpans, returned_spans: usize) -> Vec<OtlpScopeSpans> {
+fn otlp_scope_spans(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Vec<OtlpScopeSpans> {
     let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
-    for span in trace.spans.iter().take(returned_spans) {
+    for span in input_spans {
         let key = (
             span.instrumentation_name.clone(),
             span.instrumentation_version.clone(),
@@ -1302,7 +1343,7 @@ fn otlp_scope_spans(trace: &TraceSpans, returned_spans: usize) -> Vec<OtlpScopeS
             }),
             spans: spans
                 .into_iter()
-                .map(|span| otlp_span(trace.trace_id, span))
+                .map(|span| otlp_span(trace_id, span))
                 .collect(),
             ..OtlpScopeSpans::default()
         })
@@ -1384,9 +1425,9 @@ fn otlp_kv(key: &str, value: &AttrValue) -> OtlpKeyValue {
     }
 }
 
-fn scope_spans_json(trace: &TraceSpans, returned_spans: usize) -> Value {
+fn scope_spans_json(trace_id: [u8; 16], input_spans: Vec<&SpanRef>) -> Value {
     let mut groups: Vec<((String, String), Vec<&SpanRef>)> = Vec::new();
-    for span in trace.spans.iter().take(returned_spans) {
+    for span in input_spans {
         let key = (
             span.instrumentation_name.clone(),
             span.instrumentation_version.clone(),
@@ -1406,7 +1447,7 @@ fn scope_spans_json(trace: &TraceSpans, returned_spans: usize) -> Value {
                     "scope": instrumentation_scope_json(&name, &version),
                     "spans": spans
                         .into_iter()
-                        .map(|span| trace_span_json(trace.trace_id, span))
+                        .map(|span| trace_span_json(trace_id, span))
                         .collect::<Vec<_>>(),
                 })
             })
@@ -2264,6 +2305,7 @@ mod tests {
                 status_message: String::new(),
                 instrumentation_name: String::new(),
                 instrumentation_version: String::new(),
+                resource_attributes: Vec::new(),
                 attributes: Vec::new(),
                 events: Vec::new(),
                 links: Vec::new(),
@@ -2279,6 +2321,82 @@ mod tests {
                 .contains(&json!({
                     "key": "cloud.region",
                     "value": {"stringValue": "us-east-1"}
+                }))
+        );
+    }
+
+    #[test]
+    fn trace_json_groups_spans_by_resource_attributes() {
+        let trace = TraceSpans {
+            trace_id: [9; 16],
+            root_service_name: "api".into(),
+            root_trace_name: "GET /".into(),
+            resource_attributes: vec![("service.name".into(), AttrValue::Str("api".into()))],
+            spans: vec![
+                SpanRef {
+                    span_id: [1; 8],
+                    parent_span_id: None,
+                    name: "api".into(),
+                    kind: 0,
+                    nested_set_left: 1,
+                    nested_set_right: 4,
+                    nested_set_parent: 0,
+                    start_time_unix_nano: 1_001,
+                    duration_nanos: 200,
+                    status_code: 0,
+                    status_message: String::new(),
+                    instrumentation_name: String::new(),
+                    instrumentation_version: String::new(),
+                    resource_attributes: vec![(
+                        "service.name".into(),
+                        AttrValue::Str("api".into()),
+                    )],
+                    attributes: Vec::new(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                },
+                SpanRef {
+                    span_id: [2; 8],
+                    parent_span_id: Some([1; 8]),
+                    name: "db".into(),
+                    kind: 0,
+                    nested_set_left: 2,
+                    nested_set_right: 3,
+                    nested_set_parent: 1,
+                    start_time_unix_nano: 1_002,
+                    duration_nanos: 100,
+                    status_code: 0,
+                    status_message: String::new(),
+                    instrumentation_name: String::new(),
+                    instrumentation_version: String::new(),
+                    resource_attributes: vec![("service.name".into(), AttrValue::Str("db".into()))],
+                    attributes: Vec::new(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                },
+            ],
+        };
+
+        let body = trace_json(&trace, 10);
+        let resource_spans = body["trace"]["resourceSpans"].as_array().unwrap();
+
+        assert!(resource_spans.len() == 2);
+        assert!(
+            resource_spans[0]["resource"]["attributes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "key": "service.name",
+                    "value": {"stringValue": "api"}
+                }))
+        );
+        assert!(
+            resource_spans[1]["resource"]["attributes"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "key": "service.name",
+                    "value": {"stringValue": "db"}
                 }))
         );
     }

@@ -383,6 +383,11 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
         status_message: span.status_message.clone(),
         instrumentation_name: span.instrumentation_scope.clone(),
         instrumentation_version: span.instrumentation_version.clone(),
+        resource_attributes: span
+            .resource_attrs
+            .iter()
+            .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
+            .collect(),
         attributes: span
             .span_attrs
             .iter()

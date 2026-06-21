@@ -1077,6 +1077,7 @@ pub(crate) fn assemble_search_response(
                     .unwrap_or_default(),
                 instrumentation_version: string_value(batch, COL_INSTRUMENTATION_VERSION, row)
                     .unwrap_or_default(),
+                resource_attributes: Vec::new(),
                 attributes: row_attrs(batch, row)?,
                 events: Vec::new(),
                 links: Vec::new(),

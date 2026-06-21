@@ -952,6 +952,7 @@ fn trace_from_batches(
                 status_message: string_value(&batch, COL_STATUS_MESSAGE, row)?,
                 instrumentation_name: string_value(&batch, COL_INSTRUMENTATION_NAME, row)?,
                 instrumentation_version: string_value(&batch, COL_INSTRUMENTATION_VERSION, row)?,
+                resource_attributes: resource_attr_values(&batch, row)?,
                 attributes: attr_values(&batch, row)?,
                 events: event_values(&batch, row)?,
                 links: link_values(&batch, row)?,
@@ -2081,6 +2082,15 @@ mod tests {
         }
     }
 
+    fn assert_cloud_region_resource_attr(attrs: &[(String, AttrValue)]) {
+        assert!(attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))));
+        assert!(
+            !attrs
+                .iter()
+                .any(|(key, _)| key == "__resource.cloud.region")
+        );
+    }
+
     #[tokio::test]
     async fn cold_trace_by_id_projects_events_and_links_from_span_blocks() {
         let object_store = Arc::new(InMemory::new());
@@ -2433,16 +2443,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(trace.resource_attributes.contains(&(
-            "cloud.region".into(),
-            crabka_traceql::AttrValue::Str("us-east-1".into())
-        )));
-        assert!(
-            !trace
-                .resource_attributes
-                .iter()
-                .any(|(key, _)| key == "__resource.cloud.region")
-        );
+        assert_cloud_region_resource_attr(&trace.resource_attributes);
+        assert_cloud_region_resource_attr(&trace.spans[0].resource_attributes);
 
         let bare_attr = engine
             .search("tenant", "{ .cloud.region = \"us-east-1\" }", 0, 10_000, 10)

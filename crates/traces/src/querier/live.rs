@@ -174,6 +174,7 @@ mod tests {
                 status_message: String::new(),
                 instrumentation_name: String::new(),
                 instrumentation_version: String::new(),
+                resource_attributes: vec![("service.name".into(), AttrValue::Str("api".into()))],
                 attributes: vec![("svc".into(), AttrValue::Str("api".into()))],
                 events: Vec::new(),
                 links: Vec::new(),
