@@ -303,6 +303,12 @@ fn grouped_rank_pipeline_parts(
             Pipeline::Aggregate(agg),
             Pipeline::Filter { op, value },
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            Pipeline::Filter { op, value },
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::By(by),
         ] => Some((agg, by, rank, Some((*op, *value)), None)),
         [
             Pipeline::Aggregate(agg),
@@ -321,6 +327,12 @@ fn grouped_rank_pipeline_parts(
             rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
             Pipeline::By(by),
             Pipeline::Filter { op, value },
+        ]
+        | [
+            Pipeline::Aggregate(agg),
+            rank @ (Pipeline::TopK(_) | Pipeline::BottomK(_)),
+            Pipeline::Filter { op, value },
+            Pipeline::By(by),
         ] => Some((agg, by, rank, None, Some((*op, *value)))),
         _ => None,
     }
@@ -1514,6 +1526,102 @@ mod tests {
 
         let out = planned(
             "{ .svc != nil } | count() by(span.svc) > 1 | topk(1)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            names(&out)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn count_filter_topk_by_ranks_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc != nil } | count() > 1 | topk(1) | by(span.svc)",
+            &store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            names(&out)
+                == vec![
+                    "cache-a".to_string(),
+                    "cache-b".to_string(),
+                    "cache-c".to_string()
+                ]
+        );
+    }
+
+    #[tokio::test]
+    async fn count_topk_filter_by_keeps_spans_from_ranked_passing_groups() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "svc",
+            "root",
+            vec![
+                span(1, "api-a", 20, vec![("svc", AttrValue::Str("api".into()))]),
+                span(2, "api-b", 40, vec![("svc", AttrValue::Str("api".into()))]),
+                span(3, "db-a", 200, vec![("svc", AttrValue::Str("db".into()))]),
+                span(
+                    4,
+                    "cache-a",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    5,
+                    "cache-b",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+                span(
+                    6,
+                    "cache-c",
+                    10,
+                    vec![("svc", AttrValue::Str("cache".into()))],
+                ),
+            ],
+        );
+
+        let out = planned(
+            "{ .svc != nil } | count() | topk(2) > 2 | by(span.svc)",
             &store,
         )
         .await
