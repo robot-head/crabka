@@ -3956,7 +3956,7 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert!(loki_rules_response.status() == StatusCode::BAD_REQUEST);
+    assert!(loki_rules_response.status() == StatusCode::OK);
     let content_type = loki_rules_response
         .headers()
         .get("content-type")
@@ -3964,10 +3964,8 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(loki_rules_response).await;
-    assert!(content_type.starts_with("text/plain"));
-    assert!(
-        body == "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n"
-    );
+    assert!(content_type.starts_with("application/yaml"));
+    assert!(body == "{}\n");
 
     let prometheus_rules_response = app
         .clone()

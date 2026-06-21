@@ -5332,9 +5332,9 @@ fn ruler_status_page() -> Response {
 
 async fn loki_rules() -> Response {
     (
-        StatusCode::BAD_REQUEST,
-        [("content-type", "text/plain; charset=utf-8")],
-        "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n",
+        StatusCode::OK,
+        [("content-type", "application/yaml; charset=utf-8")],
+        "{}\n",
     )
         .into_response()
 }
