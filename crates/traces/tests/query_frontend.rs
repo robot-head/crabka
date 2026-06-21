@@ -461,6 +461,34 @@ async fn frontend_shards_instant_metrics_query_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_dispatches_instant_metric_shards_concurrently() {
+    let upstream_url = spawn_concurrent_metrics_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = timeout(
+        Duration::from_millis(500),
+        router(cfg).oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("sharded instant metrics should not serialize shard requests")
+    .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["series"][0]["points"].as_array().unwrap().len() == 2);
+}
+
+#[tokio::test]
 async fn frontend_shards_v2_tag_discovery_across_live_frontier() {
     let upstream_url = spawn_sharded_tags_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
