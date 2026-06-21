@@ -6880,7 +6880,7 @@ async fn detected_fields_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6907,7 +6907,7 @@ async fn detected_labels_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
@@ -6936,7 +6936,7 @@ async fn detected_field_values_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let raw_query = match post_query_params(raw_query.as_deref(), &body) {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
         Err(error) => return error.into_response(),
     };
