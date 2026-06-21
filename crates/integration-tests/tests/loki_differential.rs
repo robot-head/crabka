@@ -3068,6 +3068,35 @@ async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let query = "vector(1)";
+
+    let loki_error = loki_query_range_range_error(&http, &loki_base, query).await;
+    let crabka_error = crabka_query_range_range_error(querier, query).await;
+
+    assert!(crabka_error == loki_error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -4860,6 +4889,49 @@ async fn loki_query_range_resolution_error(
 async fn crabka_query_range_resolution_error(app: axum::Router, query: &str) -> Value {
     let uri = format!(
         "/loki/api/v1/query_range?query={}&start=0&end=11001000000000&step=1s",
+        percent_encode_component(query)
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    if response.status().is_success() {
+        return stable_loki_error(status, "<success>");
+    }
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
+async fn loki_query_range_range_error(http: &reqwest::Client, base: &str, query: &str) -> Value {
+    let response = http
+        .get(format!("{base}/loki/api/v1/query_range"))
+        .query(&[
+            ("query", query.to_string()),
+            ("start", "0".to_string()),
+            ("end", "2595601000000000".to_string()),
+            ("step", "1h".to_string()),
+        ])
+        .send()
+        .await
+        .expect("query_range Loki");
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .expect("Loki query_range range error response body");
+    stable_loki_error(status, &body)
+}
+
+async fn crabka_query_range_range_error(app: axum::Router, query: &str) -> Value {
+    let uri = format!(
+        "/loki/api/v1/query_range?query={}&start=0&end=2595601000000000&step=1h",
         percent_encode_component(query)
     );
     let response = app
