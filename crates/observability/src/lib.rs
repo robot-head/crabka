@@ -9724,6 +9724,7 @@ async fn execute_index_stats_query(
         .end
         .ok_or(HttpQueryError::MissingQueryParameter("end"))?;
     let time_range = TimeRange::new(start, end).map_err(HttpQueryError::from)?;
+    validate_loki_volume_query_range_limit(time_range)?;
     validate_query_range_limit(state, time_range)?;
     validate_query_length_limit(state, &params.query)?;
     let state = state.with_request_tenant_index(tenant, time_range).await?;
