@@ -145,6 +145,8 @@ where
                     .lock()
                     .expect("metrics generator mutex poisoned");
                 *pending = generator.collect(timestamp_ms);
+                drop(generator);
+                self.sync_edge_checkpoints();
             }
             pending.len()
         };
@@ -380,6 +382,30 @@ mod tests {
         svc.source
             .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
         assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_tombstones_checkpoints_for_expired_edges() {
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        let clock = MockClock::new(0);
+        let source = Arc::new(MockSpanSource::default());
+        let sink = Arc::new(MockRemoteWriteSink::default());
+        let svc = MetricsGenService::new(
+            MetricsGenConfig::default(),
+            Arc::new(clock.clone()),
+            source.clone(),
+            sink,
+        )
+        .with_checkpoint_store(store.clone());
+
+        source.push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
+        assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").len() == 1);
+
+        clock.set(11_000_000_000);
+        assert!(svc.collect_once().await.unwrap() == 1);
+
         assert!(store.load_all("A").is_empty());
     }
 
