@@ -68,6 +68,12 @@ struct Cli {
     query_queue_depth: usize,
     #[arg(long, default_value_t = usize::MAX)]
     max_trace_spans: usize,
+    #[arg(long, default_value_t = 10_000)]
+    max_spans_per_request: usize,
+    #[arg(long, default_value_t = 64 * 1024)]
+    max_attr_value_len: usize,
+    #[arg(long, default_value_t = 10 * 1024 * 1024)]
+    max_decompressed_bytes: usize,
     #[arg(long)]
     config: Option<String>,
 }
@@ -133,9 +139,11 @@ async fn run_distributor(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let producer = Producer::builder().bootstrap(cli.bootstrap).build().await?;
-    let state = Arc::new(DistributorState::new(Arc::new(KafkaSink::new(Arc::new(
-        producer,
-    )))));
+    let mut state = DistributorState::new(Arc::new(KafkaSink::new(Arc::new(producer))));
+    state.limits.max_spans_per_request = cli.max_spans_per_request;
+    state.limits.max_attr_value_len = cli.max_attr_value_len;
+    state.max_decompressed = cli.max_decompressed_bytes;
+    let state = Arc::new(state);
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
     let otlp_http_addr: SocketAddr = cli.otlp_http_listen.parse()?;
@@ -407,6 +415,26 @@ mod tests {
         assert!(cli.otlp_http_listen == "127.0.0.1:4318");
         assert!(cli.jaeger_http_listen == "127.0.0.1:14268");
         assert!(cli.zipkin_listen == "127.0.0.1:9411");
+    }
+
+    #[test]
+    fn parses_distributor_ingest_limits() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--max-spans-per-request",
+            "123",
+            "--max-attr-value-len",
+            "456",
+            "--max-decompressed-bytes",
+            "789",
+        ])
+        .unwrap();
+
+        assert!(cli.max_spans_per_request == 123);
+        assert!(cli.max_attr_value_len == 456);
+        assert!(cli.max_decompressed_bytes == 789);
     }
 
     #[test]
