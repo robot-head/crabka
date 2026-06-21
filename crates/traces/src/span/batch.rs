@@ -95,19 +95,35 @@ fn service_name(attrs: &[KeyValue]) -> Option<String> {
 }
 
 fn span_attrs(span: &Span) -> Vec<SpanAttr> {
-    span.resource_attrs
-        .iter()
-        .map(|attr| SpanAttr {
-            key: format!("{RESOURCE_ATTR_PREFIX}{}", attr.key),
-            is_array: false,
-            value: block_attr_value(&attr.value),
-        })
-        .chain(span.span_attrs.iter().map(|attr| SpanAttr {
-            key: attr.key.clone(),
-            is_array: false,
-            value: block_attr_value(&attr.value),
-        }))
-        .collect()
+    let mut attrs = Vec::new();
+    for attr in &span.resource_attrs {
+        push_span_attr(
+            &mut attrs,
+            format!("{RESOURCE_ATTR_PREFIX}{}", attr.key),
+            &attr.value,
+        );
+    }
+    for attr in &span.span_attrs {
+        push_span_attr(&mut attrs, attr.key.clone(), &attr.value);
+    }
+    attrs
+}
+
+fn push_span_attr(attrs: &mut Vec<SpanAttr>, key: String, value: &AttrValue) {
+    let value = block_attr_value(value);
+    if let Some(existing) = attrs
+        .iter_mut()
+        .find(|attr| attr.key == key && same_block_attr_type(&attr.value, &value))
+    {
+        extend_block_attr_value(&mut existing.value, value);
+        existing.is_array = true;
+        return;
+    }
+    attrs.push(SpanAttr {
+        key,
+        is_array: false,
+        value,
+    });
 }
 
 fn block_attr_value(value: &AttrValue) -> BlockAttrValue {
@@ -117,6 +133,26 @@ fn block_attr_value(value: &AttrValue) -> BlockAttrValue {
         AttrValue::Double(value) => BlockAttrValue::Double(vec![*value]),
         AttrValue::Bool(value) => BlockAttrValue::Bool(vec![*value]),
         AttrValue::Bytes(value) => BlockAttrValue::Str(vec![hex::encode(value)]),
+    }
+}
+
+fn same_block_attr_type(lhs: &BlockAttrValue, rhs: &BlockAttrValue) -> bool {
+    matches!(
+        (lhs, rhs),
+        (BlockAttrValue::Str(_), BlockAttrValue::Str(_))
+            | (BlockAttrValue::Int(_), BlockAttrValue::Int(_))
+            | (BlockAttrValue::Double(_), BlockAttrValue::Double(_))
+            | (BlockAttrValue::Bool(_), BlockAttrValue::Bool(_))
+    )
+}
+
+fn extend_block_attr_value(existing: &mut BlockAttrValue, next: BlockAttrValue) {
+    match (existing, next) {
+        (BlockAttrValue::Str(existing), BlockAttrValue::Str(next)) => existing.extend(next),
+        (BlockAttrValue::Int(existing), BlockAttrValue::Int(next)) => existing.extend(next),
+        (BlockAttrValue::Double(existing), BlockAttrValue::Double(next)) => existing.extend(next),
+        (BlockAttrValue::Bool(existing), BlockAttrValue::Bool(next)) => existing.extend(next),
+        _ => unreachable!("same_block_attr_type guards extension"),
     }
 }
 
@@ -180,11 +216,14 @@ fn block_status(status: super::StatusCode) -> StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{Array, FixedSizeBinaryArray, Int32Array, StringArray};
+    use arrow::array::{
+        Array, BooleanArray, FixedSizeBinaryArray, Int32Array, ListArray, StringArray,
+    };
     use assert2::assert;
     use crabka_blockstore::{
-        SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_ROOT_SERVICE_NAME,
-        SCOL_SPAN_ID, SCOL_TRACE_ID, span_block_schema,
+        SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_NESTED_SET_LEFT,
+        SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_ROOT_SERVICE_NAME, SCOL_SPAN_ID, SCOL_TRACE_ID,
+        span_block_schema,
     };
 
     use super::*;
@@ -249,6 +288,58 @@ mod tests {
 
         let service = col::<StringArray>(&batch, SCOL_ROOT_SERVICE_NAME);
         assert!(service.value(0) == "api");
+    }
+
+    #[test]
+    fn groups_repeated_attribute_keys_as_array_values() {
+        let mut s = span(1, None, "api");
+        s.span_attrs = vec![
+            KeyValue {
+                key: "http.method".into(),
+                value: AttrValue::Str("GET".into()),
+            },
+            KeyValue {
+                key: "http.method".into(),
+                value: AttrValue::Str("POST".into()),
+            },
+        ];
+
+        let batch = span_batch(&[s]).unwrap();
+
+        let keys = col::<ListArray>(&batch, SCOL_ATTR_KEYS);
+        let keys_row = keys.value(0);
+        let keys = keys_row.as_any().downcast_ref::<StringArray>().unwrap();
+        let methods_idx = (0..keys.len())
+            .find(|idx| keys.value(*idx) == "http.method")
+            .unwrap();
+        assert!(
+            (0..keys.len())
+                .filter(|idx| keys.value(*idx) == "http.method")
+                .count()
+                == 1
+        );
+
+        let is_array = col::<ListArray>(&batch, SCOL_ATTR_IS_ARRAY);
+        let is_array_row = is_array.value(0);
+        let is_array = is_array_row
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(is_array.value(methods_idx));
+
+        let values = col::<ListArray>(&batch, SCOL_ATTR_VALUE);
+        let row_values = values.value(0);
+        let row_values = row_values
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap_or_else(|| panic!("{SCOL_ATTR_VALUE} row is not a list"));
+        let method_values = row_values.value(methods_idx);
+        let method_values = method_values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(method_values.value(0) == "GET");
+        assert!(method_values.value(1) == "POST");
     }
 
     #[test]
