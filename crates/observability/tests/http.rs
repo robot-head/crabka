@@ -12279,6 +12279,34 @@ async fn index_volume_endpoints_require_start_parameter() {
 }
 
 #[tokio::test]
+async fn index_stats_endpoint_requires_start_parameter() {
+    let state = QuerierState::new(
+        tempfile::tempdir().unwrap().keep(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    );
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/index/stats?query=%7Bapp%3D%22api%22%7D&end=1000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(
+        &json_body(response).await,
+        "bad_data",
+        "missing query parameter `start`",
+    );
+}
+
+#[tokio::test]
 async fn index_volume_endpoints_require_end_parameter() {
     let state = QuerierState::new(
         tempfile::tempdir().unwrap().keep(),
@@ -12309,6 +12337,34 @@ async fn index_volume_endpoints_require_end_parameter() {
             "missing query parameter `end`",
         );
     }
+}
+
+#[tokio::test]
+async fn index_stats_endpoint_requires_end_parameter() {
+    let state = QuerierState::new(
+        tempfile::tempdir().unwrap().keep(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    );
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/index/stats?query=%7Bapp%3D%22api%22%7D&start=0")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(
+        &json_body(response).await,
+        "bad_data",
+        "missing query parameter `end`",
+    );
 }
 
 #[tokio::test]
