@@ -4,11 +4,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
     LargeStringArray, ListArray, StringArray, StringViewArray, StructArray,
 };
-use arrow::compute::filter_record_batch;
-use arrow::datatypes::DataType;
+use arrow::compute::{cast, concat_batches, filter_record_batch};
+use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockIndex, BlockStore, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
@@ -122,6 +122,7 @@ impl SpanStore for CrabkaSpanStore {
         {
             batches.extend(live.span_batches(tenant, live_start, end_ns).await?);
         }
+        let batches = recompute_scan_nested_sets(batches)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
 
         let schema = batches
@@ -1038,6 +1039,178 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
     }
 }
 
+fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>, TraceqlError> {
+    if batches.is_empty() {
+        return Ok(batches);
+    }
+    let schema = batches[0].schema();
+    let batches = align_scan_batches_to_schema(batches, &schema)?;
+    let batch = concat_batches(&schema, &batches)
+        .map_err(|err| TraceqlError::Store(format!("concat scan batches: {err}")))?;
+    recompute_batch_nested_sets(&batch).map(|batch| vec![batch])
+}
+
+fn align_scan_batches_to_schema(
+    batches: Vec<RecordBatch>,
+    schema: &SchemaRef,
+) -> Result<Vec<RecordBatch>, TraceqlError> {
+    batches
+        .into_iter()
+        .map(|batch| align_scan_batch_to_schema(&batch, schema))
+        .collect()
+}
+
+fn align_scan_batch_to_schema(
+    batch: &RecordBatch,
+    schema: &SchemaRef,
+) -> Result<RecordBatch, TraceqlError> {
+    if batch.schema() == *schema {
+        return Ok(batch.clone());
+    }
+    let mut columns = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let column = batch
+            .column_by_name(field.name())
+            .ok_or_else(|| TraceqlError::Store(format!("missing column `{}`", field.name())))?;
+        if column.data_type() == field.data_type() {
+            columns.push(column.clone());
+        } else {
+            columns.push(cast(column, field.data_type()).map_err(|err| {
+                TraceqlError::Store(format!(
+                    "cast column `{}` from {:?} to {:?}: {err}",
+                    field.name(),
+                    column.data_type(),
+                    field.data_type()
+                ))
+            })?);
+        }
+    }
+    RecordBatch::try_new(schema.clone(), columns)
+        .map_err(|err| TraceqlError::Store(format!("align scan batch schema: {err}")))
+}
+
+fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TraceqlError> {
+    enum Frame {
+        Enter { row: usize, parent_left: i32 },
+        Exit { row: usize },
+    }
+
+    let trace_ids = fixed(batch, COL_TRACE_ID)?;
+    let span_ids = fixed(batch, COL_SPAN_ID)?;
+    let parent_span_ids = fixed(batch, COL_PARENT_SPAN_ID)?;
+    let mut by_trace: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
+    for row in 0..batch.num_rows() {
+        if trace_ids.is_null(row) {
+            continue;
+        }
+        let mut trace_id = [0_u8; 16];
+        trace_id.copy_from_slice(trace_ids.value(row));
+        by_trace.entry(trace_id).or_default().push(row);
+    }
+
+    let mut left = vec![0_i32; batch.num_rows()];
+    let mut right = vec![0_i32; batch.num_rows()];
+    let mut parent_id = vec![0_i32; batch.num_rows()];
+
+    for rows in by_trace.values() {
+        let mut positions = BTreeMap::new();
+        for &row in rows {
+            if span_ids.is_null(row) {
+                continue;
+            }
+            let mut span_id = [0_u8; 8];
+            span_id.copy_from_slice(span_ids.value(row));
+            positions.insert(span_id, row);
+        }
+
+        let mut children = BTreeMap::<usize, Vec<usize>>::new();
+        let mut roots = Vec::new();
+        for &row in rows {
+            let parent = (!parent_span_ids.is_null(row)).then(|| {
+                let mut parent = [0_u8; 8];
+                parent.copy_from_slice(parent_span_ids.value(row));
+                parent
+            });
+            match parent.and_then(|parent| positions.get(&parent).copied()) {
+                Some(parent_row) if parent_row != row => {
+                    children.entry(parent_row).or_default().push(row);
+                }
+                _ => roots.push(row),
+            }
+        }
+
+        let mut counter = 1_i32;
+        let mut stack = Vec::new();
+        for &row in roots.iter().rev() {
+            stack.push(Frame::Enter {
+                row,
+                parent_left: 0,
+            });
+        }
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter { row, parent_left } => {
+                    left[row] = counter;
+                    parent_id[row] = parent_left;
+                    counter += 1;
+                    stack.push(Frame::Exit { row });
+                    if let Some(children) = children.get(&row) {
+                        for &child in children.iter().rev() {
+                            stack.push(Frame::Enter {
+                                row: child,
+                                parent_left: left[row],
+                            });
+                        }
+                    }
+                }
+                Frame::Exit { row } => {
+                    right[row] = counter;
+                    counter += 1;
+                }
+            }
+        }
+    }
+
+    let child_count = left
+        .iter()
+        .map(|node_left| {
+            i32::try_from(
+                parent_id
+                    .iter()
+                    .filter(|parent| *parent == node_left)
+                    .count(),
+            )
+            .unwrap_or(i32::MAX)
+        })
+        .collect::<Vec<_>>();
+    replace_scan_int32_columns(
+        batch,
+        &[
+            (COL_NS_LEFT, left),
+            (COL_NS_RIGHT, right),
+            (COL_PARENT_ID, parent_id),
+            (COL_CHILD_COUNT, child_count),
+        ],
+    )
+}
+
+fn replace_scan_int32_columns(
+    batch: &RecordBatch,
+    replacements: &[(&str, Vec<i32>)],
+) -> Result<RecordBatch, TraceqlError> {
+    let schema = batch.schema();
+    let mut columns = batch.columns().to_vec();
+    for (name, values) in replacements {
+        let idx = schema
+            .column_with_name(name)
+            .ok_or_else(|| TraceqlError::Store(format!("missing column `{name}`")))?
+            .0;
+        columns[idx] = Arc::new(Int32Array::from(values.clone())) as ArrayRef;
+    }
+    RecordBatch::try_new(schema, columns)
+        .map_err(|err| TraceqlError::Store(format!("replace scan nested-set columns: {err}")))
+}
+
 fn is_intrinsic_tag(tag: &str) -> bool {
     tag.contains(':')
 }
@@ -1745,6 +1918,7 @@ mod tests {
     #[derive(Default)]
     struct FakeLiveSource {
         trace: Option<TraceSpans>,
+        batches: Vec<RecordBatch>,
         values: Vec<TypedValue>,
         frontier_ns: i64,
     }
@@ -1757,7 +1931,7 @@ mod tests {
             _start_ns: i64,
             _end_ns: i64,
         ) -> Result<Vec<RecordBatch>, TraceqlError> {
-            Ok(Vec::new())
+            Ok(self.batches.clone())
         }
 
         async fn trace_spans(
@@ -2295,6 +2469,7 @@ mod tests {
                 resource_attributes: vec![],
                 spans: vec![span_ref_from_span(&span)],
             }),
+            batches: vec![],
             values: vec![],
             frontier_ns: 1_000,
         }));
@@ -2357,6 +2532,7 @@ mod tests {
                 resource_attributes: vec![],
                 spans: vec![span_ref_from_span(&child)],
             }),
+            batches: vec![],
             values: vec![],
             frontier_ns: 1_000,
         }));
@@ -2381,6 +2557,73 @@ mod tests {
         assert!(child.nested_set_parent == root.nested_set_left);
         assert!(child.nested_set_left > root.nested_set_left);
         assert!(child.nested_set_right < root.nested_set_right);
+    }
+
+    #[tokio::test]
+    async fn traceql_search_recomputes_nested_sets_across_cold_and_live_tiers() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let root = span_with_nested_refs();
+        let mut child = span_with_nested_refs();
+        child.span_id = [3; 8];
+        child.parent_span_id = Some(root.span_id);
+        child.name = "db".into();
+        child.start_ns = root.start_ns + 10;
+
+        let cold_batch = span_batch(std::slice::from_ref(&root)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/split-trace-search-root.parquet",
+                span_block_schema(),
+                &[cold_batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&root.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let live = LiveTier::new(Arc::new(FakeLiveSource {
+            trace: None,
+            batches: vec![span_batch(std::slice::from_ref(&child)).unwrap()],
+            values: vec![],
+            frontier_ns: child.start_ns,
+        }));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), Some(live)));
+        let engine = TraceqlEngine::new(store, EngineOpts::default());
+
+        let resp = engine
+            .search(
+                "tenant",
+                "{ span:name = \"GET /users\" } >> { span:name = \"db\" }",
+                0,
+                10_000,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 1);
+        assert!(resp.traces[0].trace_id == root.trace_id);
+        assert!(resp.traces[0].span_sets[0].spans.len() == 1);
+        assert!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
     }
 
     #[tokio::test]
