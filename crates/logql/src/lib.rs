@@ -5627,7 +5627,15 @@ impl<'a> Parser<'a> {
     fn parse_range_offset(&mut self) -> Result<i64, ParseError> {
         if self.consume_keyword("offset") {
             self.skip_ws();
-            self.parse_prometheus_duration()
+            let negative = self.consume("-");
+            let duration_ns = self.parse_prometheus_duration()?;
+            if negative {
+                duration_ns
+                    .checked_neg()
+                    .ok_or_else(|| self.error("range duration overflow"))
+            } else {
+                Ok(duration_ns)
+            }
         } else {
             Ok(0)
         }

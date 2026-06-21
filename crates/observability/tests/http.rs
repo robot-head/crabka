@@ -7849,6 +7849,47 @@ async fn query_range_endpoint_returns_count_over_time_matrix_json() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_applies_negative_count_over_time_offset() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B1ns%5D%20offset%20-9ns%29&start=10&end=10&step=1")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "matrix",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod"
+                            },
+                            "values": [
+                                [0.00000001, "1"]
+                            ]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(1819, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_accepts_range_selector_before_pipeline() {
     let state = fixture();
     let app = loki_router(state);

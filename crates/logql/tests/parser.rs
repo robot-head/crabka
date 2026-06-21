@@ -2269,6 +2269,17 @@ fn parses_metric_query_with_range_offset() {
 }
 
 #[test]
+fn parses_metric_query_with_negative_range_offset() {
+    let query =
+        parse_metric_query(r#"count_over_time({app="api"} |= "error" [10s] offset -5m)"#).unwrap();
+
+    check!(query.aggregation == RangeAggregation::CountOverTime);
+    check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
+    check!(query.range_ns == 10_000_000_000);
+    check!(query.offset_ns == -300_000_000_000);
+}
+
+#[test]
 fn rejects_metric_query_with_offset_after_range_aggregation() {
     check!(parse_metric_query(r#"count_over_time({app="api"} [10s]) offset 5m"#).is_err());
 }
