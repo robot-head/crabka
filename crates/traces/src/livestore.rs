@@ -376,9 +376,8 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
         instrumentation_name: span.instrumentation_scope.clone(),
         instrumentation_version: span.instrumentation_version.clone(),
         attributes: span
-            .resource_attrs
+            .span_attrs
             .iter()
-            .chain(&span.span_attrs)
             .filter_map(|attr| traceql_attr(attr).map(|value| (attr.key.clone(), value)))
             .collect(),
         events: span

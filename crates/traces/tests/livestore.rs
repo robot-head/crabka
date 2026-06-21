@@ -98,10 +98,7 @@ async fn live_source_exposes_trace_spans_and_tags() {
     assert!(trace.spans.len() == 2);
     assert!(
         trace.spans[0].attributes
-            == vec![
-                ("service.name".into(), TraceqlAttrValue::Str("api".into())),
-                ("http.method".into(), TraceqlAttrValue::Str("GET".into())),
-            ]
+            == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
     );
 
     let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
@@ -166,6 +163,28 @@ async fn live_source_exposes_trace_spans_and_tags() {
         .await
         .unwrap();
     assert_typed_value(&trace_durations, "duration", "20");
+}
+
+#[tokio::test]
+async fn live_trace_spans_keep_resource_attrs_out_of_span_attrs() {
+    let mut store = LiveStore::new(i64::MAX);
+    let mut item = span([1; 16], 1, 10);
+    item.resource_attrs.push(KeyValue {
+        key: "cloud.region".into(),
+        value: AttrValue::Str("us-east-1".into()),
+    });
+    store.ingest(record("tenant-a", item));
+
+    let trace = store
+        .trace_spans("tenant-a", &[1; 16])
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        trace.spans[0].attributes
+            == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
+    );
 }
 
 fn assert_tag_scope_contains(tags: &[ScopedTag], scope: TagScope, expected: &[&str]) {
