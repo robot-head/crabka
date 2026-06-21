@@ -53,6 +53,7 @@ impl Parser {
             };
             match name.as_str() {
                 "most_recent" => hints.most_recent = value,
+                "exemplars" => hints.exemplars = Some(value),
                 other => return Err(Self::err(format!("unsupported query hint {other:?}"))),
             }
             if !self.eat(&Token::Comma) {
@@ -1040,6 +1041,12 @@ mod tests {
         let q = parse("{ .a = 1 } with (most_recent=true)").unwrap();
         assert!(q.hints.most_recent);
         assert!(parse("{ .a = 1 } with (unknown=true)").is_err());
+    }
+
+    #[test]
+    fn exemplars_query_hint_parses() {
+        let q = parse("{ .a = 1 } | count_over_time() with (exemplars=false)").unwrap();
+        assert!(q.hints.exemplars == Some(false));
     }
 
     #[test]

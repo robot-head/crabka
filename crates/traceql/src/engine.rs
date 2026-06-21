@@ -222,6 +222,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
     ) -> Result<TraceMetricsResponse> {
         let q = parse(query)?;
         let metric = metric_plan(&q)?;
+        let max_exemplars = hinted_max_exemplars(self.opts.max_exemplars, q.hints.exemplars);
         if metric.compare {
             return self
                 .query_range_compare(
@@ -235,6 +236,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                     },
                     metric,
                     scan_options,
+                    max_exemplars,
                 )
                 .await;
         }
@@ -261,7 +263,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             end_ns,
             step_ns,
             &metric,
-            self.opts.max_exemplars,
+            max_exemplars,
             start_ns,
         )
     }
@@ -273,6 +275,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
         range: MetricsRange,
         metric: MetricPlan,
         scan_options: ScanOptions,
+        max_exemplars: usize,
     ) -> Result<TraceMetricsResponse> {
         let width_ns = range
             .scan_end
@@ -289,7 +292,14 @@ impl<S: SpanStore> TraceqlEngine<S> {
             .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
         let root = q.root;
         let current = self
-            .metrics_for_range(tenant, root.clone(), range, &metric, scan_options.clone())
+            .metrics_for_range(
+                tenant,
+                root.clone(),
+                range,
+                &metric,
+                scan_options.clone(),
+                max_exemplars,
+            )
             .await?;
         let previous = self
             .metrics_for_range(
@@ -303,6 +313,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 },
                 &metric,
                 scan_options,
+                max_exemplars,
             )
             .await?;
 
@@ -318,6 +329,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
         range: MetricsRange,
         metric: &MetricPlan,
         scan_options: ScanOptions,
+        max_exemplars: usize,
     ) -> Result<TraceMetricsResponse> {
         let planned = plan_query(
             self.store.as_ref(),
@@ -341,7 +353,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             range.scan_end,
             range.step,
             metric,
-            self.opts.max_exemplars,
+            max_exemplars,
             range.output_start,
         )
     }
@@ -384,6 +396,13 @@ impl<S: SpanStore> TraceqlEngine<S> {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>> {
         self.store.tag_values(tenant, tag, start_ns, end_ns).await
+    }
+}
+
+fn hinted_max_exemplars(default: usize, hint: Option<bool>) -> usize {
+    match hint {
+        Some(false) => 0,
+        Some(true) | None => default,
     }
 }
 
@@ -3531,6 +3550,33 @@ mod tests {
             .query_range(
                 "t",
                 "{ .svc = \"api\" } | count_over_time()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+
+        assert!(got.series.len() == 1);
+        assert!(got.series[0].exemplars.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_hint_can_disable_traceql_metric_exemplars() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "a", "root", vec![sp_at(0x11, 0x22, None, "api", 0)]);
+        let e = TraceqlEngine::new(
+            Arc::new(s),
+            EngineOpts {
+                max_exemplars: 1,
+                ..EngineOpts::default()
+            },
+        );
+
+        let got = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time() with (exemplars=false)",
                 0,
                 60_000,
                 60_000,

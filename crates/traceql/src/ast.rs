@@ -10,6 +10,7 @@ pub struct Query {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryHints {
     pub most_recent: bool,
+    pub exemplars: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
