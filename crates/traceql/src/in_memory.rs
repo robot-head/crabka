@@ -173,13 +173,13 @@ impl AttrBuilder {
     }
 }
 
-#[async_trait::async_trait]
-#[allow(clippy::too_many_lines)]
-impl SpanStore for InMemorySpanStore {
-    async fn scan(
+impl InMemorySpanStore {
+    #[allow(clippy::too_many_lines)]
+    fn scan_with_projection(
         &self,
         tenant: &str,
         matchers: &[SpanMatcher],
+        projection_matchers: &[SpanMatcher],
         start_ns: i64,
         end_ns: i64,
     ) -> Result<ScanResult> {
@@ -229,8 +229,9 @@ impl SpanStore for InMemorySpanStore {
                 if !span_matches(trace, span, &trace.nested, i, matchers) {
                     continue;
                 }
-                let event_rows = matching_events_for_scan(span, matchers);
-                let link_rows = matching_links_for_scan(span, matchers);
+                let expansion_matchers = expansion_matchers(matchers, projection_matchers);
+                let event_rows = matching_events_for_scan(span, &expansion_matchers);
+                let link_rows = matching_links_for_scan(span, &expansion_matchers);
                 for event in event_rows {
                     for link in &link_rows {
                         trace_id
@@ -328,6 +329,36 @@ impl SpanStore for InMemorySpanStore {
             ctx,
             span_table: "spans".into(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl SpanStore for InMemorySpanStore {
+    async fn scan(
+        &self,
+        tenant: &str,
+        matchers: &[SpanMatcher],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<ScanResult> {
+        self.scan_with_projection(tenant, matchers, &[], start_ns, end_ns)
+    }
+
+    async fn scan_with_options(
+        &self,
+        tenant: &str,
+        matchers: &[SpanMatcher],
+        start_ns: i64,
+        end_ns: i64,
+        options: &crate::store::ScanOptions,
+    ) -> Result<ScanResult> {
+        self.scan_with_projection(
+            tenant,
+            matchers,
+            &options.projection_matchers,
+            start_ns,
+            end_ns,
+        )
     }
 
     async fn trace_by_id(&self, tenant: &str, trace_id: &[u8; 16]) -> Result<Option<TraceSpans>> {
@@ -500,6 +531,16 @@ fn span_matches(
         .iter()
         .filter(|matcher| !is_event_matcher(matcher) && !is_link_matcher(matcher))
         .all(|matcher| matcher_matches(trace, span, nested_sets, idx, matcher))
+}
+
+fn expansion_matchers(
+    matchers: &[SpanMatcher],
+    projection_matchers: &[SpanMatcher],
+) -> Vec<SpanMatcher> {
+    let mut out = Vec::with_capacity(matchers.len() + projection_matchers.len());
+    out.extend_from_slice(matchers);
+    out.extend_from_slice(projection_matchers);
+    out
 }
 
 fn matching_events_for_scan<'a>(

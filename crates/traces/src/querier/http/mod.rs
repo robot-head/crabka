@@ -714,6 +714,7 @@ fn scan_options_param(uri: &Uri) -> Result<ScanOptions, String> {
             row_group_start,
             row_group_end,
         }),
+        ..ScanOptions::default()
     })
 }
 

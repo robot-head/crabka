@@ -146,7 +146,9 @@ impl CrabkaSpanStore {
         }
         let batches = recompute_scan_nested_sets(batches)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
-        let batches = add_nested_intrinsic_columns(batches, matchers)?;
+        let mut expansion_matchers = matchers.to_vec();
+        expansion_matchers.extend(options.projection_matchers.clone());
+        let batches = add_nested_intrinsic_columns(batches, &expansion_matchers)?;
 
         let schema = batches
             .first()
@@ -2948,6 +2950,7 @@ mod tests {
                         row_group_start: 1,
                         row_group_end: 2,
                     }),
+                    ..ScanOptions::default()
                 },
             )
             .await
@@ -3021,6 +3024,7 @@ mod tests {
                         row_group_start: 0,
                         row_group_end: 1,
                     }),
+                    ..ScanOptions::default()
                 },
             )
             .await
@@ -3619,6 +3623,34 @@ mod tests {
             .search(
                 "tenant",
                 "{ event:name != nil } | count() by (event:name) > 1",
+                0,
+                10_000,
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.traces.len() == 3);
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == matching.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == other.trace_id)
+        );
+        assert!(
+            resp.traces
+                .iter()
+                .any(|trace| trace.trace_id == split_events.trace_id)
+        );
+
+        let resp = engine
+            .search(
+                "tenant",
+                "{ span:name = \"GET /users\" } | count() by (event:name) > 1",
                 0,
                 10_000,
                 10,

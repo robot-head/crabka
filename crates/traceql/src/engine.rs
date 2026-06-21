@@ -11,10 +11,7 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
 
-use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, QueryHints, Scope,
-    SpansetExpr, Value,
-};
+use crate::ast::{Aggregate, Field, Intrinsic, Pipeline, Query, QueryHints, Scope};
 use crate::error::{Result, TraceqlError};
 use crate::parser::parse;
 use crate::planner::{PlannerContext, plan_query};
@@ -29,7 +26,7 @@ use crate::span_columns::{
     COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START, COL_STATUS_CODE,
     COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
-use crate::store::{ScanOptions, SpanStore};
+use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
 const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
     2_000_000.0,
@@ -78,7 +75,7 @@ pub struct TraceqlEngine<S: SpanStore> {
     opts: EngineOpts,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SearchOptions {
     pub limit: usize,
     pub spss: usize,
@@ -245,6 +242,8 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 .await;
         }
 
+        let mut scan_options = scan_options;
+        extend_metric_projection_matchers(&mut scan_options, &metric);
         let planned = plan_query(
             self.store.as_ref(),
             &PlannerContext {
@@ -254,7 +253,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 scan_options,
             },
             &Query {
-                root: metric_scan_root(q.root, &metric),
+                root: q.root,
                 pipeline: Vec::new(),
                 hints: QueryHints::default(),
             },
@@ -294,7 +293,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             .scan_start
             .checked_sub(range.step)
             .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
-        let root = metric_scan_root(q.root, &metric);
+        let root = q.root;
         let current = self
             .metrics_for_range(
                 tenant,
@@ -335,6 +334,8 @@ impl<S: SpanStore> TraceqlEngine<S> {
         scan_options: ScanOptions,
         max_exemplars: usize,
     ) -> Result<TraceMetricsResponse> {
+        let mut scan_options = scan_options;
+        extend_metric_projection_matchers(&mut scan_options, metric);
         let planned = plan_query(
             self.store.as_ref(),
             &PlannerContext {
@@ -482,43 +483,50 @@ fn metric_plan(q: &Query) -> Result<MetricPlan> {
     }
 }
 
-fn metric_scan_root(root: SpansetExpr, metric: &MetricPlan) -> SpansetExpr {
-    metric_nested_presence_fields(metric)
-        .into_iter()
-        .fold(root, |root, field| {
-            SpansetExpr::And(
-                Box::new(root),
-                Box::new(SpansetExpr::Selector(Box::new(FieldExpr::Comparison {
-                    lhs: field,
-                    op: ComparisonOp::Neq,
-                    rhs: Value::Nil,
-                }))),
-            )
-        })
+fn extend_metric_projection_matchers(options: &mut ScanOptions, metric: &MetricPlan) {
+    for matcher in metric_nested_projection_matchers(metric) {
+        if !options.projection_matchers.contains(&matcher) {
+            options.projection_matchers.push(matcher);
+        }
+    }
 }
 
-fn metric_nested_presence_fields(metric: &MetricPlan) -> Vec<Field> {
+fn metric_nested_projection_matchers(metric: &MetricPlan) -> Vec<SpanMatcher> {
     let mut out = Vec::new();
     for field in metric.by.iter().chain(metric.value.iter()) {
-        if is_nested_metric_field(field) && !out.contains(field) {
-            out.push(field.clone());
+        if let Some(matcher) = nested_metric_projection_matcher(field)
+            && !out.contains(&matcher)
+        {
+            out.push(matcher);
         }
     }
     out
 }
 
-fn is_nested_metric_field(field: &Field) -> bool {
-    matches!(
-        field.scope,
-        Scope::Event
-            | Scope::Link
-            | Scope::Intrinsic(
-                Intrinsic::EventName
-                    | Intrinsic::EventTimeSinceStart
-                    | Intrinsic::LinkTraceId
-                    | Intrinsic::LinkSpanId
-            )
-    )
+fn nested_metric_projection_matcher(field: &Field) -> Option<SpanMatcher> {
+    let (scope, key) = match &field.scope {
+        Scope::Event => (MatchScope::Event, field.key.clone()),
+        Scope::Link => (MatchScope::Link, field.key.clone()),
+        Scope::Intrinsic(Intrinsic::EventName) => (MatchScope::Intrinsic, "event:name".into()),
+        Scope::Intrinsic(Intrinsic::EventTimeSinceStart) => {
+            (MatchScope::Intrinsic, "event:timeSinceStart".into())
+        }
+        Scope::Intrinsic(Intrinsic::LinkTraceId) => (MatchScope::Intrinsic, "link:traceID".into()),
+        Scope::Intrinsic(Intrinsic::LinkSpanId) => (MatchScope::Intrinsic, "link:spanID".into()),
+        Scope::Both
+        | Scope::Span
+        | Scope::Resource
+        | Scope::Parent
+        | Scope::Instrumentation
+        | Scope::Intrinsic(_) => return None,
+    };
+    Some(SpanMatcher {
+        scope,
+        key,
+        op: MatchCmp::Neq,
+        value: MatchValue::Nil,
+        negated: false,
+    })
 }
 
 struct MetricPipelineParts<'a> {

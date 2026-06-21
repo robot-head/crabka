@@ -52,9 +52,10 @@ pub struct ScanResult {
     pub span_table: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanOptions {
     pub job: Option<ScanJob>,
+    pub projection_matchers: Vec<SpanMatcher>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

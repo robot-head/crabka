@@ -10,11 +10,12 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 
 use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Pipeline, Query, SpansetExpr, StructuralOp,
+    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
+    StructuralOp,
 };
 use crate::error::{Result, TraceqlError};
 use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
-use crate::store::{ScanOptions, SpanStore};
+use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
 pub(crate) struct PlannerContext {
     pub tenant: String,
@@ -50,14 +51,9 @@ async fn plan_spanset_sql<S: SpanStore>(
     root: &SpansetExpr,
     pipeline: &[Pipeline],
 ) -> Result<PlannedSpanset> {
+    let scan_options = scan_options_with_pipeline_projections(&ctx.scan_options, pipeline);
     let scan = store
-        .scan_with_options(
-            &ctx.tenant,
-            &[],
-            ctx.start_ns,
-            ctx.end_ns,
-            &ctx.scan_options,
-        )
+        .scan_with_options(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns, &scan_options)
         .await?;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
     let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table), &nested_tables)?;
@@ -67,6 +63,95 @@ async fn plan_spanset_sql<S: SpanStore>(
     Ok(PlannedSpanset {
         ctx: scan.ctx,
         plan,
+    })
+}
+
+fn scan_options_with_pipeline_projections(
+    options: &ScanOptions,
+    pipeline: &[Pipeline],
+) -> ScanOptions {
+    let mut options = options.clone();
+    for matcher in pipeline_nested_projection_matchers(pipeline) {
+        if !options.projection_matchers.contains(&matcher) {
+            options.projection_matchers.push(matcher);
+        }
+    }
+    options
+}
+
+fn pipeline_nested_projection_matchers(pipeline: &[Pipeline]) -> Vec<SpanMatcher> {
+    let mut out = Vec::new();
+    for stage in pipeline {
+        match stage {
+            Pipeline::By(fields) | Pipeline::Select(fields) => {
+                for field in fields {
+                    push_nested_projection_matcher(&mut out, field);
+                }
+            }
+            Pipeline::Aggregate(agg) => {
+                if let Some(field) = aggregate_projection_field(agg) {
+                    push_nested_projection_matcher(&mut out, field);
+                }
+            }
+            Pipeline::Filter { .. }
+            | Pipeline::TopK(_)
+            | Pipeline::BottomK(_)
+            | Pipeline::Compare
+            | Pipeline::Coalesce
+            | Pipeline::With(_) => {}
+        }
+    }
+    out
+}
+
+fn aggregate_projection_field(agg: &Aggregate) -> Option<&Field> {
+    match agg {
+        Aggregate::Sum(field)
+        | Aggregate::Avg(field)
+        | Aggregate::Min(field)
+        | Aggregate::Max(field)
+        | Aggregate::SumOverTime(field)
+        | Aggregate::AvgOverTime(field)
+        | Aggregate::MinOverTime(field)
+        | Aggregate::MaxOverTime(field)
+        | Aggregate::HistogramOverTime(field)
+        | Aggregate::QuantileOverTime { field, .. } => Some(field),
+        Aggregate::Count | Aggregate::Rate | Aggregate::CountOverTime => None,
+    }
+}
+
+fn push_nested_projection_matcher(out: &mut Vec<SpanMatcher>, field: &Field) {
+    let Some(matcher) = nested_projection_matcher(field) else {
+        return;
+    };
+    if !out.contains(&matcher) {
+        out.push(matcher);
+    }
+}
+
+fn nested_projection_matcher(field: &Field) -> Option<SpanMatcher> {
+    let (scope, key) = match &field.scope {
+        Scope::Event => (MatchScope::Event, field.key.clone()),
+        Scope::Link => (MatchScope::Link, field.key.clone()),
+        Scope::Intrinsic(Intrinsic::EventName) => (MatchScope::Intrinsic, "event:name".into()),
+        Scope::Intrinsic(Intrinsic::EventTimeSinceStart) => {
+            (MatchScope::Intrinsic, "event:timeSinceStart".into())
+        }
+        Scope::Intrinsic(Intrinsic::LinkTraceId) => (MatchScope::Intrinsic, "link:traceID".into()),
+        Scope::Intrinsic(Intrinsic::LinkSpanId) => (MatchScope::Intrinsic, "link:spanID".into()),
+        Scope::Both
+        | Scope::Span
+        | Scope::Resource
+        | Scope::Parent
+        | Scope::Instrumentation
+        | Scope::Intrinsic(_) => return None,
+    };
+    Some(SpanMatcher {
+        scope,
+        key,
+        op: MatchCmp::Neq,
+        value: MatchValue::Nil,
+        negated: false,
     })
 }
 
@@ -917,6 +1002,45 @@ mod tests {
         .unwrap();
 
         assert!(names(&out) == vec!["miss-one".to_string(), "miss-two".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn grouped_pipeline_by_nested_event_intrinsic_counts_all_events_without_nested_selector()
+    {
+        let mut one = span(1, "one", 50, vec![("svc", AttrValue::Str("api".into()))]);
+        one.events = vec![
+            EventRef {
+                time_since_start_nano: 10,
+                name: "cache.miss".into(),
+                attributes: Vec::new(),
+            },
+            EventRef {
+                time_since_start_nano: 20,
+                name: "cache.hit".into(),
+                attributes: Vec::new(),
+            },
+        ];
+        let mut two = span(2, "two", 50, vec![("svc", AttrValue::Str("api".into()))]);
+        two.events = vec![
+            EventRef {
+                time_since_start_nano: 30,
+                name: "cache.wait".into(),
+                attributes: Vec::new(),
+            },
+            EventRef {
+                time_since_start_nano: 40,
+                name: "cache.hit".into(),
+                attributes: Vec::new(),
+            },
+        ];
+        let mut store = InMemorySpanStore::new();
+        store.push_trace("t", "svc", "root", vec![one, two]);
+
+        let out = planned("{ .svc = \"api\" } | count() by (event:name) > 1", &store)
+            .await
+            .unwrap();
+
+        assert!(names(&out) == vec!["one".to_string(), "two".to_string()]);
     }
 
     #[tokio::test]
