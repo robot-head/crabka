@@ -192,7 +192,10 @@ where
 {
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = time_bounds(&uri);
-    let scope = query_param(&uri, "scope").and_then(|s| parse_tag_scope(&s));
+    let scope = match scope_param(&uri) {
+        Ok(scope) => scope,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     match state
         .engine
         .tag_names(&tenant, scope, start_ns, end_ns)
@@ -2747,6 +2750,14 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_tags_rejects_invalid_scope_parameter() {
+        let (status, body) = get_text("/api/search/tags?scope=bogus").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid scope");
     }
 
     #[tokio::test]
