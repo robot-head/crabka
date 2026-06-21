@@ -3045,6 +3045,25 @@ async fn status_config_endpoint_returns_loki_yaml_placeholder() {
 }
 
 #[tokio::test]
+async fn status_config_diff_mode_returns_loki_error() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/config?mode=diff")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(text_body(response).await == "unsupported type <nil>\n");
+}
+
+#[tokio::test]
 async fn distributor_router_exposes_loki_ingester_control_endpoints() {
     let app = distributor_router(InMemoryWalSink::default());
 
