@@ -241,6 +241,7 @@ impl SpanStore for CrabkaSpanStore {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
+        let index_tag = unscoped_attribute_tag(tag);
         if is_nested_intrinsic_tag(tag) {
             return self
                 .nested_intrinsic_tag_values(tenant, tag, start_ns, end_ns)
@@ -253,7 +254,7 @@ impl SpanStore for CrabkaSpanStore {
         }
         let mut values: BTreeSet<(String, String)> = self
             .trace_index
-            .tag_values(tenant, tag, start_ns, end_ns)
+            .tag_values(tenant, index_tag, start_ns, end_ns)
             .into_iter()
             .map(|value| ("string".to_string(), value))
             .collect();
@@ -270,6 +271,12 @@ impl SpanStore for CrabkaSpanStore {
             .map(|(type_, value)| TypedValue { type_, value })
             .collect())
     }
+}
+
+fn unscoped_attribute_tag(tag: &str) -> &str {
+    tag.strip_prefix("resource.")
+        .or_else(|| tag.strip_prefix("span."))
+        .unwrap_or(tag)
 }
 
 impl CrabkaSpanStore {

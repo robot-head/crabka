@@ -3087,6 +3087,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_tag_values_v2_accepts_resource_scope_prefix() {
+        let (status, body) = get_json("/api/v2/search/tag/resource.service.name/values").await;
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "svc-a"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn search_tag_values_v2_returns_intrinsic_values() {
         let (status, body) = get_json("/api/v2/search/tag/span:name/values").await;
         assert!(status == StatusCode::OK);

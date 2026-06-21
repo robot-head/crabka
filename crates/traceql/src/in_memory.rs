@@ -413,29 +413,42 @@ impl SpanStore for InMemorySpanStore {
         end_ns: i64,
     ) -> Result<Vec<TypedValue>> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
+        let (attr_tag, attr_scope) = scoped_attribute_tag(tag);
         let mut values = BTreeSet::new();
         for trace in self.traces_in_range(tenant, start_ns, end_ns) {
             collect_trace_intrinsic_values(trace, tag, &mut values);
-            if tag == "service.name" {
+            if matches!(attr_scope, None | Some(TagScope::Resource)) && attr_tag == "service.name" {
                 values.insert(("string".to_string(), trace.root_service_name.clone()));
             }
             for (idx, input) in trace.spans.iter().enumerate() {
                 collect_span_intrinsic_values(input, &trace.nested, idx, tag, &mut values);
                 collect_event_values(input, tag, &mut values);
                 collect_link_values(input, tag, &mut values);
-                values.extend(
-                    input
-                        .attrs
-                        .iter()
-                        .filter(|(key, _)| key == tag)
-                        .map(|(_, value)| typed_value_parts(value)),
-                );
+                if matches!(attr_scope, None | Some(TagScope::Span)) {
+                    values.extend(
+                        input
+                            .attrs
+                            .iter()
+                            .filter(|(key, _)| key == attr_tag)
+                            .map(|(_, value)| typed_value_parts(value)),
+                    );
+                }
             }
         }
         Ok(values
             .into_iter()
             .map(|(type_, value)| TypedValue { type_, value })
             .collect())
+    }
+}
+
+fn scoped_attribute_tag(tag: &str) -> (&str, Option<TagScope>) {
+    if let Some(tag) = tag.strip_prefix("resource.") {
+        (tag, Some(TagScope::Resource))
+    } else if let Some(tag) = tag.strip_prefix("span.") {
+        (tag, Some(TagScope::Span))
+    } else {
+        (tag, None)
     }
 }
 

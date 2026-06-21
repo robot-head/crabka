@@ -286,6 +286,7 @@ impl LiveSource for LiveStore {
         end_ns: i64,
     ) -> LiveResult<Vec<crabka_traceql::TypedValue>> {
         let tag = tag.strip_prefix('.').unwrap_or(tag);
+        let (attr_tag, attr_scope) = scoped_attribute_tag(tag);
         let mut values = BTreeSet::new();
         if let Some(traces) = self.by_tenant.get(tenant) {
             for spans in traces.values() {
@@ -300,13 +301,22 @@ impl LiveSource for LiveStore {
                 .flatten()
                 .filter(|item| in_time_range(item, start_ns, end_ns))
             {
-                values.extend(
-                    span.resource_attrs
-                        .iter()
-                        .chain(&span.span_attrs)
-                        .filter(|attr| attr.key == tag)
-                        .map(|attr| typed_value_parts(&attr.value)),
-                );
+                if matches!(attr_scope, None | Some(crabka_traceql::TagScope::Resource)) {
+                    values.extend(
+                        span.resource_attrs
+                            .iter()
+                            .filter(|attr| attr.key == attr_tag)
+                            .map(|attr| typed_value_parts(&attr.value)),
+                    );
+                }
+                if matches!(attr_scope, None | Some(crabka_traceql::TagScope::Span)) {
+                    values.extend(
+                        span.span_attrs
+                            .iter()
+                            .filter(|attr| attr.key == attr_tag)
+                            .map(|attr| typed_value_parts(&attr.value)),
+                    );
+                }
                 collect_span_intrinsic_value(span, tag, &mut values);
                 collect_event_values(span, tag, &mut values);
                 collect_link_values(span, tag, &mut values);
@@ -330,6 +340,16 @@ impl LiveSource for LiveStore {
         } else {
             self.max_start_ns
         }
+    }
+}
+
+fn scoped_attribute_tag(tag: &str) -> (&str, Option<crabka_traceql::TagScope>) {
+    if let Some(tag) = tag.strip_prefix("resource.") {
+        (tag, Some(crabka_traceql::TagScope::Resource))
+    } else if let Some(tag) = tag.strip_prefix("span.") {
+        (tag, Some(crabka_traceql::TagScope::Span))
+    } else {
+        (tag, None)
     }
 }
 
