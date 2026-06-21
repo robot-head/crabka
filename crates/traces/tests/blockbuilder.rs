@@ -161,6 +161,42 @@ async fn build_blocks_writes_span_block_and_updates_trace_index() {
 }
 
 #[tokio::test]
+async fn replaying_same_offset_window_is_idempotent_in_trace_index() {
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = BlockWriter::new(store.clone());
+    let mut index = TraceIndex::new();
+    let records = vec![
+        rec("tenant-a", [1; 16], 2, Some(1), 200),
+        rec("tenant-a", [1; 16], 1, None, 100),
+    ];
+
+    let first = build_blocks(&writer, &mut index, "tenant-a", 7, &records, (10, 20))
+        .await
+        .unwrap();
+    let replay = build_blocks(&writer, &mut index, "tenant-a", 7, &records, (10, 20))
+        .await
+        .unwrap();
+
+    assert!(first[0].object_key == replay[0].object_key);
+    assert!(
+        index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
+            == vec![first[0].object_key.clone()]
+    );
+    assert!(
+        index.prune_blocks_by_tag("tenant-a", "service.name", Some("api"), 0, 1_000)
+            == vec![first[0].object_key.clone()]
+    );
+    let batches = read_block(store, &first[0].object_key).await.unwrap();
+    assert!(
+        batches
+            .iter()
+            .map(arrow::record_batch::RecordBatch::num_rows)
+            .sum::<usize>()
+            == 2
+    );
+}
+
+#[tokio::test]
 async fn build_blocks_with_prefix_scopes_block_keys() {
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let writer = BlockWriter::new(store.clone());

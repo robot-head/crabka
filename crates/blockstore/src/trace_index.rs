@@ -41,11 +41,11 @@ impl TraceIndex {
     }
 
     pub fn add_trace_block(&mut self, tenant: &str, stats: TraceBlockStats) {
-        self.tenants
-            .entry(tenant.to_string())
-            .or_default()
+        let tenant_index = self.tenants.entry(tenant.to_string()).or_default();
+        tenant_index
             .blocks
-            .push(stats);
+            .retain(|block| block.object_key != stats.object_key);
+        tenant_index.blocks.push(stats);
     }
 
     pub fn replace_trace_blocks(
