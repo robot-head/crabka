@@ -176,6 +176,32 @@ async fn frontend_shards_metrics_query_range_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_limits_merged_metric_exemplars_across_shards() {
+    let upstream_url = spawn_sharded_metrics_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3&step=1&exemplars=1",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 1);
+}
+
+#[tokio::test]
 async fn frontend_shards_instant_metrics_query_across_live_frontier() {
     let upstream_url = spawn_sharded_metrics_querier().await;
     let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();

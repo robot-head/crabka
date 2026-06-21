@@ -182,6 +182,7 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
     for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
@@ -209,6 +210,7 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
         }
     }
 
+    limit_metric_exemplars(&mut merged_series, exemplar_limit);
     axum::Json(json!({ "series": merged_series })).into_response()
 }
 
@@ -236,6 +238,7 @@ async fn merged_metric_query_response(
     start_ns: i64,
     end_ns: i64,
 ) -> Response {
+    let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
     for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
@@ -263,6 +266,7 @@ async fn merged_metric_query_response(
         }
     }
 
+    limit_metric_exemplars(&mut merged_series, exemplar_limit);
     axum::Json(json!({ "series": merged_series })).into_response()
 }
 
@@ -658,6 +662,29 @@ fn forward_accept(req: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest:
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
     url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+fn exemplar_limit_param(uri: &Uri) -> Option<usize> {
+    query_param(uri, "exemplars").and_then(|value| {
+        if value.eq_ignore_ascii_case("false") {
+            Some(0)
+        } else if value.eq_ignore_ascii_case("true") {
+            None
+        } else {
+            value.parse().ok()
+        }
+    })
+}
+
+fn limit_metric_exemplars(series: &mut [Value], limit: Option<usize>) {
+    let Some(limit) = limit else {
+        return;
+    };
+    for series in series {
+        if let Some(exemplars) = series.get_mut("exemplars").and_then(Value::as_array_mut) {
+            exemplars.truncate(limit);
+        }
+    }
 }
 
 fn required_seconds_param(uri: &Uri, key: &'static str) -> Result<i64, String> {
