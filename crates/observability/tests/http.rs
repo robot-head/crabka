@@ -5999,6 +5999,26 @@ async fn query_range_endpoint_applies_metric_binary_set_or() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_rejects_approx_topk_metric_query() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=approx_topk%282%2C%20count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%29&start=0&end=30")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert_loki_error(&json_body(response).await, "bad_data", "instant query");
+}
+
+#[tokio::test]
 async fn query_range_endpoint_applies_bool_metric_query_scalar_comparison() {
     let state = fixture();
     let app = loki_router(state);
@@ -7679,7 +7699,7 @@ async fn query_range_endpoint_line_format_can_reference_root_fields() {
                 .header("X-Scope-OrgID", "tenant-a")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    r#"query={app="api"} |= "error" | line_format `{{ with fromJson "{\"status\":\"200\"}" }}inner={{ .status }} root={{ $.status }}{{ end }}`&start=0&end=30"#,
+                    r#"query={app="api"} |= "error" | line_format `{{ with fromJson "{\"status\":\"200\"}" }}inner={{ .status }} root={{ $.app }}{{ end }}`&start=0&end=30"#,
                 ))
                 .unwrap(),
         )
@@ -7688,7 +7708,7 @@ async fn query_range_endpoint_line_format_can_reference_root_fields() {
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "inner=200 root=500"]])));
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "inner=200 root=api"]])));
 }
 
 #[tokio::test]

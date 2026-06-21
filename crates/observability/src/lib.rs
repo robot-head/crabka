@@ -7070,6 +7070,9 @@ async fn execute_http_metric_query(
     kind: QueryKind,
     query: MetricQuery,
 ) -> Result<Value, HttpQueryError> {
+    if matches!(kind, QueryKind::Range) && metric_query_uses_approx_topk(&query) {
+        return Err(HttpQueryError::ApproxTopKRangeQuery);
+    }
     let scan_range = metric_scan_range(&query, time_range)?;
     let state = state.with_request_tenant_index(tenant, scan_range).await?;
     let plan = plan_stream_query(
@@ -7126,6 +7129,13 @@ async fn execute_http_metric_query(
         ));
     }
     Ok(add_loki_query_stats_for_metric_plan(response, &plan))
+}
+
+fn metric_query_uses_approx_topk(query: &MetricQuery) -> bool {
+    query
+        .vector_aggregation
+        .as_ref()
+        .is_some_and(|aggregation| matches!(aggregation.op, VectorAggregationOp::ApproxTopK(_)))
 }
 
 async fn execute_http_metric_binary_arithmetic_query(
@@ -13490,6 +13500,8 @@ enum HttpQueryError {
     },
     #[error("query matched {series} series, exceeding configured limit {max_series}")]
     QuerySeriesTooLarge { series: usize, max_series: usize },
+    #[error("approx_topk is only supported for instant query")]
+    ApproxTopKRangeQuery,
     #[error(transparent)]
     QueryAuthorization(#[from] QueryAuthorizationError),
     #[error("{source}")]
@@ -13533,6 +13545,7 @@ impl IntoResponse for HttpQueryError {
             | Self::QueryBytesTooLarge { .. }
             | Self::QueryLengthTooLarge { .. }
             | Self::QuerySeriesTooLarge { .. }
+            | Self::ApproxTopKRangeQuery
             | Self::Plan(_) => StatusCode::BAD_REQUEST,
             Self::QueryAuthorization(QueryAuthorizationError::Unauthorized { .. }) => {
                 StatusCode::FORBIDDEN
