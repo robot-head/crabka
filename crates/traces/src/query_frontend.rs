@@ -56,7 +56,7 @@ pub fn router(cfg: QueryFrontendConfig) -> Router {
         .route("/status", get(ready))
         .route("/api/search", get(search))
         .route("/api/search/tags", get(proxy))
-        .route("/api/v2/search/tags", get(proxy))
+        .route("/api/v2/search/tags", get(search_tags_v2))
         .route("/api/search/tag/{tag}/values", get(proxy))
         .route("/api/v2/search/tag/{tag}/values", get(proxy))
         .route("/api/metrics/query_range", get(query_range))
@@ -266,6 +266,53 @@ async fn merged_metric_query_response(
     axum::Json(json!({ "series": merged_series })).into_response()
 }
 
+async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    };
+
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let mut merged_scopes = Vec::new();
+    let mut metrics = json!({
+        "totalBlocks": 0,
+        "inspectedTraces": 0,
+        "inspectedBytes": 0,
+    });
+
+    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+            .send()
+            .await
+        else {
+            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
+        };
+        let status = resp.status();
+        let Ok(bytes) = resp.bytes().await else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if !status.is_success() {
+            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            return (status, bytes).into_response();
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if let Some(scopes) = body.get("scopes").and_then(Value::as_array) {
+            merge_scopes(&mut merged_scopes, scopes);
+        }
+        merge_metrics(&mut metrics, body.get("metrics"));
+    }
+
+    axum::Json(json!({
+        "scopes": merged_scopes,
+        "metrics": metrics,
+    }))
+    .into_response()
+}
+
 async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
@@ -294,6 +341,35 @@ async fn proxy_querier_response(state: &AppState, headers: &HeaderMap, uri: &Uri
             .insert(header::CONTENT_TYPE, content_type);
     }
     response
+}
+
+fn merge_scopes(merged_scopes: &mut Vec<Value>, incoming_scopes: &[Value]) {
+    for incoming_scope in incoming_scopes {
+        let Some(scope_name) = incoming_scope.get("name").and_then(Value::as_str) else {
+            merged_scopes.push(incoming_scope.clone());
+            continue;
+        };
+        let Some(incoming_tags) = incoming_scope.get("tags").and_then(Value::as_array) else {
+            merged_scopes.push(incoming_scope.clone());
+            continue;
+        };
+        let Some(existing_scope) = merged_scopes
+            .iter_mut()
+            .find(|scope| scope.get("name").and_then(Value::as_str) == Some(scope_name))
+        else {
+            merged_scopes.push(incoming_scope.clone());
+            continue;
+        };
+        let Some(existing_tags) = existing_scope.get_mut("tags").and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for tag in incoming_tags {
+            if !existing_tags.iter().any(|existing| existing == tag) {
+                existing_tags.push(tag.clone());
+            }
+        }
+    }
 }
 
 fn merge_metric_series(series: &mut Vec<Value>, next: Value) {
@@ -516,6 +592,24 @@ fn required_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
         return Err("end must be >= start".to_string());
     }
     Ok((start_ns, end_ns))
+}
+
+fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
+    let start_ns = optional_seconds_param(uri, "start")?.unwrap_or(0);
+    let end_ns = optional_seconds_param(uri, "end")?.unwrap_or(i64::MAX);
+    if end_ns < start_ns {
+        return Err("end must be >= start".to_string());
+    }
+    Ok((start_ns, end_ns))
+}
+
+fn optional_seconds_param(uri: &Uri, key: &'static str) -> Result<Option<i64>, String> {
+    let Some(value) = query_param(uri, key) else {
+        return Ok(None);
+    };
+    parse_seconds_to_ns(&value)
+        .map(Some)
+        .ok_or_else(|| format!("invalid query parameter {key}"))
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
