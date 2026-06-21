@@ -7328,6 +7328,34 @@ async fn query_range_endpoint_line_format_ranges_with_current_dot_over_from_json
 }
 
 #[tokio::test]
+async fn query_range_endpoint_line_format_ranges_with_index_and_value_variables() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/query_range")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    r#"query={app="api"} |= "error" | line_format `{{ range $i, $q := fromJson "[{\"query\":\"rate\",\"duration\":30},{\"query\":\"sum\",\"duration\":15}]" }}{{ $i }}:{{ $q.query }}={{ $q.duration }};{{ end }}`&start=0&end=30"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        body.pointer("/data/result/0/values")
+            == Some(&json!([["19", "0:rate=30;1:sum=15;"]]))
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_line_format_uses_range_else_for_empty_from_json_arrays() {
     let state = fixture();
     let app = loki_router(state);
