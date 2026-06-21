@@ -6996,7 +6996,7 @@ async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
         axum::serve(listener, app).await.unwrap();
     });
     let mut request =
-        format!("ws://{addr}/loki/api/v1/tail?query=%7Bapp%3D%22api%22%7D&delay_for=6")
+        format!("ws://{addr}/loki/api/v1/tail?delay_for=6&query=%7Bapp%3D%22api%22%7D")
             .into_client_request()
             .unwrap();
     request
@@ -7010,6 +7010,29 @@ async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
         panic!("expected HTTP websocket error");
     };
     assert!(response.status() == StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn tail_endpoint_accepts_delay_for_at_five_seconds() {
+    let state = fixture();
+    let app = loki_router(state);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request =
+        format!("ws://{addr}/loki/api/v1/tail?delay_for=5&query=%7Bapp%3D%22api%22%7D")
+            .into_client_request()
+            .unwrap();
+    request
+        .headers_mut()
+        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    let _ = socket.close(None).await;
+    server.abort();
 }
 
 #[tokio::test]
