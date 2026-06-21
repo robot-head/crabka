@@ -1,6 +1,7 @@
 //! Push-door wire surfaces for trace ingest.
 
 pub mod jaeger;
+pub mod jaeger_grpc;
 pub mod otlp;
 pub mod zipkin;
 

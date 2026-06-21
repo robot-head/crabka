@@ -38,6 +38,8 @@ struct Cli {
     grpc_listen: String,
     #[arg(long, default_value = "127.0.0.1:4318")]
     otlp_http_listen: String,
+    #[arg(long, default_value = "127.0.0.1:14250")]
+    jaeger_grpc_listen: String,
     #[arg(long, default_value = "127.0.0.1:6831")]
     jaeger_compact_listen: String,
     #[arg(long, default_value = "127.0.0.1:14268")]
@@ -147,6 +149,7 @@ async fn run_distributor(
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
     let otlp_http_addr: SocketAddr = cli.otlp_http_listen.parse()?;
+    let jaeger_grpc_addr: SocketAddr = cli.jaeger_grpc_listen.parse()?;
     let jaeger_compact_addr: SocketAddr = cli.jaeger_compact_listen.parse()?;
     let jaeger_http_addr: SocketAddr = cli.jaeger_http_listen.parse()?;
     let zipkin_addr: SocketAddr = cli.zipkin_listen.parse()?;
@@ -155,6 +158,19 @@ async fn run_distributor(
     tokio::spawn(async move {
         if let Err(err) = distributor::serve_otlp_grpc(grpc_addr, grpc_state, grpc_shutdown).await {
             tracing::warn!(error = %err, "traces distributor OTLP/gRPC server error");
+        }
+    });
+    let jaeger_grpc_shutdown = shutdown.clone();
+    let jaeger_grpc_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(err) = distributor::serve_jaeger_grpc(
+            jaeger_grpc_addr,
+            jaeger_grpc_state,
+            jaeger_grpc_shutdown,
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "traces distributor Jaeger gRPC server error");
         }
     });
     let jaeger_compact_bound = distributor::serve_jaeger_compact_udp(
@@ -409,10 +425,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_distributor_jaeger_grpc_listener() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "distributor",
+            "--jaeger-grpc-listen",
+            "127.0.0.1:14250",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::Distributor));
+        assert!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
+    }
+
+    #[test]
     fn distributor_defaults_include_tempo_push_ports() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
 
         assert!(cli.otlp_http_listen == "127.0.0.1:4318");
+        assert!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
         assert!(cli.jaeger_http_listen == "127.0.0.1:14268");
         assert!(cli.zipkin_listen == "127.0.0.1:9411");
     }

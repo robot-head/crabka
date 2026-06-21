@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package jaeger.api_v2;
+
+import "model.proto";
+
+message PostSpansRequest {
+  Batch batch = 1;
+}
+
+message PostSpansResponse {}
+
+service CollectorService {
+  rpc PostSpans(PostSpansRequest) returns (PostSpansResponse);
+}

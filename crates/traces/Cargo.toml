@@ -12,6 +12,7 @@ documentation = "https://docs.rs/crabka-traces"
 readme = "README.md"
 keywords = ["observability", "tempo", "traceql", "traces", "crabka"]
 categories = ["database-implementations"]
+build = "build.rs"
 
 [lints]
 workspace = true
@@ -33,6 +34,7 @@ hex = { workspace = true }
 object_store = { workspace = true }
 opentelemetry-proto = { workspace = true }
 prost = { workspace = true }
+prost-types = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -44,6 +46,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tonic = { workspace = true }
+tonic-prost = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 wincode = { workspace = true }
@@ -57,3 +60,7 @@ http-body-util = "0.1"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tower = { workspace = true, features = ["util"] }
+
+[build-dependencies]
+protox = { workspace = true }
+tonic-prost-build = { workspace = true }

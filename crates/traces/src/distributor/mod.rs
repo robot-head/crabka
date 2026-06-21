@@ -27,6 +27,11 @@ use crate::error::TracesError;
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
 use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
+use crate::wire::jaeger_grpc::api_v2::{
+    PostSpansRequest, PostSpansResponse,
+    collector_service_server::{CollectorService, CollectorServiceServer},
+};
+use crate::wire::jaeger_grpc::decode_jaeger_grpc_batch;
 use crate::wire::otlp::decode_otlp;
 use crate::wire::zipkin::decode_zipkin;
 
@@ -150,6 +155,20 @@ pub async fn serve_otlp_grpc(
         .await
 }
 
+/// Serve the Jaeger API v2 gRPC trace receiver until cancelled.
+pub async fn serve_jaeger_grpc(
+    addr: SocketAddr,
+    state: Arc<DistributorState>,
+    shutdown: CancellationToken,
+) -> Result<(), tonic::transport::Error> {
+    GrpcServer::builder()
+        .add_service(CollectorServiceServer::new(JaegerGrpcService::new(state)))
+        .serve_with_shutdown(addr, async move {
+            shutdown.cancelled().await;
+        })
+        .await
+}
+
 /// Serve the Jaeger compact-Thrift UDP receiver until cancelled.
 pub async fn serve_jaeger_compact_udp(
     addr: SocketAddr,
@@ -192,6 +211,41 @@ impl OtlpGrpcService {
     #[must_use]
     pub fn new(state: Arc<DistributorState>) -> Self {
         Self { state }
+    }
+}
+
+/// Jaeger API v2 gRPC collector backed by the traces WAL.
+pub struct JaegerGrpcService {
+    state: Arc<DistributorState>,
+}
+
+impl JaegerGrpcService {
+    #[must_use]
+    pub fn new(state: Arc<DistributorState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl CollectorService for JaegerGrpcService {
+    async fn post_spans(
+        &self,
+        request: GrpcRequest<PostSpansRequest>,
+    ) -> Result<GrpcResponse<PostSpansResponse>, GrpcStatus> {
+        let metadata = request.metadata().clone();
+        let batch = request
+            .into_inner()
+            .batch
+            .ok_or_else(|| GrpcStatus::invalid_argument("missing jaeger batch"))?;
+        let spans = decode_jaeger_grpc_batch(batch)
+            .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        validate(&spans, &self.state.limits)
+            .map_err(|err| GrpcStatus::invalid_argument(err.to_string()))?;
+        let tenant = tenant_metadata(&metadata);
+        produce_spans(self.state.sink.as_ref(), &tenant, spans)
+            .await
+            .map_err(|err| GrpcStatus::internal(err.to_string()))?;
+        Ok(GrpcResponse::new(PostSpansResponse {}))
     }
 }
 
@@ -685,6 +739,57 @@ mod tests {
         assert!(resp.into_inner().partial_success.is_none());
         assert!(sink.count() == 1);
         assert!(sink.tenant(0) == "tenant-a");
+    }
+
+    #[tokio::test]
+    async fn jaeger_grpc_post_spans_appends_and_returns_success() {
+        let (state, sink) = test_state();
+        let service = JaegerGrpcService::new(state);
+        let mut req = GrpcRequest::new(crate::wire::jaeger_grpc::api_v2::PostSpansRequest {
+            batch: Some(crate::wire::jaeger_grpc::api_v2::Batch {
+                process: Some(crate::wire::jaeger_grpc::api_v2::Process {
+                    service_name: "checkout".into(),
+                    tags: Vec::new(),
+                }),
+                spans: vec![crate::wire::jaeger_grpc::api_v2::Span {
+                    trace_id: vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
+                    span_id: vec![0, 0, 0, 0, 0, 0, 0, 3],
+                    operation_name: "GET /grpc".into(),
+                    start_time: Some(prost_types::Timestamp {
+                        seconds: 1,
+                        nanos: 2_000,
+                    }),
+                    duration: Some(prost_types::Duration {
+                        seconds: 0,
+                        nanos: 25_000,
+                    }),
+                    tags: vec![
+                        crate::wire::jaeger_grpc::api_v2::KeyValue {
+                            key: "span.kind".into(),
+                            v_type: crate::wire::jaeger_grpc::api_v2::ValueType::String.into(),
+                            v_str: "server".into(),
+                            ..Default::default()
+                        },
+                        crate::wire::jaeger_grpc::api_v2::KeyValue {
+                            key: "error".into(),
+                            v_type: crate::wire::jaeger_grpc::api_v2::ValueType::Bool.into(),
+                            v_bool: true,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+            }),
+        });
+        req.metadata_mut()
+            .insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        let resp = service.post_spans(req).await.unwrap();
+
+        assert!(sink.count() == 1);
+        assert!(sink.tenant(0) == "tenant-a");
+        assert!(sink.span_name(0) == "GET /grpc");
+        assert!(resp.into_inner() == crate::wire::jaeger_grpc::api_v2::PostSpansResponse {});
     }
 
     #[tokio::test]

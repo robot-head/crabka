@@ -31,7 +31,7 @@ pub fn decode_jaeger_binary_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> 
     Ok(spans_from_batch(&batch))
 }
 
-fn spans_from_batch(batch: &JaegerBatch) -> Vec<Span> {
+pub(super) fn spans_from_batch(batch: &JaegerBatch) -> Vec<Span> {
     batch
         .spans
         .iter()
@@ -39,44 +39,44 @@ fn spans_from_batch(batch: &JaegerBatch) -> Vec<Span> {
         .collect()
 }
 
-#[derive(Default)]
-struct JaegerBatch {
-    process: JaegerProcess,
-    spans: Vec<JaegerSpan>,
+#[derive(Clone, Default)]
+pub(super) struct JaegerBatch {
+    pub(super) process: JaegerProcess,
+    pub(super) spans: Vec<JaegerSpan>,
 }
 
-#[derive(Default)]
-struct JaegerProcess {
-    service_name: String,
-    tags: Vec<KeyValue>,
+#[derive(Clone, Default)]
+pub(super) struct JaegerProcess {
+    pub(super) service_name: String,
+    pub(super) tags: Vec<KeyValue>,
 }
 
-#[derive(Default)]
-struct JaegerSpan {
-    trace_id_low: i64,
-    trace_id_high: i64,
-    span_id: i64,
-    parent_span_id: i64,
-    operation_name: String,
-    references: Vec<JaegerRef>,
-    start_time_micros: i64,
-    duration_micros: i64,
-    tags: Vec<KeyValue>,
-    logs: Vec<JaegerLog>,
+#[derive(Clone, Default)]
+pub(super) struct JaegerSpan {
+    pub(super) trace_id_low: i64,
+    pub(super) trace_id_high: i64,
+    pub(super) span_id: i64,
+    pub(super) parent_span_id: i64,
+    pub(super) operation_name: String,
+    pub(super) references: Vec<JaegerRef>,
+    pub(super) start_time_micros: i64,
+    pub(super) duration_micros: i64,
+    pub(super) tags: Vec<KeyValue>,
+    pub(super) logs: Vec<JaegerLog>,
 }
 
-#[derive(Default)]
-struct JaegerLog {
-    timestamp_micros: i64,
-    fields: Vec<KeyValue>,
+#[derive(Clone, Default)]
+pub(super) struct JaegerLog {
+    pub(super) timestamp_micros: i64,
+    pub(super) fields: Vec<KeyValue>,
 }
 
-#[derive(Default)]
-struct JaegerRef {
-    ref_type: i32,
-    trace_id_low: i64,
-    trace_id_high: i64,
-    span_id: i64,
+#[derive(Clone, Default)]
+pub(super) struct JaegerRef {
+    pub(super) ref_type: i32,
+    pub(super) trace_id_low: i64,
+    pub(super) trace_id_high: i64,
+    pub(super) span_id: i64,
 }
 
 fn read_batch(input: &mut CompactInput<'_>) -> Result<JaegerBatch, WireError> {
