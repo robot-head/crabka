@@ -198,6 +198,7 @@ pub enum PipelineStage {
     Unwrap(UnwrapExpression),
     FieldFilter(FieldFilter),
     FieldFilterChain(FieldFilterChain),
+    FieldFilterExpression(FieldFilterExpression),
 }
 
 impl PipelineStage {
@@ -249,6 +250,7 @@ impl PipelineStage {
             }
             Self::FieldFilter(filter) => filter.apply(fields),
             Self::FieldFilterChain(chain) => chain.apply(fields),
+            Self::FieldFilterExpression(expression) => expression.apply(fields),
         }
     }
 
@@ -3874,6 +3876,81 @@ pub struct FieldFilterChain {
     rest: Vec<(FieldFilterLogicOp, FieldFilter)>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldFilterExpression {
+    Filter(FieldFilter),
+    Group(Box<FieldFilterExpression>),
+    Chain {
+        first: Box<FieldFilterExpression>,
+        rest: Vec<(FieldFilterLogicOp, FieldFilterExpression)>,
+    },
+}
+
+impl FieldFilterExpression {
+    #[must_use]
+    pub fn apply(&self, fields: &mut Labels) -> bool {
+        match self {
+            Self::Filter(filter) => filter.apply(fields),
+            Self::Group(expression) => expression.apply(fields),
+            Self::Chain { first, rest } => {
+                let mut result = first.apply(fields);
+                for (op, expression) in rest {
+                    match op {
+                        FieldFilterLogicOp::And => result = result && expression.apply(fields),
+                        FieldFilterLogicOp::Or => result = result || expression.apply(fields),
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn matches(&self, fields: &Labels) -> bool {
+        let mut fields = fields.clone();
+        self.apply(&mut fields)
+    }
+}
+
+fn field_filter_expression_to_pipeline_stage(expression: FieldFilterExpression) -> PipelineStage {
+    match expression {
+        FieldFilterExpression::Filter(filter) => PipelineStage::FieldFilter(filter),
+        FieldFilterExpression::Chain { first, rest } => {
+            let first = match *first {
+                FieldFilterExpression::Filter(filter) => filter,
+                first => {
+                    return PipelineStage::FieldFilterExpression(FieldFilterExpression::Chain {
+                        first: Box::new(first),
+                        rest,
+                    });
+                }
+            };
+
+            let mut flat_rest = Vec::new();
+            for (op, expression) in rest {
+                let filter = match expression {
+                    FieldFilterExpression::Filter(filter) => filter,
+                    expression => {
+                        let first = Box::new(FieldFilterExpression::Filter(first));
+                        let rest = flat_rest
+                            .into_iter()
+                            .map(|(op, filter)| (op, FieldFilterExpression::Filter(filter)))
+                            .chain(std::iter::once((op, expression)))
+                            .collect();
+                        return PipelineStage::FieldFilterExpression(
+                            FieldFilterExpression::Chain { first, rest },
+                        );
+                    }
+                };
+                flat_rest.push((op, filter));
+            }
+
+            PipelineStage::FieldFilterChain(FieldFilterChain::new(first, flat_rest))
+        }
+        expression => PipelineStage::FieldFilterExpression(expression),
+    }
+}
+
 impl FieldFilterChain {
     #[must_use]
     pub fn new(first: FieldFilter, rest: Vec<(FieldFilterLogicOp, FieldFilter)>) -> Self {
@@ -5679,14 +5756,8 @@ impl<'a> Parser<'a> {
             return Ok(PipelineStage::Unwrap(self.parse_unwrap_expression()?));
         }
 
-        let (first, rest) = self.parse_field_filter_chain()?;
-        if rest.is_empty() {
-            Ok(PipelineStage::FieldFilter(first))
-        } else {
-            Ok(PipelineStage::FieldFilterChain(FieldFilterChain::new(
-                first, rest,
-            )))
-        }
+        let expression = self.parse_field_filter_expression()?;
+        Ok(field_filter_expression_to_pipeline_stage(expression))
     }
 
     fn try_parse_line_filter(&mut self) -> Result<Option<LineFilter>, ParseError> {
@@ -5838,10 +5909,19 @@ impl<'a> Parser<'a> {
         FieldFilter::try_new(name, op, value)
     }
 
-    fn parse_field_filter_chain(
-        &mut self,
-    ) -> Result<(FieldFilter, Vec<(FieldFilterLogicOp, FieldFilter)>), ParseError> {
-        let first = self.parse_field_filter()?;
+    fn parse_field_filter_primary(&mut self) -> Result<FieldFilterExpression, ParseError> {
+        self.skip_ws();
+        if self.consume("(") {
+            let expression = self.parse_field_filter_expression()?;
+            self.skip_ws();
+            self.expect(')')?;
+            return Ok(FieldFilterExpression::Group(Box::new(expression)));
+        }
+        self.parse_field_filter().map(FieldFilterExpression::Filter)
+    }
+
+    fn parse_field_filter_expression(&mut self) -> Result<FieldFilterExpression, ParseError> {
+        let first = self.parse_field_filter_primary()?;
         let mut rest = Vec::new();
         loop {
             self.skip_ws();
@@ -5851,14 +5931,25 @@ impl<'a> Parser<'a> {
                 FieldFilterLogicOp::Or
             } else if self.consume(",") {
                 FieldFilterLogicOp::And
-            } else if self.peek().is_some_and(is_ident_start) {
+            } else if self
+                .peek()
+                .is_some_and(|ch| is_ident_start(ch) || ch == '(')
+            {
                 FieldFilterLogicOp::And
             } else {
                 break;
             };
-            rest.push((op, self.parse_field_filter()?));
+            rest.push((op, self.parse_field_filter_primary()?));
         }
-        Ok((first, rest))
+
+        if rest.is_empty() {
+            Ok(first)
+        } else {
+            Ok(FieldFilterExpression::Chain {
+                first: Box::new(first),
+                rest,
+            })
+        }
     }
 
     fn parse_comparison_op(&mut self) -> Result<ComparisonOp, ParseError> {

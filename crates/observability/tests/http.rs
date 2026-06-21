@@ -4623,6 +4623,31 @@ async fn format_query_endpoint_formats_or_field_filter_chains() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_parenthesized_field_filter_chains() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=%7Bapp%3D%22api%22%7D%20%7C%20logfmt%20%7C%20duration%20%3E%3D%2020ms%20or%20%28method%20%3D%20%22GET%22%20and%20size%20%3C%3D%2020KB%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"{app="api"} | logfmt | duration>=20000000ns or (method="GET" and size<=20000B)"#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_comma_and_adjacent_field_filter_chains() {
     let state = fixture();
     let app = loki_router(state);
