@@ -26,7 +26,7 @@ use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStat
 use crate::error::TracesError;
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
-use crate::wire::jaeger::decode_jaeger_thrift;
+use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
 use crate::wire::otlp::decode_otlp;
 use crate::wire::zipkin::decode_zipkin;
 
@@ -265,13 +265,21 @@ async fn jaeger_push(
 ) -> Response {
     if let Err(err) = require_content_type(
         &headers,
-        &["application/x-thrift", "application/octet-stream"],
+        &[
+            "application/x-thrift",
+            "application/octet-stream",
+            "application/vnd.apache.thrift.binary",
+        ],
     ) {
         return error_response(&err);
     }
-    match decode_body(&headers, &body, state.max_decompressed)
-        .and_then(|body| decode_jaeger_thrift(&body))
-    {
+    match decode_body(&headers, &body, state.max_decompressed).and_then(|body| {
+        if is_jaeger_binary_thrift(&headers) {
+            decode_jaeger_binary_thrift(&body)
+        } else {
+            decode_jaeger_thrift(&body)
+        }
+    }) {
         Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await,
         Err(err) => error_response(&err),
     }
@@ -341,6 +349,18 @@ fn require_content_type(headers: &HeaderMap, allowed: &[&str]) -> Result<(), Tra
     } else {
         Err(TracesError::UnsupportedContentType(declared.to_string()))
     }
+}
+
+fn is_jaeger_binary_thrift(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|declared| declared.split(';').next())
+        .is_some_and(|media_type| {
+            media_type
+                .trim()
+                .eq_ignore_ascii_case("application/vnd.apache.thrift.binary")
+        })
 }
 
 fn decode_body(
@@ -726,6 +746,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jaeger_binary_thrift_push_returns_202_and_appends() {
+        let (state, sink) = test_state();
+        let resp = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/traces")
+                    .header("content-type", "application/vnd.apache.thrift.binary")
+                    .header("x-scope-orgid", "t")
+                    .body(Body::from(jaeger_binary_batch()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(resp.status() == StatusCode::ACCEPTED);
+        assert!(sink.count() == 1);
+        assert!(sink.span_name(0) == "GET /binary");
+    }
+
+    #[tokio::test]
     async fn jaeger_compact_datagram_appends() {
         let (state, sink) = test_state();
 
@@ -790,5 +831,81 @@ mod tests {
             instrumentation_version: String::new(),
         };
         assert!(validate(&[span], &limits).is_err());
+    }
+
+    fn jaeger_binary_batch() -> Vec<u8> {
+        const T_STOP: u8 = 0;
+        const T_BOOL: u8 = 2;
+        const T_I32: u8 = 8;
+        const T_I64: u8 = 10;
+        const T_BINARY: u8 = 11;
+        const T_STRUCT: u8 = 12;
+        const T_LIST: u8 = 15;
+
+        fn field(out: &mut Vec<u8>, type_: u8, id: i16) {
+            out.push(type_);
+            out.extend_from_slice(&id.to_be_bytes());
+        }
+        fn string(out: &mut Vec<u8>, value: &str) {
+            out.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        fn string_field(out: &mut Vec<u8>, id: i16, value: &str) {
+            field(out, T_BINARY, id);
+            string(out, value);
+        }
+        fn i32_field(out: &mut Vec<u8>, id: i16, value: i32) {
+            field(out, T_I32, id);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        fn i64_field(out: &mut Vec<u8>, id: i16, value: i64) {
+            field(out, T_I64, id);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        fn bool_field(out: &mut Vec<u8>, id: i16, value: bool) {
+            field(out, T_BOOL, id);
+            out.push(u8::from(value));
+        }
+        fn key_value_string(out: &mut Vec<u8>, key: &str, value: &str) {
+            string_field(out, 1, key);
+            i32_field(out, 2, 0);
+            string_field(out, 3, value);
+            out.push(T_STOP);
+        }
+        fn key_value_bool(out: &mut Vec<u8>, key: &str, value: bool) {
+            string_field(out, 1, key);
+            i32_field(out, 2, 3);
+            bool_field(out, 5, value);
+            out.push(T_STOP);
+        }
+
+        let mut out = Vec::new();
+        field(&mut out, T_STRUCT, 1);
+        string_field(&mut out, 1, "checkout");
+        field(&mut out, T_LIST, 2);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&1_i32.to_be_bytes());
+        key_value_string(&mut out, "process.tag", "present");
+        out.push(T_STOP);
+
+        field(&mut out, T_LIST, 2);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&1_i32.to_be_bytes());
+        i64_field(&mut out, 1, 2);
+        i64_field(&mut out, 2, 1);
+        i64_field(&mut out, 3, 3);
+        i64_field(&mut out, 4, 0);
+        string_field(&mut out, 5, "GET /binary");
+        i64_field(&mut out, 8, 1_000);
+        i64_field(&mut out, 9, 25);
+        field(&mut out, T_LIST, 10);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&3_i32.to_be_bytes());
+        key_value_string(&mut out, "span.kind", "server");
+        key_value_string(&mut out, "http.method", "GET");
+        key_value_bool(&mut out, "error", true);
+        out.push(T_STOP);
+        out.push(T_STOP);
+        out
     }
 }

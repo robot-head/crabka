@@ -21,11 +21,22 @@ const T_STRUCT: u8 = 12;
 pub fn decode_jaeger_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> {
     let mut input = CompactInput::new(body);
     let batch = read_batch(&mut input)?;
-    Ok(batch
+    Ok(spans_from_batch(&batch))
+}
+
+/// Decode a Jaeger binary-Thrift HTTP `Batch` body into internal spans.
+pub fn decode_jaeger_binary_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> {
+    let mut input = BinaryInput::new(body);
+    let batch = read_binary_batch(&mut input)?;
+    Ok(spans_from_batch(&batch))
+}
+
+fn spans_from_batch(batch: &JaegerBatch) -> Vec<Span> {
+    batch
         .spans
         .iter()
         .map(|span| jaeger_span_to_internal(span, &batch.process))
-        .collect())
+        .collect()
 }
 
 #[derive(Default)]
@@ -434,6 +445,241 @@ impl<'a> CompactInput<'a> {
     }
 }
 
+const BT_STOP: u8 = 0;
+const BT_BOOL: u8 = 2;
+const BT_BYTE: u8 = 3;
+const BT_DOUBLE: u8 = 4;
+const BT_I16: u8 = 6;
+const BT_I32: u8 = 8;
+const BT_I64: u8 = 10;
+const BT_BINARY: u8 = 11;
+const BT_STRUCT: u8 = 12;
+const BT_MAP: u8 = 13;
+const BT_SET: u8 = 14;
+const BT_LIST: u8 = 15;
+
+fn read_binary_batch(input: &mut BinaryInput<'_>) -> Result<JaegerBatch, WireError> {
+    let mut out = JaegerBatch::default();
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_STRUCT) => out.process = read_binary_process(input)?,
+            (2, BT_LIST) => out.spans = input.read_struct_list(read_binary_span)?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_binary_process(input: &mut BinaryInput<'_>) -> Result<JaegerProcess, WireError> {
+    let mut out = JaegerProcess::default();
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_BINARY) => out.service_name = input.read_string()?,
+            (2, BT_LIST) => out.tags = input.read_struct_list(read_binary_key_value)?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_binary_span(input: &mut BinaryInput<'_>) -> Result<JaegerSpan, WireError> {
+    let mut out = JaegerSpan::default();
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_I64) => out.trace_id_low = input.read_i64()?,
+            (2, BT_I64) => out.trace_id_high = input.read_i64()?,
+            (3, BT_I64) => out.span_id = input.read_i64()?,
+            (4, BT_I64) => out.parent_span_id = input.read_i64()?,
+            (5, BT_BINARY) => out.operation_name = input.read_string()?,
+            (6, BT_LIST) => out.references = input.read_struct_list(read_binary_ref)?,
+            (8, BT_I64) => out.start_time_micros = input.read_i64()?,
+            (9, BT_I64) => out.duration_micros = input.read_i64()?,
+            (10, BT_LIST) => out.tags = input.read_struct_list(read_binary_key_value)?,
+            (11, BT_LIST) => out.logs = input.read_struct_list(read_binary_log)?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_binary_log(input: &mut BinaryInput<'_>) -> Result<JaegerLog, WireError> {
+    let mut out = JaegerLog::default();
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_I64) => out.timestamp_micros = input.read_i64()?,
+            (2, BT_LIST) => out.fields = input.read_struct_list(read_binary_key_value)?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_binary_ref(input: &mut BinaryInput<'_>) -> Result<JaegerRef, WireError> {
+    let mut out = JaegerRef::default();
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_I32) => out.ref_type = input.read_i32()?,
+            (2, BT_I64) => out.trace_id_low = input.read_i64()?,
+            (3, BT_I64) => out.trace_id_high = input.read_i64()?,
+            (4, BT_I64) => out.span_id = input.read_i64()?,
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(out)
+}
+
+fn read_binary_key_value(input: &mut BinaryInput<'_>) -> Result<KeyValue, WireError> {
+    let mut key = String::new();
+    let mut value = None;
+    while let Some((field_type, field_id)) = input.read_field()? {
+        match (field_id, field_type) {
+            (1, BT_BINARY) => key = input.read_string()?,
+            (3, BT_BINARY) => value = Some(AttrValue::Str(input.read_string()?)),
+            (4, BT_DOUBLE) => value = Some(AttrValue::Double(input.read_double()?)),
+            (5, BT_BOOL) => value = Some(AttrValue::Bool(input.read_bool()?)),
+            (6, BT_I64) => value = Some(AttrValue::Int(input.read_i64()?)),
+            (7, BT_BINARY) => value = Some(AttrValue::Bytes(input.read_binary()?)),
+            _ => input.skip(field_type)?,
+        }
+    }
+    Ok(KeyValue {
+        key,
+        value: value.unwrap_or_else(|| AttrValue::Str(String::new())),
+    })
+}
+
+struct BinaryInput<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BinaryInput<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn read_field(&mut self) -> Result<Option<(u8, i16)>, WireError> {
+        let field_type = self.read_u8()?;
+        if field_type == BT_STOP {
+            return Ok(None);
+        }
+        Ok(Some((field_type, self.read_i16()?)))
+    }
+
+    fn read_struct_list<T>(
+        &mut self,
+        read_one: fn(&mut BinaryInput<'_>) -> Result<T, WireError>,
+    ) -> Result<Vec<T>, WireError> {
+        let (element_type, len) = self.read_list_header()?;
+        if element_type != BT_STRUCT {
+            return Err(WireError::Decode("expected struct list".into()));
+        }
+        (0..len).map(|_| read_one(self)).collect()
+    }
+
+    fn read_list_header(&mut self) -> Result<(u8, usize), WireError> {
+        let element_type = self.read_u8()?;
+        let len = usize::try_from(self.read_i32()?)
+            .map_err(|_| WireError::Decode("list length out of range".into()))?;
+        Ok((element_type, len))
+    }
+
+    fn read_string(&mut self) -> Result<String, WireError> {
+        String::from_utf8(self.read_binary()?).map_err(|err| WireError::Decode(err.to_string()))
+    }
+
+    fn read_binary(&mut self) -> Result<Vec<u8>, WireError> {
+        let len = usize::try_from(self.read_i32()?)
+            .map_err(|_| WireError::Decode("binary length out of range".into()))?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| WireError::Decode("binary length overflow".into()))?;
+        if end > self.bytes.len() {
+            return Err(WireError::Decode("truncated binary".into()));
+        }
+        let out = self.bytes[self.pos..end].to_vec();
+        self.pos = end;
+        Ok(out)
+    }
+
+    fn read_bool(&mut self) -> Result<bool, WireError> {
+        Ok(self.read_u8()? != 0)
+    }
+
+    fn read_i16(&mut self) -> Result<i16, WireError> {
+        let mut bytes = [0; 2];
+        self.read_exact(&mut bytes)?;
+        Ok(i16::from_be_bytes(bytes))
+    }
+
+    fn read_i32(&mut self) -> Result<i32, WireError> {
+        let mut bytes = [0; 4];
+        self.read_exact(&mut bytes)?;
+        Ok(i32::from_be_bytes(bytes))
+    }
+
+    fn read_i64(&mut self) -> Result<i64, WireError> {
+        let mut bytes = [0; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(i64::from_be_bytes(bytes))
+    }
+
+    fn read_double(&mut self) -> Result<f64, WireError> {
+        let mut bytes = [0; 8];
+        self.read_exact(&mut bytes)?;
+        Ok(f64::from_bits(u64::from_be_bytes(bytes)))
+    }
+
+    fn read_u8(&mut self) -> Result<u8, WireError> {
+        let Some(byte) = self.bytes.get(self.pos).copied() else {
+            return Err(WireError::Decode("unexpected end of thrift payload".into()));
+        };
+        self.pos += 1;
+        Ok(byte)
+    }
+
+    fn read_exact(&mut self, out: &mut [u8]) -> Result<(), WireError> {
+        let end = self
+            .pos
+            .checked_add(out.len())
+            .ok_or_else(|| WireError::Decode("read length overflow".into()))?;
+        if end > self.bytes.len() {
+            return Err(WireError::Decode("unexpected end of thrift payload".into()));
+        }
+        out.copy_from_slice(&self.bytes[self.pos..end]);
+        self.pos = end;
+        Ok(())
+    }
+
+    fn skip(&mut self, field_type: u8) -> Result<(), WireError> {
+        match field_type {
+            BT_STOP => Ok(()),
+            BT_BOOL | BT_BYTE => self.read_u8().map(|_| ()),
+            BT_I16 => self.read_i16().map(|_| ()),
+            BT_I32 => self.read_i32().map(|_| ()),
+            BT_I64 => self.read_i64().map(|_| ()),
+            BT_DOUBLE => self.read_double().map(|_| ()),
+            BT_BINARY => self.read_binary().map(|_| ()),
+            BT_STRUCT => {
+                while let Some((inner_type, _)) = self.read_field()? {
+                    self.skip(inner_type)?;
+                }
+                Ok(())
+            }
+            BT_LIST | BT_SET => {
+                let (element_type, len) = self.read_list_header()?;
+                for _ in 0..len {
+                    self.skip(element_type)?;
+                }
+                Ok(())
+            }
+            BT_MAP => Err(WireError::Decode("map skip unsupported".into())),
+            other => Err(WireError::Decode(format!("unknown thrift type {other}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::cast_lossless,
@@ -629,6 +875,97 @@ mod tests {
                 .any(|attr| attr.key == "cache.key"
                     && attr.value == AttrValue::Str("users".into()))
         );
+    }
+
+    #[test]
+    fn decodes_jaeger_binary_thrift_batch() {
+        let spans = decode_jaeger_binary_thrift(&encode_binary_sample_batch()).unwrap();
+
+        assert!(spans.len() == 1);
+        let span = &spans[0];
+        assert!(span.trace_id == [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]);
+        assert!(span.span_id == [0, 0, 0, 0, 0, 0, 0, 3]);
+        assert!(span.name == "GET /binary");
+        assert!(span.kind == SpanKind::Server);
+        assert!(span.start_ns == 1_000_000);
+        assert!(span.duration_ns == 25_000);
+        assert!(span.status == StatusCode::Error);
+    }
+
+    fn encode_binary_sample_batch() -> Vec<u8> {
+        const T_STOP: u8 = 0;
+        const T_BOOL: u8 = 2;
+        const T_I32: u8 = 8;
+        const T_I64: u8 = 10;
+        const T_BINARY: u8 = 11;
+        const T_STRUCT: u8 = 12;
+        const T_LIST: u8 = 15;
+
+        fn field(out: &mut Vec<u8>, type_: u8, id: i16) {
+            out.push(type_);
+            out.extend_from_slice(&id.to_be_bytes());
+        }
+        fn string(out: &mut Vec<u8>, value: &str) {
+            out.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(value.as_bytes());
+        }
+        fn string_field(out: &mut Vec<u8>, id: i16, value: &str) {
+            field(out, T_BINARY, id);
+            string(out, value);
+        }
+        fn i32_field(out: &mut Vec<u8>, id: i16, value: i32) {
+            field(out, T_I32, id);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        fn i64_field(out: &mut Vec<u8>, id: i16, value: i64) {
+            field(out, T_I64, id);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        fn bool_field(out: &mut Vec<u8>, id: i16, value: bool) {
+            field(out, T_BOOL, id);
+            out.push(u8::from(value));
+        }
+        fn key_value_string(out: &mut Vec<u8>, key: &str, value: &str) {
+            string_field(out, 1, key);
+            i32_field(out, 2, 0);
+            string_field(out, 3, value);
+            out.push(T_STOP);
+        }
+        fn key_value_bool(out: &mut Vec<u8>, key: &str, value: bool) {
+            string_field(out, 1, key);
+            i32_field(out, 2, 3);
+            bool_field(out, 5, value);
+            out.push(T_STOP);
+        }
+
+        let mut out = Vec::new();
+        field(&mut out, T_STRUCT, 1);
+        string_field(&mut out, 1, "checkout");
+        field(&mut out, T_LIST, 2);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&1_i32.to_be_bytes());
+        key_value_string(&mut out, "process.tag", "present");
+        out.push(T_STOP);
+
+        field(&mut out, T_LIST, 2);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&1_i32.to_be_bytes());
+        i64_field(&mut out, 1, 2);
+        i64_field(&mut out, 2, 1);
+        i64_field(&mut out, 3, 3);
+        i64_field(&mut out, 4, 0);
+        string_field(&mut out, 5, "GET /binary");
+        i64_field(&mut out, 8, 1_000);
+        i64_field(&mut out, 9, 25);
+        field(&mut out, T_LIST, 10);
+        out.push(T_STRUCT);
+        out.extend_from_slice(&3_i32.to_be_bytes());
+        key_value_string(&mut out, "span.kind", "server");
+        key_value_string(&mut out, "http.method", "GET");
+        key_value_bool(&mut out, "error", true);
+        out.push(T_STOP);
+        out.push(T_STOP);
+        out
     }
 
     fn encode_sample_batch() -> Vec<u8> {
