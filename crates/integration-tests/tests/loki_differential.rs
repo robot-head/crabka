@@ -3662,6 +3662,41 @@ async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let paths = [
+        "labels?start=0&end=2595601000000000",
+        "label/app/values?start=0&end=2595601000000000",
+        "series?match[]=%7Bapp%3D%22api%22%7D&start=0&end=2595601000000000",
+    ];
+
+    for path in paths {
+        let loki_error = loki_metadata_error(&http, &loki_base, path).await;
+        let crabka_error = crabka_metadata_error(querier.clone(), path).await;
+
+        assert!(crabka_error == loki_error);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
