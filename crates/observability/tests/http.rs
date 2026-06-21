@@ -11897,6 +11897,29 @@ async fn query_range_endpoint_returns_loki_error_for_excessive_resolution() {
 }
 
 #[tokio::test]
+async fn query_range_endpoint_rejects_loki_query_ranges_over_limit() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=vector%281%29&start=0&end=2595601000000000&step=1h")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "the query time range exceeds the limit (query length: 721h0m1s, limit: 30d1h)"
+    );
+}
+
+#[tokio::test]
 async fn query_range_endpoint_returns_loki_error_for_invalid_start() {
     let state = fixture();
     let app = loki_router(state);

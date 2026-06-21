@@ -7320,6 +7320,7 @@ async fn execute_http_multi_tenant_query(
 ) -> Result<Value, HttpQueryError> {
     if let Some(result) = scalar_vector_expression_result(&params.query) {
         let time_range = time_range(params, kind)?;
+        validate_loki_range_query_range_limit(kind, time_range)?;
         validate_loki_query_range_resolution(params, kind, time_range)?;
         let value = match kind {
             QueryKind::Instant => loki_instant_scalar_or_vector_response(time_range.end_ns, result),
@@ -7359,6 +7360,7 @@ async fn execute_http_query_for_tenant(
     kind: QueryKind,
 ) -> Result<Value, HttpQueryError> {
     let time_range = time_range(params, kind)?;
+    validate_loki_range_query_range_limit(kind, time_range)?;
     validate_query_range_limit(state, time_range)?;
     validate_query_length_limit(state, &params.query)?;
     validate_loki_query_range_resolution(params, kind, time_range)?;
@@ -8297,6 +8299,16 @@ fn validate_loki_volume_query_range_limit(time_range: TimeRange) -> Result<(), H
         return Err(HttpQueryError::LokiQueryRangeTooLarge {
             query_length: format_loki_query_length(query_range_ns),
         });
+    }
+    Ok(())
+}
+
+fn validate_loki_range_query_range_limit(
+    kind: QueryKind,
+    time_range: TimeRange,
+) -> Result<(), HttpQueryError> {
+    if matches!(kind, QueryKind::Range) {
+        validate_loki_volume_query_range_limit(time_range)?;
     }
     Ok(())
 }
