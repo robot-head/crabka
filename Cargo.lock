@@ -2955,6 +2955,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-protocol",
  "crabka-traceql",
+ "dashmap",
  "datafusion",
  "flate2",
  "hex",

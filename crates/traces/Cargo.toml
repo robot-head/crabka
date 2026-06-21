@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-broker = { path = "../broker", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
 crabka-traceql = { path = "../traceql", version = "0.3.7" }
@@ -29,6 +30,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 datafusion = { workspace = true }
+dashmap = { workspace = true }
 flate2 = { workspace = true }
 hex = { workspace = true }
 object_store = { workspace = true }
@@ -53,7 +55,6 @@ wincode = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { path = "../broker", version = "0.3.7" }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }
 crabka-protocol = { path = "../protocol", version = "0.3.7" }
 http-body-util = "0.1"

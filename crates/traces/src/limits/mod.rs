@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod enforce;
 mod overrides;
 
+pub use enforce::{IngestEnforcer, QueryEnforcer};
 pub use overrides::{OverridesError, OverridesProvider};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
