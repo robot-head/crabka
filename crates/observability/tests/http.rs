@@ -3125,6 +3125,18 @@ async fn distributor_router_exposes_loki_ingester_control_endpoints() {
     assert!(text_body(response).await == "unset");
 
     let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/ingester/shutdown?flush=false&delete_ring_tokens=false&terminate=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::NO_CONTENT);
+
+    let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
