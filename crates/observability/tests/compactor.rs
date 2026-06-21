@@ -12,7 +12,9 @@ use crabka_blockstore::{
     BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, labels, log_block_object_path,
     read_log_block, read_log_block_from_object_store, read_log_index_manifest,
     read_tenant_log_index_manifest_from_object_store,
-    read_tenant_log_index_shard_from_object_store, series_fingerprint, write_log_block,
+    read_tenant_log_index_shard_from_object_store,
+    read_tenant_log_index_shard_ranges_from_object_store,
+    read_tenant_log_index_shards_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store, write_log_index_manifest,
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shards_to_object_store,
 };
@@ -767,6 +769,60 @@ async fn compactor_once_loads_existing_manifest_after_restart() {
             .unwrap();
     let api_labels = labels([("app", "api"), ("env", "prod")]);
     let api = series_fingerprint(&api_labels);
+
+    assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(
+        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
+            == vec![first_descriptor, second_descriptor]
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_updates_object_store_shard_catalog_incrementally() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+    let config = compactor_config("observability/logs");
+    let first_run =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![vec![
+            kafka_wal_record(&wal_record_without_position(10, "api ok"), 4, 42),
+        ]]));
+    let first_descriptor = run_compactor_once(&config, first_run, Some(&store))
+        .await
+        .unwrap()
+        .expect("first compacted descriptor");
+
+    let second_run =
+        ServiceDependencies::default().with_wal_consumer(RecordingWalConsumer::new(vec![vec![
+            kafka_wal_record(&wal_record_without_position(19, "api error"), 4, 43),
+        ]]));
+    let second_descriptor = run_compactor_once(&config, second_run, Some(&store))
+        .await
+        .unwrap()
+        .expect("second compacted descriptor");
+
+    let prefix = ObjectPath::from("observability/logs");
+    let shard_ranges =
+        read_tenant_log_index_shard_ranges_from_object_store(&store, &prefix, "tenant-a")
+            .await
+            .unwrap();
+    assert!(
+        shard_ranges
+            == vec![
+                first_descriptor.key.time_range,
+                second_descriptor.key.time_range
+            ]
+    );
+
+    let api_labels = labels([("app", "api"), ("env", "prod")]);
+    let api = series_fingerprint(&api_labels);
+    let (loaded_labels, loaded_blocks) = read_tenant_log_index_shards_from_object_store(
+        &store,
+        &prefix,
+        "tenant-a",
+        TimeRange::new(0, 30).unwrap(),
+    )
+    .await
+    .unwrap();
 
     assert!(loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
     assert!(

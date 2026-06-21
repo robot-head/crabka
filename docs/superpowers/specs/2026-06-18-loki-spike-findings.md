@@ -1254,10 +1254,12 @@ duplicating deterministic block keys. `QuerierState::from_tenant_object_store_sh
 uses that catalog/range loader for the HTTP path. `ServiceConfig` and
 `build_querier_state` now expose this as a startup choice alongside local
 manifests and tenant object-store manifests. The service is no longer limited
-to indexes assembled in the same process that writes blocks. Remaining
-persistence work is wiring the role runtime/server startup around this config
-surface and adding incremental catalog update semantics for the real compactor
-loop.
+to indexes assembled in the same process that writes blocks. The real compactor
+loop now updates the tenant shard catalog incrementally as it writes durable
+object-store blocks, so a shard-catalog querier can discover newly compacted
+blocks without a prebuilt fixture. Remaining persistence work is deeper
+compactor/catalog hardening around overlapping shard policies and crash-window
+validation.
 
 Parquet log blocks now have the same object-store boundary. `crabka-blockstore`
 can write a complete block payload to `object_store::ObjectStore` using the
