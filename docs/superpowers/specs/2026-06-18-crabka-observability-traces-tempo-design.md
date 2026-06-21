@@ -652,14 +652,13 @@ invariant). The following deliberate deviations from the original design/plans
 stand as-built:
 
 - **`BlockIndex` seam without a generic `BlockStore`.** The pluggable per-signal
-  index trait (`BlockIndex`) exists and the logs/metrics index (`Index`) and
-  `TraceIndex` both implement it — this is the load-bearing generalization the spec
-  required (and that profiles will reuse). The concrete index type was **not**
-  renamed to `SeriesIndex`, and `BlockStore` is **not** parameterized over
-  `BlockIndex`: the traces write/read path uses `BlockWriter` + `TraceIndex` +
-  declared `span_block_decl()` schema validation directly, so a generic `BlockStore<I>`
-  facade was unnecessary and would have churned the shared logs/metrics path for no
-  functional gain.
+  index trait (`BlockIndex`) exists; the logs/metrics index (`SeriesIndex`) and
+  `TraceIndex` both implement it, and the profiles signal's `ProfileIndex` embeds
+  `SeriesIndex` — this is the load-bearing generalization the spec required.
+  `BlockStore` is **not** parameterized over `BlockIndex`: the traces write/read
+  path uses `BlockWriter` + `TraceIndex` + declared `span_block_decl()` schema
+  validation directly, so a generic `BlockStore<I>` facade was unnecessary and would
+  have churned the shared logs/metrics/profiles path for no functional gain.
 - **TraceQL-metrics maturity flag omitted (open question resolved).** Per the
   project rule against default-off feature gates for new behavior, the
   "experimental" TraceQL-metrics functions (`histogram_over_time`, `compare`,

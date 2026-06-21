@@ -4,13 +4,13 @@
 > block schema (incl. nested-set columns + DFS pre-order), `ShardedTraceBloom`,
 > `TraceIndex`, the span-row builder, and the end-to-end pipeline test
 > (`crates/blockstore/tests/trace_pipeline_e2e.rs`) are implemented and tested.
-> **Two boxes left unchecked by design (Task 2 Steps 4–5):** the concrete index was
-> *not* renamed `Index`→`SeriesIndex`, and `BlockStore` was *not* parameterized as
-> `BlockStore<I: BlockIndex>`. The load-bearing seam — the `BlockIndex` trait that
-> both `Index` and `TraceIndex` implement — exists; the traces path uses
-> `BlockWriter` + `TraceIndex` + `span_block_decl()` validation directly, so a
-> generic `BlockStore<I>` facade was unnecessary and refactoring it would churn the
-> shared logs/metrics path for no functional gain. Accepted deviation — see design
+> **Two boxes left unchecked by design (Task 2 Steps 4–5):** `BlockStore` was *not*
+> parameterized as `BlockStore<I: BlockIndex>`. The concrete index *is* named
+> `SeriesIndex` and implements `BlockIndex` (alongside `TraceIndex`, and the profiles
+> signal's `ProfileIndex`, which embeds `SeriesIndex`); the traces path uses
+> `BlockWriter` + `TraceIndex` + `span_block_decl()` validation directly, so a generic
+> `BlockStore<I>` facade was unnecessary and refactoring it would churn the shared
+> logs/metrics/profiles path for no functional gain. Accepted deviation — see design
 > spec §14.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
