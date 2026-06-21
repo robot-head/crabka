@@ -10,10 +10,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{
     BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, labels, log_block_object_path,
-    read_log_block_from_object_store, read_tenant_log_index_manifest_from_object_store,
-    read_tenant_log_index_shard_from_object_store, series_fingerprint,
-    write_log_block_to_object_store, write_tenant_log_index_manifest_to_object_store,
-    write_tenant_log_index_shards_to_object_store,
+    read_log_block, read_log_block_from_object_store, read_log_index_manifest,
+    read_tenant_log_index_manifest_from_object_store,
+    read_tenant_log_index_shard_from_object_store, series_fingerprint, write_log_block,
+    write_log_block_to_object_store, write_log_index_manifest,
+    write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shards_to_object_store,
 };
 use crabka_client_consumer::ConsumerError;
 use crabka_observability::{
@@ -577,6 +578,72 @@ async fn compactor_runtime_materializes_active_delete_requests_in_existing_block
         read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
             .await
             .unwrap();
+    assert!(
+        loaded_blocks
+            .match_blocks("tenant-a", key.time_range, &[api])
+            .len()
+            == 1
+    );
+}
+
+#[tokio::test]
+async fn compactor_runtime_materializes_active_delete_requests_in_existing_local_manifest_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFileSystem::new_with_prefix(dir.path()).unwrap();
+    let mut config = compactor_config("observability/logs");
+    config.data_root = dir.path().to_path_buf();
+    let mut label_index = LabelIndex::default();
+    let api = label_index.insert_series("tenant-a", labels([("app", "api")]));
+    let key = BlockKey::new(
+        "tenant-a",
+        0,
+        42,
+        44,
+        TimeRange::new(14_000_000_000, 17_000_000_000).unwrap(),
+    );
+    let descriptor = write_log_block(
+        dir.path(),
+        &key,
+        vec![
+            LogRow::new(api, 14_000_000_000, "api ok", BTreeMap::new()),
+            LogRow::new(api, 15_000_000_000, "api secret", BTreeMap::new()),
+            LogRow::new(api, 17_000_000_000, "api later secret", BTreeMap::new()),
+        ],
+    )
+    .unwrap();
+    let mut block_index = BlockIndex::default();
+    block_index.insert(descriptor);
+    write_log_index_manifest(dir.path(), &label_index, &block_index).unwrap();
+
+    let app = build_service_router(&config, ServiceDependencies::default(), Some(&store))
+        .await
+        .unwrap();
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/delete?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22secret%22&start=14&end=16")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(delete_response.status() == StatusCode::NO_CONTENT);
+
+    let dependencies = ServiceDependencies::default()
+        .with_wal_consumer(RecordingWalConsumer::new(vec![Vec::new()]));
+    let descriptor = run_compactor_once(&config, dependencies, Some(&store))
+        .await
+        .unwrap();
+    assert!(descriptor.is_none());
+
+    let rows = read_log_block(dir.path(), &key).unwrap();
+    assert!(
+        rows.iter().map(|row| row.line.as_str()).collect::<Vec<_>>()
+            == vec!["api ok", "api later secret"]
+    );
+    let (_, loaded_blocks) = read_log_index_manifest(dir.path()).unwrap();
     assert!(
         loaded_blocks
             .match_blocks("tenant-a", key.time_range, &[api])

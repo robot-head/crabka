@@ -28,7 +28,8 @@ use crabka_blockstore::{
     read_tenant_log_index_shard_from_object_store,
     read_tenant_log_index_shard_ranges_from_object_store,
     read_tenant_log_index_shards_from_object_store, register_log_blocks,
-    register_log_blocks_from_object_store, series_fingerprint, write_log_block_to_object_store,
+    register_log_blocks_from_object_store, series_fingerprint, write_log_block,
+    write_log_block_to_object_store, write_log_index_manifest,
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shard_to_object_store,
 };
 use crabka_client_admin::{
@@ -439,6 +440,10 @@ pub async fn run_compactor_once(
     let delete_requests =
         compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
     load_existing_compaction_frontier(store, &prefix, &compaction_frontier).await?;
+    materialize_delete_requests_in_existing_local_manifest_blocks(
+        &config.data_root,
+        &delete_requests,
+    )?;
     let consumer = dependencies
         .wal_consumer
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
@@ -490,6 +495,10 @@ pub async fn run_compactor_until_idle(
     let delete_requests =
         compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
     load_existing_compaction_frontier(store, &prefix, &compaction_frontier).await?;
+    materialize_delete_requests_in_existing_local_manifest_blocks(
+        &config.data_root,
+        &delete_requests,
+    )?;
     let consumer = dependencies
         .wal_consumer
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
@@ -555,6 +564,10 @@ pub async fn run_compactor_until_shutdown(
     let delete_requests =
         compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
     load_existing_compaction_frontier(store, &prefix, &compaction_frontier).await?;
+    materialize_delete_requests_in_existing_local_manifest_blocks(
+        &config.data_root,
+        &delete_requests,
+    )?;
     let consumer = dependencies
         .wal_consumer
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
@@ -864,6 +877,76 @@ async fn materialize_delete_requests_in_existing_object_store_blocks(
                 .await?;
             }
         }
+    }
+    Ok(())
+}
+
+fn materialize_delete_requests_in_existing_local_manifest_blocks(
+    root: &FsPath,
+    delete_requests: &SharedLogDeleteRequests,
+) -> Result<(), CompactorRunError> {
+    let (label_index, block_index) = match read_log_index_manifest(root) {
+        Ok(indexes) => indexes,
+        Err(BlockStoreError::Io(error)) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let active_tenants = active_log_delete_tenants(delete_requests)?;
+    if active_tenants.is_empty() {
+        return Ok(());
+    }
+
+    let mut next_label_index = LabelIndex::default();
+    let mut next_block_index = BlockIndex::default();
+    let mut changed = false;
+
+    for block in block_index.blocks() {
+        let tenant = &block.key.tenant;
+        let delete_filters = if active_tenants.contains(tenant) {
+            active_log_delete_filters_from_requests(delete_requests, tenant, block.key.time_range)?
+        } else {
+            Vec::new()
+        };
+        let mut descriptor = block.clone();
+
+        if !delete_filters.is_empty() {
+            let rows = read_log_block(root, &block.key)?;
+            let original_len = rows.len();
+            let mut kept_rows = Vec::with_capacity(original_len);
+            for row in rows {
+                let labels = label_index
+                    .labels_for(tenant, row.series_fingerprint)
+                    .ok_or_else(|| CompactorRunError::MissingSeriesLabels {
+                        tenant: tenant.clone(),
+                        fingerprint: row.series_fingerprint,
+                    })?;
+                if is_deleted_log_entry(
+                    &delete_filters,
+                    labels,
+                    &row.line,
+                    &row.structured_metadata,
+                    row.timestamp_ns,
+                ) {
+                    continue;
+                }
+                kept_rows.push(row);
+            }
+
+            if kept_rows.len() != original_len {
+                changed = true;
+                if kept_rows.is_empty() {
+                    continue;
+                }
+                descriptor = write_log_block(root, &block.key, kept_rows)?;
+            }
+        }
+
+        insert_descriptor_labels(&mut next_label_index, &label_index, tenant, &descriptor)?;
+        next_block_index.insert(descriptor);
+    }
+
+    if changed {
+        write_log_index_manifest(root, &next_label_index, &next_block_index)?;
     }
     Ok(())
 }

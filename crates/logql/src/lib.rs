@@ -2207,15 +2207,11 @@ fn template_value_is_collection(value: &TemplateRuntimeValue) -> bool {
     )
 }
 
-fn template_index_value(
-    value: &TemplateRuntimeValue,
-    index: &str,
-) -> Option<TemplateRuntimeValue> {
+fn template_index_value(value: &TemplateRuntimeValue, index: &str) -> Option<TemplateRuntimeValue> {
     match value {
-        TemplateRuntimeValue::Json(serde_json::Value::Object(object)) => object
-            .get(index)
-            .cloned()
-            .map(TemplateRuntimeValue::Json),
+        TemplateRuntimeValue::Json(serde_json::Value::Object(object)) => {
+            object.get(index).cloned().map(TemplateRuntimeValue::Json)
+        }
         TemplateRuntimeValue::Json(serde_json::Value::Array(values)) => index
             .parse::<usize>()
             .ok()
@@ -2235,10 +2231,7 @@ fn template_index_value(
     }
 }
 
-fn template_slice_string(
-    value: &str,
-    bounds: &[TemplateRuntimeValue],
-) -> TemplateRuntimeValue {
+fn template_slice_string(value: &str, bounds: &[TemplateRuntimeValue]) -> TemplateRuntimeValue {
     let Some((start, end)) = template_slice_bounds(value.len(), bounds) else {
         return TemplateRuntimeValue::String(String::new());
     };
@@ -2259,19 +2252,12 @@ fn template_slice_array(
     TemplateRuntimeValue::Json(serde_json::Value::Array(values[start..end].to_vec()))
 }
 
-fn template_slice_bounds(
-    len: usize,
-    bounds: &[TemplateRuntimeValue],
-) -> Option<(usize, usize)> {
+fn template_slice_bounds(len: usize, bounds: &[TemplateRuntimeValue]) -> Option<(usize, usize)> {
     if bounds.len() > 3 {
         return None;
     }
-    let start = bounds
-        .first()
-        .map_or(Some(0), parse_template_bound)?;
-    let end = bounds
-        .get(1)
-        .map_or(Some(len), parse_template_bound)?;
+    let start = bounds.first().map_or(Some(0), parse_template_bound)?;
+    let end = bounds.get(1).map_or(Some(len), parse_template_bound)?;
     if let Some(capacity) = bounds.get(2) {
         let capacity = parse_template_bound(capacity)?;
         if end > capacity || capacity > len {
