@@ -7349,10 +7349,7 @@ async fn query_range_endpoint_line_format_ranges_with_index_and_value_variables(
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(
-        body.pointer("/data/result/0/values")
-            == Some(&json!([["19", "0:rate=30;1:sum=15;"]]))
-    );
+    assert!(body.pointer("/data/result/0/values") == Some(&json!([["19", "0:rate=30;1:sum=15;"]])));
 }
 
 #[tokio::test]
