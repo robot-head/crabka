@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::metricsgen::checkpoint::CheckpointCodecError;
 use crate::metricsgen::clock::Clock;
 use crate::metricsgen::config::MetricsGenConfig;
 use crate::metricsgen::contract::SpanRecord;
@@ -48,6 +49,23 @@ impl MetricsGenerator {
 
         state.span_metrics.record_span(span);
         state.edges.record_span(span, self.clock.now_ns());
+    }
+
+    pub fn restore_edge_checkpoint(
+        &mut self,
+        tenant: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), CheckpointCodecError> {
+        let cfg = &self.cfg;
+        let state = self
+            .per_tenant
+            .entry(tenant.to_string())
+            .or_insert_with(|| TenantState {
+                span_metrics: SpanMetricsRegistry::new(cfg),
+                edges: EdgeStore::new(cfg),
+            });
+        state.edges.restore_checkpoint_entry(tenant, key, value)
     }
 
     #[must_use]

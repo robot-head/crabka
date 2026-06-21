@@ -59,6 +59,44 @@ where
         self
     }
 
+    #[must_use]
+    pub fn with_checkpoint_store_for_tenants<I, T>(
+        self,
+        store: &Arc<dyn EdgeCheckpointStore>,
+        tenants: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let service = self.with_checkpoint_store(store.clone());
+        {
+            let mut generator = service
+                .generator
+                .lock()
+                .expect("metrics generator mutex poisoned");
+            let mut checkpoint_keys = service
+                .checkpoint_keys
+                .lock()
+                .expect("metrics generator checkpoint key mutex poisoned");
+            for tenant in tenants {
+                let tenant = tenant.as_ref();
+                let entries = store.load_all(tenant);
+                let mut keys = BTreeSet::new();
+                for (key, value) in entries {
+                    if generator
+                        .restore_edge_checkpoint(tenant, &key, &value)
+                        .is_ok()
+                    {
+                        keys.insert(key);
+                    }
+                }
+                checkpoint_keys.insert(tenant.to_string(), keys);
+            }
+        }
+        service
+    }
+
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
         if !self
             .pending_payloads
@@ -333,6 +371,32 @@ mod tests {
         svc.source
             .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
         assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkpointed_edges_are_restored_on_restart() {
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        let svc = service().with_checkpoint_store(store.clone());
+        svc.source
+            .push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
+        assert!(svc.poll_once(100).await.unwrap() == 1);
+
+        let store_for_restore: Arc<dyn EdgeCheckpointStore> = store.clone();
+        let restarted = service().with_checkpoint_store_for_tenants(&store_for_restore, ["A"]);
+        restarted
+            .source
+            .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
+        assert!(restarted.poll_once(100).await.unwrap() == 1);
+        assert!(restarted.collect_once().await.unwrap() == 1);
+
+        let payload = restarted.sink.writes().pop().unwrap();
+        assert!(
+            payload
+                .series
+                .iter()
+                .any(|s| s.name == "traces_service_graph_request_total")
+        );
         assert!(store.load_all("A").is_empty());
     }
 }

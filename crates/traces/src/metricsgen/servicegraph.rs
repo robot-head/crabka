@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 
-use bytes::{BufMut, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 
-use crate::metricsgen::checkpoint::encode_checkpoint_key;
+use crate::metricsgen::checkpoint::{
+    CheckpointCodecError, encode_checkpoint_key, parse_checkpoint_key,
+};
 use crate::metricsgen::config::MetricsGenConfig;
 use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
 use crate::metricsgen::series::{Series, SeriesSample, sorted_labels};
@@ -203,6 +205,24 @@ impl EdgeStore {
         entries
     }
 
+    pub fn restore_checkpoint_entry(
+        &mut self,
+        tenant: &str,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), CheckpointCodecError> {
+        let (encoded_tenant, trace_id, edge_id) = parse_checkpoint_key(key)?;
+        if encoded_tenant != tenant {
+            return Ok(());
+        }
+        let edge_id: [u8; 8] = edge_id
+            .try_into()
+            .map_err(|_| CheckpointCodecError::BadEdgeId)?;
+        let edge = decode_checkpoint_value(value)?;
+        self.edges.insert((trace_id, edge_id), edge);
+        Ok(())
+    }
+
     #[must_use]
     pub fn drain(&mut self, timestamp_ms: i64) -> Vec<Series> {
         let mut out = Vec::new();
@@ -336,6 +356,34 @@ fn encode_checkpoint_value(edge: &Edge) -> Vec<u8> {
     buf.to_vec()
 }
 
+fn decode_checkpoint_value(mut buf: &[u8]) -> Result<Edge, CheckpointCodecError> {
+    if buf.len() < 10 {
+        return Err(CheckpointCodecError::Truncated);
+    }
+    let connection_type = match buf.get_u8() {
+        0 => ConnectionType::Unset,
+        1 => ConnectionType::VirtualNode,
+        2 => ConnectionType::MessagingSystem,
+        3 => ConnectionType::Database,
+        _ => return Err(CheckpointCodecError::BadConnectionType),
+    };
+    let first_seen_ns = buf.get_i64();
+    let failed = buf.get_u8() != 0;
+    let client_service = get_optional_string(&mut buf)?;
+    let server_service = get_optional_string(&mut buf)?;
+    let client_latency_ns = get_optional_i64(&mut buf)?;
+    let server_latency_ns = get_optional_i64(&mut buf)?;
+    Ok(Edge {
+        client_service,
+        server_service,
+        client_latency_ns,
+        server_latency_ns,
+        failed,
+        connection_type,
+        first_seen_ns,
+    })
+}
+
 fn put_optional_string(buf: &mut BytesMut, value: Option<&str>) {
     match value {
         Some(value) => {
@@ -356,6 +404,41 @@ fn put_optional_i64(buf: &mut BytesMut, value: Option<i64>) {
         }
         None => buf.put_u8(0),
     }
+}
+
+fn get_optional_string(buf: &mut &[u8]) -> Result<Option<String>, CheckpointCodecError> {
+    let present = get_presence(buf)?;
+    if !present {
+        return Ok(None);
+    }
+    if buf.len() < 4 {
+        return Err(CheckpointCodecError::Truncated);
+    }
+    let len = buf.get_u32() as usize;
+    if buf.len() < len {
+        return Err(CheckpointCodecError::Truncated);
+    }
+    let value = String::from_utf8(buf[..len].to_vec()).map_err(|_| CheckpointCodecError::Utf8)?;
+    buf.advance(len);
+    Ok(Some(value))
+}
+
+fn get_optional_i64(buf: &mut &[u8]) -> Result<Option<i64>, CheckpointCodecError> {
+    let present = get_presence(buf)?;
+    if !present {
+        return Ok(None);
+    }
+    if buf.len() < 8 {
+        return Err(CheckpointCodecError::Truncated);
+    }
+    Ok(Some(buf.get_i64()))
+}
+
+fn get_presence(buf: &mut &[u8]) -> Result<bool, CheckpointCodecError> {
+    if buf.is_empty() {
+        return Err(CheckpointCodecError::Truncated);
+    }
+    Ok(buf.get_u8() != 0)
 }
 
 fn service_graph_labels((client, server, connection_type): LabelKey) -> Vec<(String, String)> {

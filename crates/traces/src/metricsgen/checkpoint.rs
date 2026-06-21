@@ -13,6 +13,10 @@ pub enum CheckpointCodecError {
     Utf8,
     #[error("bad trace id length in checkpoint key")]
     BadTraceId,
+    #[error("bad edge id length in checkpoint key")]
+    BadEdgeId,
+    #[error("bad connection type in checkpoint value")]
+    BadConnectionType,
 }
 
 #[must_use]
