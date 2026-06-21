@@ -116,8 +116,12 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = search_query(&uri) else {
-        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    let query = match search_query(&uri) {
+        Ok(Some(query)) => query,
+        Ok(None) => {
+            return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+        }
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let start_ns = match required_seconds_param(&uri, "start") {
         Ok(value) => value,
@@ -426,9 +430,13 @@ fn query_param(uri: &Uri, key: &str) -> Option<String> {
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
 }
 
-fn search_query(uri: &Uri) -> Option<String> {
-    query_param(uri, "q")
-        .or_else(|| query_param(uri, "tags").and_then(|tags| tags_to_traceql(&tags)))
+fn search_query(uri: &Uri) -> Result<Option<String>, &'static str> {
+    if let Some(query) = query_param(uri, "q") {
+        return Ok(Some(query));
+    }
+    query_param(uri, "tags")
+        .map(|tags| tags_to_traceql(&tags).ok_or("invalid query parameter tags"))
+        .transpose()
 }
 
 fn tags_to_traceql(tags: &str) -> Option<String> {
@@ -1946,6 +1954,14 @@ mod tests {
         assert!(status == StatusCode::OK);
         assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
         assert!(body["traces"][0]["spanSets"][0]["matched"] == 1);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_legacy_tags_parameter() {
+        let (status, body) = get_text("/api/search?tags=svc&start=0&end=10").await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter tags");
     }
 
     #[tokio::test]
