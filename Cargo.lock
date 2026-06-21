@@ -2628,6 +2628,7 @@ dependencies = [
  "futures-util",
  "object_store",
  "opentelemetry-proto",
+ "parquet",
  "prost",
  "regex",
  "serde",
