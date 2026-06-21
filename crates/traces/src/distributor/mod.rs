@@ -500,11 +500,12 @@ pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError
 
 fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), TracesError> {
     for attr in attrs {
-        let len = match &attr.value {
-            AttrValue::Str(value) => value.len(),
-            AttrValue::Bytes(value) => value.len(),
-            AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => 0,
-        };
+        let len = attr.key.len()
+            + match &attr.value {
+                AttrValue::Str(value) => value.len(),
+                AttrValue::Bytes(value) => value.len(),
+                AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => 0,
+            };
         if len > limits.max_attr_value_len {
             return Err(TracesError::Limit(format!(
                 "attribute `{}` exceeds limit {}",
@@ -980,6 +981,36 @@ mod tests {
             instrumentation_scope: String::new(),
             instrumentation_version: String::new(),
         };
+        assert!(validate(&[span], &limits).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_large_attribute_keys() {
+        let limits = TenantLimits {
+            max_attr_value_len: 4,
+            ..TenantLimits::default()
+        };
+        let span = Span {
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: "x".into(),
+            kind: crate::span::SpanKind::Internal,
+            start_ns: 0,
+            duration_ns: 1,
+            status: crate::span::StatusCode::Unset,
+            status_message: String::new(),
+            resource_attrs: Vec::new(),
+            span_attrs: vec![KeyValue {
+                key: "too-large".into(),
+                value: AttrValue::Bool(true),
+            }],
+            events: Vec::new(),
+            links: Vec::new(),
+            instrumentation_scope: String::new(),
+            instrumentation_version: String::new(),
+        };
+
         assert!(validate(&[span], &limits).is_err());
     }
 
