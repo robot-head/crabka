@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use crabka_blockstore::{BlockStore, BlockWriter, TraceIndex};
+use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
@@ -19,6 +19,7 @@ use crabka_traces::{
     },
     querier::{self as trace_querier, http::HttpConfig, store::CrabkaSpanStore},
     query_frontend::{self, QueryFrontendConfig, backend_blocks_by_tenant_from_trace_index},
+    span::batch::RESOURCE_ATTR_PREFIX,
 };
 use object_store::ObjectStore;
 use object_store::path::Path;
@@ -82,6 +83,10 @@ struct Cli {
     max_ingest_spans_per_second: usize,
     #[arg(long, default_value_t = usize::MAX)]
     ingest_rate_burst: usize,
+    #[arg(long = "promote-span-attr")]
+    promote_span_attrs: Vec<String>,
+    #[arg(long = "promote-resource-attr")]
+    promote_resource_attrs: Vec<String>,
     #[arg(long, default_value_t = 64 * 1024)]
     max_attr_value_len: usize,
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
@@ -212,6 +217,7 @@ async fn run_block_builder(
     cli: Cli,
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let promoted_attrs = promoted_attrs_from_cli(&cli)?;
     let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-block-builder").await?;
     let configured = build_object_store(&cli)?;
     let writer = BlockWriter::new(configured.store.clone());
@@ -227,7 +233,7 @@ async fn run_block_builder(
             object_key_prefix,
             index_key: trace_index_key,
             window: Duration::from_secs(5),
-            promoted_attrs: Vec::new(),
+            promoted_attrs,
         },
         shutdown,
     )
@@ -366,6 +372,35 @@ fn build_object_store(
     Ok(configured)
 }
 
+fn promoted_attrs_from_cli(cli: &Cli) -> Result<Vec<PromotedSpanAttr>, String> {
+    let mut attrs = Vec::new();
+    for spec in &cli.promote_resource_attrs {
+        attrs.push(parse_promoted_attr(spec, Some(RESOURCE_ATTR_PREFIX))?);
+    }
+    for spec in &cli.promote_span_attrs {
+        attrs.push(parse_promoted_attr(spec, None)?);
+    }
+    Ok(attrs)
+}
+
+fn parse_promoted_attr(spec: &str, key_prefix: Option<&str>) -> Result<PromotedSpanAttr, String> {
+    let (key, value_type) = spec.split_once(':').unwrap_or((spec, "string"));
+    if key.is_empty() {
+        return Err("promoted attribute key cannot be empty".into());
+    }
+
+    let key = format!("{}{}", key_prefix.unwrap_or_default(), key);
+    match value_type {
+        "string" | "str" => Ok(PromotedSpanAttr::string(key)),
+        "int" | "i64" => Ok(PromotedSpanAttr::int(key)),
+        "double" | "float" | "f64" => Ok(PromotedSpanAttr::double(key)),
+        "bool" | "boolean" => Ok(PromotedSpanAttr::bool(key)),
+        other => Err(format!(
+            "unsupported promoted attribute type {other:?}; expected string, int, double, or bool"
+        )),
+    }
+}
+
 async fn run_metrics_generator(
     cli: Cli,
     shutdown: CancellationToken,
@@ -492,6 +527,43 @@ mod tests {
     fn parses_block_builder_target() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
         assert!(matches!(cli.target, Target::BlockBuilder));
+    }
+
+    #[test]
+    fn parses_block_builder_promoted_attrs() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--promote-resource-attr",
+            "service.name:string",
+            "--promote-span-attr",
+            "http.status_code:int",
+            "--promote-span-attr",
+            "http.method",
+        ])
+        .unwrap();
+
+        let promoted = promoted_attrs_from_cli(&cli).unwrap();
+        assert!(
+            promoted[0] == crabka_blockstore::PromotedSpanAttr::string("__resource.service.name")
+        );
+        assert!(promoted[1] == crabka_blockstore::PromotedSpanAttr::int("http.status_code"));
+        assert!(promoted[2] == crabka_blockstore::PromotedSpanAttr::string("http.method"));
+    }
+
+    #[test]
+    fn rejects_unknown_promoted_attr_type() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--promote-span-attr",
+            "http.method:bytes",
+        ])
+        .unwrap();
+
+        assert!(promoted_attrs_from_cli(&cli).is_err());
     }
 
     #[test]

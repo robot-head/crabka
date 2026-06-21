@@ -10,7 +10,7 @@ use super::nested_set::assign_nested_set;
 use super::{AttrValue, KeyValue, Span};
 use crate::error::TracesError;
 
-pub(crate) const RESOURCE_ATTR_PREFIX: &str = "__resource.";
+pub const RESOURCE_ATTR_PREFIX: &str = "__resource.";
 
 /// Build one span-block `RecordBatch` from spans of one trace.
 pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
