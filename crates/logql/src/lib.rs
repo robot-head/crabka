@@ -1366,6 +1366,7 @@ fn parse_template_parts(template: &str) -> Result<Vec<TemplatePart>, ParseError>
         }
         if expression == "else"
             || expression.starts_with("else if ")
+            || expression.starts_with("else with ")
             || expression == "end"
             || expression.starts_with("range ")
             || expression.starts_with("with ")
@@ -1524,6 +1525,17 @@ fn parse_template_with(
         ));
     }
     if control_expression != "else" {
+        if let Some(with_expression) = control_expression.strip_prefix("else with ") {
+            let (with, next_pos) = parse_template_with(template, control_next, with_expression)?;
+            return Ok((
+                TemplateWith {
+                    expression,
+                    parts,
+                    else_parts: vec![TemplatePart::With(with)],
+                },
+                next_pos,
+            ));
+        }
         return Err(template_parse_error("unexpected template control action"));
     }
 
@@ -1615,7 +1627,11 @@ fn find_template_control_action(
                 return Ok(Some((body_end, expression, action.next_pos)));
             }
             depth -= 1;
-        } else if depth == 0 && (expression == "else" || expression.starts_with("else if ")) {
+        } else if depth == 0
+            && (expression == "else"
+                || expression.starts_with("else if ")
+                || expression.starts_with("else with "))
+        {
             let body_end = if action.trim_left {
                 trim_template_body_end(template, body_start, open)
             } else {

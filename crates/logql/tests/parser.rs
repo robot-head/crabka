@@ -917,6 +917,21 @@ fn query_evaluator_line_format_applies_with_template_blocks() {
 }
 
 #[test]
+fn query_evaluator_line_format_applies_else_with_template_blocks() {
+    let query = parse_query(
+        r#"{app="api"} | line_format `{{ with .missing }}primary={{ . }}{{ else with fromJson "{\"fallback\":\"worker\"}" }}fallback={{ .fallback }}{{ else }}none{{ end }}`"#,
+    )
+    .unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let output = query
+        .evaluate_with_fields(&labels, "raw", &BTreeMap::new())
+        .unwrap();
+
+    check!(output.line == "fallback=worker");
+}
+
+#[test]
 fn query_evaluator_line_format_applies_template_variable_assignments() {
     let query = parse_query(
         r#"{app="api"} | logfmt | line_format `{{ $method := .method }}{{ $status := .status }}{{ $method }} {{ $status | printf "status=%s" }}`"#,
