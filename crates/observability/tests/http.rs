@@ -6987,6 +6987,32 @@ async fn tail_endpoint_defaults_limit_to_one_hundred_entries() {
 }
 
 #[tokio::test]
+async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
+    let state = fixture();
+    let app = loki_router(state);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request =
+        format!("ws://{addr}/loki/api/v1/tail?query=%7Bapp%3D%22api%22%7D&delay_for=6")
+            .into_client_request()
+            .unwrap();
+    request
+        .headers_mut()
+        .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
+
+    let error = connect_async(request).await.unwrap_err();
+    server.abort();
+
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("expected HTTP websocket error");
+    };
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn compactor_delete_requests_filter_querier_tail_results() {
     let delete_requests = SharedLogDeleteRequests::default();
     let compactor_config = ServiceConfig {
