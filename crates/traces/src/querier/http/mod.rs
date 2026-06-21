@@ -239,7 +239,20 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
-        match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
+        let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        match matching_traces(
+            state.engine.as_ref(),
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            scan_options,
+        )
+        .await
+        {
             Ok(traces) => Json(search_tags_v2_json(&add_intrinsic_tags(
                 scoped_tags_from_traces(&traces, scope),
                 scope,
@@ -298,7 +311,20 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     if let Some(query) = query_param(&uri, "q") {
-        match matching_traces(state.engine.as_ref(), &tenant, &query, start_ns, end_ns).await {
+        let scan_options = match scan_options_param(&uri) {
+            Ok(value) => value,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
+        match matching_traces(
+            state.engine.as_ref(),
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            scan_options,
+        )
+        .await
+        {
             Ok(traces) => Json(search_tag_values_v2_json(&tag_values_from_traces(
                 &traces, &tag,
             )))
@@ -341,10 +367,14 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let exemplar_selection = exemplar_selection(&uri);
+    let scan_options = match scan_options_param(&uri) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     match state
         .engine
-        .query_range(&tenant, &query, start_ns, end_ns, step_ns)
+        .query_range_with_options(&tenant, &query, start_ns, end_ns, step_ns, scan_options)
         .await
     {
         Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
@@ -373,10 +403,14 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let exemplar_selection = exemplar_selection(&uri);
+    let scan_options = match scan_options_param(&uri) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     match state
         .engine
-        .query_range(&tenant, &query, start_ns, end_ns, step_ns)
+        .query_range_with_options(&tenant, &query, start_ns, end_ns, step_ns, scan_options)
         .await
     {
         Ok(resp) => Json(trace_metrics_json(&filter_metrics_exemplars(
@@ -925,12 +959,24 @@ async fn matching_traces<S>(
     query: &str,
     start_ns: i64,
     end_ns: i64,
+    scan_options: ScanOptions,
 ) -> Result<Vec<TraceSpans>, TraceqlError>
 where
     S: SpanStore + 'static,
 {
     let resp = engine
-        .search(tenant, query, start_ns, end_ns, usize::MAX)
+        .search_with_options(
+            tenant,
+            query,
+            start_ns,
+            end_ns,
+            SearchOptions {
+                limit: usize::MAX,
+                spss: 0,
+                search_limit: Some(usize::MAX),
+                scan_options,
+            },
+        )
         .await?;
     let mut seen = BTreeSet::new();
     let mut traces = Vec::new();
@@ -1914,13 +1960,16 @@ mod tests {
         writer.close().await.unwrap();
 
         let mut trace_index = TraceIndex::new();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&[1; 16]);
+        bloom.insert(&[2; 16]);
         trace_index.add_trace_block(
             "tenant-a",
             TraceBlockStats {
                 object_key: "blocks/row-groups.parquet".into(),
                 min_ts: 0,
                 max_ts: 10,
-                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                bloom,
                 tag_names: BTreeSet::new(),
                 tag_values: BTreeMap::new(),
             },
@@ -1990,6 +2039,70 @@ mod tests {
                         "value": 1.0
                     }]
                 }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_honors_backend_row_group_job_params() {
+        let app = row_group_job_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1&block=blocks%2Frow-groups.parquet&rowGroupStart=1&rowGroupEnd=2",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "series": [{
+                    "labels": {},
+                    "points": [["0", 1.0], ["1000000000", 0.0]],
+                    "exemplars": []
+                }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tag_values_v2_filter_honors_backend_row_group_job_params() {
+        let app = row_group_job_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/span:name/values?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&block=blocks%2Frow-groups.parquet&rowGroupStart=1&rowGroupEnd=2",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "second-rg"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
             })
         );
     }

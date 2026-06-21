@@ -200,11 +200,42 @@ impl<S: SpanStore> TraceqlEngine<S> {
         end_ns: i64,
         step_ns: i64,
     ) -> Result<TraceMetricsResponse> {
+        self.query_range_with_options(
+            tenant,
+            query,
+            start_ns,
+            end_ns,
+            step_ns,
+            ScanOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn query_range_with_options(
+        &self,
+        tenant: &str,
+        query: &str,
+        start_ns: i64,
+        end_ns: i64,
+        step_ns: i64,
+        scan_options: ScanOptions,
+    ) -> Result<TraceMetricsResponse> {
         let q = parse(query)?;
         let metric = metric_plan(&q)?;
         if metric.compare {
             return self
-                .query_range_compare(tenant, q, start_ns, end_ns, step_ns, metric)
+                .query_range_compare(
+                    tenant,
+                    q,
+                    MetricsRange {
+                        scan_start: start_ns,
+                        scan_end: end_ns,
+                        output_start: start_ns,
+                        step: step_ns,
+                    },
+                    metric,
+                    scan_options,
+                )
                 .await;
         }
 
@@ -214,7 +245,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns,
                 end_ns,
-                scan_options: ScanOptions::default(),
+                scan_options,
             },
             &Query {
                 root: q.root,
@@ -239,34 +270,26 @@ impl<S: SpanStore> TraceqlEngine<S> {
         &self,
         tenant: &str,
         q: Query,
-        start_ns: i64,
-        end_ns: i64,
-        step_ns: i64,
+        range: MetricsRange,
         metric: MetricPlan,
+        scan_options: ScanOptions,
     ) -> Result<TraceMetricsResponse> {
-        let width_ns = end_ns
-            .checked_sub(start_ns)
+        let width_ns = range
+            .scan_end
+            .checked_sub(range.scan_start)
             .ok_or_else(|| TraceqlError::Plan("metrics end must be >= start".into()))?;
-        let previous_start_ns = start_ns
+        let previous_start_ns = range
+            .scan_start
             .checked_sub(width_ns)
-            .and_then(|v| v.checked_sub(step_ns))
+            .and_then(|v| v.checked_sub(range.step))
             .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
-        let previous_end_ns = start_ns
-            .checked_sub(step_ns)
+        let previous_end_ns = range
+            .scan_start
+            .checked_sub(range.step)
             .ok_or_else(|| TraceqlError::Plan("compare range underflow".into()))?;
         let root = q.root;
         let current = self
-            .metrics_for_range(
-                tenant,
-                root.clone(),
-                MetricsRange {
-                    scan_start: start_ns,
-                    scan_end: end_ns,
-                    output_start: start_ns,
-                    step: step_ns,
-                },
-                &metric,
-            )
+            .metrics_for_range(tenant, root.clone(), range, &metric, scan_options.clone())
             .await?;
         let previous = self
             .metrics_for_range(
@@ -275,10 +298,11 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 MetricsRange {
                     scan_start: previous_start_ns,
                     scan_end: previous_end_ns,
-                    output_start: start_ns,
-                    step: step_ns,
+                    output_start: range.output_start,
+                    step: range.step,
                 },
                 &metric,
+                scan_options,
             )
             .await?;
 
@@ -293,6 +317,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
         root: crate::ast::SpansetExpr,
         range: MetricsRange,
         metric: &MetricPlan,
+        scan_options: ScanOptions,
     ) -> Result<TraceMetricsResponse> {
         let planned = plan_query(
             self.store.as_ref(),
@@ -300,7 +325,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns: range.scan_start,
                 end_ns: range.scan_end,
-                scan_options: ScanOptions::default(),
+                scan_options,
             },
             &Query {
                 root,
