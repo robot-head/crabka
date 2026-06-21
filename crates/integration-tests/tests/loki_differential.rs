@@ -869,6 +869,14 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
     let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"absent_over_time({app="missing",env="prod"} [2s])"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
         crabka_query_range_result_with_step(querier, query, base_ns, end_ns, "1s").await;
 
     assert!(crabka_result == loki_result);

@@ -8361,7 +8361,9 @@ async fn execute_http_metric_query(
                 &delete_filters,
             ));
         }
-        return Ok(add_loki_query_stats_for_metric_plan(response, &plan));
+        return Ok(add_loki_query_stats_for_metric_plan(
+            response, &plan, &query,
+        ));
     }
     let response =
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
@@ -8380,7 +8382,9 @@ async fn execute_http_metric_query(
             &delete_filters,
         ));
     }
-    Ok(add_loki_query_stats_for_metric_plan(response, &plan))
+    Ok(add_loki_query_stats_for_metric_plan(
+        response, &plan, &query,
+    ))
 }
 
 fn metric_query_uses_approx_topk(query: &MetricQuery) -> bool {
@@ -8509,7 +8513,9 @@ async fn execute_http_metric_scalar_comparison_query(
                 &delete_filters,
             ));
         }
-        return Ok(add_loki_query_stats_for_metric_plan(response, &plan));
+        return Ok(add_loki_query_stats_for_metric_plan(
+            response, &plan, &query,
+        ));
     }
 
     let mut response =
@@ -8530,7 +8536,9 @@ async fn execute_http_metric_scalar_comparison_query(
             &delete_filters,
         ));
     }
-    Ok(add_loki_query_stats_for_metric_plan(response, &plan))
+    Ok(add_loki_query_stats_for_metric_plan(
+        response, &plan, &query,
+    ))
 }
 
 async fn execute_http_metric_scalar_arithmetic_query(
@@ -8580,7 +8588,9 @@ async fn execute_http_metric_scalar_arithmetic_query(
                 &delete_filters,
             ));
         }
-        return Ok(add_loki_query_stats_for_metric_plan(response, &plan));
+        return Ok(add_loki_query_stats_for_metric_plan(
+            response, &plan, &query,
+        ));
     }
 
     let mut response =
@@ -8601,7 +8611,9 @@ async fn execute_http_metric_scalar_arithmetic_query(
             &delete_filters,
         ));
     }
-    Ok(add_loki_query_stats_for_metric_plan(response, &plan))
+    Ok(add_loki_query_stats_for_metric_plan(
+        response, &plan, &query,
+    ))
 }
 
 fn apply_metric_binary_arithmetic_to_loki_result(
@@ -12671,17 +12683,13 @@ fn apply_absent_over_time(samples: &mut MetricSamples, query: &MetricQuery, eval
 }
 
 fn absent_metric_labels(query: &MetricQuery) -> Labels {
-    let mut labels = query
+    query
         .stream
         .matchers
         .iter()
         .filter(|matcher| matcher.op == MatchOp::Equal)
         .map(|matcher| (matcher.name.clone(), matcher.value.clone()))
-        .collect::<Labels>();
-    if should_insert_unknown_detected_level(&labels) {
-        labels.insert("detected_level".to_string(), "unknown".to_string());
-    }
-    labels
+        .collect::<Labels>()
 }
 
 fn metric_samples_from_batches(
@@ -14525,10 +14533,14 @@ fn add_loki_query_stats_for_stream_plan_with_hot_tail(
     value
 }
 
-fn add_loki_query_stats_for_metric_plan(mut value: Value, plan: &StreamPlan) -> Value {
+fn add_loki_query_stats_for_metric_plan(
+    mut value: Value,
+    plan: &StreamPlan,
+    query: &MetricQuery,
+) -> Value {
     let bytes = planned_block_bytes(plan);
     let chunks = u64::try_from(plan.blocks.len()).unwrap_or(u64::MAX);
-    let samples = count_loki_metric_result_samples(&value);
+    let samples = count_loki_metric_result_scan_lines(&value, query);
     let mut stats = loki_query_stats();
     let (store_lines, ingester_lines) = if chunks == 0 {
         (0, samples)
@@ -14553,7 +14565,7 @@ fn add_loki_query_stats_for_metric_plan_with_hot_tail(
 ) -> Value {
     let bytes = planned_block_bytes(plan);
     let chunks = u64::try_from(plan.blocks.len()).unwrap_or(u64::MAX);
-    let samples = count_loki_metric_result_samples(&value);
+    let samples = count_loki_metric_result_scan_lines(&value, query);
     let ingester_samples = count_loki_metric_result_hot_tail_samples(
         &value,
         plan,
@@ -14712,6 +14724,13 @@ fn count_loki_metric_result_samples(value: &Value) -> u64 {
         .fold(0_u64, u64::saturating_add)
 }
 
+fn count_loki_metric_result_scan_lines(value: &Value, query: &MetricQuery) -> u64 {
+    if matches!(query.aggregation, RangeAggregation::AbsentOverTime) {
+        return 0;
+    }
+    count_loki_metric_result_samples(value)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn count_loki_metric_result_hot_tail_samples(
     value: &Value,
@@ -14723,6 +14742,10 @@ fn count_loki_metric_result_hot_tail_samples(
     step_ns: i64,
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> u64 {
+    if matches!(query.aggregation, RangeAggregation::AbsentOverTime) {
+        return 0;
+    }
+
     let eval_times = eval_times(eval_range, step_ns);
     let mut hot_samples = BTreeMap::new();
     for record in hot_tail {
