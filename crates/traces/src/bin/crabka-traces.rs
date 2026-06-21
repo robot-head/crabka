@@ -367,6 +367,7 @@ async fn build_querier_router_with_live(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
+            ..HttpConfig::default()
         },
     ))
 }
@@ -390,6 +391,7 @@ fn build_live_store_router(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
+            ..HttpConfig::default()
         },
     );
     let internal_router = axum::Router::new()

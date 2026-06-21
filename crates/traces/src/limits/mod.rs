@@ -7,7 +7,7 @@ mod overrides;
 pub use enforce::{IngestEnforcer, QueryEnforcer};
 pub use overrides::{OverridesError, OverridesProvider};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
     /// Tempo `ingestion_rate_limit_bytes` analog, counted as spans/sec; `0.0` is unlimited.
     pub ingestion_rate_spans_per_sec: f64,

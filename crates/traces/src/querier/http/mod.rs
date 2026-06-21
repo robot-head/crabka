@@ -24,6 +24,8 @@ use opentelemetry_proto::tonic::trace::v1::{
 use prost::Message as _;
 use serde_json::{Map, Value, json};
 
+use crate::limits::{LimitError, Limits, QueryEnforcer};
+
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
     "span:childCount",
@@ -61,15 +63,17 @@ impl<S: SpanStore> Clone for AppState<S> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HttpConfig {
     pub max_trace_spans: usize,
+    pub limits: Limits,
 }
 
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             max_trace_spans: usize::MAX,
+            limits: Limits::default(),
         }
     }
 }
@@ -138,6 +142,15 @@ where
         Ok(value) => value.unwrap_or(0),
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if let Err(err) = QueryEnforcer::check_search_limit(
+        &state.cfg.limits,
+        u64::try_from(limit).unwrap_or(u64::MAX),
+    ) {
+        return limit_error_response(&err);
+    }
+    if let Err(err) = QueryEnforcer::check_search_duration(&state.cfg.limits, start_ns, end_ns) {
+        return limit_error_response(&err);
+    }
     if limit > state.engine.max_traces() {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -406,6 +419,9 @@ where
     };
     if end_ns < start_ns {
         return (StatusCode::BAD_REQUEST, "end must be >= start").into_response();
+    }
+    if let Err(err) = QueryEnforcer::check_search_duration(&state.cfg.limits, start_ns, end_ns) {
+        return limit_error_response(&err);
     }
     let step_ns = match step_param(&uri) {
         Ok(value) => value,
@@ -960,6 +976,14 @@ fn traceql_query_error_response(err: &TraceqlError) -> Response {
         StatusCode::INTERNAL_SERVER_ERROR
     };
     (status, err.to_string()).into_response()
+}
+
+fn limit_error_response(err: &LimitError) -> Response {
+    (
+        StatusCode::from_u16(err.http_status()).unwrap_or(StatusCode::BAD_REQUEST),
+        err.message(),
+    )
+        .into_response()
 }
 
 fn add_intrinsic_tags(mut tags: Vec<ScopedTag>, scope: Option<TagScope>) -> Vec<ScopedTag> {
@@ -1908,6 +1932,24 @@ mod tests {
         router(engine)
     }
 
+    fn app_with_http_config(cfg: HttpConfig) -> axum::Router {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "tenant-a",
+            "svc-a",
+            "root-a",
+            vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
+        );
+        let engine = Arc::new(TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts {
+                max_exemplars: 1,
+                ..EngineOpts::default()
+            },
+        ));
+        router_with_config(engine, cfg)
+    }
+
     async fn get_json(uri: &str) -> (StatusCode, Value) {
         let resp = app()
             .oneshot(
@@ -2426,6 +2468,44 @@ mod tests {
 
         assert!(status == StatusCode::TOO_MANY_REQUESTS);
         assert!(body == "max traces per search exceeded");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_limit_above_http_limits() {
+        let app = app_with_http_config(HttpConfig {
+            max_trace_spans: usize::MAX,
+            limits: crate::limits::Limits {
+                max_traces_per_search: 1,
+                ..crate::limits::Limits::default()
+            },
+        });
+        let (status, body) = get_text_with_app(
+            app,
+            "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=2",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body.contains("max traces per search"));
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_rejects_duration_above_http_limits() {
+        let app = app_with_http_config(HttpConfig {
+            max_trace_spans: usize::MAX,
+            limits: crate::limits::Limits {
+                max_search_duration_secs: 1,
+                ..crate::limits::Limits::default()
+            },
+        });
+        let (status, body) = get_text_with_app(
+            app,
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=3&step=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body.contains("max search duration"));
     }
 
     #[tokio::test]
@@ -3284,7 +3364,13 @@ mod tests {
             vec![span(9, 1, None, "a"), span(9, 2, Some(1), "b")],
         );
         let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
-        let app = router_with_config(engine, HttpConfig { max_trace_spans: 1 });
+        let app = router_with_config(
+            engine,
+            HttpConfig {
+                max_trace_spans: 1,
+                ..HttpConfig::default()
+            },
+        );
         let resp = app
             .oneshot(
                 Request::builder()
