@@ -7016,9 +7016,6 @@ async fn series(
         Ok(params) => params,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = validate_loki_series_matchers(&params) {
-        return error.into_response();
-    }
     match execute_series_query(&state, &headers, &params).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -7038,9 +7035,6 @@ async fn series_post(
         Ok(params) => params,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = validate_loki_series_matchers(&params) {
-        return error.into_response();
-    }
     match execute_series_query(&state, &headers, &params).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
@@ -11223,13 +11217,6 @@ fn metadata_selectors(
             })
         })
         .collect()
-}
-
-fn validate_loki_series_matchers(params: &SeriesParams) -> Result<(), HttpQueryError> {
-    if params.matchers.is_empty() {
-        return Err(HttpQueryError::MissingQueryParameter("match[]"));
-    }
-    Ok(())
 }
 
 async fn execute_series_query(
