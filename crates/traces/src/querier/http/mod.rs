@@ -321,6 +321,9 @@ where
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if end_ns < start_ns {
+        return (StatusCode::BAD_REQUEST, "end must be >= start").into_response();
+    }
     let step_ns = match step_param(&uri) {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -535,7 +538,7 @@ fn instant_metric_bounds(uri: &Uri) -> Result<(i64, i64, i64, i64), String> {
             .checked_sub(start_ns)
             .and_then(|width| width.checked_add(1))
             .filter(|step| *step > 0)
-            .ok_or_else(|| "metrics end must be >= start".to_string())?;
+            .ok_or_else(|| "end must be >= start".to_string())?;
         return Ok((start_ns, end_ns, step_ns, end_ns));
     }
 
@@ -1883,6 +1886,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_query_rejects_end_before_start() {
+        let (status, body) = get_text(
+            "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=2&end=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "end must be >= start");
+    }
+
+    #[tokio::test]
     async fn metrics_query_range_rejects_zero_step() {
         let (status, body) = get_text(
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=0",
@@ -1924,6 +1938,17 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "missing query parameter end");
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_rejects_end_before_start() {
+        let (status, body) = get_text(
+            "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=2&end=1&step=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
