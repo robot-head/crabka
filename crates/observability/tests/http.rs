@@ -3991,6 +3991,30 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
             })
     );
 
+    let api_prom_rules_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/prom/rules")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(api_prom_rules_response.status() == StatusCode::OK);
+    assert!(
+        json_body(api_prom_rules_response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "groups": []
+                },
+                "errorType": "",
+                "error": ""
+            })
+    );
+
     let prometheus_alerts_response = app
         .oneshot(
             Request::builder()
