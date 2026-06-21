@@ -4609,6 +4609,11 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/services", get(querier_services))
         .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route("/loki/api/v1/rules", get(loki_rules))
+        .route("/loki/api/v1/rules/{namespace}", get(loki_rule_namespace))
+        .route(
+            "/loki/api/v1/rules/{namespace}/{group_name}",
+            get(loki_rule_group),
+        )
         .route("/prometheus/api/v1/rules", get(prometheus_rules))
         .route("/prometheus/api/v1/alerts", get(prometheus_alerts))
         .route("/ruler/ring", get(ruler_ring))
@@ -4648,6 +4653,11 @@ pub fn loki_router(state: QuerierState) -> Router {
             get(query_range).post(query_range_post),
         )
         .route("/api/prom/rules", get(prometheus_rules))
+        .route("/api/prom/rules/{namespace}", get(loki_rule_namespace))
+        .route(
+            "/api/prom/rules/{namespace}/{group_name}",
+            get(loki_rule_group),
+        )
         .route("/api/prom/tail", get(tail))
         .route(
             "/api/prom/label",
@@ -5338,6 +5348,14 @@ async fn loki_rules() -> Response {
         "{}\n",
     )
         .into_response()
+}
+
+async fn loki_rule_namespace() -> Response {
+    text_response(StatusCode::NOT_FOUND, "no rule groups found\n")
+}
+
+async fn loki_rule_group() -> Response {
+    text_response(StatusCode::NOT_FOUND, "group does not exist\n")
 }
 
 async fn prometheus_rules() -> Response {
