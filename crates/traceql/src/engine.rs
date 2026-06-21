@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, LargeStringArray, StringArray, StringViewArray};
+use arrow::array::{
+    Array, BooleanArray, Float64Array, Int64Array, LargeStringArray, ListArray, StringArray,
+    StringViewArray,
+};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use datafusion::arrow::array::AsArray;
@@ -40,6 +43,12 @@ const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
     8_192_000_000.0,
     16_384_000_000.0,
 ];
+const BLOCK_ATTR_KEYS: &str = "attr_keys";
+const BLOCK_ATTR_VALUE: &str = "attr_value";
+const BLOCK_ATTR_VALUE_INT: &str = "attr_value_int";
+const BLOCK_ATTR_VALUE_DOUBLE: &str = "attr_value_double";
+const BLOCK_ATTR_VALUE_BOOL: &str = "attr_value_bool";
+const RESOURCE_ATTR_PREFIX: &str = "__resource.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EngineOpts {
@@ -1256,8 +1265,191 @@ fn row_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>
         };
         attrs.push((name.to_string(), value));
     }
+    attrs.extend(block_row_attrs(batch, row)?);
     attrs.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(attrs)
+}
+
+fn block_row_attrs(batch: &RecordBatch, row: usize) -> Result<Vec<(String, AttrValue)>> {
+    let Some(keys) = optional_list_column(batch, BLOCK_ATTR_KEYS)? else {
+        return Ok(Vec::new());
+    };
+    if keys.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let key_values = keys.value(row);
+    let key_values = key_values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TraceqlError::Exec("attr_keys row is not Utf8".into()))?;
+    let str_values = optional_list_column(batch, BLOCK_ATTR_VALUE)?;
+    let int_values = optional_list_column(batch, BLOCK_ATTR_VALUE_INT)?;
+    let double_values = optional_list_column(batch, BLOCK_ATTR_VALUE_DOUBLE)?;
+    let bool_values = optional_list_column(batch, BLOCK_ATTR_VALUE_BOOL)?;
+
+    let mut out = Vec::new();
+    for attr_idx in 0..key_values.len() {
+        if key_values.is_null(attr_idx) {
+            continue;
+        }
+        let key = key_values.value(attr_idx);
+        if key.starts_with(RESOURCE_ATTR_PREFIX) {
+            continue;
+        }
+        out.extend(
+            block_attr_values_for_key(
+                str_values,
+                int_values,
+                double_values,
+                bool_values,
+                row,
+                attr_idx,
+            )?
+            .into_iter()
+            .map(|value| (key.to_string(), value)),
+        );
+    }
+    Ok(out)
+}
+
+fn block_attr_values_for_key(
+    str_values: Option<&ListArray>,
+    int_values: Option<&ListArray>,
+    double_values: Option<&ListArray>,
+    bool_values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+) -> Result<Vec<AttrValue>> {
+    let values = string_attr_values(str_values, row, attr_idx, BLOCK_ATTR_VALUE)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Str).collect());
+    }
+    let values = i64_attr_values(int_values, row, attr_idx, BLOCK_ATTR_VALUE_INT)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Int).collect());
+    }
+    let values = f64_attr_values(double_values, row, attr_idx, BLOCK_ATTR_VALUE_DOUBLE)?;
+    if !values.is_empty() {
+        return Ok(values.into_iter().map(AttrValue::Float).collect());
+    }
+    Ok(
+        bool_attr_values(bool_values, row, attr_idx, BLOCK_ATTR_VALUE_BOOL)?
+            .into_iter()
+            .map(AttrValue::Bool)
+            .collect(),
+    )
+}
+
+fn optional_list_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<Option<&'a ListArray>> {
+    batch
+        .column_by_name(name)
+        .map(|col| {
+            col.as_any()
+                .downcast_ref::<ListArray>()
+                .ok_or_else(|| TraceqlError::Exec(format!("nested column `{name}` is not a list")))
+        })
+        .transpose()
+}
+
+fn row_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Option<arrow::array::ArrayRef>> {
+    let Some(values) = values else {
+        return Ok(None);
+    };
+    if values.is_null(row) {
+        return Ok(None);
+    }
+    let row_values = values.value(row);
+    let row_values = row_values
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| {
+            TraceqlError::Exec(format!("attribute column `{name}` row is not a list"))
+        })?;
+    if attr_idx >= row_values.len() || row_values.is_null(attr_idx) {
+        return Ok(None);
+    }
+    Ok(Some(row_values.value(attr_idx)))
+}
+
+fn string_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Vec<String>> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| TraceqlError::Exec(format!("attribute column `{name}` is not Utf8")))?;
+    Ok((0..values.len())
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx).to_string())
+        .collect())
+}
+
+fn i64_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Vec<i64>> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| TraceqlError::Exec(format!("attribute column `{name}` is not Int64")))?;
+    Ok((0..values.len())
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
+}
+
+fn f64_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Vec<f64>> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| TraceqlError::Exec(format!("attribute column `{name}` is not Float64")))?;
+    Ok((0..values.len())
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
+}
+
+fn bool_attr_values(
+    values: Option<&ListArray>,
+    row: usize,
+    attr_idx: usize,
+    name: &str,
+) -> Result<Vec<bool>> {
+    let Some(values) = row_attr_values(values, row, attr_idx, name)? else {
+        return Ok(Vec::new());
+    };
+    let values = values
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| TraceqlError::Exec(format!("attribute column `{name}` is not Boolean")))?;
+    Ok((0..values.len())
+        .filter(|idx| !values.is_null(*idx))
+        .map(|idx| values.value(idx))
+        .collect())
 }
 
 fn u64_from_i64(v: i64) -> Result<u64> {

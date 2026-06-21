@@ -2526,6 +2526,13 @@ mod tests {
             .unwrap();
         assert!(resp.traces.len() == 1);
         assert!(resp.traces[0].trace_id == [1; 16]);
+        assert!(
+            resp.traces[0].span_sets[0].spans[0].attributes
+                == vec![
+                    ("http.method".into(), AttrValue::Str("GET".into())),
+                    ("http.method".into(), AttrValue::Str("POST".into())),
+                ]
+        );
 
         let resp = engine
             .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
