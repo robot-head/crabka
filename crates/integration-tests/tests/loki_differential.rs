@@ -2962,12 +2962,12 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         LabelIndex::default(),
         BlockIndex::default(),
     ));
-    let query = r#"{app="#;
+    for query in [r#"{app="#, "abs(vector(-1.2))"] {
+        let loki_error = loki_query_error(&http, &loki_base, query).await;
+        let crabka_error = crabka_query_error(querier.clone(), query).await;
 
-    let loki_error = loki_query_error(&http, &loki_base, query).await;
-    let crabka_error = crabka_query_error(querier, query).await;
-
-    assert!(crabka_error == loki_error);
+        assert!(crabka_error == loki_error);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

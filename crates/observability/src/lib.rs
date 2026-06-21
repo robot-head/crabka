@@ -15049,13 +15049,20 @@ fn loki_parse_error(status: StatusCode, query: &str, source: &ParseError) -> Res
 
 fn loki_parse_error_text(query: &str, source: &ParseError) -> String {
     match source {
-        ParseError::Syntax { message, position } => format!(
-            "parse error at line {}, col {}: syntax error: unexpected {}, expecting {}",
-            line_number(query, *position),
-            column_number(query, *position),
-            unexpected_logql_token(query, *position),
-            expected_logql_token(message)
-        ),
+        ParseError::Syntax { message, position } => {
+            let unexpected = unexpected_logql_token(query, *position);
+            let prefix = format!(
+                "parse error at line {}, col {}: syntax error: unexpected {}",
+                line_number(query, *position),
+                column_number(query, *position),
+                unexpected
+            );
+            if should_omit_expected_logql_token(message, &unexpected) {
+                prefix
+            } else {
+                format!("{prefix}, expecting {}", expected_logql_token(message))
+            }
+        }
         ParseError::InvalidRegex { pattern, source } => {
             format!("parse error: invalid regex `{pattern}`: {source}")
         }
@@ -15081,10 +15088,18 @@ fn column_number(query: &str, position: usize) -> usize {
 }
 
 fn unexpected_logql_token(query: &str, position: usize) -> String {
-    query[position.min(query.len())..]
-        .chars()
-        .next()
-        .map_or_else(|| "$end".to_string(), |token| token.to_string())
+    let rest = &query[position.min(query.len())..];
+    let Some(token) = rest.chars().next() else {
+        return "$end".to_string();
+    };
+    if token == '_' || token.is_ascii_alphabetic() {
+        return "IDENTIFIER".to_string();
+    }
+    token.to_string()
+}
+
+fn should_omit_expected_logql_token(message: &str, unexpected: &str) -> bool {
+    message == "expected '{'" && unexpected == "IDENTIFIER"
 }
 
 fn expected_logql_token(message: &str) -> String {
