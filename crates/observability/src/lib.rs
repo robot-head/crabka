@@ -198,6 +198,8 @@ pub enum ServiceConfigError {
     ObjectStore(#[from] object_store::Error),
     #[error(transparent)]
     DeleteRequests(#[from] LogDeleteRequestStoreError),
+    #[error(transparent)]
+    Rules(#[from] LokiRuleStoreError),
 }
 
 #[derive(Debug, Error)]
@@ -257,6 +259,22 @@ pub enum LogDeleteRequestStoreError {
         source: std::io::Error,
     },
     #[error("delete request store JSON error for {path:?}: {source}")]
+    Json {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum LokiRuleStoreError {
+    #[error("Loki rule store I/O error for {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Loki rule store JSON error for {path:?}: {source}")]
     Json {
         path: PathBuf,
         #[source]
@@ -4060,6 +4078,7 @@ type LokiRuleTenants = BTreeMap<String, LokiRuleNamespaces>;
 #[derive(Clone, Default)]
 struct SharedLokiRules {
     tenants: Arc<Mutex<LokiRuleTenants>>,
+    storage_path: Option<Arc<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -4178,6 +4197,11 @@ impl QuerierState {
 
     fn with_delete_requests(mut self, requests: SharedLogDeleteRequests) -> Self {
         self.delete_requests = Some(requests);
+        self
+    }
+
+    fn with_rules(mut self, rules: SharedLokiRules) -> Self {
+        self.rules = rules;
         self
     }
 
@@ -4516,6 +4540,7 @@ pub async fn build_service_router(
                 SharedLogDeleteRequests::from_data_root(&config.data_root)?
             };
             state = state.with_delete_requests(delete_requests);
+            state = state.with_rules(SharedLokiRules::from_data_root(&config.data_root)?);
             if let Some(hot_tail) = dependencies.hot_tail {
                 state = state.with_hot_tail_source(hot_tail.source, hot_tail.frontier);
             } else if let Some(wal_consumer) = dependencies.wal_consumer {
@@ -5009,6 +5034,70 @@ fn write_log_delete_requests(
     })
 }
 
+impl SharedLokiRules {
+    fn from_data_root(root: impl AsRef<FsPath>) -> Result<Self, LokiRuleStoreError> {
+        let path = loki_ruler_rules_path(root.as_ref());
+        Ok(Self {
+            tenants: Arc::new(Mutex::new(read_loki_rule_tenants(&path)?)),
+            storage_path: Some(Arc::new(path)),
+        })
+    }
+
+    fn persist_snapshot(&self, tenants: &LokiRuleTenants) -> Result<(), LokiRuleStoreError> {
+        let Some(path) = &self.storage_path else {
+            return Ok(());
+        };
+        write_loki_rule_tenants(path, tenants)
+    }
+}
+
+fn loki_ruler_rules_path(root: &FsPath) -> PathBuf {
+    root.join("loki-ruler-rules.json")
+}
+
+fn read_loki_rule_tenants(path: &FsPath) -> Result<LokiRuleTenants, LokiRuleStoreError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == ErrorKind::NotFound => return Ok(LokiRuleTenants::new()),
+        Err(source) => {
+            return Err(LokiRuleStoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    serde_json::from_slice(&bytes).map_err(|source| LokiRuleStoreError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_loki_rule_tenants(
+    path: &FsPath,
+    tenants: &LokiRuleTenants,
+) -> Result<(), LokiRuleStoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| LokiRuleStoreError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let tmp_path = path.with_file_name(".loki-ruler-rules.json.tmp");
+    let payload =
+        serde_json::to_vec_pretty(tenants).map_err(|source| LokiRuleStoreError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    std::fs::write(&tmp_path, payload).map_err(|source| LokiRuleStoreError::Io {
+        path: tmp_path.clone(),
+        source,
+    })?;
+    std::fs::rename(&tmp_path, path).map_err(|source| LokiRuleStoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 async fn create_delete_request(
     State(state): State<CompactorDeleteState>,
     headers: HeaderMap,
@@ -5424,17 +5513,23 @@ async fn create_loki_rule_group(
         Some(name) => name.to_string(),
         None => return text_response(StatusCode::BAD_REQUEST, "unable to decoded rule group\n"),
     };
-    let mut rules = state
-        .rules
-        .tenants
-        .lock()
-        .expect("Loki rule store lock poisoned");
-    rules
-        .entry(tenant)
-        .or_default()
-        .entry(namespace)
-        .or_default()
-        .insert(name, rule_group);
+    let snapshot = {
+        let mut rules = state
+            .rules
+            .tenants
+            .lock()
+            .expect("Loki rule store lock poisoned");
+        rules
+            .entry(tenant)
+            .or_default()
+            .entry(namespace)
+            .or_default()
+            .insert(name, rule_group);
+        rules.clone()
+    };
+    if let Err(error) = state.rules.persist_snapshot(&snapshot) {
+        return HttpQueryError::from(error).into_response();
+    }
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
 
@@ -5447,16 +5542,25 @@ async fn delete_loki_rule_namespace(
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
-    let mut rules = state
-        .rules
-        .tenants
-        .lock()
-        .expect("Loki rule store lock poisoned");
-    let Some(namespaces) = rules.get_mut(&tenant) else {
-        return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+    let snapshot = {
+        let mut rules = state
+            .rules
+            .tenants
+            .lock()
+            .expect("Loki rule store lock poisoned");
+        let Some(namespaces) = rules.get_mut(&tenant) else {
+            return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+        };
+        if namespaces.remove(&namespace).is_none() {
+            return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+        }
+        if namespaces.is_empty() {
+            rules.remove(&tenant);
+        }
+        rules.clone()
     };
-    if namespaces.remove(&namespace).is_none() {
-        return text_response(StatusCode::NOT_FOUND, "no rule groups found\n");
+    if let Err(error) = state.rules.persist_snapshot(&snapshot) {
+        return HttpQueryError::from(error).into_response();
     }
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
@@ -5494,22 +5598,31 @@ async fn delete_loki_rule_group(
         Ok(tenant) => tenant,
         Err(error) => return error.into_response(),
     };
-    let mut rules = state
-        .rules
-        .tenants
-        .lock()
-        .expect("Loki rule store lock poisoned");
-    let Some(namespaces) = rules.get_mut(&tenant) else {
-        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+    let snapshot = {
+        let mut rules = state
+            .rules
+            .tenants
+            .lock()
+            .expect("Loki rule store lock poisoned");
+        let Some(namespaces) = rules.get_mut(&tenant) else {
+            return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+        };
+        let Some(groups) = namespaces.get_mut(&namespace) else {
+            return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+        };
+        if groups.remove(&group_name).is_none() {
+            return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
+        }
+        if groups.is_empty() {
+            namespaces.remove(&namespace);
+        }
+        if namespaces.is_empty() {
+            rules.remove(&tenant);
+        }
+        rules.clone()
     };
-    let Some(groups) = namespaces.get_mut(&namespace) else {
-        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
-    };
-    if groups.remove(&group_name).is_none() {
-        return text_response(StatusCode::NOT_FOUND, "group does not exist\n");
-    }
-    if groups.is_empty() {
-        namespaces.remove(&namespace);
+    if let Err(error) = state.rules.persist_snapshot(&snapshot) {
+        return HttpQueryError::from(error).into_response();
     }
     json_response(StatusCode::ACCEPTED, &json!({ "status": "success" }))
 }
@@ -14660,6 +14773,8 @@ enum HttpQueryError {
     #[error(transparent)]
     DeleteRequests(#[from] LogDeleteRequestStoreError),
     #[error(transparent)]
+    Rules(#[from] LokiRuleStoreError),
+    #[error(transparent)]
     DeleteFilter(#[from] ActiveLogDeleteFilterError),
 }
 
@@ -14696,6 +14811,7 @@ impl IntoResponse for HttpQueryError {
             | Self::QueryAuthorization(QueryAuthorizationError::Unavailable { .. })
             | Self::Query(_)
             | Self::DeleteRequests(_)
+            | Self::Rules(_)
             | Self::DeleteFilter(_)
             | Self::LokiParquet(_)
             | Self::Parquet(_) => StatusCode::INTERNAL_SERVER_ERROR,
