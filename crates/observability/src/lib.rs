@@ -4090,14 +4090,21 @@ struct PrometheusAlertKey {
     labels: Labels,
 }
 
+#[derive(Clone, Debug)]
+struct PrometheusAlertRuntimeState {
+    active_at: i64,
+    last_active_at: i64,
+    value: String,
+}
+
 #[derive(Clone, Default)]
 struct SharedPrometheusAlertStates {
-    active_at: Arc<Mutex<BTreeMap<PrometheusAlertKey, i64>>>,
+    alerts: Arc<Mutex<BTreeMap<PrometheusAlertKey, PrometheusAlertRuntimeState>>>,
 }
 
 impl SharedPrometheusAlertStates {
     fn clear_tenant(&self, tenant: &str) {
-        self.active_at
+        self.alerts
             .lock()
             .expect("Prometheus alert state lock poisoned")
             .retain(|key, _| key.tenant != tenant);
@@ -6240,6 +6247,7 @@ fn prometheus_alerts_from_query_result(
     result: &Value,
 ) -> Vec<Value> {
     let hold_duration_ns = yaml_duration_ns_field(fields, "for").unwrap_or(0);
+    let keep_firing_for_ns = yaml_duration_ns_field(fields, "keep_firing_for").unwrap_or(0);
     let annotations = yaml_string_map_field(fields, "annotations");
     let rule_labels = yaml_string_labels_field(fields, "labels");
     let samples = result
@@ -6270,11 +6278,11 @@ fn prometheus_alerts_from_query_result(
         .collect::<Vec<_>>();
 
     let mut states = alert_states
-        .active_at
+        .alerts
         .lock()
         .expect("Prometheus alert state lock poisoned");
     let mut active_keys = BTreeSet::new();
-    let alerts = samples
+    let mut alerts = samples
         .into_iter()
         .map(|(labels, value)| {
             let key = PrometheusAlertKey {
@@ -6283,27 +6291,61 @@ fn prometheus_alerts_from_query_result(
                 query: query.to_string(),
                 labels: labels.clone(),
             };
-            let active_at = *states.entry(key.clone()).or_insert(evaluation_time);
-            let state = if evaluation_time.saturating_sub(active_at) >= hold_duration_ns {
+            let alert = states
+                .entry(key.clone())
+                .or_insert_with(|| PrometheusAlertRuntimeState {
+                    active_at: evaluation_time,
+                    last_active_at: evaluation_time,
+                    value: value.clone(),
+            });
+            alert.last_active_at = evaluation_time;
+            alert.value.clone_from(&value);
+            let state = if evaluation_time.saturating_sub(alert.active_at) >= hold_duration_ns {
                 "firing"
             } else {
                 "pending"
             };
             active_keys.insert(key);
             json!({
-                "activeAt": prometheus_active_at(active_at),
+                "activeAt": prometheus_active_at(alert.active_at),
                 "annotations": annotations,
                 "labels": labels,
                 "state": state,
                 "value": value,
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
+
+    let mut retained_keys = BTreeSet::new();
+    for (key, alert) in states.iter() {
+        if key.tenant != tenant
+            || key.alert_name != alert_name
+            || key.query != query
+            || active_keys.contains(key)
+        {
+            continue;
+        }
+        let was_firing = alert.last_active_at.saturating_sub(alert.active_at) >= hold_duration_ns;
+        let within_keep_firing =
+            evaluation_time.saturating_sub(alert.last_active_at) <= keep_firing_for_ns;
+        if was_firing && within_keep_firing {
+            retained_keys.insert(key.clone());
+            alerts.push(json!({
+                "activeAt": prometheus_active_at(alert.active_at),
+                "annotations": annotations,
+                "labels": key.labels,
+                "state": "firing",
+                "value": alert.value,
+            }));
+        }
+    }
+
     states.retain(|key, _| {
         key.tenant != tenant
             || key.alert_name != alert_name
             || key.query != query
             || active_keys.contains(key)
+            || retained_keys.contains(key)
     });
     alerts
 }

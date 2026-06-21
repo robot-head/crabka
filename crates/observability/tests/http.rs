@@ -4567,6 +4567,60 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_alerts_endpoint_honors_keep_firing_for_after_condition_resolves() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    keep_firing_for: 50ns
+",
+    )
+    .await;
+
+    let firing_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
+    assert!(firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
+
+    let retained_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/alerts?time=80")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(retained_response.status() == StatusCode::OK);
+    let retained_body = json_body(retained_response).await;
+    assert!(retained_body["data"]["alerts"].as_array().unwrap().len() == 1);
+    assert!(retained_body["data"]["alerts"][0]["state"] == "firing");
+    assert!(retained_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.00000004Z");
+
+    let resolved_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/alerts?time=100")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resolved_response.status() == StatusCode::OK);
+    let resolved_body = json_body(resolved_response).await;
+    assert!(resolved_body["data"]["alerts"] == json!([]));
+}
+
+#[tokio::test]
 async fn ruler_rule_group_recreate_resets_alert_for_duration_state() {
     let state = fixture();
     let app = loki_router(state);
