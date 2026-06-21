@@ -73,6 +73,8 @@ struct Cli {
     #[arg(long)]
     collection_interval_secs: Option<u64>,
     #[arg(long)]
+    max_exemplars_per_series: Option<usize>,
+    #[arg(long)]
     enable_target_info: bool,
     #[arg(long)]
     enable_status_message: bool,
@@ -542,6 +544,9 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
     if let Some(url) = &cli.remote_write_url {
         cfg.remote_write_url.clone_from(url);
     }
+    if let Some(max) = cli.max_exemplars_per_series {
+        cfg.max_exemplars_per_series = max;
+    }
     cfg.enable_target_info |= cli.enable_target_info;
     cfg.enable_status_message |= cli.enable_status_message;
     cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
@@ -786,6 +791,8 @@ mod tests {
             "http://mimir.example/api/v1/push",
             "--collection-interval-secs",
             "30",
+            "--max-exemplars-per-series",
+            "3",
             "--config",
             "metricsgen.yaml",
         ])
@@ -794,6 +801,7 @@ mod tests {
         assert!(matches!(cli.target, Target::MetricsGenerator));
         assert!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
         assert!(cli.collection_interval_secs == Some(30));
+        assert!(cli.max_exemplars_per_series == Some(3));
         assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
     }
 
@@ -819,6 +827,7 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "metrics-generator"]).unwrap();
         let mut cfg = MetricsGenConfig {
             collection_interval: Duration::from_secs(30),
+            max_exemplars_per_series: 5,
             remote_write_url: "http://metrics.example/api/v1/push".into(),
             ..MetricsGenConfig::default()
         };
@@ -826,6 +835,7 @@ mod tests {
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
         assert!(cfg.collection_interval == Duration::from_secs(30));
+        assert!(cfg.max_exemplars_per_series == 5);
         assert!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
 
         let cli = Cli::try_parse_from([
@@ -834,6 +844,8 @@ mod tests {
             "metrics-generator",
             "--collection-interval-secs",
             "45",
+            "--max-exemplars-per-series",
+            "2",
             "--remote-write-url",
             "http://override.example/api/v1/push",
         ])
@@ -842,6 +854,7 @@ mod tests {
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
         assert!(cfg.collection_interval == Duration::from_secs(45));
+        assert!(cfg.max_exemplars_per_series == 2);
         assert!(cfg.remote_write_url == "http://override.example/api/v1/push");
     }
 
