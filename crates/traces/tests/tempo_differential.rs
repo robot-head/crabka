@@ -35,6 +35,7 @@ use tower::ServiceExt as _;
 
 const TENANT: &str = "tenant-a";
 const TRACE_ID_HEX: &str = "01010101010101010101010101010101";
+const CHILD_SPAN_ID_HEX: &str = "0303030303030303";
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
 const TEMPO_CONFIG: &str = r"
@@ -112,6 +113,26 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     )
     .await?;
     assert_search_shape_matches(&tempo_search, &crabka_search);
+
+    let structural_query = "%7B%20.http.method%20%3D%20%22GET%22%20%7D%20%3E%3E%20%7B%20.db.system%20%3D%20%22postgresql%22%20%7D";
+    let tempo_structural_search = get_json_until_non_empty_traces(
+        &client,
+        &format!("{tempo_query}/api/search?q={structural_query}&start=0&end=1"),
+        None,
+    )
+    .await?;
+    let crabka_structural_search = get_json(
+        &client,
+        &format!(
+            "{}/api/search?q={structural_query}&start=0&end=1",
+            crabka.base_url
+        ),
+        Some(TENANT),
+    )
+    .await?;
+    assert_search_shape_matches(&tempo_structural_search, &crabka_structural_search);
+    assert_search_contains_span_id(&tempo_structural_search, CHILD_SPAN_ID_HEX);
+    assert_search_contains_span_id(&crabka_structural_search, CHILD_SPAN_ID_HEX);
 
     let tempo_tags = get_json(
         &client,
@@ -531,6 +552,20 @@ fn assert_search_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
         "Crabka search response: {crabka}"
     );
     assert!(crabka["traces"][0]["traceID"] == TRACE_ID_HEX);
+}
+
+fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {
+    let found = search["traces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|trace| trace["spanSets"].as_array().into_iter().flatten())
+        .flat_map(|span_set| span_set["spans"].as_array().into_iter().flatten())
+        .any(|span| span["spanID"].as_str() == Some(span_id));
+    assert!(
+        found,
+        "search response did not contain span {span_id}: {search}"
+    );
 }
 
 fn assert_required_tag_names_match(tempo: &JsonValue, crabka: &JsonValue) {
