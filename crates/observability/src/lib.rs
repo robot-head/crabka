@@ -3117,16 +3117,18 @@ fn decode_loki_http_body(headers: &HeaderMap, body: &[u8]) -> Result<Vec<u8>, Di
     else {
         return Ok(body.to_vec());
     };
+    let encoding = encoding.trim();
 
-    if encoding.eq_ignore_ascii_case("gzip") {
+    if encoding.is_empty() || encoding.eq_ignore_ascii_case("snappy") {
+        return Ok(body.to_vec());
+    } else if encoding.eq_ignore_ascii_case("gzip") {
         let mut decoder = GzDecoder::new(body);
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
             .map_err(DistributorError::LokiGzipDecode)?;
         return Ok(decompressed);
-    }
-    if encoding.eq_ignore_ascii_case("deflate") {
+    } else if encoding.eq_ignore_ascii_case("deflate") {
         let mut decoder = DeflateDecoder::new(body);
         let mut decompressed = Vec::new();
         decoder
@@ -3135,7 +3137,9 @@ fn decode_loki_http_body(headers: &HeaderMap, body: &[u8]) -> Result<Vec<u8>, Di
         return Ok(decompressed);
     }
 
-    Ok(body.to_vec())
+    Err(DistributorError::UnsupportedLokiContentEncoding(
+        encoding.to_string(),
+    ))
 }
 
 fn normalize_otlp_http_logs(
@@ -13299,6 +13303,8 @@ enum DistributorError {
     LokiGzipDecode(std::io::Error),
     #[error("invalid deflate-compressed Loki payload: {0}")]
     LokiDeflateDecode(std::io::Error),
+    #[error("Content-Encoding {0:?} not supported")]
+    UnsupportedLokiContentEncoding(String),
     #[error("invalid OTLP protobuf payload: {0}")]
     OtlpDecode(prost::DecodeError),
     #[error("wal append timed out")]
@@ -13337,6 +13343,7 @@ impl IntoResponse for DistributorError {
             | Self::LokiDeflateDecode(_)
             | Self::LokiGzipDecode(_)
             | Self::LokiSnappyDecode(_)
+            | Self::UnsupportedLokiContentEncoding(_)
             | Self::OtlpDecode(_) => StatusCode::BAD_REQUEST,
         };
         if matches!(
@@ -13392,6 +13399,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::LokiDeflateDecode(_)
         | DistributorError::LokiGzipDecode(_)
         | DistributorError::LokiSnappyDecode(_)
+        | DistributorError::UnsupportedLokiContentEncoding(_)
         | DistributorError::OtlpDecode(_) => tonic::Status::invalid_argument(message),
     }
 }
