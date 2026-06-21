@@ -60,6 +60,8 @@ struct Cli {
     bootstrap: String,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
     retention_ns: i64,
+    #[arg(long, default_value_t = 5)]
+    block_builder_window_secs: u64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long, default_value = "index/traces.json")]
@@ -249,7 +251,7 @@ async fn run_block_builder(
         blockbuilder::BlockBuilderConfig {
             object_key_prefix,
             index_key: trace_index_key,
-            window: Duration::from_secs(5),
+            window: Duration::from_secs(cli.block_builder_window_secs),
             promoted_attrs,
         },
         shutdown,
@@ -646,6 +648,21 @@ mod tests {
     fn parses_block_builder_target() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
         assert!(matches!(cli.target, Target::BlockBuilder));
+    }
+
+    #[test]
+    fn parses_block_builder_flush_window() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--block-builder-window-secs",
+            "30",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::BlockBuilder));
+        assert!(cli.block_builder_window_secs == 30);
     }
 
     #[test]
