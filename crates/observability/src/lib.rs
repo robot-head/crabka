@@ -2545,6 +2545,7 @@ fn distributor_router_with_sink(
         .route("/metrics", get(distributor_metrics))
         .route("/config", get(distributor_config))
         .route("/services", get(distributor_services))
+        .route("/memberlist", get(memberlist_status))
         .route("/flush", post(flush_ingester_chunks))
         .route(
             "/ingester/prepare_shutdown",
@@ -4691,6 +4692,7 @@ pub fn loki_router(state: QuerierState) -> Router {
         .route("/metrics", get(querier_metrics))
         .route("/config", get(querier_config))
         .route("/services", get(querier_services))
+        .route("/memberlist", get(memberlist_status))
         .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route("/loki/api/v1/rules", get(loki_rules))
         .route(
@@ -4789,6 +4791,7 @@ fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequest
         .route("/metrics", get(compactor_metrics))
         .route("/config", get(compactor_config))
         .route("/services", get(compactor_services))
+        .route("/memberlist", get(memberlist_status))
         .route("/compactor/ring", get(compactor_ring))
         .route(
             "/loki/api/v1/format_query",
@@ -4823,16 +4826,12 @@ async fn get_prepare_shutdown(State(state): State<DistributorState>) -> Response
 }
 
 async fn set_prepare_shutdown(State(state): State<DistributorState>) -> Response {
-    state
-        .prepare_shutdown
-        .store(true, AtomicOrdering::SeqCst);
+    state.prepare_shutdown.store(true, AtomicOrdering::SeqCst);
     StatusCode::NO_CONTENT.into_response()
 }
 
 async fn unset_prepare_shutdown(State(state): State<DistributorState>) -> Response {
-    state
-        .prepare_shutdown
-        .store(false, AtomicOrdering::SeqCst);
+    state.prepare_shutdown.store(false, AtomicOrdering::SeqCst);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -4958,6 +4957,15 @@ fn status_services(_name: &'static str) -> Response {
          distributor => Running\n\
          query-scheduler-ring => Running\n",
     )
+}
+
+async fn memberlist_status() -> Response {
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain")],
+        "This instance doesn't use memberlist.",
+    )
+        .into_response()
 }
 
 async fn querier_metrics() -> Response {
