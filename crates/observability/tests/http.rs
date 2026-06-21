@@ -4369,6 +4369,76 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_alerts_endpoint_lists_firing_loki_rule_alerts() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    labels:
+      severity: page
+    annotations:
+      summary: API errors detected
+",
+    )
+    .await;
+
+    let alerts_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/alerts?time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(alerts_response.status() == StatusCode::OK);
+    assert!(
+        json_body(alerts_response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "alerts": [
+                        {
+                            "activeAt": "1970-01-01T00:00:00.000000019Z",
+                            "annotations": {
+                                "summary": "API errors detected"
+                            },
+                            "labels": {
+                                "alertname": "ApiErrors",
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod",
+                                "severity": "page"
+                            },
+                            "state": "firing",
+                            "value": "1"
+                        }
+                    ]
+                },
+                "errorType": "",
+                "error": ""
+            })
+    );
+
+    let rules_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=19&type=alert").await;
+    assert!(rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
+    assert!(
+        rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["labels"]["alertname"]
+            == "ApiErrors"
+    );
+}
+
+#[tokio::test]
 async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
     let state = fixture();
     let app = loki_router(state);
