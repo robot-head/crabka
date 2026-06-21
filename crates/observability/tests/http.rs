@@ -4439,6 +4439,33 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_rules_endpoint_excludes_active_alerts_when_requested() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+",
+    )
+    .await;
+
+    let body = prometheus_rules_body_for_test(
+        &app,
+        "/prometheus/api/v1/rules?time=19&type=alert&exclude_alerts=true",
+    )
+    .await;
+
+    assert!(body["data"]["groups"].as_array().unwrap().len() == 1);
+    assert!(body["data"]["groups"][0]["rules"][0]["name"] == "ApiErrors");
+    assert!(body["data"]["groups"][0]["rules"][0]["alerts"] == json!([]));
+}
+
+#[tokio::test]
 async fn ruler_rule_group_delete_endpoint_removes_only_the_named_group() {
     let state = fixture();
     let app = loki_router(state);
