@@ -8,6 +8,7 @@ use std::io::ErrorKind;
 use std::io::Read as _;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -2506,6 +2507,7 @@ pub enum WalRecordDecodeError {
 pub struct DistributorState {
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
+    prepare_shutdown: Arc<AtomicBool>,
     max_ingest_body_bytes: Option<usize>,
     wal_append_timeout: Option<Duration>,
     reject_old_samples_max_age: Option<Duration>,
@@ -2543,6 +2545,17 @@ fn distributor_router_with_sink(
         .route("/metrics", get(distributor_metrics))
         .route("/config", get(distributor_config))
         .route("/services", get(distributor_services))
+        .route("/flush", post(flush_ingester_chunks))
+        .route(
+            "/ingester/prepare_shutdown",
+            get(get_prepare_shutdown)
+                .post(set_prepare_shutdown)
+                .delete(unset_prepare_shutdown),
+        )
+        .route(
+            "/ingester/shutdown",
+            get(shutdown_ingester).post(shutdown_ingester),
+        )
         .route("/distributor/ring", get(distributor_ring))
         .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route(
@@ -2560,6 +2573,7 @@ fn distributor_router_with_sink(
         .with_state(DistributorState {
             sink,
             ingest_limiter,
+            prepare_shutdown: Arc::new(AtomicBool::new(false)),
             max_ingest_body_bytes,
             wal_append_timeout,
             reject_old_samples_max_age,
@@ -2603,6 +2617,7 @@ impl LogsService for OtlpGrpcLogsService {
         let state = DistributorState {
             sink: Arc::clone(&self.sink),
             ingest_limiter: Arc::clone(&self.ingest_limiter),
+            prepare_shutdown: Arc::new(AtomicBool::new(false)),
             max_ingest_body_bytes: None,
             wal_append_timeout: self.wal_append_timeout,
             reject_old_samples_max_age: None,
@@ -4792,6 +4807,37 @@ fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequest
 
 async fn ready() -> Response {
     (StatusCode::OK, "ready\n").into_response()
+}
+
+async fn flush_ingester_chunks() -> Response {
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn get_prepare_shutdown(State(state): State<DistributorState>) -> Response {
+    let status = if state.prepare_shutdown.load(AtomicOrdering::SeqCst) {
+        "set"
+    } else {
+        "unset"
+    };
+    text_response(StatusCode::OK, status)
+}
+
+async fn set_prepare_shutdown(State(state): State<DistributorState>) -> Response {
+    state
+        .prepare_shutdown
+        .store(true, AtomicOrdering::SeqCst);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn unset_prepare_shutdown(State(state): State<DistributorState>) -> Response {
+    state
+        .prepare_shutdown
+        .store(false, AtomicOrdering::SeqCst);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn shutdown_ingester() -> Response {
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn log_level() -> Response {
