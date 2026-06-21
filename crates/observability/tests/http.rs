@@ -3064,6 +3064,27 @@ async fn status_config_diff_mode_returns_loki_error() {
 }
 
 #[tokio::test]
+async fn status_config_defaults_mode_returns_loki_defaults_lines() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/config?mode=defaults")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = text_body(response).await;
+    assert!(body.contains("target: all\n"));
+    assert!(body.contains("auth_enabled: true\n"));
+}
+
+#[tokio::test]
 async fn distributor_router_exposes_loki_ingester_control_endpoints() {
     let app = distributor_router(InMemoryWalSink::default());
 

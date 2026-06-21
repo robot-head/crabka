@@ -4924,13 +4924,24 @@ async fn compactor_config(RawQuery(raw_query): RawQuery) -> Response {
 }
 
 fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
-    if query_param_value(raw_query, "mode").as_deref() == Some("diff") {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [("content-type", "text/plain; charset=utf-8")],
-            "unsupported type <nil>\n",
-        )
-            .into_response();
+    match query_param_value(raw_query, "mode").as_deref() {
+        Some("diff") => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [("content-type", "text/plain; charset=utf-8")],
+                "unsupported type <nil>\n",
+            )
+                .into_response();
+        }
+        Some("defaults") => {
+            return (
+                StatusCode::OK,
+                [("content-type", "application/yaml; charset=utf-8")],
+                "target: all\nauth_enabled: true\n",
+            )
+                .into_response();
+        }
+        _ => {}
     }
 
     (
