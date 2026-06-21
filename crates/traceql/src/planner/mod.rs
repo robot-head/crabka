@@ -14,12 +14,13 @@ use crate::ast::{
 };
 use crate::error::{Result, TraceqlError};
 use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
-use crate::store::SpanStore;
+use crate::store::{ScanOptions, SpanStore};
 
 pub(crate) struct PlannerContext {
     pub tenant: String,
     pub start_ns: i64,
     pub end_ns: i64,
+    pub scan_options: ScanOptions,
 }
 
 pub(crate) struct PlannedSpanset {
@@ -50,7 +51,13 @@ async fn plan_spanset_sql<S: SpanStore>(
     pipeline: &[Pipeline],
 ) -> Result<PlannedSpanset> {
     let scan = store
-        .scan(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns)
+        .scan_with_options(
+            &ctx.tenant,
+            &[],
+            ctx.start_ns,
+            ctx.end_ns,
+            &ctx.scan_options,
+        )
         .await?;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
     let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table), &nested_tables)?;
@@ -76,11 +83,12 @@ async fn register_nested_selector_tables<S: SpanStore>(
     for (idx, selector) in selectors.into_iter().enumerate() {
         let table_name = format!("nested_selector_{idx}");
         let scan = store
-            .scan(
+            .scan_with_options(
                 &ctx.tenant,
                 &selector::field_expr_to_matchers(&selector),
                 ctx.start_ns,
                 ctx.end_ns,
+                &ctx.scan_options,
             )
             .await?;
         let batches = collect_table(&scan.ctx, &scan.span_table).await?;
@@ -629,6 +637,7 @@ mod tests {
                     tenant: "t".into(),
                     start_ns: 0,
                     end_ns: 10_000,
+                    scan_options: ScanOptions::default(),
                 },
                 &q,
             )

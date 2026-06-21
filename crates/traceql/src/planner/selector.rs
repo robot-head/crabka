@@ -29,7 +29,13 @@ pub(crate) async fn plan_selector<S: SpanStore>(
 
     let matchers = field_expr_to_matchers(fe);
     let scan = store
-        .scan(&ctx.tenant, &matchers, ctx.start_ns, ctx.end_ns)
+        .scan_with_options(
+            &ctx.tenant,
+            &matchers,
+            ctx.start_ns,
+            ctx.end_ns,
+            &ctx.scan_options,
+        )
         .await?;
     let parent_table = if has_nested_scope(fe) && has_parent_scope(fe) {
         register_unfiltered_parent_table(store, ctx, &scan.ctx).await?
@@ -69,7 +75,13 @@ async fn plan_selector_disjuncts<S: SpanStore>(
     let mut schema = None;
     for matchers in disjuncts {
         let scan = store
-            .scan(&ctx.tenant, matchers, ctx.start_ns, ctx.end_ns)
+            .scan_with_options(
+                &ctx.tenant,
+                matchers,
+                ctx.start_ns,
+                ctx.end_ns,
+                &ctx.scan_options,
+            )
             .await?;
         let mut scan_batches = collect_table(&scan.ctx, &scan.span_table).await?;
         if schema.is_none() {
@@ -93,7 +105,13 @@ async fn register_unfiltered_parent_table<S: SpanStore>(
     target_ctx: &SessionContext,
 ) -> Result<String> {
     let parent_scan = store
-        .scan(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns)
+        .scan_with_options(
+            &ctx.tenant,
+            &[],
+            ctx.start_ns,
+            ctx.end_ns,
+            &ctx.scan_options,
+        )
         .await?;
     let batches = collect_table(&parent_scan.ctx, &parent_scan.span_table).await?;
     let schema = batches

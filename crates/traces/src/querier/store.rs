@@ -20,8 +20,8 @@ use crabka_traceql::{
     COL_INSTRUMENTATION_VERSION, COL_KIND, COL_NAME, COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID,
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, EventRef, LinkRef,
-    MatchCmp, MatchScope, MatchValue, ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore,
-    TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
+    MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, ScopedTag, SpanMatcher,
+    SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError, TypedValue, span_schema,
 };
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
@@ -85,38 +85,51 @@ impl CrabkaSpanStore {
         tenant: &str,
         start_ns: i64,
         end_ns: i64,
+        job: Option<&ScanJob>,
     ) -> Result<Vec<RecordBatch>, TraceqlError> {
         if end_ns < start_ns {
             return Ok(Vec::new());
         }
-        let keys = self.trace_index.candidate_blocks(tenant, start_ns, end_ns);
-        let (ctx, table) = self
-            .blocks
-            .scan_block_keys(&keys, span_block_schema())
-            .await
-            .map_err(|err| block_err(&err))?;
+        let (ctx, table) = if let Some(job) = job {
+            let row_groups = (job.row_group_start..job.row_group_end).collect::<Vec<_>>();
+            self.blocks
+                .scan_block_row_groups(&job.object_key, &row_groups, span_block_schema())
+                .await
+                .map_err(|err| block_err(&err))?
+        } else {
+            let keys = self.trace_index.candidate_blocks(tenant, start_ns, end_ns);
+            self.blocks
+                .scan_block_keys(&keys, span_block_schema())
+                .await
+                .map_err(|err| block_err(&err))?
+        };
         collect_table(&ctx, &table).await
     }
-}
 
-#[async_trait::async_trait]
-impl SpanStore for CrabkaSpanStore {
-    async fn scan(
+    async fn scan_inner(
         &self,
         tenant: &str,
         matchers: &[SpanMatcher],
         start_ns: i64,
         end_ns: i64,
+        options: &ScanOptions,
     ) -> Result<ScanResult, TraceqlError> {
-        let (cold_end, live_start) = self.live.as_ref().map_or((end_ns, end_ns + 1), |live| {
-            let frontier = live.block_builder_frontier_ns(tenant);
-            (
-                end_ns.min(frontier.saturating_sub(1)),
-                start_ns.max(frontier),
-            )
-        });
+        let scan_job = options.job.as_ref();
+        let (cold_end, live_start) = if scan_job.is_some() {
+            (end_ns, end_ns.saturating_add(1))
+        } else {
+            self.live.as_ref().map_or((end_ns, end_ns + 1), |live| {
+                let frontier = live.block_builder_frontier_ns(tenant);
+                (
+                    end_ns.min(frontier.saturating_sub(1)),
+                    start_ns.max(frontier),
+                )
+            })
+        };
 
-        let mut batches = self.cold_batches(tenant, start_ns, cold_end).await?;
+        let mut batches = self
+            .cold_batches(tenant, start_ns, cold_end, scan_job)
+            .await?;
         if let Some(live) = &self.live
             && live_start <= end_ns
         {
@@ -140,6 +153,32 @@ impl SpanStore for CrabkaSpanStore {
             ctx,
             span_table: "spans".into(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl SpanStore for CrabkaSpanStore {
+    async fn scan(
+        &self,
+        tenant: &str,
+        matchers: &[SpanMatcher],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Result<ScanResult, TraceqlError> {
+        self.scan_inner(tenant, matchers, start_ns, end_ns, &ScanOptions::default())
+            .await
+    }
+
+    async fn scan_with_options(
+        &self,
+        tenant: &str,
+        matchers: &[SpanMatcher],
+        start_ns: i64,
+        end_ns: i64,
+        options: &ScanOptions,
+    ) -> Result<ScanResult, TraceqlError> {
+        self.scan_inner(tenant, matchers, start_ns, end_ns, options)
+            .await
     }
 
     async fn trace_by_id(
@@ -1898,13 +1937,17 @@ mod tests {
         AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, SCOL_START_NANO,
         SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind, SpanRow,
         StatusCode as BlockStatusCode, SummaryColumns, TraceBlockStats, encode_span_rows,
-        span_block_decl,
+        span_block_decl, span_block_schema,
     };
     use crabka_traceql::{
         COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
-        EventRef, LinkRef, TraceqlEngine,
+        EventRef, LinkRef, ScanJob, ScanOptions, TraceqlEngine,
     };
     use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use parquet::arrow::AsyncArrowWriter;
+    use parquet::arrow::async_writer::ParquetObjectWriter;
+    use parquet::file::properties::WriterProperties;
     use url::Url;
 
     use crate::querier::live::LiveSource;
@@ -2211,6 +2254,92 @@ mod tests {
         assert!(tags.len() == 1);
         assert!(tags[0].scope == TagScope::Span);
         assert!(tags[0].tags == vec!["http.method"]);
+    }
+
+    #[tokio::test]
+    async fn cold_scan_can_read_one_backend_row_group_job() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let first = encode_span_rows(&[block_attr_span_row(
+            [1; 16],
+            [1; 8],
+            "first-rg",
+            false,
+            vec!["GET".into()],
+        )])
+        .unwrap();
+        let second = encode_span_rows(&[block_attr_span_row(
+            [2; 16],
+            [2; 8],
+            "second-rg",
+            false,
+            vec!["POST".into()],
+        )])
+        .unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_write_batch_size(1)
+            .build();
+        let object_writer = ParquetObjectWriter::new(
+            object_store.clone(),
+            Path::from("blocks/row-groups.parquet"),
+        );
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), Some(props)).unwrap();
+        writer.write(&first).await.unwrap();
+        writer.write(&second).await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: "blocks/row-groups.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        let scan = store
+            .scan_with_options(
+                "tenant",
+                &[],
+                0,
+                10,
+                &ScanOptions {
+                    job: Some(ScanJob {
+                        object_key: "blocks/row-groups.parquet".into(),
+                        row_group_start: 1,
+                        row_group_end: 2,
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        let batches = collect_table(&scan.ctx, &scan.span_table).await.unwrap();
+        let names = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(crabka_traceql::COL_NAME)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.unwrap().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names == vec!["second-rg"]);
     }
 
     #[tokio::test]

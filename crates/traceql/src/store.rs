@@ -52,6 +52,18 @@ pub struct ScanResult {
     pub span_table: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub job: Option<ScanJob>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScanJob {
+    pub object_key: String,
+    pub row_group_start: usize,
+    pub row_group_end: usize,
+}
+
 #[async_trait::async_trait]
 pub trait SpanStore: Send + Sync {
     async fn scan(
@@ -61,6 +73,18 @@ pub trait SpanStore: Send + Sync {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<ScanResult>;
+
+    async fn scan_with_options(
+        &self,
+        tenant: &str,
+        matchers: &[SpanMatcher],
+        start_ns: i64,
+        end_ns: i64,
+        options: &ScanOptions,
+    ) -> Result<ScanResult> {
+        let _ = options;
+        self.scan(tenant, matchers, start_ns, end_ns).await
+    }
 
     async fn trace_by_id(&self, tenant: &str, trace_id: &[u8; 16]) -> Result<Option<TraceSpans>>;
 

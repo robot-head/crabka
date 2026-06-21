@@ -8,8 +8,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use crabka_traceql::{
-    AttrValue, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore, TagScope,
-    TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
+    AttrValue, ScanJob, ScanOptions, ScopedTag, SearchOptions, SearchResponse, SpanRef, SpanStore,
+    TagScope, TraceMetricsResponse, TraceSpans, TraceqlEngine, TraceqlError, TypedValue,
 };
 use opentelemetry_proto::tonic::common::v1::{
     AnyValue as OtlpAnyValue, ArrayValue as OtlpArrayValue, InstrumentationScope,
@@ -157,6 +157,10 @@ where
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    let scan_options = match scan_options_param(&uri) {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     let duration_filtered = min_duration_ns.is_some() || max_duration_ns.is_some();
     let search_limit = duration_filtered.then_some(usize::MAX);
@@ -172,6 +176,7 @@ where
                 limit,
                 spss,
                 search_limit,
+                scan_options,
             },
         )
         .await
@@ -600,6 +605,34 @@ fn optional_usize_param(uri: &Uri, key: &'static str) -> Result<Option<usize>, S
                 .map_err(|_| format!("invalid query parameter {key}"))
         })
         .transpose()
+}
+
+fn scan_options_param(uri: &Uri) -> Result<ScanOptions, String> {
+    let block = query_param(uri, "block");
+    let row_group_start = optional_usize_param(uri, "rowGroupStart")?;
+    let row_group_end = optional_usize_param(uri, "rowGroupEnd")?;
+    if block.is_none() && row_group_start.is_none() && row_group_end.is_none() {
+        return Ok(ScanOptions::default());
+    }
+    let Some(object_key) = block else {
+        return Err("missing query parameter block".into());
+    };
+    let Some(row_group_start) = row_group_start else {
+        return Err("missing query parameter rowGroupStart".into());
+    };
+    let Some(row_group_end) = row_group_end else {
+        return Err("missing query parameter rowGroupEnd".into());
+    };
+    if row_group_end <= row_group_start {
+        return Err("rowGroupEnd must be > rowGroupStart".into());
+    }
+    Ok(ScanOptions {
+        job: Some(ScanJob {
+            object_key,
+            row_group_start,
+            row_group_end,
+        }),
+    })
 }
 
 fn parse_step_to_ns(value: &str) -> Option<i64> {
@@ -1677,21 +1710,34 @@ fn base64<const N: usize>(bytes: [u8; N]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use assert2::assert;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use crabka_blockstore::{
+        AttrValue as BlockAttrValue, BlockStore, NestedSet as BlockNestedSet, ShardedTraceBloom,
+        SpanAttr, SpanKind as BlockSpanKind, SpanRow, StatusCode as BlockStatusCode,
+        TraceBlockStats, TraceIndex, encode_span_rows, span_block_schema,
+    };
     use crabka_traceql::{
         AttrValue, EngineOpts, EventRef, InMemorySpanStore, InputSpan, LinkRef, TraceqlEngine,
     };
     use http_body_util::BodyExt;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
     use opentelemetry_proto::tonic::trace::v1::TracesData;
+    use parquet::arrow::AsyncArrowWriter;
+    use parquet::arrow::async_writer::ParquetObjectWriter;
+    use parquet::file::properties::WriterProperties;
     use prost::Message as _;
     use serde_json::{Value, json};
     use tower::ServiceExt;
+    use url::Url;
 
     use super::*;
+    use crate::querier::store::CrabkaSpanStore;
 
     fn span(trace: u8, span: u8, parent: Option<u8>, svc: &str) -> InputSpan {
         span_at(trace, span, parent, svc, 1_000 + i64::from(span))
@@ -1794,6 +1840,96 @@ mod tests {
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn get_json_with_app(app: axum::Router, uri: &str) -> (StatusCode, Value) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn block_span_row(trace: u8, span: u8, name: &str) -> SpanRow {
+        SpanRow {
+            trace_id: [trace; 16],
+            span_id: [span; 8],
+            parent_span_id: None,
+            nested_set: BlockNestedSet {
+                nested_set_left: 1,
+                nested_set_right: 2,
+                parent_id: 0,
+            },
+            child_count: 0,
+            root_service_name: Some("api".into()),
+            root_span_name: Some(name.into()),
+            trace_start_unix_nano: 1_000,
+            trace_duration_nanos: 500,
+            name: Some(name.into()),
+            kind: BlockSpanKind::Server,
+            start_unix_nano: 1_000,
+            duration_nanos: 500,
+            status_code: BlockStatusCode::Ok,
+            status_message: None,
+            instrumentation_name: Some("otel-rust".into()),
+            instrumentation_version: None,
+            attrs: vec![SpanAttr {
+                key: "svc".into(),
+                is_array: false,
+                value: BlockAttrValue::Str(vec!["api".into()]),
+            }],
+            events: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+
+    async fn row_group_job_app() -> axum::Router {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let first = encode_span_rows(&[block_span_row(1, 1, "first-rg")]).unwrap();
+        let second = encode_span_rows(&[block_span_row(2, 2, "second-rg")]).unwrap();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_write_batch_size(1)
+            .build();
+        let object_writer = ParquetObjectWriter::new(
+            object_store.clone(),
+            Path::from("blocks/row-groups.parquet"),
+        );
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), Some(props)).unwrap();
+        writer.write(&first).await.unwrap();
+        writer.write(&second).await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut trace_index = TraceIndex::new();
+        trace_index.add_trace_block(
+            "tenant-a",
+            TraceBlockStats {
+                object_key: "blocks/row-groups.parquet".into(),
+                min_ts: 0,
+                max_ts: 10,
+                bloom: ShardedTraceBloom::with_tempo_defaults(1),
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(trace_index), None);
+        router(Arc::new(TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts::default(),
+        )))
     }
 
     #[tokio::test]
@@ -2054,6 +2190,21 @@ mod tests {
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
         assert!(status == StatusCode::OK);
         assert!(body["traces"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn search_honors_backend_row_group_job_params() {
+        let (status, body) = get_json_with_app(
+            row_group_job_app().await,
+            "/api/search?q=%7B%20.svc%20%3D%20%22api%22%20%7D&start=0&end=10&block=blocks%2Frow-groups.parquet&rowGroupStart=1&rowGroupEnd=2",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        let traces = body["traces"].as_array().unwrap();
+        assert!(traces.len() == 1);
+        assert!(traces[0]["traceID"] == "02020202020202020202020202020202");
+        assert!(traces[0]["rootTraceName"] == "second-rg");
     }
 
     #[tokio::test]

@@ -37,4 +37,6 @@ pub use span_columns::{
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
     InputSpan, NestedSet, assign_nested_set, span_schema, span_schema_with_attrs,
 };
-pub use store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
+pub use store::{
+    MatchCmp, MatchScope, MatchValue, ScanJob, ScanOptions, ScanResult, SpanMatcher, SpanStore,
+};

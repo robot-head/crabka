@@ -2961,6 +2961,7 @@ dependencies = [
  "http-body-util",
  "object_store",
  "opentelemetry-proto",
+ "parquet",
  "prost",
  "prost-types",
  "protox",

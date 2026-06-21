@@ -57,6 +57,7 @@ crabka-broker = { path = "../broker", version = "0.3.7" }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }
 crabka-protocol = { path = "../protocol", version = "0.3.7" }
 http-body-util = "0.1"
+parquet = { workspace = true }
 tempfile = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

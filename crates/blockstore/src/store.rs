@@ -11,6 +11,7 @@ use url::Url;
 use crate::error::Result;
 use crate::index::Index;
 use crate::matcher::LabelMatcher;
+use crate::reader::read_block_row_groups;
 use crate::writer::BlockWriter;
 
 const TABLE_NAME: &str = "logs";
@@ -99,6 +100,32 @@ impl BlockStore {
             .read_parquet(paths, ParquetReadOptions::default())
             .await?;
         ctx.register_table(TABLE_NAME, df.into_view())?;
+        Ok((ctx, TABLE_NAME.to_string()))
+    }
+
+    pub async fn scan_block_row_groups(
+        &self,
+        object_key: &str,
+        row_groups: &[usize],
+        schema: SchemaRef,
+    ) -> Result<(SessionContext, String)> {
+        let ctx = SessionContext::new();
+        ctx.register_object_store(&self.base, self.store.clone());
+
+        if row_groups.is_empty() {
+            let empty = MemTable::try_new(schema, vec![vec![]])?;
+            ctx.register_table(TABLE_NAME, Arc::new(empty))?;
+            return Ok((ctx, TABLE_NAME.to_string()));
+        }
+
+        let batches = read_block_row_groups(self.store.clone(), object_key, row_groups).await?;
+        let partitions = if batches.is_empty() {
+            vec![vec![]]
+        } else {
+            vec![batches]
+        };
+        let table = MemTable::try_new(schema, partitions)?;
+        ctx.register_table(TABLE_NAME, Arc::new(table))?;
         Ok((ctx, TABLE_NAME.to_string()))
     }
 }

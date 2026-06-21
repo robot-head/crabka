@@ -25,7 +25,7 @@ use crate::span_columns::{
     COL_PARENT_SPAN_ID, COL_ROOT_SERVICE_NAME, COL_ROOT_SPAN_NAME, COL_SPAN_ID, COL_START,
     COL_STATUS_CODE, COL_STATUS_MESSAGE, COL_TRACE_DURATION, COL_TRACE_ID, COL_TRACE_START,
 };
-use crate::store::SpanStore;
+use crate::store::{ScanOptions, SpanStore};
 
 const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
     2_000_000.0,
@@ -74,11 +74,12 @@ pub struct TraceqlEngine<S: SpanStore> {
     opts: EngineOpts,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchOptions {
     pub limit: usize,
     pub spss: usize,
     pub search_limit: Option<usize>,
+    pub scan_options: ScanOptions,
 }
 
 impl<S: SpanStore> TraceqlEngine<S> {
@@ -146,6 +147,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 limit,
                 spss,
                 search_limit: None,
+                scan_options: ScanOptions::default(),
             },
         )
         .await
@@ -166,6 +168,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns,
                 end_ns,
+                scan_options: options.scan_options.clone(),
             },
             &q,
         )
@@ -211,6 +214,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns,
                 end_ns,
+                scan_options: ScanOptions::default(),
             },
             &Query {
                 root: q.root,
@@ -296,6 +300,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
                 tenant: tenant.to_string(),
                 start_ns: range.scan_start,
                 end_ns: range.scan_end,
+                scan_options: ScanOptions::default(),
             },
             &Query {
                 root,
