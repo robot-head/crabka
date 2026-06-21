@@ -31,6 +31,7 @@ use crabka_blockstore::{
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store, write_log_index_manifest,
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shard_to_object_store,
+    write_tenant_log_index_shards_to_object_store,
 };
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, AdminClient, AdminError, PatternType, PermissionType,
@@ -1128,15 +1129,54 @@ pub async fn compact_log_block_to_object_store(
 ) -> Result<BlockDescriptor, BlockStoreError> {
     let descriptor = write_log_block_to_object_store(store, prefix, key, rows).await?;
     block_index.insert(descriptor.clone());
-    write_tenant_log_index_manifest_to_object_store(
+    write_tenant_compaction_indexes_to_object_store(
         store,
         prefix,
         &key.tenant,
+        key.time_range,
         label_index,
         block_index,
     )
     .await?;
     Ok(descriptor)
+}
+
+async fn write_tenant_compaction_indexes_to_object_store(
+    store: &dyn ObjectStore,
+    prefix: &ObjectPath,
+    tenant: &str,
+    new_shard_range: TimeRange,
+    label_index: &LabelIndex,
+    block_index: &BlockIndex,
+) -> Result<(), BlockStoreError> {
+    write_tenant_log_index_manifest_to_object_store(
+        store,
+        prefix,
+        tenant,
+        label_index,
+        block_index,
+    )
+    .await?;
+
+    let mut shard_ranges =
+        match read_tenant_log_index_shard_ranges_from_object_store(store, prefix, tenant).await {
+            Ok(shard_ranges) => shard_ranges,
+            Err(BlockStoreError::ObjectStore(object_store::Error::NotFound { .. })) => Vec::new(),
+            Err(error) => return Err(error),
+        };
+    if !shard_ranges.contains(&new_shard_range) {
+        shard_ranges.push(new_shard_range);
+    }
+    shard_ranges.sort_by_key(|range| (range.start_ns, range.end_ns));
+    write_tenant_log_index_shards_to_object_store(
+        store,
+        prefix,
+        tenant,
+        &shard_ranges,
+        label_index,
+        block_index,
+    )
+    .await
 }
 
 pub trait CompactionOffsetCommitter {
