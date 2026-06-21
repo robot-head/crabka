@@ -378,6 +378,8 @@ fn attr_typed_value_parts(value: &AttrValue) -> (String, String) {
 fn unscoped_attribute_tag(tag: &str) -> &str {
     tag.strip_prefix("resource.")
         .or_else(|| tag.strip_prefix("span."))
+        .or_else(|| tag.strip_prefix("event.").filter(|tag| tag.contains('.')))
+        .or_else(|| tag.strip_prefix("link.").filter(|tag| tag.contains('.')))
         .unwrap_or(tag)
 }
 
@@ -2488,8 +2490,16 @@ mod tests {
             .tag_values("tenant", "exception.type", 0, 10_000)
             .await
             .unwrap();
+        let scoped_event_values = store
+            .tag_values("tenant", "event.exception.type", 0, 10_000)
+            .await
+            .unwrap();
         let link_values = store
             .tag_values("tenant", "link.kind", 0, 10_000)
+            .await
+            .unwrap();
+        let scoped_link_values = store
+            .tag_values("tenant", "link.link.kind", 0, 10_000)
             .await
             .unwrap();
 
@@ -2500,6 +2510,7 @@ mod tests {
                     value: "timeout".into(),
                 }]
         );
+        assert!(scoped_event_values == event_values);
         assert!(
             link_values
                 == vec![TypedValue {
@@ -2507,6 +2518,7 @@ mod tests {
                     value: "retry".into(),
                 }]
         );
+        assert!(scoped_link_values == link_values);
     }
 
     #[tokio::test]

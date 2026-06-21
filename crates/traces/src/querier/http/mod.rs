@@ -1291,7 +1291,7 @@ fn collect_event_values(span: &SpanRef, tag: &str, values: &mut BTreeSet<(String
             event
                 .attributes
                 .iter()
-                .filter(|(key, _)| key == tag)
+                .filter(|(key, _)| nested_attribute_key_matches(key, tag, "event."))
                 .map(|(_, value)| typed_value_parts(value)),
         );
     }
@@ -1311,10 +1311,14 @@ fn collect_link_values(span: &SpanRef, tag: &str, values: &mut BTreeSet<(String,
         values.extend(
             link.attributes
                 .iter()
-                .filter(|(key, _)| key == tag)
+                .filter(|(key, _)| nested_attribute_key_matches(key, tag, "link."))
                 .map(|(_, value)| typed_value_parts(value)),
         );
     }
+}
+
+fn nested_attribute_key_matches(key: &str, tag: &str, scope_prefix: &str) -> bool {
+    key == tag || tag.strip_prefix(scope_prefix).is_some_and(|tag| key == tag)
 }
 
 fn typed_value_parts(value: &AttrValue) -> (String, String) {
@@ -4559,6 +4563,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn search_tag_values_v2_query_filter_returns_event_and_link_attribute_values() {
         let mut store = InMemorySpanStore::new();
         let mut root = span_at_with_attrs(
@@ -4614,10 +4619,70 @@ mod tests {
         );
 
         let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/event.cache.key/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "users"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(
                         "/api/v2/search/tag/link.kind/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
+                    )
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagValues": [{
+                    "type": "string",
+                    "value": "retry"
+                }],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v2/search/tag/link.link.kind/values?q=%7B%20.env%20%3D%20%22prod%22%20%7D",
                     )
                     .header("x-scope-orgid", "tenant-a")
                     .body(Body::empty())

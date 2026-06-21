@@ -1047,7 +1047,7 @@ fn collect_event_values(span: &InputSpan, tag: &str, values: &mut BTreeSet<(Stri
             event
                 .attributes
                 .iter()
-                .filter(|(key, _)| key == tag)
+                .filter(|(key, _)| nested_attribute_key_matches(key, tag, "event."))
                 .map(|(_, value)| typed_value_parts(value)),
         );
     }
@@ -1067,10 +1067,14 @@ fn collect_link_values(span: &InputSpan, tag: &str, values: &mut BTreeSet<(Strin
         values.extend(
             link.attributes
                 .iter()
-                .filter(|(key, _)| key == tag)
+                .filter(|(key, _)| nested_attribute_key_matches(key, tag, "link."))
                 .map(|(_, value)| typed_value_parts(value)),
         );
     }
+}
+
+fn nested_attribute_key_matches(key: &str, tag: &str, scope_prefix: &str) -> bool {
+    key == tag || tag.strip_prefix(scope_prefix).is_some_and(|tag| key == tag)
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -1296,6 +1300,15 @@ mod tests {
                 }]
         );
         assert!(
+            s.tag_values("t", "event.cache.key", 0, 10_000)
+                .await
+                .unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "users".into(),
+                }]
+        );
+        assert!(
             s.tag_values("t", "link:traceID", 0, 10_000).await.unwrap()
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -1311,6 +1324,15 @@ mod tests {
         );
         assert!(
             s.tag_values("t", "link.kind", 0, 10_000).await.unwrap()
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "retry".into(),
+                }]
+        );
+        assert!(
+            s.tag_values("t", "link.link.kind", 0, 10_000)
+                .await
+                .unwrap()
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "retry".into(),
