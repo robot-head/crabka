@@ -5,7 +5,8 @@ use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use crabka_traces::query_frontend::{
-    QueryFrontendConfig, QueryShard, QueryTier, plan_time_shards, router,
+    BackendBlock, BackendRowGroup, QueryFrontendConfig, QueryShard, QueryTier, plan_query_shards,
+    plan_time_shards, router,
 };
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
@@ -22,11 +23,13 @@ fn plan_time_shards_splits_search_at_live_frontier() {
                     tier: QueryTier::Backend,
                     start_ns: 0,
                     end_ns: 59,
+                    backend_job: None,
                 },
                 QueryShard {
                     tier: QueryTier::Live,
                     start_ns: 60,
                     end_ns: 100,
+                    backend_job: None,
                 },
             ]
     );
@@ -40,6 +43,7 @@ fn plan_time_shards_keeps_single_tier_windows_intact() {
                 tier: QueryTier::Backend,
                 start_ns: 0,
                 end_ns: 50,
+                backend_job: None,
             }]
     );
     assert!(
@@ -48,7 +52,66 @@ fn plan_time_shards_keeps_single_tier_windows_intact() {
                 tier: QueryTier::Live,
                 start_ns: 60,
                 end_ns: 100,
+                backend_job: None,
             }]
+    );
+}
+
+#[test]
+fn plan_query_shards_groups_backend_row_groups_by_target_bytes() {
+    let shards = plan_query_shards(
+        0,
+        100,
+        Some(80),
+        100,
+        &[
+            BackendBlock {
+                object_key: "blocks/a.parquet".into(),
+                min_time_ns: 0,
+                max_time_ns: 50,
+                row_groups: vec![
+                    BackendRowGroup {
+                        index: 0,
+                        compressed_bytes: 40,
+                    },
+                    BackendRowGroup {
+                        index: 1,
+                        compressed_bytes: 60,
+                    },
+                    BackendRowGroup {
+                        index: 2,
+                        compressed_bytes: 40,
+                    },
+                ],
+            },
+            BackendBlock {
+                object_key: "blocks/outside.parquet".into(),
+                min_time_ns: 150,
+                max_time_ns: 200,
+                row_groups: vec![BackendRowGroup {
+                    index: 0,
+                    compressed_bytes: 40,
+                }],
+            },
+        ],
+    );
+
+    assert!(shards.len() == 3);
+    assert!(shards[0].tier == QueryTier::Backend);
+    assert!(shards[0].backend_job.as_ref().unwrap().object_key == "blocks/a.parquet");
+    assert!(shards[0].backend_job.as_ref().unwrap().row_group_start == 0);
+    assert!(shards[0].backend_job.as_ref().unwrap().row_group_end == 2);
+    assert!(shards[1].tier == QueryTier::Backend);
+    assert!(shards[1].backend_job.as_ref().unwrap().row_group_start == 2);
+    assert!(shards[1].backend_job.as_ref().unwrap().row_group_end == 3);
+    assert!(
+        shards[2]
+            == QueryShard {
+                tier: QueryTier::Live,
+                start_ns: 80,
+                end_ns: 100,
+                backend_job: None,
+            }
     );
 }
 
@@ -137,6 +200,47 @@ async fn frontend_deduplicates_spans_across_shards() {
     assert!(span_sets[0]["matched"] == 1);
     assert!(spans.len() == 1);
     assert!(spans[0]["spanID"] == "1111111111111111");
+}
+
+#[tokio::test]
+async fn frontend_forwards_backend_row_group_job_to_querier() {
+    let upstream_url = spawn_query_echo_search_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.target_bytes_per_job = 100;
+    cfg.backend_blocks = vec![BackendBlock {
+        object_key: "blocks/a.parquet".into(),
+        min_time_ns: 0,
+        max_time_ns: 10_000_000_000,
+        row_groups: vec![
+            BackendRowGroup {
+                index: 0,
+                compressed_bytes: 40,
+            },
+            BackendRowGroup {
+                index: 1,
+                compressed_bytes: 60,
+            },
+        ],
+    }];
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=10")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
+
+    assert!(received_query.contains("block=blocks%2Fa.parquet"));
+    assert!(received_query.contains("rowGroupStart=0"));
+    assert!(received_query.contains("rowGroupEnd=2"));
 }
 
 #[tokio::test]
@@ -413,6 +517,18 @@ async fn spawn_overlapping_search_querier() -> String {
     format!("http://{addr}")
 }
 
+async fn spawn_query_echo_search_querier() -> String {
+    let app = Router::new()
+        .route("/{*path}", get(query_echo_search_response))
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
 async fn spawn_sharded_metrics_querier() -> String {
     let app = Router::new()
         .route("/{*path}", get(sharded_metrics_response))
@@ -509,6 +625,27 @@ async fn overlapping_search_response() -> axum::Json<Value> {
             "totalBlocks": 1,
             "inspectedTraces": 1,
             "inspectedBytes": 0
+        }
+    }))
+}
+
+async fn query_echo_search_response(State(()): State<()>, uri: Uri) -> axum::Json<Value> {
+    axum::Json(json!({
+        "traces": [{
+            "traceID": "0123456789abcdef0123456789abcdef",
+            "rootServiceName": "svc",
+            "rootTraceName": uri.query().unwrap_or_default(),
+            "startTimeUnixNano": "0",
+            "durationMs": 1,
+            "spanSets": [{
+                "spans": [{ "spanID": "1111111111111111" }],
+                "matched": 1
+            }]
+        }],
+        "metrics": {
+            "totalBlocks": 1,
+            "inspectedTraces": 1,
+            "inspectedBytes": 100
         }
     }))
 }

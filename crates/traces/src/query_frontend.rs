@@ -17,11 +17,33 @@ pub enum QueryTier {
     Live,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendRowGroup {
+    pub index: u32,
+    pub compressed_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendBlock {
+    pub object_key: String,
+    pub min_time_ns: i64,
+    pub max_time_ns: i64,
+    pub row_groups: Vec<BackendRowGroup>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendJob {
+    pub object_key: String,
+    pub row_group_start: u32,
+    pub row_group_end: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueryShard {
     pub tier: QueryTier,
     pub start_ns: i64,
     pub end_ns: i64,
+    pub backend_job: Option<BackendJob>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,6 +51,8 @@ pub struct QueryFrontendConfig {
     pub querier_url: Url,
     pub live_frontier_ns: Option<i64>,
     pub max_queue_depth: usize,
+    pub target_bytes_per_job: u64,
+    pub backend_blocks: Vec<BackendBlock>,
 }
 
 impl QueryFrontendConfig {
@@ -37,6 +61,8 @@ impl QueryFrontendConfig {
             querier_url: Url::parse(querier_url)?,
             live_frontier_ns: None,
             max_queue_depth: 128,
+            target_bytes_per_job: 0,
+            backend_blocks: Vec::new(),
         })
     }
 }
@@ -84,6 +110,7 @@ pub fn plan_time_shards(
             tier: QueryTier::Backend,
             start_ns,
             end_ns,
+            backend_job: None,
         }];
     };
 
@@ -92,6 +119,7 @@ pub fn plan_time_shards(
             tier: QueryTier::Backend,
             start_ns,
             end_ns,
+            backend_job: None,
         }];
     }
     if start_ns >= frontier {
@@ -99,6 +127,7 @@ pub fn plan_time_shards(
             tier: QueryTier::Live,
             start_ns,
             end_ns,
+            backend_job: None,
         }];
     }
 
@@ -107,13 +136,100 @@ pub fn plan_time_shards(
             tier: QueryTier::Backend,
             start_ns,
             end_ns: frontier.saturating_sub(1),
+            backend_job: None,
         },
         QueryShard {
             tier: QueryTier::Live,
             start_ns: frontier,
             end_ns,
+            backend_job: None,
         },
     ]
+}
+
+#[must_use]
+pub fn plan_query_shards(
+    start_ns: i64,
+    end_ns: i64,
+    live_frontier_ns: Option<i64>,
+    target_bytes_per_job: u64,
+    backend_blocks: &[BackendBlock],
+) -> Vec<QueryShard> {
+    let time_shards = plan_time_shards(start_ns, end_ns, live_frontier_ns);
+    if target_bytes_per_job == 0 || backend_blocks.is_empty() {
+        return time_shards;
+    }
+
+    let mut out = Vec::new();
+    for shard in time_shards {
+        if shard.tier != QueryTier::Backend {
+            out.push(shard);
+            continue;
+        }
+
+        let before = out.len();
+        for block in backend_blocks {
+            if block.max_time_ns < shard.start_ns || block.min_time_ns > shard.end_ns {
+                continue;
+            }
+            out.extend(plan_block_jobs(&shard, block, target_bytes_per_job));
+        }
+        if out.len() == before {
+            out.push(shard);
+        }
+    }
+    out
+}
+
+fn plan_block_jobs(
+    shard: &QueryShard,
+    block: &BackendBlock,
+    target_bytes_per_job: u64,
+) -> Vec<QueryShard> {
+    let mut jobs = Vec::new();
+    let mut row_group_start = None;
+    let mut row_group_end = 0;
+    let mut bytes = 0_u64;
+
+    for row_group in &block.row_groups {
+        row_group_start.get_or_insert(row_group.index);
+        row_group_end = row_group.index.saturating_add(1);
+        bytes = bytes.saturating_add(row_group.compressed_bytes);
+        if bytes >= target_bytes_per_job {
+            jobs.push(backend_job_shard(
+                shard,
+                block,
+                row_group_start.unwrap(),
+                row_group_end,
+            ));
+            row_group_start = None;
+            bytes = 0;
+        }
+    }
+
+    if let Some(start) = row_group_start {
+        jobs.push(backend_job_shard(shard, block, start, row_group_end));
+    }
+
+    jobs
+}
+
+fn backend_job_shard(
+    shard: &QueryShard,
+    block: &BackendBlock,
+    row_group_start: u32,
+    row_group_end: u32,
+) -> QueryShard {
+    QueryShard {
+        tier: QueryTier::Backend,
+        start_ns: shard.start_ns,
+        end_ns: shard.end_ns,
+        backend_job: Some(BackendJob {
+            object_key: block.object_key.clone(),
+            row_group_start,
+            row_group_end,
+        }),
+    }
 }
 
 async fn echo() -> &'static str {
@@ -122,6 +238,16 @@ async fn echo() -> &'static str {
 
 async fn ready() -> &'static str {
     "ready"
+}
+
+fn planned_shards(state: &AppState, start_ns: i64, end_ns: i64) -> Vec<QueryShard> {
+    plan_query_shards(
+        start_ns,
+        end_ns,
+        state.cfg.live_frontier_ns,
+        state.cfg.target_bytes_per_job,
+        &state.cfg.backend_blocks,
+    )
 }
 
 async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
@@ -140,8 +266,8 @@ async fn search(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> 
         "inspectedBytes": 0,
     });
 
-    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+    for shard in planned_shards(&state, start_ns, end_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
         else {
@@ -185,8 +311,8 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+    for shard in planned_shards(&state, start_ns, end_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
         else {
@@ -241,8 +367,8 @@ async fn merged_metric_query_response(
     let exemplar_limit = exemplar_limit_param(&uri);
     let mut merged_series = Vec::new();
 
-    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+    for shard in planned_shards(&state, start_ns, end_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
         else {
@@ -286,8 +412,8 @@ async fn search_tags_v2(State(state): State<AppState>, headers: HeaderMap, uri: 
         "inspectedBytes": 0,
     });
 
-    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+    for shard in planned_shards(&state, start_ns, end_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
         else {
@@ -337,8 +463,8 @@ async fn search_tag_values_v2(
         "inspectedBytes": 0,
     });
 
-    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
-        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+    for shard in planned_shards(&state, start_ns, end_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, &shard)
             .send()
             .await
         else {
@@ -591,7 +717,7 @@ fn build_querier_request(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
-    shard: QueryShard,
+    shard: &QueryShard,
 ) -> reqwest::RequestBuilder {
     let mut url = state.cfg.querier_url.clone();
     url.set_path(uri.path());
@@ -599,12 +725,22 @@ fn build_querier_request(
         let mut pairs = url.query_pairs_mut();
         for (key, value) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         {
-            if key != "start" && key != "end" {
+            if key != "start"
+                && key != "end"
+                && key != "block"
+                && key != "rowGroupStart"
+                && key != "rowGroupEnd"
+            {
                 pairs.append_pair(&key, &value);
             }
         }
         pairs.append_pair("start", &format_ns_as_seconds(shard.start_ns));
         pairs.append_pair("end", &format_ns_as_seconds(shard.end_ns));
+        if let Some(job) = &shard.backend_job {
+            pairs.append_pair("block", &job.object_key);
+            pairs.append_pair("rowGroupStart", &job.row_group_start.to_string());
+            pairs.append_pair("rowGroupEnd", &job.row_group_end.to_string());
+        }
     }
 
     let mut req = state.http.get(url);
