@@ -912,18 +912,21 @@ fn template_current_dot_field_value(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateConditional {
-    branches: Vec<(TemplateExpression, Vec<TemplatePart>)>,
+    branches: Vec<(TemplateControlExpression, Vec<TemplatePart>)>,
     else_parts: Vec<TemplatePart>,
 }
 
 impl TemplateConditional {
     fn render(&self, context: &TemplateRenderContext<'_>) -> String {
+        let mut context = context.clone();
         for (condition, parts) in &self.branches {
-            if condition.evaluate(context).is_truthy() {
-                return render_template_parts(parts, context);
+            let (value, branch_context) = condition.evaluate(&context);
+            if value.is_truthy() {
+                return render_template_parts(parts, &branch_context);
             }
+            context = branch_context;
         }
-        render_template_parts(&self.else_parts, context)
+        render_template_parts(&self.else_parts, &context)
     }
 }
 
@@ -1021,19 +1024,50 @@ impl TemplateRange {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateWith {
-    expression: TemplateExpression,
+    expression: TemplateControlExpression,
     parts: Vec<TemplatePart>,
     else_parts: Vec<TemplatePart>,
 }
 
 impl TemplateWith {
     fn render(&self, context: &TemplateRenderContext<'_>) -> String {
-        let value = self.expression.evaluate(context);
+        let (value, context) = self.expression.evaluate(context);
         if !value.is_truthy() {
-            return render_template_parts(&self.else_parts, context);
+            return render_template_parts(&self.else_parts, &context);
         }
         let child_context = context.with_current_dot(value);
         render_template_parts(&self.parts, &child_context)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TemplateControlExpression {
+    variable: Option<String>,
+    expression: TemplateExpression,
+}
+
+impl TemplateControlExpression {
+    fn parse(expression: &str) -> Result<Self, ParseError> {
+        let (variable, expression) = parse_template_control_assignment(expression)?
+            .map_or((None, expression.trim()), |(variable, expression)| {
+                (Some(variable), expression)
+            });
+        Ok(Self {
+            variable,
+            expression: TemplateExpression::parse(expression)?,
+        })
+    }
+
+    fn evaluate<'a>(
+        &self,
+        context: &TemplateRenderContext<'a>,
+    ) -> (TemplateRuntimeValue, TemplateRenderContext<'a>) {
+        let value = self.expression.evaluate(context);
+        let context = self.variable.as_ref().map_or_else(
+            || context.clone(),
+            |variable| context.with_variable(variable.clone(), value.clone()),
+        );
+        (value, context)
     }
 }
 
@@ -1405,13 +1439,34 @@ fn parse_template_assignment(expression: &str) -> Result<Option<TemplateAssignme
     }))
 }
 
+fn parse_template_control_assignment(
+    expression: &str,
+) -> Result<Option<(String, &str)>, ParseError> {
+    if !expression.trim_start().starts_with('$') {
+        return Ok(None);
+    }
+    let Some((variable, expression)) = expression.split_once(":=") else {
+        return Ok(None);
+    };
+    if variable
+        .trim()
+        .contains(|ch: char| ch.is_whitespace() || ch == '|')
+    {
+        return Ok(None);
+    }
+    Ok(Some((
+        parse_template_variable_name(variable.trim(), "expected template variable")?,
+        expression.trim(),
+    )))
+}
+
 fn parse_template_conditional(
     template: &str,
     mut branch_start: usize,
     first_condition: &str,
 ) -> Result<(TemplateConditional, usize), ParseError> {
     let mut branches = Vec::new();
-    let mut condition = TemplateExpression::parse(first_condition)?;
+    let mut condition = TemplateControlExpression::parse(first_condition)?;
     loop {
         let Some((body_end, expression, next_pos)) =
             find_template_control_action(template, branch_start)?
@@ -1421,7 +1476,7 @@ fn parse_template_conditional(
         let branch_parts = parse_template_parts(&template[branch_start..body_end])?;
         if let Some(next_condition) = expression.strip_prefix("else if ") {
             branches.push((condition, branch_parts));
-            condition = TemplateExpression::parse(next_condition.trim())?;
+            condition = TemplateControlExpression::parse(next_condition.trim())?;
             branch_start = next_pos;
             continue;
         }
@@ -1507,7 +1562,7 @@ fn parse_template_with(
     body_start: usize,
     with_expression: &str,
 ) -> Result<(TemplateWith, usize), ParseError> {
-    let expression = TemplateExpression::parse(with_expression.trim())?;
+    let expression = TemplateControlExpression::parse(with_expression.trim())?;
     let Some((control_body, control_expression, control_next)) =
         find_template_control_action(template, body_start)?
     else {
