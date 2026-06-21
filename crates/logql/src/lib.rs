@@ -910,6 +910,28 @@ fn template_current_dot_field_value(
     template_variable_path_value(value, &path)
 }
 
+fn template_root_field_value(fields: &Labels, path: &[String]) -> TemplateRuntimeValue {
+    let Some((first, rest)) = path.split_first() else {
+        let object = fields
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect();
+        return TemplateRuntimeValue::Json(serde_json::Value::Object(object));
+    };
+
+    let Some(value) = fields.get(first) else {
+        return TemplateRuntimeValue::String(String::new());
+    };
+    if rest.is_empty() {
+        return TemplateRuntimeValue::String(value.clone());
+    }
+
+    serde_json::from_str::<serde_json::Value>(value)
+        .ok()
+        .and_then(|json| template_variable_path_value(&TemplateRuntimeValue::Json(json), rest))
+        .unwrap_or_else(|| TemplateRuntimeValue::String(String::new()))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TemplateConditional {
     branches: Vec<(TemplateControlExpression, Vec<TemplatePart>)>,
@@ -1156,6 +1178,7 @@ impl TemplateCommand {
 enum TemplateValue {
     Current,
     Field(String),
+    Root { path: Vec<String> },
     Variable { name: String, path: Vec<String> },
     Line,
     Timestamp,
@@ -1180,6 +1203,18 @@ impl TemplateValue {
                 return Err(template_parse_error("expected template field name"));
             }
             return Ok(Self::Field(field.to_string()));
+        }
+        if token == "$" {
+            return Ok(Self::Root { path: Vec::new() });
+        }
+        if let Some(path) = token.strip_prefix("$.") {
+            return Ok(Self::Root {
+                path: path
+                    .split('.')
+                    .filter(|part| !part.is_empty())
+                    .map(ToString::to_string)
+                    .collect(),
+            });
         }
         if let Some(variable) = token.strip_prefix('$') {
             if variable.is_empty() {
@@ -1230,6 +1265,7 @@ impl TemplateValue {
                         context.fields.get(name).cloned().unwrap_or_default(),
                     )
                 }),
+            Self::Root { path } => template_root_field_value(context.fields, path),
             Self::Variable { name, path } => context
                 .variables
                 .get(name)
