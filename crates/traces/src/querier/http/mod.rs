@@ -130,12 +130,14 @@ where
     if end_ns < start_ns {
         return (StatusCode::BAD_REQUEST, "end must be >= start").into_response();
     }
-    let limit = query_param(&uri, "limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let spss = query_param(&uri, "spss")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let limit = match optional_usize_param(&uri, "limit") {
+        Ok(value) => value.unwrap_or(0),
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let spss = match optional_usize_param(&uri, "spss") {
+        Ok(value) => value.unwrap_or(0),
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
     let min_duration_ns = match duration_param(&uri, "minDuration") {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -569,6 +571,16 @@ fn optional_seconds_param(uri: &Uri, key: &'static str) -> Result<Option<i64>, S
     query_param(uri, key)
         .map(|value| {
             parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
+        })
+        .transpose()
+}
+
+fn optional_usize_param(uri: &Uri, key: &'static str) -> Result<Option<usize>, String> {
+    query_param(uri, key)
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| format!("invalid query parameter {key}"))
         })
         .transpose()
 }
@@ -1951,6 +1963,21 @@ mod tests {
 
         assert!(status == StatusCode::BAD_REQUEST);
         assert!(body == "end must be >= start");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_numeric_parameters() {
+        let (status, body) =
+            get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=bogus")
+                .await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter limit");
+
+        let (status, body) =
+            get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&spss=bogus")
+                .await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter spss");
     }
 
     #[tokio::test]
