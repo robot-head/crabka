@@ -75,6 +75,10 @@ struct Cli {
     #[arg(long)]
     max_exemplars_per_series: Option<usize>,
     #[arg(long)]
+    edge_ttl_secs: Option<u64>,
+    #[arg(long)]
+    edge_store_max_items: Option<usize>,
+    #[arg(long)]
     enable_target_info: bool,
     #[arg(long)]
     enable_status_message: bool,
@@ -547,6 +551,12 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
     if let Some(max) = cli.max_exemplars_per_series {
         cfg.max_exemplars_per_series = max;
     }
+    if let Some(secs) = cli.edge_ttl_secs {
+        cfg.edge_ttl = Duration::from_secs(secs);
+    }
+    if let Some(max) = cli.edge_store_max_items {
+        cfg.edge_store_max_items = max;
+    }
     cfg.enable_target_info |= cli.enable_target_info;
     cfg.enable_status_message |= cli.enable_status_message;
     cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
@@ -793,6 +803,10 @@ mod tests {
             "30",
             "--max-exemplars-per-series",
             "3",
+            "--edge-ttl-secs",
+            "20",
+            "--edge-store-max-items",
+            "1234",
             "--config",
             "metricsgen.yaml",
         ])
@@ -802,6 +816,8 @@ mod tests {
         assert!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
         assert!(cli.collection_interval_secs == Some(30));
         assert!(cli.max_exemplars_per_series == Some(3));
+        assert!(cli.edge_ttl_secs == Some(20));
+        assert!(cli.edge_store_max_items == Some(1234));
         assert!(cli.config.as_deref() == Some("metricsgen.yaml"));
     }
 
@@ -828,6 +844,8 @@ mod tests {
         let mut cfg = MetricsGenConfig {
             collection_interval: Duration::from_secs(30),
             max_exemplars_per_series: 5,
+            edge_ttl: Duration::from_mins(1),
+            edge_store_max_items: 2_000,
             remote_write_url: "http://metrics.example/api/v1/push".into(),
             ..MetricsGenConfig::default()
         };
@@ -836,6 +854,8 @@ mod tests {
 
         assert!(cfg.collection_interval == Duration::from_secs(30));
         assert!(cfg.max_exemplars_per_series == 5);
+        assert!(cfg.edge_ttl == Duration::from_mins(1));
+        assert!(cfg.edge_store_max_items == 2_000);
         assert!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
 
         let cli = Cli::try_parse_from([
@@ -846,6 +866,10 @@ mod tests {
             "45",
             "--max-exemplars-per-series",
             "2",
+            "--edge-ttl-secs",
+            "9",
+            "--edge-store-max-items",
+            "77",
             "--remote-write-url",
             "http://override.example/api/v1/push",
         ])
@@ -855,6 +879,8 @@ mod tests {
 
         assert!(cfg.collection_interval == Duration::from_secs(45));
         assert!(cfg.max_exemplars_per_series == 2);
+        assert!(cfg.edge_ttl == Duration::from_secs(9));
+        assert!(cfg.edge_store_max_items == 77);
         assert!(cfg.remote_write_url == "http://override.example/api/v1/push");
     }
 
