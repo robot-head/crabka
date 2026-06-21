@@ -12057,7 +12057,7 @@ async fn index_volume_range_endpoint_returns_matrix_without_target_labels() {
 }
 
 #[tokio::test]
-async fn index_volume_range_endpoint_defaults_missing_start_to_vector_response() {
+async fn index_volume_endpoints_require_start_parameter() {
     let state = QuerierState::new(
         tempfile::tempdir().unwrap().keep(),
         LabelIndex::default(),
@@ -12065,33 +12065,32 @@ async fn index_volume_range_endpoint_defaults_missing_start_to_vector_response()
     );
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/index/volume_range?query=%7Bapp%3D%22api%22%7D&end=1000000000&step=1000000000")
-                .header("X-Scope-OrgID", "tenant-a")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for endpoint in ["index/volume", "index/volume_range"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/loki/api/v1/{endpoint}?query=%7Bapp%3D%22api%22%7D&end=1000000000&step=1000000000"
+                    ))
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": {
-                    "resultType": "vector",
-                    "result": [],
-                    "stats": expected_loki_stats()
-                }
-            })
-    );
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert_loki_error(
+            &json_body(response).await,
+            "bad_data",
+            "missing query parameter `start`",
+        );
+    }
 }
 
 #[tokio::test]
-async fn index_volume_endpoints_return_loki_error_for_default_end_over_limit() {
+async fn index_volume_endpoints_require_end_parameter() {
     let state = QuerierState::new(
         tempfile::tempdir().unwrap().keep(),
         LabelIndex::default(),
@@ -12115,9 +12114,11 @@ async fn index_volume_endpoints_return_loki_error_for_default_end_over_limit() {
             .unwrap();
 
         assert!(response.status() == StatusCode::BAD_REQUEST);
-        let body = text_body(response).await;
-        assert!(body.starts_with("the query time range exceeds the limit (query length: "));
-        assert!(body.ends_with(", limit: 30d1h)"));
+        assert_loki_error(
+            &json_body(response).await,
+            "bad_data",
+            "missing query parameter `end`",
+        );
     }
 }
 
