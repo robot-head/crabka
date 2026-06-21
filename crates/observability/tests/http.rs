@@ -4480,6 +4480,51 @@ rules:
 }
 
 #[tokio::test]
+async fn prometheus_alerts_endpoint_tracks_pending_alerts_until_for_duration_elapses() {
+    let state = fixture();
+    let app = loki_router(state);
+    post_loki_rule_group_for_test(
+        &app,
+        "default",
+        "\
+name: api-errors
+rules:
+  - alert: ApiErrors
+    expr: count_over_time({app=\"api\"} |= \"error\" [30ns]) > 0
+    for: 20ns
+    labels:
+      severity: page
+",
+    )
+    .await;
+
+    let pending_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/alerts?time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(pending_response.status() == StatusCode::OK);
+    let pending_body = json_body(pending_response).await;
+    assert!(pending_body["data"]["alerts"].as_array().unwrap().len() == 1);
+    assert!(pending_body["data"]["alerts"][0]["state"] == "pending");
+    assert!(pending_body["data"]["alerts"][0]["activeAt"] == "1970-01-01T00:00:00.000000019Z");
+
+    let firing_body =
+        prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
+    assert!(firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
+    assert!(
+        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
+            == "1970-01-01T00:00:00.000000019Z"
+    );
+}
+
+#[tokio::test]
 async fn prometheus_rules_endpoint_excludes_active_alerts_when_requested() {
     let state = fixture();
     let app = loki_router(state);
