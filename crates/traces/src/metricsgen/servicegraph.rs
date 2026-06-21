@@ -166,6 +166,7 @@ impl EdgeStore {
             first_seen_ns: now_ns,
         };
         fill_edge(&mut edge, span, is_client, latency_ns);
+        fill_virtual_node(&mut edge, span, is_client, connection_type);
         self.edges.insert(key, edge);
         RecordOutcome::Recorded
     }
@@ -500,6 +501,25 @@ fn fill_edge(edge: &mut Edge, span: &SpanRecord, is_client: bool, latency_ns: i6
     }
 }
 
+fn fill_virtual_node(
+    edge: &mut Edge,
+    span: &SpanRecord,
+    is_client: bool,
+    connection_type: ConnectionType,
+) {
+    if connection_type != ConnectionType::VirtualNode {
+        return;
+    }
+    let Some(peer) = attr_value(span, "peer.service") else {
+        return;
+    };
+    if is_client {
+        edge.server_service = Some(peer.to_string());
+    } else {
+        edge.client_service = Some(peer.to_string());
+    }
+}
+
 fn counter(name: &str, labels: &[(String, String)], value: f64, timestamp_ms: i64) -> Series {
     Series {
         name: name.to_string(),
@@ -544,6 +564,12 @@ fn classify(span: &SpanRecord) -> ConnectionType {
 
 fn has_attr(span: &SpanRecord, name: &str) -> bool {
     span.attributes.iter().any(|(key, _)| key == name)
+}
+
+fn attr_value<'a>(span: &'a SpanRecord, name: &str) -> Option<&'a str> {
+    span.attributes
+        .iter()
+        .find_map(|(key, value)| (key == name && !value.is_empty()).then_some(value.as_str()))
 }
 
 #[expect(
@@ -1000,6 +1026,36 @@ mod tests {
                 .labels
                 .iter()
                 .any(|(k, v)| k == "connection_type" && v == "database")
+        );
+    }
+
+    #[test]
+    fn virtual_node_uses_peer_service_as_server_label() {
+        let mut store = EdgeStore::new(&MetricsGenConfig::default());
+        let mut client = span(
+            "frontend",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        client
+            .attributes
+            .push(("peer.service".into(), "db-proxy".into()));
+
+        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert!(store.expire(20_000_000_000) == 1);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_unpaired_spans_total");
+        assert!(
+            labels
+                == [
+                    ("client".to_string(), "frontend".to_string()),
+                    ("connection_type".to_string(), "virtual_node".to_string()),
+                    ("server".to_string(), "db-proxy".to_string()),
+                ]
         );
     }
 
