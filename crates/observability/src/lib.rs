@@ -9779,7 +9779,10 @@ fn parse_series_params(raw_query: Option<&str>) -> Result<SeriesParams, HttpQuer
         return Ok(params);
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(
+        raw_query,
+        &["match[]", "match%5B%5D", "query", "start", "end", "since"],
+    ) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
@@ -9890,7 +9893,18 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(
+        raw_query,
+        &[
+            "query",
+            "start",
+            "end",
+            "step",
+            "limit",
+            "targetLabels",
+            "aggregateBy",
+        ],
+    ) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
@@ -9951,7 +9965,19 @@ fn parse_detected_fields_params(
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(
+        raw_query,
+        &[
+            "query",
+            "start",
+            "end",
+            "since",
+            "step",
+            "limit",
+            "field_limit",
+            "line_limit",
+        ],
+    ) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
@@ -9996,7 +10022,7 @@ fn parse_patterns_params(raw_query: Option<&str>) -> Result<PatternsParams, Http
         return Err(HttpQueryError::MissingQueryParameter("query"));
     };
 
-    for pair in raw_query.split('&').filter(|pair| !pair.is_empty()) {
+    for pair in split_query_param_pairs(raw_query, &["query", "start", "end", "step"]) {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = decode_form_component(key)?;
         let value = decode_form_component(value)?;
