@@ -980,7 +980,62 @@ fn trace_from_batches(
 fn deduplicate_trace_spans(spans: &mut Vec<SpanRef>) {
     spans.sort_by_key(|span| span.span_id);
     spans.dedup_by_key(|span| span.span_id);
+    recompute_trace_nested_sets(spans);
     spans.sort_by_key(|span| (span.start_time_unix_nano, span.span_id));
+}
+
+fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
+    enum Frame {
+        Enter { idx: usize, parent_left: i32 },
+        Exit { idx: usize },
+    }
+
+    let positions = spans
+        .iter()
+        .enumerate()
+        .map(|(idx, span)| (span.span_id, idx))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = vec![Vec::new(); spans.len()];
+    let mut roots = Vec::new();
+    for (idx, span) in spans.iter().enumerate() {
+        match span
+            .parent_span_id
+            .and_then(|parent| positions.get(&parent).copied())
+        {
+            Some(parent_idx) if parent_idx != idx => children[parent_idx].push(idx),
+            _ => roots.push(idx),
+        }
+    }
+
+    let mut counter = 1_i32;
+    let mut stack = Vec::new();
+    for &root in roots.iter().rev() {
+        stack.push(Frame::Enter {
+            idx: root,
+            parent_left: 0,
+        });
+    }
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter { idx, parent_left } => {
+                let left = counter;
+                counter += 1;
+                spans[idx].nested_set_left = left;
+                spans[idx].nested_set_parent = parent_left;
+                stack.push(Frame::Exit { idx });
+                for &child in children[idx].iter().rev() {
+                    stack.push(Frame::Enter {
+                        idx: child,
+                        parent_left: left,
+                    });
+                }
+            }
+            Frame::Exit { idx } => {
+                spans[idx].nested_set_right = counter;
+                counter += 1;
+            }
+        }
+    }
 }
 
 fn is_intrinsic_tag(tag: &str) -> bool {
@@ -2253,6 +2308,79 @@ mod tests {
 
         assert!(trace.spans.len() == 1);
         assert!(trace.spans[0].span_id == span.span_id);
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_recomputes_nested_sets_across_cold_and_live_tiers() {
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        let root = span_with_nested_refs();
+        let mut child = span_with_nested_refs();
+        child.span_id = [3; 8];
+        child.parent_span_id = Some(root.span_id);
+        child.start_ns = root.start_ns + 10;
+        let batch = span_batch(std::slice::from_ref(&root)).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/split-trace-root.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&root.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let live = LiveTier::new(Arc::new(FakeLiveSource {
+            trace: Some(TraceSpans {
+                trace_id: root.trace_id,
+                root_service_name: "api".into(),
+                root_trace_name: "GET /users".into(),
+                resource_attributes: vec![],
+                spans: vec![span_ref_from_span(&child)],
+            }),
+            values: vec![],
+            frontier_ns: 1_000,
+        }));
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), Some(live));
+
+        let trace = store
+            .trace_by_id("tenant", &root.trace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let root = trace
+            .spans
+            .iter()
+            .find(|span| span.span_id == root.span_id)
+            .unwrap();
+        let child = trace
+            .spans
+            .iter()
+            .find(|span| span.span_id == child.span_id)
+            .unwrap();
+
+        assert!(child.nested_set_parent == root.nested_set_left);
+        assert!(child.nested_set_left > root.nested_set_left);
+        assert!(child.nested_set_right < root.nested_set_right);
     }
 
     #[tokio::test]
