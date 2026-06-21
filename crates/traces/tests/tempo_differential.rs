@@ -27,10 +27,10 @@ use opentelemetry_proto::tonic::trace::v1::{
 };
 use prost::Message as _;
 use reqwest::StatusCode as ReqwestStatusCode;
-use serde_json::Value as JsonValue;
-use testcontainers::GenericImage;
+use serde_json::{Value as JsonValue, json};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
+use testcontainers::{GenericImage, ImageExt};
 use tower::ServiceExt as _;
 
 const TENANT: &str = "tenant-a";
@@ -92,6 +92,90 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     )
     .await?;
     assert_search_shape_matches(&tempo_search, &crabka_search);
+
+    crabka.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the grafana/grafana image"]
+async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
+    let client = reqwest::Client::new();
+    let otlp_body = sample_otlp_body();
+    let crabka = start_crabka_pair(&otlp_body).await?;
+
+    let grafana = start_grafana().await?;
+    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
+
+    let payload = json!({
+        "name": "Crabka Traces",
+        "type": "tempo",
+        "access": "proxy",
+        "url": crabka.base_url,
+        "isDefault": true,
+        "jsonData": {
+            "httpMethod": "GET"
+        }
+    });
+    let created: JsonValue = client
+        .post(format!("{grafana_base}/api/datasources"))
+        .basic_auth("admin", Some("admin"))
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let uid = created
+        .get("datasource")
+        .and_then(|datasource| datasource.get("uid"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+    let id = created
+        .get("datasource")
+        .and_then(|datasource| datasource.get("id"))
+        .and_then(JsonValue::as_i64)
+        .unwrap_or_default();
+
+    let fetched: JsonValue = if let Some(uid) = uid {
+        client
+            .get(format!("{grafana_base}/api/datasources/uid/{uid}"))
+            .basic_auth("admin", Some("admin"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    } else if id != 0 {
+        client
+            .get(format!("{grafana_base}/api/datasources/id/{id}"))
+            .basic_auth("admin", Some("admin"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    } else {
+        let encoded = url::form_urlencoded::byte_serialize(b"Crabka Traces").collect::<String>();
+        client
+            .get(format!("{grafana_base}/api/datasources/name/{encoded}"))
+            .basic_auth("admin", Some("admin"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    };
+
+    assert_eq!(
+        fetched.get("type").and_then(JsonValue::as_str),
+        Some("tempo")
+    );
+    assert_eq!(
+        fetched.get("url").and_then(JsonValue::as_str),
+        Some(crabka.base_url.as_str())
+    );
 
     crabka.shutdown();
     Ok(())
@@ -229,6 +313,16 @@ async fn start_tempo() -> TestResult<testcontainers::ContainerAsync<GenericImage
         .with_exposed_port(3200.tcp())
         .with_exposed_port(4318.tcp())
         .with_wait_for(WaitFor::seconds(5))
+        .start()
+        .await?)
+}
+
+async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericImage>> {
+    let tag = std::env::var("CRABKA_GRAFANA_IMAGE_TAG").unwrap_or_else(|_| "latest".into());
+    Ok(GenericImage::new("grafana/grafana".to_string(), tag)
+        .with_exposed_port(3000.tcp())
+        .with_wait_for(WaitFor::seconds(5))
+        .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
         .start()
         .await?)
 }
