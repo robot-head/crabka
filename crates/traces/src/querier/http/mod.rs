@@ -1109,6 +1109,26 @@ fn scoped_tags_from_traces(traces: &[TraceSpans], scope: Option<TagScope>) -> Ve
         }
     }
 
+    if matches!(scope, None | Some(TagScope::Instrumentation)) {
+        let mut tags = BTreeSet::new();
+        for trace in traces {
+            for span in &trace.spans {
+                if !span.instrumentation_name.is_empty() {
+                    tags.insert("instrumentation:name".to_string());
+                }
+                if !span.instrumentation_version.is_empty() {
+                    tags.insert("instrumentation:version".to_string());
+                }
+            }
+        }
+        if !tags.is_empty() {
+            out.push(ScopedTag {
+                scope: TagScope::Instrumentation,
+                tags: tags.into_iter().collect(),
+            });
+        }
+    }
+
     out
 }
 
@@ -3362,6 +3382,60 @@ mod tests {
         assert!(
             body == json!({
                 "tagNames": ["env", "svc", "target"],
+                "metrics": {
+                    "inspectedBytes": "0"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tags_legacy_query_filter_returns_instrumentation_scope() {
+        let mut store = InMemorySpanStore::new();
+        let mut root = span_at_with_attrs(
+            1,
+            1,
+            None,
+            "root-svc",
+            1_000,
+            vec![("env".into(), AttrValue::Str("prod".into()))],
+        );
+        root.instrumentation_name = "tracer".into();
+        root.instrumentation_version = "1.2.3".into();
+        store.push_trace("tenant-a", "svc-a", "root-a", vec![root]);
+        store.push_trace(
+            "tenant-a",
+            "svc-b",
+            "root-b",
+            vec![span_at_with_attrs(
+                2,
+                1,
+                None,
+                "dropped-svc",
+                3_000,
+                vec![("env".into(), AttrValue::Str("dev".into()))],
+            )],
+        );
+        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
+        let app = router(engine);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search/tags?q=%7B%20.env%20%3D%20%22prod%22%20%7D&scope=instrumentation")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(
+            body == json!({
+                "tagNames": ["instrumentation:name", "instrumentation:version"],
                 "metrics": {
                     "inspectedBytes": "0"
                 }
