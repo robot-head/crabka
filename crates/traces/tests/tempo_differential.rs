@@ -5,7 +5,7 @@
 //!
 //! `cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,13 +30,31 @@ use reqwest::StatusCode as ReqwestStatusCode;
 use serde_json::{Value as JsonValue, json};
 use testcontainers::core::{Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::{CopyDataSource, CopyTargetOptions, GenericImage, ImageExt};
 use tower::ServiceExt as _;
 
 const TENANT: &str = "tenant-a";
 const TRACE_ID_HEX: &str = "01010101010101010101010101010101";
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
+const TEMPO_CONFIG: &str = r"
+multitenancy_enabled: false
+server:
+  http_listen_port: 3200
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /tmp/tempo/wal
+    local:
+      path: /tmp/tempo/blocks
+";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -80,8 +98,8 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     let crabka_trace = get_trace_by_id(&client, &crabka.base_url, Some(TENANT)).await?;
     assert_trace_shape_matches(&tempo_trace, &crabka_trace);
 
-    let query = "%7B%20.service.name%20%3D%20%22checkout%22%20%7D";
-    let tempo_search = get_json(
+    let query = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
+    let tempo_search = get_json_until_non_empty_traces(
         &client,
         &format!("{tempo_query}/api/search?q={query}&start=0&end=1"),
         None,
@@ -94,6 +112,37 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     )
     .await?;
     assert_search_shape_matches(&tempo_search, &crabka_search);
+
+    let tempo_tags = get_json(
+        &client,
+        &format!("{tempo_query}/api/v2/search/tags?start=0&end=1"),
+        None,
+    )
+    .await?;
+    let crabka_tags = get_json(
+        &client,
+        &format!("{}/api/v2/search/tags?start=0&end=1", crabka.base_url),
+        Some(TENANT),
+    )
+    .await?;
+    assert_required_tag_names_match(&tempo_tags, &crabka_tags);
+
+    let tempo_service_values = get_json(
+        &client,
+        &format!("{tempo_query}/api/v2/search/tag/resource.service.name/values?start=0&end=1"),
+        None,
+    )
+    .await?;
+    let crabka_service_values = get_json(
+        &client,
+        &format!(
+            "{}/api/v2/search/tag/resource.service.name/values?start=0&end=1",
+            crabka.base_url
+        ),
+        Some(TENANT),
+    )
+    .await?;
+    assert_required_tag_values_match(&tempo_service_values, &crabka_service_values, "checkout");
 
     crabka.shutdown();
     Ok(())
@@ -332,7 +381,13 @@ async fn start_tempo() -> TestResult<testcontainers::ContainerAsync<GenericImage
     Ok(GenericImage::new("grafana/tempo".to_string(), tag)
         .with_exposed_port(3200.tcp())
         .with_exposed_port(4318.tcp())
-        .with_wait_for(WaitFor::seconds(5))
+        .with_wait_for(WaitFor::message_on_stderr("Tempo started"))
+        .with_copy_to(
+            CopyTargetOptions::new("/tmp/tempo.yaml").with_mode(0o644),
+            CopyDataSource::Data(TEMPO_CONFIG.as_bytes().to_vec()),
+        )
+        .with_cmd(["-target=all", "-config.file=/tmp/tempo.yaml"])
+        .with_user("root")
         .start()
         .await?)
 }
@@ -357,7 +412,7 @@ async fn mapped_base_url(
 }
 
 async fn wait_for_http_ok(client: &reqwest::Client, base: &str, paths: &[&str]) -> TestResult {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         for path in paths {
             if client
@@ -425,8 +480,31 @@ async fn get_json(
     Ok(serde_json::from_slice(&body)?)
 }
 
+async fn get_json_until_non_empty_traces(
+    client: &reqwest::Client,
+    url: &str,
+    tenant: Option<&str>,
+) -> TestResult<JsonValue> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = JsonValue::Null;
+    while Instant::now() < deadline {
+        let json = get_json(client, url, tenant).await?;
+        if json["traces"]
+            .as_array()
+            .is_some_and(|traces| !traces.is_empty())
+        {
+            return Ok(json);
+        }
+        last = json;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!("timed out waiting for non-empty traces from {url}: {last}").into())
+}
+
 fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
-    assert!(tempo["status"] == crabka["status"]);
+    if !tempo["status"].is_null() {
+        assert!(tempo["status"] == crabka["status"]);
+    }
     assert!(
         tempo["trace"]["resourceSpans"]
             .as_array()
@@ -443,14 +521,58 @@ fn assert_search_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
     assert!(
         tempo["traces"]
             .as_array()
-            .is_some_and(|traces| !traces.is_empty())
+            .is_some_and(|traces| !traces.is_empty()),
+        "Tempo search response: {tempo}"
     );
     assert!(
         crabka["traces"]
             .as_array()
-            .is_some_and(|traces| !traces.is_empty())
+            .is_some_and(|traces| !traces.is_empty()),
+        "Crabka search response: {crabka}"
     );
     assert!(crabka["traces"][0]["traceID"] == TRACE_ID_HEX);
+}
+
+fn assert_required_tag_names_match(tempo: &JsonValue, crabka: &JsonValue) {
+    let tempo_tags = tag_names(tempo);
+    let crabka_tags = tag_names(crabka);
+    for required in ["service.name", "http.method", "db.system"] {
+        assert!(tempo_tags.contains(required));
+        assert!(crabka_tags.contains(required));
+    }
+}
+
+fn assert_required_tag_values_match(tempo: &JsonValue, crabka: &JsonValue, required: &str) {
+    let tempo_values = tag_values(tempo);
+    let crabka_values = tag_values(crabka);
+    assert!(tempo_values.contains(required));
+    assert!(crabka_values.contains(required));
+}
+
+fn tag_names(value: &JsonValue) -> BTreeSet<String> {
+    value["scopes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|scope| {
+            scope["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(JsonValue::as_str)
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn tag_values(value: &JsonValue) -> BTreeSet<String> {
+    value["tagValues"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tag_value| tag_value["value"].as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 fn sample_otlp_body() -> Vec<u8> {
