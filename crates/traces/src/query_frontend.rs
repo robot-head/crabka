@@ -60,7 +60,7 @@ pub fn router(cfg: QueryFrontendConfig) -> Router {
         .route("/api/search/tag/{tag}/values", get(proxy))
         .route("/api/v2/search/tag/{tag}/values", get(proxy))
         .route("/api/metrics/query_range", get(query_range))
-        .route("/api/metrics/query", get(proxy))
+        .route("/api/metrics/query", get(query_instant))
         .route("/api/v2/traces/{trace_id}", get(proxy))
         .with_state(AppState {
             cfg,
@@ -220,12 +220,74 @@ async fn query_range(State(state): State<AppState>, headers: HeaderMap, uri: Uri
     axum::Json(json!({ "series": merged_series })).into_response()
 }
 
+async fn query_instant(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
+    let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
+        return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
+    };
+
+    if query_param(&uri, "start").is_none() && query_param(&uri, "end").is_none() {
+        return proxy_querier_response(&state, &headers, &uri).await;
+    }
+
+    let start_ns = match required_seconds_param(&uri, "start") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let end_ns = match required_seconds_param(&uri, "end") {
+        Ok(value) => value,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    merged_metric_query_response(state, headers, uri, start_ns, end_ns).await
+}
+
+async fn merged_metric_query_response(
+    state: AppState,
+    headers: HeaderMap,
+    uri: Uri,
+    start_ns: i64,
+    end_ns: i64,
+) -> Response {
+    let mut merged_series = Vec::new();
+
+    for shard in plan_time_shards(start_ns, end_ns, state.cfg.live_frontier_ns) {
+        let Ok(resp) = build_querier_request(&state, &headers, &uri, shard)
+            .send()
+            .await
+        else {
+            return (StatusCode::BAD_GATEWAY, "querier request failed").into_response();
+        };
+        let status = resp.status();
+        let Ok(bytes) = resp.bytes().await else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if !status.is_success() {
+            let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            return (status, bytes).into_response();
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+            return (StatusCode::BAD_GATEWAY, "querier response decode failed").into_response();
+        };
+        if let Some(series) = body.get("series").and_then(Value::as_array) {
+            for next in series {
+                merge_metric_series(&mut merged_series, next.clone());
+            }
+        }
+    }
+
+    axum::Json(json!({ "series": merged_series })).into_response()
+}
+
 async fn proxy(State(state): State<AppState>, headers: HeaderMap, uri: Uri) -> Response {
     let Ok(_permit) = state.permits.clone().try_acquire_owned() else {
         return (StatusCode::TOO_MANY_REQUESTS, "query frontend queue full").into_response();
     };
 
-    let Ok(resp) = build_plain_querier_request(&state, &headers, &uri)
+    proxy_querier_response(&state, &headers, &uri).await
+}
+
+async fn proxy_querier_response(state: &AppState, headers: &HeaderMap, uri: &Uri) -> Response {
+    let Ok(resp) = build_plain_querier_request(state, headers, uri)
         .send()
         .await
     else {

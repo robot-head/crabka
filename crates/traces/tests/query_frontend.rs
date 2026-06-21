@@ -176,6 +176,42 @@ async fn frontend_shards_metrics_query_range_across_live_frontier() {
 }
 
 #[tokio::test]
+async fn frontend_shards_instant_metrics_query_across_live_frontier() {
+    let upstream_url = spawn_sharded_metrics_querier().await;
+    let mut cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
+    cfg.live_frontier_ns = Some(2_000_000_000);
+
+    let response = router(cfg)
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(
+                    "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3",
+                )
+                .header("x-scope-orgid", "tenant-a")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["series"].as_array().unwrap().len() == 1);
+    assert!(
+        json["series"][0]["points"]
+            == json!([
+                ["1000000000", 1.0],
+                ["1999999999", 2.0],
+                ["2000000000", 3.0],
+                ["3000000000", 4.0],
+            ])
+    );
+    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 2);
+}
+
+#[tokio::test]
 async fn frontend_search_requires_valid_start_and_end() {
     let upstream_url = spawn_sharded_search_querier().await;
     let cfg = QueryFrontendConfig::new(&upstream_url).unwrap();
