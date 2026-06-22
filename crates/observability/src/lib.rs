@@ -18298,6 +18298,9 @@ impl IntoResponse for DistributorError {
         if let Self::UnsupportedLokiContentEncoding(_) = &self {
             return text_response(StatusCode::BAD_REQUEST, &format!("{self}\n"));
         }
+        if let Self::LokiSnappyDecode(_) = &self {
+            return text_response(StatusCode::BAD_REQUEST, "snappy: corrupt input\n");
+        }
 
         let status = match &self {
             Self::IngestBodyTooLarge { .. }
