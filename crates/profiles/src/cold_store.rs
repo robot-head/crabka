@@ -1,6 +1,6 @@
 //! Object-store backed cold-block `ProfileStore`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, AsArray, UInt64Array};
@@ -102,23 +102,25 @@ impl ProfileStore for ColdProfileStore {
         let mut batches = Vec::new();
         let mut symbols = CompositeSymbols::default();
         for (block_idx, block_key) in blocks.iter().enumerate() {
-            let partition_base = u64::try_from(block_idx)
-                .map_err(|err| ProfileError::Store(err.to_string()))?
-                .saturating_add(1)
-                << 32;
+            // Re-base this block's stored partitions to a dense local `0..n` range
+            // before OR-ing the per-block high-bit base. A block that has already
+            // been compacted stores partitions that occupy the high bits; OR-ing a
+            // fresh base straight onto them folds bits together and can collide
+            // across blocks (e.g. `1<<32 | (2<<32)` and `2<<32 | (1<<32)` both ==
+            // `3<<32`). Dense re-basing keeps each block's external keys unique.
+            let stored_partitions = self.index.stacktrace_partitions(block_key);
+            let partition_map = block_partition_map(block_idx, &stored_partitions)?;
             let symdb = self.load_symdb(block_key).await?;
             let source = Arc::new(LazySymbolizer::new(symdb, Arc::clone(&self.resolver)));
-            let mut partitions = self.index.stacktrace_partitions(block_key);
-            if partitions.is_empty() {
-                partitions.push(STACKTRACE_PARTITION);
-            }
-            for partition in partitions {
-                symbols.insert(partition_base | partition, source.clone(), partition);
+            for (source_partition, external) in &partition_map {
+                // `source_partition` is the partition key within this block's own
+                // symbol DB, so resolution stays scoped to the correct block.
+                symbols.insert(*external, source.clone(), *source_partition);
             }
             batches.extend(
                 self.load_block_batches(
                     block_key,
-                    partition_base,
+                    &partition_map,
                     &fps,
                     profile_type,
                     start_ms,
@@ -337,7 +339,7 @@ impl ColdProfileStore {
     async fn load_block_batches(
         &self,
         block_key: &str,
-        partition_base: u64,
+        partition_map: &BTreeMap<u64, u64>,
         fps: &std::collections::BTreeSet<SeriesFingerprint>,
         profile_type: &str,
         start_ms: i64,
@@ -358,20 +360,52 @@ impl ColdProfileStore {
         let mut out = Vec::new();
         for batch in reader {
             let batch = batch.map_err(|err| ProfileError::Store(err.to_string()))?;
-            let filtered = filter_and_remap_batch(
-                &batch,
-                partition_base,
-                fps,
-                profile_type,
-                start_ms,
-                end_ms,
-            )?;
+            let filtered =
+                filter_and_remap_batch(&batch, partition_map, fps, profile_type, start_ms, end_ms)?;
             if filtered.num_rows() > 0 {
                 out.push(filtered);
             }
         }
         Ok(out)
     }
+}
+
+/// Build the dense per-block partition map used by the cold read path.
+///
+/// `stored_partitions` are this block's partitions as recorded in the index
+/// (already in the high bits if the block was compacted). They are re-based to a
+/// dense local `0..n` range and OR-ed with the per-block high-bit base so the
+/// external keys are unique even when several already-compacted blocks are read
+/// together. Maps `stored_partition -> base | local_id`.
+fn block_partition_map(
+    block_idx: usize,
+    stored_partitions: &[u64],
+) -> Result<BTreeMap<u64, u64>, ProfileError> {
+    let base = u64::try_from(block_idx + 1)
+        .map_err(|err| ProfileError::Store(format!("block index does not fit u64: {err}")))?
+        .checked_shl(32)
+        .ok_or_else(|| {
+            ProfileError::Store(format!("block base for index {block_idx} overflows u64"))
+        })?;
+    let mut sorted = stored_partitions.to_vec();
+    if sorted.is_empty() {
+        sorted.push(STACKTRACE_PARTITION);
+    }
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut map = BTreeMap::new();
+    for (local, stored) in sorted.into_iter().enumerate() {
+        let local = u64::try_from(local).map_err(|err| {
+            ProfileError::Store(format!("local partition does not fit u64: {err}"))
+        })?;
+        if local >= 1 << 32 {
+            return Err(ProfileError::Store(format!(
+                "local partition {local} does not fit the low 32 bits"
+            )));
+        }
+        map.insert(stored, base | local);
+    }
+    Ok(map)
 }
 
 fn batch_fingerprints_overlap(batch: &RecordBatch, fps: &BTreeSet<SeriesFingerprint>) -> bool {
@@ -408,7 +442,7 @@ impl SymbolSource for CompositeSymbols {
 
 fn filter_and_remap_batch(
     batch: &RecordBatch,
-    partition_base: u64,
+    partition_map: &BTreeMap<u64, u64>,
     fps: &std::collections::BTreeSet<SeriesFingerprint>,
     profile_type: &str,
     start_ms: i64,
@@ -421,6 +455,7 @@ fn filter_and_remap_batch(
         .as_dictionary::<arrow::datatypes::Int32Type>();
     let profile_values = profile_types.values().as_string::<i32>();
     let partitions = batch.column(5).as_primitive::<UInt64Type>();
+    // Single pass: collect the indices of all surviving rows once.
     let mut indices = Vec::new();
     for row in 0..batch.num_rows() {
         let profile_key = profile_types.keys().value(row);
@@ -433,34 +468,31 @@ fn filter_and_remap_batch(
             && ts >= start_ms
             && ts <= end_ms
         {
+            let row = u64::try_from(row)
+                .map_err(|err| ProfileError::Store(format!("row index does not fit u64: {err}")))?;
             indices.push(row);
         }
     }
 
-    let mut rows = Vec::with_capacity(indices.len());
-    for row in indices {
-        let mut cols = batch.columns().to_vec();
-        let remapped = UInt64Array::from(
-            (0..batch.num_rows())
-                .map(|idx| partition_base | partitions.value(idx))
-                .collect::<Vec<_>>(),
-        );
-        cols[5] = Arc::new(remapped) as ArrayRef;
-        rows.push(arrow::compute::take_record_batch(
-            &RecordBatch::try_new(batch.schema(), cols)
-                .map_err(|err| ProfileError::Store(err.to_string()))?,
-            &UInt64Array::from(vec![u64::try_from(row).expect("row fits u64")]),
-        ));
-    }
-
-    if rows.is_empty() {
+    if indices.is_empty() {
         return Ok(RecordBatch::new_empty(profile_samples_schema()));
     }
-    let rows = rows
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
+
+    // Remap the partition column once over the whole batch (cheap, O(N)) and
+    // build the input batch a single time, then `take` all surviving rows in one
+    // call instead of rebuilding the full batch per surviving row (O(R*N)).
+    // Look up each stored partition in the dense per-block map so already-compacted
+    // high-bit partitions are re-based without OR-folding/aliasing.
+    let remapped = UInt64Array::from_iter_values((0..batch.num_rows()).map(|idx| {
+        let stored = partitions.value(idx);
+        partition_map.get(&stored).copied().unwrap_or(stored)
+    }));
+    let mut cols = batch.columns().to_vec();
+    cols[5] = Arc::new(remapped) as ArrayRef;
+    let remapped_batch = RecordBatch::try_new(profile_samples_schema(), cols)
         .map_err(|err| ProfileError::Store(err.to_string()))?;
-    arrow::compute::concat_batches(&profile_samples_schema(), rows.iter())
+
+    arrow::compute::take_record_batch(&remapped_batch, &UInt64Array::from(indices))
         .map_err(|err| ProfileError::Store(err.to_string()))
 }
 
@@ -789,6 +821,84 @@ mod tests {
 
         assert!(out[0].function == "/missing/native+0x99");
         assert!(out[0].file == "/missing/native");
+    }
+
+    #[test]
+    fn filter_and_remap_batch_selects_and_remaps_in_one_pass() {
+        use crabka_blockstore::{ProfileSampleRow, encode_profile_samples};
+
+        let fp_keep = 7_u64;
+        let fp_drop = 99_u64;
+        let rows = vec![
+            // keep: matching fp, type, in range; partition 0
+            ProfileSampleRow {
+                series_fingerprint: fp_keep,
+                timestamp: 1_000,
+                profile_type: PT.to_string(),
+                stacktrace_id: 1,
+                value: 10,
+                stacktrace_partition: 0,
+                total_value: 10,
+                span_id: None,
+                trace_id: None,
+            },
+            // drop: wrong fingerprint
+            ProfileSampleRow {
+                series_fingerprint: fp_drop,
+                timestamp: 1_000,
+                profile_type: PT.to_string(),
+                stacktrace_id: 2,
+                value: 5,
+                stacktrace_partition: 0,
+                total_value: 5,
+                span_id: None,
+                trace_id: None,
+            },
+            // drop: out of time range
+            ProfileSampleRow {
+                series_fingerprint: fp_keep,
+                timestamp: 9_999,
+                profile_type: PT.to_string(),
+                stacktrace_id: 3,
+                value: 5,
+                stacktrace_partition: 0,
+                total_value: 5,
+                span_id: None,
+                trace_id: None,
+            },
+            // keep: matching, distinct partition 1 to verify per-row remap
+            ProfileSampleRow {
+                series_fingerprint: fp_keep,
+                timestamp: 2_000,
+                profile_type: PT.to_string(),
+                stacktrace_id: 4,
+                value: 20,
+                stacktrace_partition: 1,
+                total_value: 20,
+                span_id: None,
+                trace_id: None,
+            },
+        ];
+        let batch = encode_profile_samples(&rows).unwrap();
+
+        let partition_base = 1_u64 << 32;
+        // Dense per-block map: stored partitions {0, 1} -> {base|0, base|1}.
+        let partition_map = BTreeMap::from([(0_u64, partition_base), (1_u64, partition_base | 1)]);
+        let fps = BTreeSet::from([fp_keep]);
+        let out = filter_and_remap_batch(&batch, &partition_map, &fps, PT, 0, 5_000).unwrap();
+
+        // Two surviving rows (the partition-0 and partition-1 keeps).
+        assert!(out.num_rows() == 2);
+        let out_fps = out.column(0).as_primitive::<UInt64Type>();
+        let out_partitions = out.column(5).as_primitive::<UInt64Type>();
+        assert!(out_fps.value(0) == fp_keep);
+        assert!(out_fps.value(1) == fp_keep);
+        // Partitions remapped once over the whole batch: base|local preserved
+        // per surviving row.
+        assert!(out_partitions.value(0) == partition_base);
+        assert!(out_partitions.value(1) == (partition_base | 1));
+        // Schema matches the canonical samples schema (consumed by the MemTable).
+        assert!(out.schema() == profile_samples_schema());
     }
 
     fn record(tenant: &str, service: &str, stack: Vec<u32>, value: i64) -> ProfileRecord {

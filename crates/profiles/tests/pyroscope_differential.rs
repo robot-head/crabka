@@ -296,7 +296,15 @@ async fn start_crabka_pair(
         .await?;
 
     let (querier_shutdown, querier_rx) = oneshot::channel();
-    let querier_state = Arc::new(QuerierState::new(Arc::new(store)));
+    // The differential / e2e corpus intentionally queries the full `[0, i64::MAX]`
+    // range to compare against real Pyroscope, so disable the per-query range cap.
+    let querier_state = Arc::new(QuerierState::new_with_limits(
+        Arc::new(store),
+        crabka_profiles::limits::Limits {
+            max_query_length_secs: 0,
+            ..Default::default()
+        },
+    ));
     let querier_addr = query::serve("127.0.0.1:0".parse()?, querier_state, async move {
         let _ = querier_rx.await;
     })
@@ -1809,7 +1817,15 @@ async fn start_crabka_public(
         .await?;
 
     let (querier_shutdown, querier_rx) = oneshot::channel();
-    let querier_state = Arc::new(QuerierState::new(Arc::new(store)));
+    // The differential / e2e corpus intentionally queries the full `[0, i64::MAX]`
+    // range to compare against real Pyroscope, so disable the per-query range cap.
+    let querier_state = Arc::new(QuerierState::new_with_limits(
+        Arc::new(store),
+        crabka_profiles::limits::Limits {
+            max_query_length_secs: 0,
+            ..Default::default()
+        },
+    ));
     let querier_addr = query::serve("0.0.0.0:0".parse()?, querier_state, async move {
         let _ = querier_rx.await;
     })

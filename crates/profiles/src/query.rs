@@ -721,6 +721,7 @@ async fn span_exemplars_from_scan(
             }
         }
     }
+    let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for ((timestamp, _fingerprint, span_id), value) in per_span {
         out.entry(step_bucket_ms(timestamp, step_ms))
@@ -730,7 +731,7 @@ async fn span_exemplars_from_scan(
                 profile_id: String::new(),
                 span_id: format!("{span_id:x}"),
                 value,
-                labels: types_label_pairs(labels.to_vec()),
+                labels: label_pairs.clone(),
             });
     }
     Ok(out)
@@ -760,6 +761,7 @@ async fn span_exemplars_from_totals(
         .collect()
         .await
         .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for batch in batches {
         let timestamps = batch.column(0).as_primitive::<Int64Type>();
@@ -777,7 +779,7 @@ async fn span_exemplars_from_totals(
                     profile_id: String::new(),
                     span_id: format!("{:x}", span_ids.value(row)),
                     value: totals.value(row),
-                    labels: types_label_pairs(labels.to_vec()),
+                    labels: label_pairs.clone(),
                 });
         }
     }
@@ -833,6 +835,7 @@ async fn individual_exemplars_from_scan(
             }
         }
     }
+    let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for ((timestamp, _fingerprint), value) in per_profile {
         out.entry(step_bucket_ms(timestamp, step_ms))
@@ -842,7 +845,7 @@ async fn individual_exemplars_from_scan(
                 profile_id: profile_id.to_string(),
                 span_id: String::new(),
                 value,
-                labels: types_label_pairs(labels.to_vec()),
+                labels: label_pairs.clone(),
             });
     }
     Ok(out)
@@ -871,6 +874,7 @@ async fn individual_exemplars_from_totals(
         .collect()
         .await
         .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for batch in batches {
         let timestamps = batch.column(0).as_primitive::<Int64Type>();
@@ -884,7 +888,7 @@ async fn individual_exemplars_from_totals(
                     profile_id: profile_id.to_string(),
                     span_id: String::new(),
                     value: totals.value(row),
-                    labels: types_label_pairs(labels.to_vec()),
+                    labels: label_pairs.clone(),
                 });
         }
     }
@@ -925,6 +929,7 @@ async fn heatmap_span_exemplars_from_scan(
         .collect()
         .await
         .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let labels = label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::querier::v1::Exemplar>> = BTreeMap::new();
     for batch in batches {
         let timestamps = batch.column(0).as_primitive::<Int64Type>();
@@ -947,7 +952,7 @@ async fn heatmap_span_exemplars_from_scan(
                     profile_id: String::new(),
                     span_id: format!("{:x}", span_ids.value(row)),
                     value: totals.value(row),
-                    labels: label_pairs(labels.to_vec()),
+                    labels: labels.clone(),
                 });
         }
     }
@@ -979,6 +984,7 @@ async fn heatmap_individual_exemplars_from_scan(
         .collect()
         .await
         .map_err(|err| ProfileError::Exec(err.to_string()))?;
+    let labels = label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::querier::v1::Exemplar>> = BTreeMap::new();
     for batch in batches {
         let timestamps = batch.column(0).as_primitive::<Int64Type>();
@@ -997,7 +1003,7 @@ async fn heatmap_individual_exemplars_from_scan(
                     profile_id: profile_id.to_string(),
                     span_id: String::new(),
                     value: totals.value(row),
-                    labels: label_pairs(labels.to_vec()),
+                    labels: labels.clone(),
                 });
         }
     }
@@ -1112,7 +1118,7 @@ async fn profile_types_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     let range_omitted = req.start == 0 && req.end == 0;
     let (start, end) = if range_omitted {
@@ -1158,7 +1164,7 @@ async fn label_names_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
@@ -1182,7 +1188,7 @@ async fn label_values_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
@@ -1210,7 +1216,7 @@ async fn series_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
@@ -1244,7 +1250,7 @@ async fn select_merge_stacktraces_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     let label_selector = merge_profile_id_selector(&req.label_selector, &req.profile_id_selector)
         .map_err(connect_error)?;
@@ -1320,7 +1326,7 @@ async fn select_series_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     let agg = if req.aggregation
         == pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32
@@ -1409,7 +1415,7 @@ async fn select_merge_span_profile_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     let span_ids = parse_span_selectors(&req.span_selector).map_err(connect_error)?;
     let response = if req.format == pb::querier::v1::ProfileFormat::Tree as i32 {
@@ -1458,7 +1464,7 @@ async fn select_merge_profile_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     let label_selector = merge_profile_id_selector(&req.label_selector, &req.profile_id_selector)
         .map_err(connect_error)?;
@@ -1493,7 +1499,7 @@ async fn select_heatmap_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     state
         .validate_query_range(&tenant, req.start, req.end)
@@ -1585,7 +1591,7 @@ async fn diff_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let left = req
         .0
         .left
@@ -1646,7 +1652,7 @@ async fn get_profile_stats_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     state
         .validate_query_range(&tenant, req.0.start, req.0.end)
         .map_err(connect_error)?;
@@ -1672,7 +1678,7 @@ async fn analyze_query_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
     state
         .validate_query_range(&tenant, req.start, req.end)
@@ -1763,7 +1769,10 @@ async fn render_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = match tenant_from_headers(&headers) {
+        Ok(tenant) => tenant,
+        Err(err) => return profile_error_response(err),
+    };
     let (profile_type, selector) = match parse_render_query(&query.query) {
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
@@ -1814,7 +1823,10 @@ async fn render_diff_handler<S>(
 where
     S: ProfileStore,
 {
-    let tenant = tenant_from_headers(&headers);
+    let tenant = match tenant_from_headers(&headers) {
+        Ok(tenant) => tenant,
+        Err(err) => return profile_error_response(err),
+    };
     let params = url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
         .into_owned()
         .collect::<Vec<_>>();
@@ -1882,13 +1894,22 @@ where
     }
 }
 
-fn tenant_from_headers(headers: &HeaderMap) -> String {
-    headers
+/// Resolve and validate the tenant from the `X-Scope-OrgID` header.
+///
+/// Absent, empty, or non-UTF-8 headers resolve to the anonymous tenant; a
+/// present, non-empty header is validated against the tenant charset (see
+/// [`crate::tenant::validate_tenant`]). An invalid tenant id is surfaced as a
+/// [`ProfileError::Plan`] (Connect `invalid_argument` / legacy 400) with a
+/// generic, non-leaky message rather than being used as a storage key.
+fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfileError> {
+    let header = headers
         .get("x-scope-orgid")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("anonymous")
-        .to_string()
+        .and_then(|value| value.to_str().ok());
+    crate::tenant::tenant_from_header(header).map_err(|_| {
+        // `validate_tenant` already returns a generic, non-leaky message; keep
+        // it generic here too so we never echo an attacker-supplied tenant id.
+        ProfileError::Plan("invalid tenant id".to_string())
+    })
 }
 
 fn parse_matchers(
@@ -2014,12 +2035,27 @@ fn parse_render_time_param(
         return Ok(now_ms);
     }
     if let Some(offset) = value.strip_prefix("now-") {
-        return Ok(now_ms - parse_render_duration_ms(offset)?);
+        let resolved = now_ms - parse_render_duration_ms(offset)?;
+        return reject_negative_render_time(resolved, value);
     }
     let numeric = value
         .parse::<i64>()
         .map_err(|err| ProfileError::Plan(format!("invalid render time {value:?}: {err}")))?;
-    Ok(normalize_render_unix_time(numeric))
+    reject_negative_render_time(normalize_render_unix_time(numeric), value)
+}
+
+/// Reject a render time bound that resolved to a negative millisecond value.
+///
+/// A `now-<offset>` larger than `now` (clock skew / huge lookback) or a literal
+/// negative timestamp both yield a negative bound, which is never a valid Unix
+/// time and would otherwise be passed downstream as a query window edge.
+fn reject_negative_render_time(resolved_ms: i64, raw: &str) -> Result<i64, ProfileError> {
+    if resolved_ms < 0 {
+        return Err(ProfileError::Plan(format!(
+            "render time {raw:?} resolves to a negative timestamp"
+        )));
+    }
+    Ok(resolved_ms)
 }
 
 fn normalize_render_unix_time(value: i64) -> i64 {
@@ -2264,8 +2300,27 @@ fn label_matcher_value_escape(value: &str) -> String {
         .collect()
 }
 
+/// Map a [`ProfileError`] to a legacy flamebearer HTTP response.
+///
+/// Mirrors [`connect_error`]'s code mapping: client-shaped errors
+/// (`Decode`/`Plan`/`Unsupported` — including limit/range violations surfaced as
+/// `Plan`) keep their user-facing message at 400, while internal failures
+/// (`Exec`/`Store`/`Symbolize`) return a generic 500 and log the detail via
+/// tracing so raw DataFusion/internal text never reaches the client.
 fn profile_error_response(err: ProfileError) -> Response {
-    (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+    match err {
+        ProfileError::Decode(_) | ProfileError::Plan(_) | ProfileError::Unsupported(_) => {
+            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
+        }
+        ProfileError::Exec(_) | ProfileError::Store(_) | ProfileError::Symbolize(_) => {
+            tracing::error!(%err, "profiles querier internal error");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            )
+                .into_response()
+        }
+    }
 }
 
 fn connect_error(err: ProfileError) -> ConnectError {
@@ -4194,6 +4249,154 @@ overrides:
         assert!(
             parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
         );
+    }
+
+    #[test]
+    fn render_time_params_reject_negative_resolved_bounds() {
+        let now_ms = 1_000;
+
+        // A `now-<offset>` larger than `now` underflows past the epoch.
+        assert!(parse_render_time_param(Some("now-1h"), now_ms, 0).is_err());
+        // A literal negative timestamp (seconds or millis heuristic) is rejected.
+        assert!(parse_render_time_param(Some("-5"), now_ms, 0).is_err());
+        assert!(parse_render_time_param(Some("-1700000000000"), now_ms, 0).is_err());
+        // A valid millisecond timestamp at/above the seconds-vs-millis cutoff is
+        // left untouched (not mangled by the heuristic) and accepted.
+        assert!(
+            parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
+        );
+    }
+
+    #[test]
+    fn tenant_from_headers_validates_and_defaults() {
+        // Absent header -> anonymous.
+        let empty = HeaderMap::new();
+        assert!(tenant_from_headers(&empty).unwrap() == "anonymous");
+
+        // Valid tenant passes through.
+        let mut valid = HeaderMap::new();
+        valid.insert("x-scope-orgid", "tenant-a".parse().unwrap());
+        assert!(tenant_from_headers(&valid).unwrap() == "tenant-a");
+
+        // Empty header value falls back to anonymous (preserved behaviour).
+        let mut blank = HeaderMap::new();
+        blank.insert("x-scope-orgid", "".parse().unwrap());
+        assert!(tenant_from_headers(&blank).unwrap() == "anonymous");
+    }
+
+    #[test]
+    fn tenant_from_headers_rejects_path_unsafe_tenant() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "../escape".parse().unwrap());
+        let err = tenant_from_headers(&headers).unwrap_err();
+
+        // Mapped to an invalid-argument-class error with a generic message that
+        // does not echo the attacker-supplied id.
+        assert!(matches!(err, ProfileError::Plan(_)));
+        assert!(connect_error(err).code() == Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn invalid_tenant_header_is_rejected_by_connect_handler() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let status = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/ProfileTypes"
+            ))
+            .header("x-scope-orgid", "bad/tenant")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+
+        assert!(status.is_client_error(), "{status}");
+    }
+
+    #[test]
+    fn default_limits_reject_unbounded_explicit_range() {
+        let state = QuerierState::new(Arc::new(InMemoryProfileStore::new()));
+
+        // An explicit `start=0, end=i64::MAX` range (NOT the range-omitted health
+        // probe) now exceeds the default `max_query_length_secs` cap.
+        let err = state
+            .validate_query_range("anonymous", 0, i64::MAX)
+            .unwrap_err();
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
+
+        // A bounded recent window stays well within the 721h default.
+        assert!(state.validate_query_range("anonymous", 0, 60_000).is_ok());
+    }
+
+    #[tokio::test]
+    async fn profile_types_health_probe_ok_under_default_limits() {
+        // The range-omitted (`start==0 && end==0`) health probe must still work
+        // even though the default cap now rejects explicit unbounded ranges.
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let response: serde_json::Value = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/querier.v1.QuerierService/ProfileTypes"
+            ))
+            .header("x-scope-orgid", "tenant-a")
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .get("profileTypes")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|profile_types| !profile_types.is_empty()),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_error_response_maps_internal_to_generic_500() {
+        // Internal failures become a generic 500 with no leaked detail.
+        let response = profile_error_response(ProfileError::Exec(
+            "datafusion: secret plan detail".to_string(),
+        ));
+        assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body == "internal error", "{body}");
+        assert!(!body.contains("datafusion"), "{body}");
+        assert!(!body.contains("secret"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn profile_error_response_preserves_client_error_400() {
+        // Client-shaped errors (including limit/range violations surfaced as
+        // `Plan`) keep their user-facing message at 400.
+        let response =
+            profile_error_response(ProfileError::Plan("query length exceeded".to_string()));
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("query length exceeded"), "{body}");
     }
 
     #[test]

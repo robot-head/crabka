@@ -1,7 +1,7 @@
 //! Crate-wide error + ingest-edge HTTP status mapping.
 
 /// Errors across the profiles ingest pipeline.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ProfilesError {
     #[error("unsupported content-type/format: {0}")]
     UnsupportedFormat(String),
@@ -23,6 +23,11 @@ pub enum ProfilesError {
     Block(String),
     #[error("pprof: {0}")]
     Pprof(String),
+    /// An unexpected server-side fault (e.g. a poisoned lock). The inner string
+    /// is for server-side logging only and must NOT be surfaced verbatim to
+    /// clients; the ingest edge maps this to a generic 500 message.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 impl ProfilesError {
@@ -34,7 +39,7 @@ impl ProfilesError {
             Self::Decode(_) | Self::Gunzip(_) | Self::Invalid(_) | Self::Pprof(_) => 400,
             Self::Limit(err) => err.http_status(),
             Self::TooLarge { .. } => 400,
-            Self::Wal(_) | Self::Produce(_) | Self::Block(_) => 500,
+            Self::Wal(_) | Self::Produce(_) | Self::Block(_) | Self::Internal(_) => 500,
         }
     }
 }

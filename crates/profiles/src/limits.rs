@@ -33,6 +33,13 @@ pub struct Limits {
     pub max_session_id_cardinality: u64,
 }
 
+/// Pyroscope's default `max_query_length` (`721h`) expressed in seconds.
+///
+/// Mirrors upstream Pyroscope's `validation.Limits.MaxQueryLength` default so
+/// an unbounded explicit range (`start=0, end=i64::MAX`) is rejected instead of
+/// scanning the whole store.
+pub const DEFAULT_MAX_QUERY_LENGTH_SECS: u64 = 721 * 3_600;
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -44,7 +51,7 @@ impl Default for Limits {
             max_label_names_per_series: 40,
             max_flamegraph_nodes_default: 2048,
             max_flamegraph_nodes_max: 0,
-            max_query_length_secs: 0,
+            max_query_length_secs: DEFAULT_MAX_QUERY_LENGTH_SECS,
             max_session_id_cardinality: 0,
         }
     }
@@ -151,7 +158,8 @@ mod tests {
         assert!(limits.max_label_names_per_series == 40);
         assert!(limits.max_flamegraph_nodes_default == 2048);
         assert!(limits.max_flamegraph_nodes_max == 0);
-        assert!(limits.max_query_length_secs == 0);
+        assert!(limits.max_query_length_secs == DEFAULT_MAX_QUERY_LENGTH_SECS);
+        assert!(limits.max_query_length_secs == 2_595_600);
         assert!(limits.max_session_id_cardinality == 0);
     }
 

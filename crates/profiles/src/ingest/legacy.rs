@@ -538,6 +538,22 @@ fn lines_to_pprof(
     stacks_to_pprof(name, "samples", sample_unit, stacks)
 }
 
+/// Absolute cap on the number of tree/trie nodes a single payload may expand
+/// into. A malformed or hostile payload can declare child counts that amplify
+/// far beyond the input byte length (each pending entry carries a cloned path),
+/// so we bound the total work independently of `body.len()`.
+const MAX_TREE_NODES: usize = 500_000;
+
+/// Absolute cap on the cumulative bytes of all materialized stack paths/keys.
+/// Path bytes are copied per child during expansion, so a deep-and-wide payload
+/// can amplify path storage far past the input size even when node count is
+/// under control.
+const MAX_TREE_PATH_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard cap on trie recursion depth (modeled as an explicit work-stack). A
+/// deeply nested payload would otherwise overflow the native stack.
+const MAX_TRIE_DEPTH: usize = 4_096;
+
 fn tree_to_pprof(
     name: &str,
     sample_unit: &str,
@@ -546,8 +562,17 @@ fn tree_to_pprof(
     let mut pos = 0;
     let mut pending = vec![Vec::<(String, i32)>::new()];
     let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+    let mut node_count = 0_usize;
+    let mut path_bytes = 0_usize;
 
     while let Some(parent_path) = pending.pop() {
+        node_count += 1;
+        if node_count > MAX_TREE_NODES {
+            return Err(ProfilesError::Decode(
+                "tree profile exceeds node budget".to_string(),
+            ));
+        }
+
         let name_len = read_tree_varint(body, &mut pos, "node name length")?;
         let name_len = usize::try_from(name_len).map_err(|err| {
             ProfilesError::Decode(format!("tree node name length does not fit usize: {err}"))
@@ -587,7 +612,37 @@ fn tree_to_pprof(
             })?;
             *stacks.entry(path.clone()).or_default() += value;
         }
-        pending.extend(std::iter::repeat_n(path, children_len));
+
+        if children_len > 0 {
+            // Each child gets its own clone of `path`; charge that copied
+            // storage against the cumulative path-bytes budget so a payload
+            // declaring many children of a long path cannot amplify memory
+            // beyond the cap.
+            let per_child_bytes = path
+                .iter()
+                .map(|(frame, _)| frame.len())
+                .fold(0_usize, usize::saturating_add);
+            let added = per_child_bytes.saturating_mul(children_len);
+            path_bytes = path_bytes.saturating_add(added);
+            if path_bytes > MAX_TREE_PATH_BYTES {
+                return Err(ProfilesError::Decode(
+                    "tree profile exceeds path-bytes budget".to_string(),
+                ));
+            }
+            // Also bound the queued node count up front so an enormous declared
+            // child count cannot balloon `pending` before the per-iteration
+            // `node_count` check trips.
+            if node_count
+                .saturating_add(pending.len())
+                .saturating_add(children_len)
+                > MAX_TREE_NODES
+            {
+                return Err(ProfilesError::Decode(
+                    "tree profile exceeds node budget".to_string(),
+                ));
+            }
+            pending.extend(std::iter::repeat_n(path, children_len));
+        }
     }
 
     if pos != body.len() {
@@ -631,9 +686,125 @@ fn trie_to_pprof(
 ) -> Result<PprofProfile, ProfilesError> {
     let mut pos = 0;
     let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
+    let mut node_count = 0_usize;
+    let mut path_bytes = 0_usize;
 
-    while pos < body.len() {
-        parse_trie_node(body, &mut pos, &[], &mut stacks)?;
+    // Explicit work-stack: each frame is a node prefix paired with the number
+    // of sibling children that still need to be visited at this depth. The
+    // stack length is the live recursion depth, hard-capped below so a deeply
+    // nested payload cannot overflow the native stack.
+    //
+    // The top-level forest is modeled as a synthetic root whose "remaining"
+    // count is consumed one node per outer step until the payload is exhausted.
+    let mut work: Vec<TrieFrame> = Vec::new();
+
+    loop {
+        // Unwind any completed parents first so `work.len()` reflects true live
+        // depth and the exhaustion check below isn't tripped by spent frames.
+        while let Some(frame) = work.last() {
+            if frame.remaining == 0 {
+                work.pop();
+            } else {
+                break;
+            }
+        }
+
+        if pos >= body.len() {
+            if work.is_empty() {
+                break;
+            }
+            // Out of bytes but the work-stack still expects children: malformed.
+            return Err(ProfilesError::Decode(
+                "trie payload ended before all declared children".to_string(),
+            ));
+        }
+
+        if work.len() >= MAX_TRIE_DEPTH {
+            return Err(ProfilesError::Decode(
+                "trie profile exceeds maximum depth".to_string(),
+            ));
+        }
+
+        node_count += 1;
+        if node_count > MAX_TREE_NODES {
+            return Err(ProfilesError::Decode(
+                "trie profile exceeds node budget".to_string(),
+            ));
+        }
+
+        let prefix: &[u8] = work.last().map_or(&[][..], |frame| frame.key.as_slice());
+
+        let suffix_len = read_tree_varint(body, &mut pos, "trie node suffix length")?;
+        let suffix_len = usize::try_from(suffix_len).map_err(|err| {
+            ProfilesError::Decode(format!("trie node suffix length does not fit usize: {err}"))
+        })?;
+        let suffix_end = pos.checked_add(suffix_len).ok_or_else(|| {
+            ProfilesError::Decode("trie node suffix length overflows payload offset".to_string())
+        })?;
+        if suffix_end > body.len() {
+            return Err(ProfilesError::Decode(
+                "trie node suffix length exceeds payload".to_string(),
+            ));
+        }
+
+        let mut key = Vec::with_capacity(prefix.len().saturating_add(suffix_len));
+        key.extend_from_slice(prefix);
+        key.extend_from_slice(&body[pos..suffix_end]);
+        pos = suffix_end;
+
+        // Charge the materialized key length against the cumulative budget.
+        // Long shared prefixes are copied into every descendant, so a hostile
+        // payload can amplify key storage well beyond the input size.
+        path_bytes = path_bytes.saturating_add(key.len());
+        if path_bytes > MAX_TREE_PATH_BYTES {
+            return Err(ProfilesError::Decode(
+                "trie profile exceeds path-bytes budget".to_string(),
+            ));
+        }
+
+        let value = read_tree_varint(body, &mut pos, "trie node value")?;
+        let children_len = read_tree_varint(body, &mut pos, "trie node children length")?;
+        let children_len = usize::try_from(children_len).map_err(|err| {
+            ProfilesError::Decode(format!(
+                "trie node children length does not fit usize: {err}"
+            ))
+        })?;
+        if children_len > body.len().saturating_sub(pos) + 1 {
+            return Err(ProfilesError::Decode(
+                "trie node children length exceeds remaining payload".to_string(),
+            ));
+        }
+
+        if value > 0 {
+            let value = i64::try_from(value).map_err(|err| {
+                ProfilesError::Decode(format!("trie node value does not fit i64: {err}"))
+            })?;
+            let key_str = std::str::from_utf8(&key)
+                .map_err(|err| ProfilesError::Decode(format!("trie key is not UTF-8: {err}")))?;
+            let frames = key_str
+                .split(';')
+                .filter(|frame| !frame.is_empty())
+                .map(|frame| (frame.to_string(), 0))
+                .collect::<Vec<_>>();
+            if frames.is_empty() {
+                return Err(ProfilesError::Decode(
+                    "trie profile has an empty stack".to_string(),
+                ));
+            }
+            *stacks.entry(frames).or_default() += value;
+        }
+
+        // This node consumed one of its parent's remaining child slots.
+        if let Some(frame) = work.last_mut() {
+            frame.remaining -= 1;
+        }
+        // Descend if this node declares children.
+        if children_len > 0 {
+            work.push(TrieFrame {
+                key,
+                remaining: children_len,
+            });
+        }
     }
 
     if stacks.is_empty() {
@@ -644,66 +815,11 @@ fn trie_to_pprof(
     stacks_to_pprof(name, "samples", sample_unit, stacks)
 }
 
-fn parse_trie_node(
-    body: &[u8],
-    pos: &mut usize,
-    prefix: &[u8],
-    stacks: &mut BTreeMap<Vec<(String, i32)>, i64>,
-) -> Result<(), ProfilesError> {
-    let suffix_len = read_tree_varint(body, pos, "trie node suffix length")?;
-    let suffix_len = usize::try_from(suffix_len).map_err(|err| {
-        ProfilesError::Decode(format!("trie node suffix length does not fit usize: {err}"))
-    })?;
-    let suffix_end = pos.checked_add(suffix_len).ok_or_else(|| {
-        ProfilesError::Decode("trie node suffix length overflows payload offset".to_string())
-    })?;
-    if suffix_end > body.len() {
-        return Err(ProfilesError::Decode(
-            "trie node suffix length exceeds payload".to_string(),
-        ));
-    }
-
-    let mut key = Vec::with_capacity(prefix.len() + suffix_len);
-    key.extend_from_slice(prefix);
-    key.extend_from_slice(&body[*pos..suffix_end]);
-    *pos = suffix_end;
-
-    let value = read_tree_varint(body, pos, "trie node value")?;
-    let children_len = read_tree_varint(body, pos, "trie node children length")?;
-    let children_len = usize::try_from(children_len).map_err(|err| {
-        ProfilesError::Decode(format!(
-            "trie node children length does not fit usize: {err}"
-        ))
-    })?;
-    if children_len > body.len().saturating_sub(*pos) + 1 {
-        return Err(ProfilesError::Decode(
-            "trie node children length exceeds remaining payload".to_string(),
-        ));
-    }
-
-    if value > 0 {
-        let value = i64::try_from(value).map_err(|err| {
-            ProfilesError::Decode(format!("trie node value does not fit i64: {err}"))
-        })?;
-        let key = std::str::from_utf8(&key)
-            .map_err(|err| ProfilesError::Decode(format!("trie key is not UTF-8: {err}")))?;
-        let frames = key
-            .split(';')
-            .filter(|frame| !frame.is_empty())
-            .map(|frame| (frame.to_string(), 0))
-            .collect::<Vec<_>>();
-        if frames.is_empty() {
-            return Err(ProfilesError::Decode(
-                "trie profile has an empty stack".to_string(),
-            ));
-        }
-        *stacks.entry(frames).or_default() += value;
-    }
-
-    for _ in 0..children_len {
-        parse_trie_node(body, pos, &key, stacks)?;
-    }
-    Ok(())
+/// One level of the explicit trie work-stack: the accumulated key prefix for a
+/// node plus how many of its declared children remain to be visited.
+struct TrieFrame {
+    key: Vec<u8>,
+    remaining: usize,
 }
 
 fn speedscope_to_pprof(
@@ -1312,5 +1428,98 @@ mod tests {
                 .iter()
                 .any(|function| function.contains("CompileBroker::compiler_thread_loop"))
         );
+    }
+
+    /// LEB128 varint encoder mirroring [`read_tree_varint`], for crafting
+    /// adversarial tree/trie payloads in the amplification tests below.
+    fn put_tree_varint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = u8::try_from(value & 0x7f).unwrap();
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn tree_decoder_rejects_path_bytes_amplification() {
+        // A single child node with a very long name that then declares a large
+        // child count: the decoder would clone the long path once per declared
+        // child (`repeat_n(path, children_len)`), amplifying memory far beyond
+        // the ~17 KB input. The cumulative path-bytes budget must reject it as
+        // a Decode error instead of OOMing.
+        let long = 9_000_usize;
+        let children = 8_000_u64;
+        let mut body = Vec::new();
+        // Root: empty name, no self value, exactly one child.
+        put_tree_varint(&mut body, 0);
+        put_tree_varint(&mut body, 0);
+        put_tree_varint(&mut body, 1);
+        // Child: long name, no self value, `children` declared children.
+        put_tree_varint(&mut body, long as u64);
+        body.extend(std::iter::repeat_n(b'a', long));
+        put_tree_varint(&mut body, 0);
+        put_tree_varint(&mut body, children);
+        // Filler bytes so the per-node remaining-payload guard passes and the
+        // path-bytes guard (not the cheap structural one) is what fires.
+        body.extend(std::iter::repeat_n(
+            0_u8,
+            usize::try_from(children).unwrap(),
+        ));
+
+        let err = tree_to_pprof("app", "samples", &body).unwrap_err();
+        assert!(matches!(err, ProfilesError::Decode(_)));
+
+        // Sanity: a normal small tree still decodes successfully.
+        let ok = b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00";
+        assert!(tree_to_pprof("app", "samples", ok).is_ok());
+    }
+
+    #[test]
+    fn trie_decoder_rejects_deep_payload_past_depth_cap() {
+        // A linear chain of single-child nodes deeper than MAX_TRIE_DEPTH. The
+        // old recursive `parse_trie_node` would recurse once per level and blow
+        // the native stack; the explicit work-stack must reject past the cap.
+        let depth = MAX_TRIE_DEPTH + 16;
+        let mut body = Vec::new();
+        for _ in 0..depth - 1 {
+            // suffix "a", value 0, one child.
+            put_tree_varint(&mut body, 1);
+            body.push(b'a');
+            put_tree_varint(&mut body, 0);
+            put_tree_varint(&mut body, 1);
+        }
+        // Leaf: suffix "a", value 1, no children.
+        put_tree_varint(&mut body, 1);
+        body.push(b'a');
+        put_tree_varint(&mut body, 1);
+        put_tree_varint(&mut body, 0);
+
+        let err = trie_to_pprof("app", "samples", &body).unwrap_err();
+        assert!(matches!(err, ProfilesError::Decode(_)));
+
+        // Sanity: a chain comfortably under the cap still decodes.
+        let shallow_depth = 64_usize;
+        let mut shallow = Vec::new();
+        for _ in 0..shallow_depth - 1 {
+            put_tree_varint(&mut shallow, 1);
+            shallow.push(b'a');
+            put_tree_varint(&mut shallow, 0);
+            put_tree_varint(&mut shallow, 1);
+        }
+        put_tree_varint(&mut shallow, 1);
+        shallow.push(b'a');
+        put_tree_varint(&mut shallow, 1);
+        put_tree_varint(&mut shallow, 0);
+        assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
+
+        // Sanity: the canonical small trie payload still decodes.
+        let ok = b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00";
+        assert!(trie_to_pprof("app", "samples", ok).is_ok());
     }
 }

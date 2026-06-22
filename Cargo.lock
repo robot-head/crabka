@@ -2567,6 +2567,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde-wincode",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "wincode",
