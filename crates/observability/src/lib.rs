@@ -4194,7 +4194,7 @@ fn parse_structured_metadata(
         return Err(DistributorError::InvalidStructuredMetadata);
     };
 
-    let metadata = metadata
+    metadata
         .iter()
         .map(|(name, value)| {
             let value = value
@@ -4202,9 +4202,7 @@ fn parse_structured_metadata(
                 .ok_or(DistributorError::InvalidStructuredMetadata)?;
             Ok((name.clone(), value.to_string()))
         })
-        .collect::<Result<BTreeMap<_, _>, DistributorError>>()?;
-    validate_loki_structured_metadata(&metadata)?;
-    Ok(metadata)
+        .collect::<Result<BTreeMap<_, _>, DistributorError>>()
 }
 
 fn validate_loki_structured_metadata(metadata: &Labels) -> Result<(), DistributorError> {
