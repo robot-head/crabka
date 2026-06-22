@@ -6825,6 +6825,31 @@ async fn format_query_endpoint_formats_vector_arithmetic_expression_like_loki() 
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_vector_comparison_expression_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=vector%281%29%3Ebool%20vector%282%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": "(vector(1.000000) > bool vector(2.000000))"
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_scalar_expression_like_loki() {
     let state = fixture();
     let app = loki_router(state);

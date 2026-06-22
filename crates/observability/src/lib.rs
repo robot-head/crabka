@@ -11097,6 +11097,9 @@ fn format_scalar_vector_expression(query: &str) -> Option<String> {
     if let Some(formatted) = format_vector_arithmetic_expression(&query) {
         return Some(formatted);
     }
+    if let Some(formatted) = format_vector_comparison_expression(&query) {
+        return Some(formatted);
+    }
     match scalar_vector_expression_result(&query)? {
         ScalarVectorExpressionResult::Scalar { sample } => Some(sample),
         ScalarVectorExpressionResult::Vector { .. } => None,
@@ -11112,6 +11115,33 @@ fn format_vector_set_expression(query: &str) -> Option<String> {
             if end == query.len() {
                 return Some(format!("({left} {operator} {right})"));
             }
+        }
+    }
+    None
+}
+
+fn format_vector_comparison_expression(query: &str) -> Option<String> {
+    let (left, position) = parse_formatted_vector_function(query, 0)?;
+    let (operator, mut right_position) = parse_vector_comparison_operator(query, position)?;
+    let bool_modifier = query[right_position..].starts_with("bool");
+    if bool_modifier {
+        right_position += "bool".len();
+    }
+    let (right, end) = parse_formatted_vector_function(query, right_position)?;
+    if end != query.len() {
+        return None;
+    }
+    if bool_modifier {
+        Some(format!("({left} {operator} bool {right})"))
+    } else {
+        Some(format!("({left} {operator} {right})"))
+    }
+}
+
+fn parse_vector_comparison_operator(query: &str, position: usize) -> Option<(&'static str, usize)> {
+    for operator in [">=", "<=", "==", "!=", ">", "<"] {
+        if query[position..].starts_with(operator) {
+            return Some((operator, position + operator.len()));
         }
     }
     None
