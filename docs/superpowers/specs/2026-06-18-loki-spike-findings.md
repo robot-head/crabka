@@ -1507,7 +1507,9 @@ append, with real-Loki differential coverage pinning the response body.
 Malformed JSON push entry fields now also match Loki's raw
 `loghttp.PushRequest.Streams` unmarshaler text responses instead of Crabka's
 generic Loki error envelope, covering timestamp strings that fail numeric
-parsing and non-string log-line values. The
+parsing and non-string log-line values. Timestamp-only JSON push values now
+match Loki by appending an empty log line instead of rejecting the value shape.
+The
 configured OTLP HTTP ingest path now shares the same timestamp windows before
 WAL append and matches Loki's `400` protobuf status-message body for future
 OTLP timestamps. Configured distributors now also perform a broker-backed tenant

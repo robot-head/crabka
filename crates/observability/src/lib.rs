@@ -3282,19 +3282,24 @@ fn normalize_loki_push(
         discover_service_name_label(&mut stream_labels);
 
         for value in stream.values {
-            let [timestamp, line, metadata @ ..] = value.as_slice() else {
-                return Err(DistributorError::InvalidPushValue);
+            let (timestamp, line, metadata) = match value.as_slice() {
+                [timestamp] => (timestamp, "", [].as_slice()),
+                [timestamp, line, metadata @ ..] => (
+                    timestamp,
+                    line.as_str().ok_or_else(|| {
+                        DistributorError::InvalidJsonLineSyntax(loki_json_line_parse_error(
+                            &original_stream_labels,
+                            timestamp.as_str().unwrap_or_default(),
+                            line,
+                        ))
+                    })?,
+                    metadata,
+                ),
+                [] => return Err(DistributorError::InvalidPushValue),
             };
             let timestamp = timestamp
                 .as_str()
                 .ok_or(DistributorError::InvalidTimestamp)?;
-            let line = line.as_str().ok_or_else(|| {
-                DistributorError::InvalidJsonLineSyntax(loki_json_line_parse_error(
-                    &original_stream_labels,
-                    timestamp,
-                    line,
-                ))
-            })?;
             let timestamp_ns = timestamp.parse().map_err(|_| {
                 DistributorError::InvalidJsonTimestampSyntax(loki_json_timestamp_parse_error(
                     timestamp, line,
