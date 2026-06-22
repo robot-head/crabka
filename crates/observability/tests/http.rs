@@ -12348,7 +12348,7 @@ async fn deprecated_api_prom_metadata_endpoints_return_loki_metadata() {
     assert!(
         json_body(values_response).await
             == json!({
-                "values": ["prod"]
+                "values": ["app", "env"]
             })
     );
 

@@ -7117,14 +7117,14 @@ async fn api_prom_label_names_post(
 async fn api_prom_label_values(
     State(state): State<QuerierState>,
     headers: HeaderMap,
-    Path(name): Path<String>,
+    Path(_name): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let params = match parse_series_params(raw_query.as_deref()) {
         Ok(params) => params,
         Err(error) => return error.into_response(),
     };
-    match execute_api_prom_label_values_query(&state, &headers, &name, &params).await {
+    match execute_api_prom_label_names_query(&state, &headers, &params).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
     }
@@ -7133,7 +7133,7 @@ async fn api_prom_label_values(
 async fn api_prom_label_values_post(
     State(state): State<QuerierState>,
     headers: HeaderMap,
-    Path(name): Path<String>,
+    Path(_name): Path<String>,
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
@@ -7145,7 +7145,7 @@ async fn api_prom_label_values_post(
         Ok(params) => params,
         Err(error) => return error.into_response(),
     };
-    match execute_api_prom_label_values_query(&state, &headers, &name, &params).await {
+    match execute_api_prom_label_names_query(&state, &headers, &params).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
     }
@@ -11090,20 +11090,6 @@ async fn execute_label_values_query(
 ) -> Result<Response, HttpQueryError> {
     Ok(loki_success(
         label_values_data(state, headers, name, params).await?,
-    ))
-}
-
-async fn execute_api_prom_label_values_query(
-    state: &QuerierState,
-    headers: &HeaderMap,
-    name: &str,
-    params: &SeriesParams,
-) -> Result<Response, HttpQueryError> {
-    Ok(json_response(
-        StatusCode::OK,
-        &json!({
-            "values": label_values_data(state, headers, name, params).await?,
-        }),
     ))
 }
 

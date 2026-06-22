@@ -1240,12 +1240,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let crabka_alias_app_values =
         crabka_api_prom_metadata_result(querier.clone(), "label/app/values", base_ns, end_ns).await;
     assert!(loki_alias_app_values == loki_alias_labels);
-    assert!(
-        crabka_alias_app_values
-            == json!({
-                "values": loki_app_values.clone(),
-            })
-    );
+    assert!(crabka_alias_app_values == loki_alias_app_values);
 
     let detected_labels_path = "detected_labels?query=%7Bapp%3D%22api%22%7D&limit=10";
     let loki_detected_labels =
