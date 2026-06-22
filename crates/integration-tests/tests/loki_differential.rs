@@ -7400,7 +7400,7 @@ async fn crabka_api_prom_query_range_result(
     let status = response.status().as_u16();
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     if status != StatusCode::OK.as_u16() {
-        return stable_loki_error(status, &String::from_utf8(body.to_vec()).unwrap());
+        return stable_loki_error(status, std::str::from_utf8(&body).unwrap());
     }
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
@@ -7592,6 +7592,7 @@ async fn crabka_tail_ws_raw_error(app: axum::Router, raw_query: &str) -> Value {
     response
 }
 
+#[allow(clippy::type_complexity)]
 fn websocket_error_response(
     result: Result<
         (
@@ -9849,10 +9850,8 @@ fn stable_status_probe_body(body: Value) -> Value {
 fn stable_config_response(status: u16, body: &str) -> Value {
     let mut lines = body
         .lines()
-        .filter_map(|line| {
-            (line.starts_with("target:") || line.starts_with("auth_enabled:"))
-                .then(|| line.trim().to_owned())
-        })
+        .filter(|&line| line.starts_with("target:") || line.starts_with("auth_enabled:"))
+        .map(|line| line.trim().to_owned())
         .collect::<Vec<String>>();
     lines.sort();
     json!({

@@ -1,7 +1,7 @@
 //! Profiles WAL topic record contract.
 
 use bytes::Bytes;
-use crabka_blockstore::Labels;
+use crabka_blockstore::SeriesLabels as Labels;
 use serde::{Deserialize, Serialize};
 use serde_wincode::SerdeCompat;
 use wincode::{Deserialize as WincodeDeserialize, Serialize as WincodeSerialize};

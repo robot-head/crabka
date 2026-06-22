@@ -169,7 +169,7 @@ mod tests {
 
     use arrow::array::{Array, BinaryArray};
     use assert2::assert;
-    use crabka_blockstore::{LabelMatcher, MatchOp};
+    use crabka_blockstore::{LabelMatcher, SeriesMatchOp as MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, PCOL_TRACE_ID, ProfileStore, SeriesAgg};
 
     use crate::wal::{ProfileRecord, WalFunction, WalLocation, WalSample, WalSymbolSet};

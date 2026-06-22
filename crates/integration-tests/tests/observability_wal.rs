@@ -324,7 +324,7 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
     create_topic(&bootstrap, topic, 1).await;
     broker.wait_until_partition_present(topic, 0).await;
 
-    let mut admin = AdminClient::connect(&[bootstrap.clone()])
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .expect("admin client");
     let outcome = admin
@@ -411,7 +411,7 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
     create_topic(&bootstrap, topic, 1).await;
     broker.wait_until_partition_present(topic, 0).await;
 
-    let mut admin = AdminClient::connect(&[bootstrap.clone()])
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .expect("admin client");
     let outcomes = admin
@@ -494,7 +494,7 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
     create_topic(&bootstrap, topic, 1).await;
     broker.wait_until_partition_present(topic, 0).await;
 
-    let mut admin = AdminClient::connect(&[bootstrap.clone()])
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .expect("admin client");
     let outcomes = admin
@@ -599,7 +599,7 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
     label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
     write_log_index_manifest(data_root.path(), &label_index, &BlockIndex::default()).unwrap();
 
-    let mut admin = AdminClient::connect(&[bootstrap.clone()])
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .expect("admin client");
     let outcomes = admin

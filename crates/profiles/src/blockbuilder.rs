@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
-    BlockIndex, BlockMeta, Labels, ProfileIndex, ProfileSampleRow, encode_profile_samples,
+    BlockMeta, ProfileIndex, ProfileSampleRow, SeriesLabels as Labels, SignalBlockIndex,
+    encode_profile_samples,
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, SymbolDb};
@@ -530,8 +531,8 @@ mod tests {
             );
         }
         assert!(index.profile_types("t") == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds"]);
-        assert!(BlockIndex::block_count(&index, "t") == 1);
-        assert!(BlockIndex::block_count(&index, "u") == 1);
+        assert!(index.block_count("t") == 1);
+        assert!(index.block_count("u") == 1);
     }
 
     fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {

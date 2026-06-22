@@ -677,7 +677,7 @@ mod tests {
     async fn push_normalizes_pprof_symbol_ids_to_wal_indices() {
         let sink = Arc::new(RecordingSink::default());
         let state = state_with(sink.clone());
-        let mut labels = crabka_blockstore::Labels::new();
+        let mut labels = crabka_blockstore::SeriesLabels::new();
         labels.insert("__name__", "samples");
         labels.insert("service_name", "api");
         let profile = PprofProfile::from(crabka_pprof::proto::Profile {

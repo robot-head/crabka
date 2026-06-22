@@ -3,7 +3,7 @@
 
 use std::io::Read;
 
-use crabka_blockstore::Labels;
+use crabka_blockstore::SeriesLabels as Labels;
 use crabka_pprof::PprofProfile;
 
 use crate::error::ProfilesError;

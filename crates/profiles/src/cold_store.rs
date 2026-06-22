@@ -469,7 +469,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_blockstore::{BlockIndex, Labels, MatchOp};
+    use crabka_blockstore::{SeriesLabels as Labels, SeriesMatchOp as MatchOp, SignalBlockIndex};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
     use object_store::ObjectStore;
     use object_store::memory::InMemory;

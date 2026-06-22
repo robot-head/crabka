@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crabka_blockstore::Labels;
+use crabka_blockstore::SeriesLabels as Labels;
 use crabka_pprof::ProfileType;
 
 use crate::error::ProfilesError;
@@ -153,7 +153,7 @@ fn labels_key(labels: &Labels) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_blockstore::Labels;
+    use crabka_blockstore::SeriesLabels as Labels;
     use crabka_pprof::PprofProfile;
 
     use crate::ingest::RawProfile;
