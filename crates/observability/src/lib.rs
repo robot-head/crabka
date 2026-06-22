@@ -7818,6 +7818,18 @@ async fn execute_http_query_for_tenant(
         )
         .await;
     }
+    if let Some(comparison) = parse_metric_vector_comparison_expression(&params.query) {
+        return execute_http_metric_vector_comparison_expression(
+            state,
+            tenant,
+            time_range,
+            params.step,
+            kind,
+            comparison,
+            &params.query,
+        )
+        .await;
+    }
     if let Ok(arithmetic) = parse_metric_binary_arithmetic_query(&params.query) {
         return execute_http_metric_binary_arithmetic_query(
             state,
@@ -7946,6 +7958,15 @@ struct MetricVectorArithmeticExpression {
     vector_query: String,
     vector_on_left: bool,
     op: MetricScalarArithmeticOp,
+    matching: Option<MetricVectorMatching>,
+}
+
+struct MetricVectorComparisonExpression {
+    metric_query: String,
+    vector_query: String,
+    vector_on_left: bool,
+    op: ComparisonOp,
+    bool_modifier: bool,
     matching: Option<MetricVectorMatching>,
 }
 
@@ -8112,6 +8133,42 @@ fn parse_metric_vector_arithmetic_expression(
             vector_query: left.to_string(),
             vector_on_left: true,
             op: parse_metric_arithmetic_operator(operator)?,
+            matching,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_metric_vector_comparison_expression(
+    query: &str,
+) -> Option<MetricVectorComparisonExpression> {
+    let (left, operator, right) = split_top_level_comparison_query(query)?;
+    let right = right.trim_start();
+    let (bool_modifier, right) = if let Some(rest) = right.strip_prefix("bool") {
+        (true, rest.trim_start())
+    } else {
+        (false, right)
+    };
+    let (matching, right) = parse_leading_metric_vector_matching_modifier(right, true)?;
+    let left = left.trim();
+    let right = right.trim();
+    let left_is_vector = scalar_vector_query_is_vector(left);
+    let right_is_vector = scalar_vector_query_is_vector(right);
+    match (left_is_vector, right_is_vector) {
+        (false, true) => Some(MetricVectorComparisonExpression {
+            metric_query: left.to_string(),
+            vector_query: right.to_string(),
+            vector_on_left: false,
+            op: parse_metric_comparison_operator(operator)?,
+            bool_modifier,
+            matching,
+        }),
+        (true, false) => Some(MetricVectorComparisonExpression {
+            metric_query: right.to_string(),
+            vector_query: left.to_string(),
+            vector_on_left: true,
+            op: parse_metric_comparison_operator(operator)?,
+            bool_modifier,
             matching,
         }),
         _ => None,
@@ -9390,6 +9447,12 @@ async fn execute_http_metric_expression_query(
         )
         .await;
     }
+    if let Some(comparison) = parse_metric_vector_comparison_expression(query) {
+        return execute_http_metric_vector_comparison_expression(
+            state, tenant, time_range, step, kind, comparison, full_query,
+        )
+        .await;
+    }
     if let Ok(arithmetic) = parse_metric_binary_arithmetic_query(query) {
         return execute_http_metric_binary_arithmetic_query(
             state, tenant, time_range, step, kind, arithmetic,
@@ -9576,33 +9639,13 @@ async fn execute_http_metric_vector_arithmetic_expression(
         query_text,
     ))
     .await?;
-    let vector_result =
-        scalar_vector_expression_result(&arithmetic.vector_query).ok_or_else(|| {
-            HttpQueryError::LokiParse {
-                query: query_text.to_string(),
-                source: ParseError::Syntax {
-                    message: "expected vector expression".to_string(),
-                    position: 0,
-                },
-            }
-        })?;
-    let vector_value = match kind {
-        QueryKind::Instant => add_loki_query_stats(loki_instant_scalar_or_vector_response(
-            time_range.end_ns,
-            vector_result,
-        )),
-        QueryKind::Range => {
-            let step_ns = step.unwrap_or_else(|| default_metric_range_step(time_range));
-            if step_ns <= 0 {
-                return Err(HttpQueryError::InvalidStep);
-            }
-            add_loki_query_stats(loki_range_vector_response(
-                time_range,
-                step_ns,
-                vector_result,
-            ))
-        }
-    };
+    let vector_value = execute_http_scalar_vector_expression_result(
+        &arithmetic.vector_query,
+        time_range,
+        step,
+        kind,
+        query_text,
+    )?;
 
     if arithmetic.vector_on_left {
         let mut value = vector_value;
@@ -9626,6 +9669,89 @@ async fn execute_http_metric_vector_arithmetic_expression(
         retain_metric_binary_on_labels(&mut value, arithmetic.matching.as_ref());
         Ok(value)
     }
+}
+
+async fn execute_http_metric_vector_comparison_expression(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    comparison: MetricVectorComparisonExpression,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    let metric_value = Box::pin(execute_http_metric_expression_query(
+        state,
+        tenant,
+        time_range,
+        step,
+        kind,
+        &comparison.metric_query,
+        query_text,
+    ))
+    .await?;
+    let vector_value = execute_http_scalar_vector_expression_result(
+        &comparison.vector_query,
+        time_range,
+        step,
+        kind,
+        query_text,
+    )?;
+
+    if comparison.vector_on_left {
+        let mut value = vector_value;
+        apply_metric_binary_comparison_to_loki_result(
+            &mut value,
+            &metric_value,
+            comparison.op,
+            comparison.bool_modifier,
+            comparison.matching.as_ref(),
+        );
+        retain_metric_binary_on_labels(&mut value, comparison.matching.as_ref());
+        merge_loki_query_stats(&mut value["data"]["stats"], &metric_value["data"]["stats"]);
+        Ok(value)
+    } else {
+        let mut value = metric_value;
+        apply_metric_binary_comparison_to_loki_result(
+            &mut value,
+            &vector_value,
+            comparison.op,
+            comparison.bool_modifier,
+            comparison.matching.as_ref(),
+        );
+        retain_metric_binary_on_labels(&mut value, comparison.matching.as_ref());
+        Ok(value)
+    }
+}
+
+fn execute_http_scalar_vector_expression_result(
+    query: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    let vector_result =
+        scalar_vector_expression_result(query).ok_or_else(|| HttpQueryError::LokiParse {
+            query: query_text.to_string(),
+            source: ParseError::Syntax {
+                message: "expected vector expression".to_string(),
+                position: 0,
+            },
+        })?;
+    let value = match kind {
+        QueryKind::Instant => {
+            loki_instant_scalar_or_vector_response(time_range.end_ns, vector_result)
+        }
+        QueryKind::Range => {
+            let step_ns = step.unwrap_or_else(|| default_metric_range_step(time_range));
+            if step_ns <= 0 {
+                return Err(HttpQueryError::InvalidStep);
+            }
+            loki_range_vector_response(time_range, step_ns, vector_result)
+        }
+    };
+    Ok(add_loki_query_stats(value))
 }
 
 fn retain_metric_binary_on_labels(value: &mut Value, matching: Option<&MetricVectorMatching>) {
