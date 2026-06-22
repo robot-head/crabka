@@ -7830,6 +7830,18 @@ async fn execute_http_query_for_tenant(
         )
         .await;
     }
+    if let Some(set) = parse_metric_vector_set_expression(&params.query) {
+        return execute_http_metric_vector_set_expression(
+            state,
+            tenant,
+            time_range,
+            params.step,
+            kind,
+            set,
+            &params.query,
+        )
+        .await;
+    }
     if let Ok(arithmetic) = parse_metric_binary_arithmetic_query(&params.query) {
         return execute_http_metric_binary_arithmetic_query(
             state,
@@ -7967,6 +7979,14 @@ struct MetricVectorComparisonExpression {
     vector_on_left: bool,
     op: ComparisonOp,
     bool_modifier: bool,
+    matching: Option<MetricVectorMatching>,
+}
+
+struct MetricVectorSetExpression {
+    metric_query: String,
+    vector_query: String,
+    vector_on_left: bool,
+    op: MetricBinarySetOp,
     matching: Option<MetricVectorMatching>,
 }
 
@@ -8169,6 +8189,32 @@ fn parse_metric_vector_comparison_expression(
             vector_on_left: true,
             op: parse_metric_comparison_operator(operator)?,
             bool_modifier,
+            matching,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_metric_vector_set_expression(query: &str) -> Option<MetricVectorSetExpression> {
+    let (left, operator, right) = split_top_level_set_query(query)?;
+    let (matching, right) = parse_leading_metric_vector_matching_modifier(right, false)?;
+    let left = left.trim();
+    let right = right.trim();
+    let left_is_vector = scalar_vector_query_is_vector(left);
+    let right_is_vector = scalar_vector_query_is_vector(right);
+    match (left_is_vector, right_is_vector) {
+        (false, true) => Some(MetricVectorSetExpression {
+            metric_query: left.to_string(),
+            vector_query: right.to_string(),
+            vector_on_left: false,
+            op: parse_metric_set_operator(operator)?,
+            matching,
+        }),
+        (true, false) => Some(MetricVectorSetExpression {
+            metric_query: right.to_string(),
+            vector_query: left.to_string(),
+            vector_on_left: true,
+            op: parse_metric_set_operator(operator)?,
             matching,
         }),
         _ => None,
@@ -9453,6 +9499,12 @@ async fn execute_http_metric_expression_query(
         )
         .await;
     }
+    if let Some(set) = parse_metric_vector_set_expression(query) {
+        return execute_http_metric_vector_set_expression(
+            state, tenant, time_range, step, kind, set, full_query,
+        )
+        .await;
+    }
     if let Ok(arithmetic) = parse_metric_binary_arithmetic_query(query) {
         return execute_http_metric_binary_arithmetic_query(
             state, tenant, time_range, step, kind, arithmetic,
@@ -9720,6 +9772,55 @@ async fn execute_http_metric_vector_comparison_expression(
             comparison.matching.as_ref(),
         );
         retain_metric_binary_on_labels(&mut value, comparison.matching.as_ref());
+        Ok(value)
+    }
+}
+
+async fn execute_http_metric_vector_set_expression(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    set: MetricVectorSetExpression,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    let metric_value = Box::pin(execute_http_metric_expression_query(
+        state,
+        tenant,
+        time_range,
+        step,
+        kind,
+        &set.metric_query,
+        query_text,
+    ))
+    .await?;
+    let vector_value = execute_http_scalar_vector_expression_result(
+        &set.vector_query,
+        time_range,
+        step,
+        kind,
+        query_text,
+    )?;
+
+    if set.vector_on_left {
+        let mut value = vector_value;
+        apply_metric_binary_set_to_loki_result(
+            &mut value,
+            &metric_value,
+            set.op,
+            set.matching.as_ref(),
+        );
+        merge_loki_query_stats(&mut value["data"]["stats"], &metric_value["data"]["stats"]);
+        Ok(value)
+    } else {
+        let mut value = metric_value;
+        apply_metric_binary_set_to_loki_result(
+            &mut value,
+            &vector_value,
+            set.op,
+            set.matching.as_ref(),
+        );
         Ok(value)
     }
 }
@@ -10752,8 +10853,7 @@ fn metric_binary_set_keeps_sample(op: MetricBinarySetOp, matched: bool) -> bool 
 }
 
 fn metric_samples_share_timestamp(left_sample: &Value, right_sample: &Value) -> bool {
-    left_sample.as_array().and_then(|sample| sample.first())
-        == right_sample.as_array().and_then(|sample| sample.first())
+    metric_binary_sample_timestamps_match(left_sample, right_sample)
 }
 
 fn apply_metric_scalar_arithmetic_to_loki_result(
