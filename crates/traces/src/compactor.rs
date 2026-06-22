@@ -4,18 +4,19 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
-    StringArray, StructArray,
+    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
+    ListArray, StringArray, StructArray,
 };
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockIndex, BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
-    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_EVENTS,
-    SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_NESTED_SET_LEFT,
-    SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID, SCOL_SPAN_ID, SCOL_START_NANO,
-    SCOL_TRACE_ID, ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, read_block,
-    span_block_decl, span_block_schema,
+    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_DURATION_NANOS,
+    SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_NAME,
+    SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID,
+    SCOL_ROOT_SERVICE_NAME, SCOL_ROOT_SPAN_NAME, SCOL_SPAN_ID, SCOL_START_NANO,
+    SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, ShardedTraceBloom,
+    SummaryColumns, TraceBlockStats, TraceIndex, read_block, span_block_decl, span_block_schema,
 };
 use object_store::ObjectStore;
 
@@ -65,6 +66,7 @@ pub async fn compact_block_keys(
     let concatenated =
         concat_batches(&schema, &batches).map_err(|err| TracesError::Block(err.to_string()))?;
     let concatenated = recompute_nested_sets(&concatenated)?;
+    let concatenated = recompute_trace_level_columns(&concatenated)?;
     let meta = writer
         .write_block_with_decl(
             tenant,
@@ -240,6 +242,134 @@ fn recompute_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, TracesError
             (SCOL_CHILD_COUNT, child_count),
         ],
     )
+}
+
+/// Recompute the trace-level denormalized columns over the FULL merged trace.
+///
+/// The write path (`span/batch.rs::root_info`) sets `trace_start_unix_nano` /
+/// `trace_duration_nanos` / `root_service_name` / `root_span_name` from only the
+/// spans in one flush-window block. After compacting several blocks of the same
+/// trace, each origin block's rows still carry that block's (partial, stale)
+/// values, so trace-level `TraceQL` matchers (`trace:duration`, `trace:rootName`,
+/// `trace:rootService`) read wrong data. Regroup by `trace_id` and recompute the
+/// four columns across all merged rows.
+fn recompute_trace_level_columns(batch: &RecordBatch) -> Result<RecordBatch, TracesError> {
+    let trace_ids = fixed_column(batch, SCOL_TRACE_ID, 16)?;
+    let parent_span_ids = fixed_column(batch, SCOL_PARENT_SPAN_ID, 8)?;
+    let start = int64_column(batch, SCOL_START_NANO)?;
+    let duration = int64_column(batch, SCOL_DURATION_NANOS)?;
+    let name = string_column(batch, SCOL_NAME)?;
+    let root_service = string_column(batch, SCOL_ROOT_SERVICE_NAME)?;
+
+    let mut by_trace: BTreeMap<[u8; 16], Vec<usize>> = BTreeMap::new();
+    for row in 0..batch.num_rows() {
+        if trace_ids.is_null(row) {
+            continue;
+        }
+        let mut trace_id = [0_u8; 16];
+        trace_id.copy_from_slice(trace_ids.value(row));
+        by_trace.entry(trace_id).or_default().push(row);
+    }
+
+    let rows_n = batch.num_rows();
+    let mut trace_start = vec![0_i64; rows_n];
+    let mut trace_duration = vec![0_i64; rows_n];
+    let mut root_service_out: Vec<Option<String>> = vec![None; rows_n];
+    let mut root_name_out: Vec<Option<String>> = vec![None; rows_n];
+
+    for rows in by_trace.values() {
+        let mut min_start = i64::MAX;
+        let mut max_end = i64::MIN;
+        for &row in rows {
+            let s = start.value(row);
+            min_start = min_start.min(s);
+            let d = if duration.is_null(row) {
+                0
+            } else {
+                duration.value(row)
+            };
+            max_end = max_end.max(s.saturating_add(d));
+        }
+        let dur = max_end.saturating_sub(min_start).max(0);
+
+        // Root = the first span with no in-trace parent, else the earliest span
+        // (matching the write-path `root_info`). `root_service_name` of the root
+        // row is its trace's root service; `name` is the root span's own name.
+        let root_row = rows
+            .iter()
+            .copied()
+            .find(|&row| parent_span_ids.is_null(row))
+            .or_else(|| rows.iter().copied().min_by_key(|&row| start.value(row)));
+        let (service, span_name) = root_row.map_or((None, None), |row| {
+            (
+                (!root_service.is_null(row)).then(|| root_service.value(row).to_string()),
+                (!name.is_null(row)).then(|| name.value(row).to_string()),
+            )
+        });
+
+        for &row in rows {
+            trace_start[row] = min_start;
+            trace_duration[row] = dur;
+            root_service_out[row].clone_from(&service);
+            root_name_out[row].clone_from(&span_name);
+        }
+    }
+
+    let schema = batch.schema();
+    let mut columns = batch.columns().to_vec();
+    set_column(
+        &schema,
+        &mut columns,
+        SCOL_TRACE_START_NANO,
+        Arc::new(Int64Array::from(trace_start)),
+    )?;
+    set_column(
+        &schema,
+        &mut columns,
+        SCOL_TRACE_DURATION_NANOS,
+        Arc::new(Int64Array::from(trace_duration)),
+    )?;
+    set_column(
+        &schema,
+        &mut columns,
+        SCOL_ROOT_SERVICE_NAME,
+        Arc::new(root_service_out.into_iter().collect::<StringArray>()),
+    )?;
+    set_column(
+        &schema,
+        &mut columns,
+        SCOL_ROOT_SPAN_NAME,
+        Arc::new(root_name_out.into_iter().collect::<StringArray>()),
+    )?;
+    RecordBatch::try_new(schema, columns).map_err(|err| TracesError::Block(err.to_string()))
+}
+
+fn set_column(
+    schema: &arrow::datatypes::SchemaRef,
+    columns: &mut [ArrayRef],
+    name: &str,
+    array: ArrayRef,
+) -> Result<(), TracesError> {
+    let idx = schema
+        .column_with_name(name)
+        .ok_or_else(|| TracesError::Block(format!("missing column {name}")))?
+        .0;
+    columns[idx] = array;
+    Ok(())
+}
+
+fn int64_column<'a>(batch: &'a RecordBatch, column: &str) -> Result<&'a Int64Array, TracesError> {
+    batch
+        .column_by_name(column)
+        .and_then(|col| col.as_any().downcast_ref::<Int64Array>())
+        .ok_or_else(|| TracesError::Block(format!("{column} is not Int64")))
+}
+
+fn string_column<'a>(batch: &'a RecordBatch, column: &str) -> Result<&'a StringArray, TracesError> {
+    batch
+        .column_by_name(column)
+        .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| TracesError::Block(format!("{column} is not Utf8")))
 }
 
 fn replace_int32_columns(
@@ -724,6 +854,99 @@ mod tests {
             }],
             instrumentation_scope: "otel-rust".into(),
             instrumentation_version: "1.2.3".into(),
+        }
+    }
+
+    fn mk_span(
+        span_id: [u8; 8],
+        parent: Option<[u8; 8]>,
+        start_ns: i64,
+        duration_ns: i64,
+        name: &str,
+        service: &str,
+    ) -> Span {
+        Span {
+            trace_id: [1; 16],
+            span_id,
+            parent_span_id: parent,
+            name: name.into(),
+            kind: SpanKind::Server,
+            start_ns,
+            duration_ns,
+            status: StatusCode::Ok,
+            status_message: String::new(),
+            resource_attrs: vec![KeyValue {
+                key: "service.name".into(),
+                value: AttrValue::Str(service.into()),
+            }],
+            span_attrs: vec![],
+            events: vec![],
+            links: vec![],
+            instrumentation_scope: "otel-rust".into(),
+            instrumentation_version: "1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_recomputes_trace_level_columns_across_blocks() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let writer = BlockWriter::new(store.clone());
+
+        // Block A holds the root span (later start); block B holds an earlier
+        // late child whose parent is NOT in B (so B's per-block root_info wrongly
+        // treats the child as the root → stale `root_span_name`/`trace_start`).
+        let batch_a = span_batch(&[mk_span([2; 8], None, 1_000, 100, "GET /", "api")]).unwrap();
+        writer
+            .write_block_with_decl(
+                "tenant",
+                "a.parquet",
+                span_block_schema(),
+                &[batch_a],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let batch_b =
+            span_batch(&[mk_span([3; 8], Some([2; 8]), 800, 50, "child", "api")]).unwrap();
+        writer
+            .write_block_with_decl(
+                "tenant",
+                "b.parquet",
+                span_block_schema(),
+                &[batch_b],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+
+        let mut index = TraceIndex::new();
+        compact_block_keys(
+            store.clone(),
+            &writer,
+            &mut index,
+            "tenant",
+            &["a.parquet".to_string(), "b.parquet".to_string()],
+            "compacted.parquet",
+        )
+        .await
+        .unwrap();
+
+        let batches = read_block(store, "compacted.parquet").await.unwrap();
+        let batch = &batches[0];
+        assert!(batch.num_rows() == 2);
+        let trace_start = int64_column(batch, SCOL_TRACE_START_NANO).unwrap();
+        let trace_duration = int64_column(batch, SCOL_TRACE_DURATION_NANOS).unwrap();
+        let service = string_column(batch, SCOL_ROOT_SERVICE_NAME).unwrap();
+        let root_name = string_column(batch, SCOL_ROOT_SPAN_NAME).unwrap();
+        for row in 0..batch.num_rows() {
+            // min start across both blocks, and span to the latest end.
+            assert!(trace_start.value(row) == 800);
+            assert!(trace_duration.value(row) == 300); // max(1100, 850) - 800
+            // root is the true (no-parent) span, consistent across every row.
+            assert!(service.value(row) == "api");
+            assert!(root_name.value(row) == "GET /");
         }
     }
 
