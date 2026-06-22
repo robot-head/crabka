@@ -2137,6 +2137,7 @@ async fn loki_push_endpoint_rejects_invalid_snappy_protobuf_without_wal_append()
         .unwrap();
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "snappy: corrupt input\n");
     assert!(sink.records().is_empty());
 }
 
