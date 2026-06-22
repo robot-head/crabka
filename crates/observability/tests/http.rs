@@ -2836,9 +2836,35 @@ async fn loki_push_endpoint_rejects_negative_timestamp_without_wal_append() {
 }
 
 #[tokio::test]
-async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_without_wal_append() {
+async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_like_loki_without_wal_append() {
     let sink = InMemoryWalSink::default();
-    let app = distributor_router(sink.clone());
+    let config = ServiceConfig {
+        target: Role::Distributor,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        object_store_url: None,
+        wal_bootstrap_server: None,
+        wal_topic: "__crabka_observability_logs_wal".to_string(),
+        wal_group_id: "crabka-observability-compactor".to_string(),
+        data_root: ".".into(),
+        querier_index_source: QuerierIndexSource::LocalManifest,
+        tenant: None,
+        index_prefix: None,
+        query_start_ns: None,
+        query_end_ns: None,
+        max_query_range_ns: None,
+        max_query_series: None,
+        max_query_bytes: None,
+        max_query_length: None,
+        max_ingest_body_bytes: None,
+        wal_append_timeout_ms: None,
+    };
+    let app = build_service_router(
+        &config,
+        ServiceDependencies::default().with_wal_sink(sink.clone()),
+        None,
+    )
+    .await
+    .unwrap();
     let payload = LokiProtoPushRequest {
         streams: vec![LokiProtoStream {
             labels: r#"{app="api"}"#.to_string(),
@@ -2872,7 +2898,10 @@ async fn loki_push_endpoint_rejects_negative_protobuf_timestamp_without_wal_appe
         .unwrap();
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(&json_body(response).await, "bad_data", "timestamp");
+    let body = text_body(response).await;
+    assert!(body.contains("timestamp too old"));
+    assert!(body.contains("1969-12-31T23:59:59Z"));
+    assert!(body.contains(r#"{app="api", service_name="api"}"#));
     assert!(sink.records().is_empty());
 }
 
