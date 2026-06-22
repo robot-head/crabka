@@ -6270,6 +6270,54 @@ async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_er
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let (broker, bootstrap, _broker_dir) = boot_crabka().await;
+    let topic = "__crabka_observability_loki_invalid_metadata_name_differential";
+    create_topic(&bootstrap, topic).await;
+    broker.wait_until_partition_present(topic, 0).await;
+    let data_root = TempDir::new().expect("data root");
+    let distributor_config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
+    let distributor = build_service_router(
+        &distributor_config,
+        build_service_dependencies(&distributor_config)
+            .await
+            .unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = json!({
+        "streams": [
+            {
+                "stream": {
+                    "app": "api"
+                },
+                "values": [[current_unix_second_ns().to_string(), "invalid metadata name", {"9bad": "metadata"}]]
+            }
+        ]
+    });
+
+    let loki_error = loki_push_error(&http, &loki_base, &payload).await;
+    let crabka_error = crabka_push_error(distributor, &payload).await;
+
+    assert!(crabka_error == loki_error);
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_push_response() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
