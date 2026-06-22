@@ -8318,6 +8318,29 @@ async fn deprecated_api_prom_query_range_endpoint_returns_loki_streams_json() {
 }
 
 #[tokio::test]
+async fn deprecated_api_prom_query_range_endpoint_rejects_metric_results() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/prom/query_range?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B5s%5D%29&start=0&end=30&step=1s")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "rpc error: code = Code(400) desc = legacy endpoints only support streams result type"
+    );
+}
+
+#[tokio::test]
 async fn deprecated_api_prom_query_range_endpoint_accepts_form_encoded_post_body() {
     let state = fixture();
     let app = loki_router(state);

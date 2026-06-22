@@ -886,6 +886,26 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
 
     assert!(crabka_result == loki_result);
 
+    let loki_alias_result =
+        loki_api_prom_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
+    let crabka_alias_result =
+        crabka_api_prom_query_range_result(querier.clone(), query, base_ns, end_ns).await;
+
+    assert!(
+        loki_alias_result
+            == json!({
+                "httpStatus": 404,
+                "body": "404 page not found\n",
+            })
+    );
+    assert!(
+        crabka_alias_result
+            == json!({
+                "httpStatus": 400,
+                "body": "rpc error: code = Code(400) desc = legacy endpoints only support streams result type",
+            })
+    );
+
     let query = r#"rate({app="api",env="prod"} |= "error" [2s])"#;
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
@@ -6434,8 +6454,11 @@ async fn crabka_api_prom_query_range_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    let status = response.status().as_u16();
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    if status != StatusCode::OK.as_u16() {
+        return stable_loki_error(status, &String::from_utf8(body.to_vec()).unwrap());
+    }
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
 }
 
