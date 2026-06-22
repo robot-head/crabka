@@ -2648,7 +2648,8 @@ struct LokiTypedPushRequest {
 
 #[derive(Debug, Deserialize)]
 struct LokiPushStream {
-    stream: Labels,
+    #[serde(default)]
+    stream: Option<Labels>,
     #[serde(default)]
     values: Vec<Value>,
 }
@@ -3451,8 +3452,10 @@ fn normalize_loki_push(
     let mut records = Vec::new();
 
     for stream in payload.streams {
-        validate_loki_stream_labels(&stream.stream)?;
-        let original_stream_labels = stream.stream;
+        let Some(original_stream_labels) = stream.stream else {
+            continue;
+        };
+        validate_loki_stream_labels(&original_stream_labels)?;
         let mut stream_labels = original_stream_labels.clone();
         discover_service_name_label(&mut stream_labels);
 
