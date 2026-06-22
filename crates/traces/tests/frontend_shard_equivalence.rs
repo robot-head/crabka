@@ -89,7 +89,7 @@ async fn sharded_search_equals_unsharded() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
-    let resp = qf.search("t1", "{ }", 0, 300, 20, 10).await;
+    let resp = qf.search("t1", "{ }", 0, 300, 20, 10).await.unwrap();
 
     assert!(qf.backend_ref().search_calls().len() == 4);
     // Unsharded baseline: trace 01 (spans 01,02 reunioned) + trace 02 (span 03).
@@ -128,7 +128,7 @@ async fn limit_and_spss_applied_after_merge() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
     // limit 2 (newest-first => 300, 200), spss 2.
-    let resp = qf.search("t1", "{ }", 0, 300, 2, 2).await;
+    let resp = qf.search("t1", "{ }", 0, 300, 2, 2).await.unwrap();
     assert!(resp.traces.len() == 2);
     assert!(resp.traces[0].start_time_unix_nano == "300");
     for t in &resp.traces {

@@ -125,6 +125,22 @@ pub enum BackendError {
     Backend { status: String, message: String },
 }
 
+impl BackendError {
+    /// Map this backend failure to the `(status, body)` the frontend returns to
+    /// its client, preserving the upstream querier's status code and error text
+    /// where known (a timeout becomes `504`, a transport failure `502`).
+    #[must_use]
+    pub fn to_http(&self) -> (u16, String) {
+        match self {
+            BackendError::Timeout => (504, "backend job timed out".to_string()),
+            BackendError::Transport(detail) => (502, format!("backend transport error: {detail}")),
+            BackendError::Backend { status, message } => {
+                (status.parse::<u16>().unwrap_or(502), message.clone())
+            }
+        }
+    }
+}
+
 /// A queryable querier backend (a pool fronting N queriers). Every method is
 /// one fanned-out job's worth of work.
 #[async_trait]

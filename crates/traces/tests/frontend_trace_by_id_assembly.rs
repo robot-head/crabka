@@ -79,7 +79,7 @@ async fn trace_split_across_queriers_reassembles() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
-    let (trace, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await;
+    let (trace, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
     // One by-id job per querier.
     assert!(qf.backend_ref().trace_calls().len() == 2);
     let trace = trace.expect("assembled trace");
@@ -102,7 +102,7 @@ async fn oversized_trace_is_partial() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
-    let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await;
+    let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
     assert!(trace.is_some());
     assert!(matches!(status, TraceStatus::Partial));
 }
@@ -117,7 +117,7 @@ async fn missing_trace_is_none() {
         ..FrontendConfig::default()
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
-    let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await;
+    let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
     assert!(trace.is_none());
     assert!(matches!(status, TraceStatus::Complete));
 }

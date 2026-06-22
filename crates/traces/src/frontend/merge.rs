@@ -5,9 +5,8 @@
 //! The search merge currency is the **typed serde edge model**
 //! ([`crate::frontend::wire`]), not raw `serde_json::Value`. Reunion is keyed by
 //! `traceID` so a trace split across blocks / hot+cold reassembles, with
-//! span-level dedup (by `spanID`) for the late-span overlap case. This ports the
-//! legacy `query_frontend` merge semantics — including cross-block `matched`-count
-//! accumulation — re-expressed over typed structs.
+//! span-level dedup (by `spanID`) for the late-span overlap case, including
+//! cross-block `matched`-count accumulation, all over typed structs.
 
 use std::collections::BTreeSet;
 

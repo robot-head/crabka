@@ -11,7 +11,6 @@ pub mod limits;
 pub mod livestore;
 pub mod metricsgen;
 pub mod querier;
-pub mod query_frontend;
 pub mod span;
 pub mod wal;
 pub mod wire;

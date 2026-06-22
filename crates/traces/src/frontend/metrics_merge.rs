@@ -1,8 +1,7 @@
 //! Typed merge of `TraceQL`-metrics series across shards: union series by their
 //! label set, sum points at equal timestamps, concatenate exemplars, and apply
-//! exemplar limiting. Ports the legacy `query_frontend` metric-series merge
-//! (`merge_metric_series` / `merge_metric_points` / `limit_metric_exemplars`)
-//! onto typed serde structs shaped to the querier's `trace_metrics_json` body.
+//! exemplar limiting, over typed serde structs shaped to the querier's
+//! `trace_metrics_json` body.
 
 use std::collections::BTreeMap;
 

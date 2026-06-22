@@ -12,6 +12,7 @@ use crabka_traces::{
     LiveStore, TRACES_WAL_TOPIC, blockbuilder,
     compactor::compact_index_window,
     distributor::{self, DistributorState, KafkaSink},
+    frontend::{self, FrontendConfig, TraceIndexCatalog},
     livestore,
     metricsgen::{
         KafkaSpanSource, MetricsGenConfig, MetricsGenService, PrometheusRemoteWriteSink,
@@ -23,7 +24,6 @@ use crabka_traces::{
         live::{LiveSource, LiveTier, RemoteLiveSource},
         store::CrabkaSpanStore,
     },
-    query_frontend::{self, QueryFrontendConfig, backend_blocks_by_tenant_from_trace_index},
     span::batch::RESOURCE_ATTR_PREFIX,
 };
 use object_store::ObjectStore;
@@ -544,38 +544,96 @@ async fn run_query_frontend(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
-    let router = build_query_frontend_router(&cli).await?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
-    tracing::info!(%bound, "traces query-frontend listening");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            shutdown.cancelled().await;
-        })
-        .await?;
+    let cfg = frontend_config_from_cli(&cli, addr)?;
+    let catalog = build_trace_index_catalog(&cli).await?;
+    tracing::info!(%addr, "traces query-frontend listening");
+    frontend::run_query_frontend(cfg, catalog, shutdown).await?;
     Ok(())
 }
 
+/// Map the role CLI onto the new query-frontend [`FrontendConfig`].
+///
+/// `--querier-url` is a comma-separated list of querier URLs (with scheme); the
+/// new [`HttpQuerier`] pool takes bare `host:port`, so the scheme/path are
+/// stripped here. `--live-frontier-ns` maps to `hot_frontier_ns` (`None` => `0`,
+/// i.e. the live tier is always probed).
+fn frontend_config_from_cli(
+    cli: &Cli,
+    listen_addr: SocketAddr,
+) -> Result<FrontendConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let querier_addrs = parse_querier_addrs(&cli.querier_url)?;
+    Ok(FrontendConfig {
+        querier_addrs,
+        target_bytes_per_job: cli.target_bytes_per_job,
+        max_concurrency: cli.query_queue_depth.max(1),
+        hot_frontier_ns: cli.live_frontier_ns.unwrap_or(0),
+        max_trace_bytes: u64::try_from(cli.max_trace_spans)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(64 * 1024),
+        listen_addr,
+        ..FrontendConfig::default()
+    })
+}
+
+/// Build the production block catalog from the trace index when row-group
+/// sharding is enabled (`--target-bytes-per-job > 0`); otherwise an empty
+/// catalog (whole-tier search, no per-block fan-out).
+async fn build_trace_index_catalog(
+    cli: &Cli,
+) -> Result<TraceIndexCatalog, Box<dyn std::error::Error + Send + Sync>> {
+    if cli.target_bytes_per_job == 0 {
+        return Ok(TraceIndexCatalog::new(std::collections::BTreeMap::new()));
+    }
+    let configured = build_object_store(cli)?;
+    let trace_index_key = configured.object_key(&cli.trace_index_key);
+    let trace_index = TraceIndex::load(&configured.store, &trace_index_key)
+        .await
+        .unwrap_or_else(|_| TraceIndex::new());
+    let blocks = BlockStore::new(configured.store, configured.root);
+    Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index)
+        .await
+        .unwrap_or_else(|_| TraceIndexCatalog::new(std::collections::BTreeMap::new())))
+}
+
+/// Parse `--querier-url` (comma-separated querier URLs, scheme allowed) into the
+/// bare `host:port` addresses the [`HttpQuerier`] pool dials.
+fn parse_querier_addrs(
+    value: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut addrs = Vec::new();
+    for raw in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        let url = Url::parse(raw)?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| format!("querier url missing host: {raw}"))?;
+        let addr = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        addrs.push(addr);
+    }
+    if addrs.is_empty() {
+        return Err(format!("no querier addresses parsed from {value:?}").into());
+    }
+    Ok(addrs)
+}
+
+#[cfg(test)]
 async fn build_query_frontend_router(
     cli: &Cli,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
-    let mut cfg = QueryFrontendConfig::new(&cli.querier_url)?;
-    cfg.live_frontier_ns = cli.live_frontier_ns;
-    cfg.max_queue_depth = cli.query_queue_depth;
-    cfg.target_bytes_per_job = cli.target_bytes_per_job;
-    if cli.target_bytes_per_job > 0 {
-        let configured = build_object_store(cli)?;
-        let trace_index_key = configured.object_key(&cli.trace_index_key);
-        let trace_index = TraceIndex::load(&configured.store, &trace_index_key)
-            .await
-            .unwrap_or_else(|_| TraceIndex::new());
-        let blocks = BlockStore::new(configured.store, configured.root);
-        cfg.backend_blocks_by_tenant =
-            backend_blocks_by_tenant_from_trace_index(&blocks, &trace_index)
-                .await
-                .unwrap_or_default();
-    }
-    Ok(query_frontend::router(cfg))
+    use crabka_traces::frontend::{HttpQuerier, QueryFrontend};
+
+    let addr: SocketAddr = cli.listen.parse()?;
+    let cfg = frontend_config_from_cli(cli, addr)?;
+    let catalog = build_trace_index_catalog(cli).await?;
+    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout)?;
+    let qf = Arc::new(QueryFrontend::new(
+        Arc::new(backend),
+        Arc::new(catalog),
+        cfg,
+    ));
+    Ok(frontend::server::router_with_backend(qf))
 }
 
 async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

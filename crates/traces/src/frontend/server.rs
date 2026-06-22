@@ -17,12 +17,21 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use crate::frontend::QueryFrontend;
-use crate::frontend::backend::QuerierBackend;
+use crate::frontend::backend::{BackendError, QuerierBackend};
 use crate::frontend::job::BlockCatalog;
 use crate::frontend::merge::TraceStatus;
 use crate::frontend::wire::parse_hex16;
 
 const TENANT_HEADER: &str = "x-scope-orgid";
+
+/// Render a propagated backend failure as the client response, preserving the
+/// upstream querier's status code and error text (so an invalid `TraceQL` query
+/// surfaces as the querier's `4xx` body rather than a silent empty `200`).
+fn backend_error_response(err: &BackendError) -> Response {
+    let (status, body) = err.to_http();
+    let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    (code, body).into_response()
+}
 
 /// Build the query-frontend router for any backend/catalog pair.
 pub fn router_with_backend<B, C>(qf: Arc<QueryFrontend<B, C>>) -> Router
@@ -76,10 +85,13 @@ where
     let limit = bounded_count(&uri, "limit", qf.default_limit());
     let spss = bounded_count(&uri, "spss", qf.default_spss());
 
-    let resp = qf
+    match qf
         .search(&tenant, &query, start_ns, end_ns, limit, spss)
-        .await;
-    Json(resp).into_response()
+        .await
+    {
+        Ok(resp) => Json(resp).into_response(),
+        Err(err) => backend_error_response(&err),
+    }
 }
 
 async fn trace_by_id<B, C>(
@@ -101,7 +113,10 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let tid = parse_hex16(&trace_id);
-    let (trace, _metrics, status) = qf.trace_by_id(&tenant, tid, start_ns, end_ns).await;
+    let (trace, _metrics, status) = match qf.trace_by_id(&tenant, tid, start_ns, end_ns).await {
+        Ok(out) => out,
+        Err(err) => return backend_error_response(&err),
+    };
 
     let Some(trace) = trace else {
         return (StatusCode::NOT_FOUND, "trace not found").into_response();
@@ -138,7 +153,10 @@ where
         Ok(scope) => scope,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let (tags, _metrics) = qf.tag_names(&tenant, scope, start_ns, end_ns).await;
+    let (tags, _metrics) = match qf.tag_names(&tenant, scope, start_ns, end_ns).await {
+        Ok(out) => out,
+        Err(err) => return backend_error_response(&err),
+    };
     let scopes: Vec<_> = tags
         .iter()
         .map(|st| json!({ "name": scope_name(st.scope), "tags": &st.tags }))
@@ -161,7 +179,10 @@ where
         Ok(bounds) => bounds,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let (values, _metrics) = qf.tag_values(&tenant, &tag, start_ns, end_ns).await;
+    let (values, _metrics) = match qf.tag_values(&tenant, &tag, start_ns, end_ns).await {
+        Ok(out) => out,
+        Err(err) => return backend_error_response(&err),
+    };
     let tag_values: Vec<_> = values
         .iter()
         .map(|v| json!({ "type": &v.type_, "value": &v.value }))
@@ -191,7 +212,7 @@ where
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     let exemplar_limit = exemplar_limit(&uri);
-    let resp = qf
+    match qf
         .metrics_query(
             &tenant,
             &query,
@@ -201,8 +222,11 @@ where
             false,
             exemplar_limit,
         )
-        .await;
-    Json(resp).into_response()
+        .await
+    {
+        Ok(resp) => Json(resp).into_response(),
+        Err(err) => backend_error_response(&err),
+    }
 }
 
 async fn query_instant<B, C>(
@@ -234,7 +258,7 @@ where
         };
     let step_ns = end_ns.saturating_sub(start_ns).max(1);
     let exemplar_limit = exemplar_limit(&uri);
-    let resp = qf
+    match qf
         .metrics_query(
             &tenant,
             &query,
@@ -244,8 +268,11 @@ where
             true,
             exemplar_limit,
         )
-        .await;
-    Json(resp).into_response()
+        .await
+    {
+        Ok(resp) => Json(resp).into_response(),
+        Err(err) => backend_error_response(&err),
+    }
 }
 
 // --- param helpers (mirror the querier's contract) --------------------------

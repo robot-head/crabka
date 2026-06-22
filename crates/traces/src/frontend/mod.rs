@@ -1,9 +1,8 @@
-//! The `query-frontend` role: search sharding (time/block/row-group jobs),
-//! job queueing, querier fan-out, and spanSet/trace merge in front of N
+//! The `query-frontend` role: search sharding (block/row-group jobs + a live
+//! shard), job queueing, querier fan-out, and spanSet/trace merge in front of N
 //! queriers.
 //!
-//! This is the typed, modular re-expression of the working
-//! [`crate::query_frontend`] module. The pipeline composes as
+//! The pipeline composes as
 //! `plan jobs -> queue (bounded fan-out) -> per-job search -> merge (limit/spss)
 //! -> render Tempo JSON`, all over typed serde structs ([`wire`]) rather than
 //! raw `serde_json::Value`.
@@ -90,6 +89,11 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
     }
 
     /// Run a `TraceQL` `/api/search` through the full pipeline.
+    ///
+    /// Search shards **partition** the data (live tier + disjoint cold blocks),
+    /// so a failed shard means missing results — any job error propagates
+    /// (an invalid query fails on every shard and must surface, not silently
+    /// return an empty 200).
     pub async fn search(
         &self,
         tenant: &str,
@@ -98,7 +102,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         end_ns: i64,
         limit: usize,
         spss: usize,
-    ) -> SearchResponseJson {
+    ) -> Result<SearchResponseJson, BackendError> {
         let blocks = self
             .catalog
             .blocks(tenant, start_ns, end_ns)
@@ -116,7 +120,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         let backend = Arc::clone(&self.backend);
         let tenant_s = tenant.to_string();
         let query_s = query.to_string();
-        let partials = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
+        let results = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
             let backend = Arc::clone(&backend);
             let req = SearchJobRequest {
                 tenant: tenant_s.clone(),
@@ -127,32 +131,38 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
                 spss,
                 shard,
             };
-            async move { backend.search_job(&req).await.unwrap_or_default() }
+            async move { backend.search_job(&req).await }
         })
         .await;
+        let partials: Vec<SearchPartial> = results.into_iter().collect::<Result<_, _>>()?;
 
         let mut resp = merge::merge_search(partials, limit, spss);
         // Seed plan-derived totals (per-job metrics carry completed/bytes).
         resp.metrics.total_jobs = total_jobs;
         resp.metrics.total_blocks = total_blocks;
-        resp
+        Ok(resp)
     }
 
     /// Run a `/api/v2/traces/{id}` by-id lookup, fanning one job per querier.
+    ///
+    /// By-id queriers are **redundant** for a trace (each reassembles it from
+    /// object storage; their live-stores differ only in recent spans), so
+    /// per-querier failures are tolerated: the trace is assembled from any
+    /// successes and an error propagates only when *every* querier failed.
     pub async fn trace_by_id(
         &self,
         tenant: &str,
         trace_id: [u8; 16],
         start_ns: i64,
         end_ns: i64,
-    ) -> (Option<TraceByIdResponseJson>, Metrics, TraceStatus) {
+    ) -> Result<(Option<TraceByIdResponseJson>, Metrics, TraceStatus), BackendError> {
         let queriers = self.backend.querier_count().max(1);
         let jobs: Vec<usize> = (0..queriers).collect();
         let total_jobs = jobs.len() as u64;
 
         let backend = Arc::clone(&self.backend);
         let tenant_s = tenant.to_string();
-        let partials = queue::run_jobs(jobs, self.cfg.max_concurrency, move |idx| {
+        let results = queue::run_jobs(jobs, self.cfg.max_concurrency, move |idx| {
             let backend = Arc::clone(&backend);
             let req = TraceByIdJobRequest {
                 tenant: tenant_s.clone(),
@@ -161,14 +171,30 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
                 end_ns,
                 querier: Some(idx),
             };
-            async move { backend.trace_by_id_job(&req).await.unwrap_or_default() }
+            async move { backend.trace_by_id_job(&req).await }
         })
         .await;
+
+        let mut partials = Vec::new();
+        let mut first_err = None;
+        for r in results {
+            match r {
+                Ok(p) => partials.push(p),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if partials.is_empty()
+            && let Some(e) = first_err
+        {
+            return Err(e);
+        }
 
         let (trace, mut metrics, status) =
             merge::assemble_trace(partials, self.cfg.max_trace_bytes);
         metrics.total_jobs = total_jobs;
-        (trace, metrics, status)
+        Ok((trace, metrics, status))
     }
 
     /// Run `/api/v2/search/tags`: fan over the planned shards, union+dedupe.
@@ -178,7 +204,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         scope: Option<crabka_traceql::TagScope>,
         start_ns: i64,
         end_ns: i64,
-    ) -> (Vec<crabka_traceql::ScopedTag>, Metrics) {
+    ) -> Result<(Vec<crabka_traceql::ScopedTag>, Metrics), BackendError> {
         let blocks = self
             .catalog
             .blocks(tenant, start_ns, end_ns)
@@ -195,7 +221,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
 
         let backend = Arc::clone(&self.backend);
         let tenant_s = tenant.to_string();
-        let partials = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
+        let results = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
             let backend = Arc::clone(&backend);
             let req = TagNamesJobRequest {
                 tenant: tenant_s.clone(),
@@ -204,14 +230,15 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
                 end_ns,
                 shard,
             };
-            async move { backend.tag_names_job(&req).await.unwrap_or_default() }
+            async move { backend.tag_names_job(&req).await }
         })
         .await;
+        let partials: Vec<TagNamesPartial> = results.into_iter().collect::<Result<_, _>>()?;
 
         let (tags, mut metrics) = merge::merge_tag_names(partials);
         metrics.total_jobs = total_jobs;
         metrics.total_blocks = total_blocks;
-        (tags, metrics)
+        Ok((tags, metrics))
     }
 
     /// Run `/api/v2/search/tag/{tag}/values`: fan over shards, union+dedupe.
@@ -221,7 +248,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         tag: &str,
         start_ns: i64,
         end_ns: i64,
-    ) -> (Vec<crabka_traceql::TypedValue>, Metrics) {
+    ) -> Result<(Vec<crabka_traceql::TypedValue>, Metrics), BackendError> {
         let blocks = self
             .catalog
             .blocks(tenant, start_ns, end_ns)
@@ -239,7 +266,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         let backend = Arc::clone(&self.backend);
         let tenant_s = tenant.to_string();
         let tag_s = tag.to_string();
-        let partials = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
+        let results = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
             let backend = Arc::clone(&backend);
             let req = TagValuesJobRequest {
                 tenant: tenant_s.clone(),
@@ -248,14 +275,15 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
                 end_ns,
                 shard,
             };
-            async move { backend.tag_values_job(&req).await.unwrap_or_default() }
+            async move { backend.tag_values_job(&req).await }
         })
         .await;
+        let partials: Vec<TagValuesPartial> = results.into_iter().collect::<Result<_, _>>()?;
 
         let (values, mut metrics) = merge::merge_tag_values(partials);
         metrics.total_jobs = total_jobs;
         metrics.total_blocks = total_blocks;
-        (values, metrics)
+        Ok((values, metrics))
     }
 
     /// Run a `TraceQL`-metrics query (`/api/metrics/query_range` or `query`)
@@ -274,7 +302,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         step_ns: i64,
         instant: bool,
         exemplar_limit: Option<usize>,
-    ) -> MetricsResponseJson {
+    ) -> Result<MetricsResponseJson, BackendError> {
         let blocks = self
             .catalog
             .blocks(tenant, start_ns, end_ns)
@@ -287,7 +315,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         let backend = Arc::clone(&self.backend);
         let tenant_s = tenant.to_string();
         let query_s = query.to_string();
-        let partials = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
+        let results = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
             let backend = Arc::clone(&backend);
             let req = MetricsJobRequest {
                 tenant: tenant_s.clone(),
@@ -298,17 +326,12 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
                 instant,
                 shard,
             };
-            async move {
-                backend
-                    .metrics_job(&req)
-                    .await
-                    .map(|p| p.response)
-                    .unwrap_or_default()
-            }
+            async move { backend.metrics_job(&req).await.map(|p| p.response) }
         })
         .await;
+        let partials: Vec<MetricsResponseJson> = results.into_iter().collect::<Result<_, _>>()?;
 
-        metrics_merge::merge_metrics(partials, exemplar_limit)
+        Ok(metrics_merge::merge_metrics(partials, exemplar_limit))
     }
 }
 
@@ -387,7 +410,7 @@ mod orch_tests {
         };
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
-        let resp = qf.search("t1", "{ }", 0, 300, 20, 3).await;
+        let resp = qf.search("t1", "{ }", 0, 300, 20, 3).await.unwrap();
         assert!(qf.backend_ref().search_calls().len() == 3);
         for c in qf.backend_ref().search_calls() {
             assert!(c.tenant == "t1");
@@ -419,7 +442,7 @@ mod orch_tests {
             ..FrontendConfig::default()
         };
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
-        let resp = qf.search("t1", "{ }", 0, 300, 1, 3).await;
+        let resp = qf.search("t1", "{ }", 0, 300, 1, 3).await.unwrap();
         assert!(resp.traces.len() == 1);
         assert!(resp.traces[0].start_time_unix_nano == "300");
     }
@@ -433,7 +456,7 @@ mod orch_tests {
             ..FrontendConfig::default()
         };
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
-        let (_t, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await;
+        let (_t, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
         // One job per querier (3), none returned the trace => Complete + None.
         assert!(qf.backend_ref().trace_calls().len() == 3);
         assert!(metrics.total_jobs == 3);
