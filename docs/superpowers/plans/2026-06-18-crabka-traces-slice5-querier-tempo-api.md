@@ -1,6 +1,6 @@
 # crabka-traces Slice 5 — Querier + Tempo HTTP API (hot/cold merge)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build the **querier role** — a concrete `crabka-traceql::SpanStore` impl (`CrabkaSpanStore`) that merges *cold* span blocks (via `crabka-blockstore` + the `TraceIndex`) with the *hot* live-store (Slice 4's in-memory recent-traces `MemTable`), UNION-ed in `scan()`, plus the **index-less by-id path** (`trace_by_id` via the `TraceIndex` bloom → block(s) → assembled `TraceSpans`) and tag discovery (`tag_names`/`tag_values` from the `TraceIndex`). On top of that, the **Tempo HTTP API** (axum, tenant via `X-Scope-OrgID`) that drives `TraceqlEngine` and serializes results into byte-exact Tempo JSON for Grafana's built-in Tempo datasource. Plus the `crabka-traces --target querier` role binary.
 
@@ -154,7 +154,7 @@ impl LiveStoreHandle {
 **Interfaces:**
 - Produces: a compiling `crabka-traces` with a `querier` module + `QuerierConfig` and a smoke test.
 
-- [ ] **Step 1: Add the Slice-5 dependencies to `crates/traces/Cargo.toml`**
+- [x] **Step 1: Add the Slice-5 dependencies to `crates/traces/Cargo.toml`**
 
 Append to `[dependencies]` (Slice 4 already has `arrow`, `thiserror`, `serde`, `tokio`, `axum`, `crabka-blockstore`, `opentelemetry-proto`):
 
@@ -176,7 +176,7 @@ object_store = { workspace = true }     # InMemory store behind a test BlockStor
 
 > If `http-body-util` is not yet a workspace dep, add `http-body-util = "0.1"` to root `[workspace.dependencies]` and use `{ workspace = true }`. `tower`/`object_store`/`async-trait`/`serde_json` are already workspace deps.
 
-- [ ] **Step 2: Create `crates/traces/src/querier/mod.rs`**
+- [x] **Step 2: Create `crates/traces/src/querier/mod.rs`**
 
 ```rust
 //! The querier role: a `SpanStore` over hot (live-store) + cold (span blocks),
@@ -214,7 +214,7 @@ impl Default for QuerierConfig {
 
 > Tempo's default HTTP listen port is `3200`; matching it lets an existing Grafana Tempo datasource point at Crabka unchanged.
 
-- [ ] **Step 3: Wire `lib.rs`**
+- [x] **Step 3: Wire `lib.rs`**
 
 Add (leaving the Slice-4 modules/re-exports intact):
 
@@ -222,7 +222,7 @@ Add (leaving the Slice-4 modules/re-exports intact):
 pub mod querier;
 ```
 
-- [ ] **Step 4: Smoke test**
+- [x] **Step 4: Smoke test**
 
 Add to `querier/mod.rs`:
 
@@ -242,12 +242,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 5: Build + test**
+- [x] **Step 5: Build + test**
 
 Run: `cargo test -p crabka-traces --lib querier::tests`
 Expected: compiles (first build pulls traceql/blockstore/datafusion — slow, normal), `default_config_matches_tempo_defaults` PASSES.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -277,7 +277,7 @@ git commit -m "feat(traces): querier module scaffold + QuerierConfig + deps"
 
 This task has **one churn-prone seam**: Slice 4's live-store handle API. Structure + a behavior-pin test now (against a fake handle / a directly-seeded live-store if Slice 4 exposes a test constructor); the live consumer-fed handle is exercised by the `#[ignore]` e2e (Task 8).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traces/src/querier/live.rs` with tests first. **Verify Slice 4's `LiveStoreHandle` test/seed constructor before running** — the test assumes `LiveStoreHandle::for_test()` that lets you push spans; adapt to Slice 4's real seed path (or wrap a fake handle behind a trait if Slice 4 only offers the consumer-fed constructor).
 
@@ -320,12 +320,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::live`
 Expected: FAIL — `cannot find type LiveTier` (then `unimplemented!` in the seed helper).
 
-- [ ] **Step 3: Implement `live.rs`**
+- [x] **Step 3: Implement `live.rs`**
 
 ```rust
 //! Read-side wrapper over Slice 4's live-store handle: the *hot* half of the
@@ -404,12 +404,12 @@ impl LiveTier {
 > - `span_batches` MUST emit the exact span block schema (Slice 1's accessor, e.g. `crabka_traces::span_block_schema()` or `crabka_blockstore::TraceIndex`-paired schema). If Slice 4's live-store stores `SpanRecord`s rather than Arrow, encode them here via the same Slice-1 encoder the block-builder uses — reuse, do not re-implement the schema.
 > - `LiveStoreHandle::*` error type — map to `LiveError::Source` via `to_string()`.
 
-- [ ] **Step 4: Make the test pass**
+- [x] **Step 4: Make the test pass**
 
 Wire `seeded()` to Slice 4's live-store seed path (or the `LiveSource` fake). Run `cargo test -p crabka-traces --lib querier::live`.
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -435,7 +435,7 @@ git commit -m "feat(traces): LiveTier — read-side wrapper over the live-store 
 
 The **UNION wiring is the churn-prone DataFusion surface.** Structure it as: (a) translate `SpanMatcher`s to the blockstore's `LabelMatcher`s (the `TraceIndex` tag-set/bloom prune happens inside `scan_context`); (b) get the cold `(SessionContext, cold_table)` from `BlockStore::scan_context`, restricting cold to `ts < frontier`; (c) register the live batches (`hot_spans` MemTable) into the *same* `SessionContext`, restricting hot to `ts >= frontier`; (d) register a `UNION ALL` view (`span_union`) over cold+hot and return its name in `ScanResult.span_table`. Behavior-pin the no-double-count property with a test.
 
-- [ ] **Step 1: Write the failing test (no broker — live tier seeded directly)**
+- [x] **Step 1: Write the failing test (no broker — live tier seeded directly)**
 
 Create `crates/traces/src/querier/store.rs` with tests first:
 
@@ -493,12 +493,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::store`
 Expected: FAIL — `cannot find type CrabkaSpanStore` (then `unimplemented!` in seeds).
 
-- [ ] **Step 3: Implement `store.rs` (scan + helpers; other trait methods stubbed)**
+- [x] **Step 3: Implement `store.rs` (scan + helpers; other trait methods stubbed)**
 
 ```rust
 //! `CrabkaSpanStore`: the `SpanStore` the TraceQL engine plans against. `scan`
@@ -660,12 +660,12 @@ pub(crate) async fn register_union(
 > - `span_block_schema()` — Slice 1's span schema accessor; confirm the exact path/name. The hot MemTable schema MUST equal the cold table's schema or the UNION fails to typecheck.
 > - `SpanMatcher`'s accessors are owned by Slice 2 — keep `span_matchers_to_label_matchers` permissive (empty) until pinned; the headline `c == 2` test does not depend on block pruning.
 
-- [ ] **Step 4: Make the test pass**
+- [x] **Step 4: Make the test pass**
 
 Wire the two seed helpers (mirror Slice-1 block-build + `TraceIndex` calls for cold; Slice-4 live seed for hot) and `svc_api()`. Run `cargo test -p crabka-traces --lib querier::store::tests::scan_unions_cold_and_hot_without_double_count`.
 Expected: PASS (`c == 2`, not 3).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -690,7 +690,7 @@ git commit -m "feat(traces): CrabkaSpanStore::scan — cold+hot UNION with front
 
 The by-id path is: **time/block prefilter → per-block `TraceIndex` bloom test → row-group min/max binary search over `trace_id` → read matching rows from each surviving block → union with `LiveTier::trace_spans` → group into OTLP `resource→scope→spans`**. A trace can span multiple blocks (late spans, §5.3) so reassembly unions *all* surviving cold blocks + the hot fraction, dedup by `span_id`.
 
-- [ ] **Step 1: Write the failing test (late-span cross-block reassembly)**
+- [x] **Step 1: Write the failing test (late-span cross-block reassembly)**
 
 Add to `store.rs` tests:
 
@@ -731,12 +731,12 @@ Add to `store.rs` tests:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::store::tests::trace_by_id`
 Expected: FAIL — `unimplemented!("trace_by_id — Task 4")`.
 
-- [ ] **Step 3: Implement `trace_by_id` + `assemble_trace_spans`**
+- [x] **Step 3: Implement `trace_by_id` + `assemble_trace_spans`**
 
 Replace the Task-3 `trace_by_id` stub with:
 
@@ -845,12 +845,12 @@ fn assembled_from_record(rec: &crate::SpanRecord) -> AssembledSpan {
 > - `SpanRecord` accessors — confirm against Slice 4 (`trace_id()`/`span_id()`/`name()`/resource+span attrs/events/links).
 > - Dedup-by-`span_id` is the late-span correctness guard (§5.4): a span present in both a cold block and the hot fraction is counted once.
 
-- [ ] **Step 4: Make the tests pass**
+- [x] **Step 4: Make the tests pass**
 
 Wire the split-trace seed + `trace_span_count`. Run `cargo test -p crabka-traces --lib querier::store::tests::trace_by_id`.
 Expected: PASS (reassembly = 3 spans; bloom-miss = `None`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -872,7 +872,7 @@ git commit -m "feat(traces): index-less trace_by_id + cross-block/live reassembl
 
 `tag_names` unions the per-block `TraceIndex` tag sets (filtered by `scope` if given) with the live tier's live tags, grouped by `TagScope`. `tag_values` unions the per-block tag-value sets with live values, carrying each value's TraceQL static `type`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `store.rs` tests:
 
@@ -908,12 +908,12 @@ Add to `store.rs` tests:
     }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::store::tests::tag_`
 Expected: FAIL — `unimplemented!("tag_names — Task 5")`.
 
-- [ ] **Step 3: Implement `tag_names` + `tag_values`**
+- [x] **Step 3: Implement `tag_names` + `tag_values`**
 
 Replace the Task-3 stubs:
 
@@ -1020,12 +1020,12 @@ fn static_scope(s: &str) -> &'static str {
 > - `BlockStore::index() -> &TraceIndex` + `TraceIndex::tag_names(tenant) -> Vec<(String /*scope*/, Vec<String>)>` and `TraceIndex::tag_values(tenant, tag) -> Vec<(String /*type*/, String /*value*/)>` are the **expected** Slice-1 tag-discovery surface (spec §4.2b). Confirm the method names; if the `TraceIndex` stores tag sets without a scope split, derive the scope from the column namespace (resource.* / span.* / event.* …). **If absent, add these accessors to `TraceIndex` in this task** — flag it.
 > - The TraceQL static `type` strings (`"string"`/`"int"`/`"float"`/`"bool"`/`"duration"`/`"status"`/`"kind"`) are owned by Slice 3's tag-discovery; reuse its type-naming so `/tag/{tag}/values` matches Tempo. Pin the exact strings in the Task-7 search-tags JSON test.
 
-- [ ] **Step 4: Make the tests pass**
+- [x] **Step 4: Make the tests pass**
 
 Wire the tag seed helpers. Run `cargo test -p crabka-traces --lib querier::store`.
 Expected: PASS (scan + trace_by_id + tag tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1050,7 +1050,7 @@ git commit -m "feat(traces): CrabkaSpanStore tag_names/tag_values — TraceIndex
   - `http/mod.rs`: `AppState { engine: Arc<TraceqlEngine<CrabkaSpanStore>> }`, `tenant_of(&HeaderMap) -> String`, `parse_time_secs(&str) -> Option<i64 /*ns*/>`, `router(state) -> Router`.
   - `traces.rs`: `echo`, `trace_by_id`, `ready`, `status` handlers.
 
-- [ ] **Step 1: Write the failing exact-JSON tests (the by-id + attrs byte-equality analog)**
+- [x] **Step 1: Write the failing exact-JSON tests (the by-id + attrs byte-equality analog)**
 
 Create `crates/traces/src/querier/http/json.rs` with tests first:
 
@@ -1102,12 +1102,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::http::json`
 Expected: FAIL — `cannot find function attrs_to_otlp_kv`.
 
-- [ ] **Step 3: Implement `json.rs`**
+- [x] **Step 3: Implement `json.rs`**
 
 ```rust
 //! Tempo HTTP-API JSON. Response *shape* is the contract (the byte-equality
@@ -1231,7 +1231,7 @@ fn resource_spans_json(t: &TraceSpans) -> Value {
 > - **`resource_spans_json` is a PLACEHOLDER.** The real OTLP-JSON projection of `TraceSpans` is the load-bearing by-id contract. If `TraceSpans` holds `opentelemetry_proto` prost types, serialize through the OTLP-JSON mapping (NOT prost's default JSON — OTLP uses base64 for `traceId`/`spanId` and string for `int64`). Confirm `opentelemetry-proto` 0.32's JSON support; if it lacks a JSON serializer, hand-build the `resourceSpans` tree here (camelCase keys) and pin it with `resource_spans_otlp_json_is_exact` cross-checked against a real `cp-tempo` response. **Flagged, not faked** — `hex_lower`/`attrs_to_otlp_kv`/the envelope `status` are the in-scope byte-exact assertions for this task.
 > - **int64 as string** in OTLP-JSON (`intValue`, nanos) — the `to_string()` is deliberate; a numeric `intValue` is wrong per the OTLP-JSON spec.
 
-- [ ] **Step 4: Create `http/mod.rs` (router + tenant extractor + time parse)**
+- [x] **Step 4: Create `http/mod.rs` (router + tenant extractor + time parse)**
 
 ```rust
 //! Tempo HTTP query API for the querier role.
@@ -1293,7 +1293,7 @@ pub fn router(state: AppState) -> Router {
 
 > `Router::route` with axum 0.8 path syntax uses `{param}` (not `:param`). Confirm against axum 0.8; the route-table behavior is pinned by the Task-6/7 handler tests.
 
-- [ ] **Step 5: Implement `traces.rs` (echo + by-id + probes)**
+- [x] **Step 5: Implement `traces.rs` (echo + by-id + probes)**
 
 ```rust
 //! `/api/echo`, `/api/v2/traces/{id}`, `/ready`, `/status`.
@@ -1358,12 +1358,12 @@ fn parse_trace_id(hex: &str) -> Option<[u8; 16]> {
 }
 ```
 
-- [ ] **Step 6: Run to verify json + by-id tests pass**
+- [x] **Step 6: Run to verify json + by-id tests pass**
 
 Run: `cargo test -p crabka-traces --lib querier::http::json`
 Expected: PASS (`hex_lower`, `attrs_to_otlp_kv`, envelope). (`traces.rs`/`search.rs`/`metrics.rs` won't fully compile until Task 7 adds the search/metrics handlers; if splitting commits, stub `search`/`metrics` handlers returning `StatusCode::NOT_IMPLEMENTED` first.)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1387,7 +1387,7 @@ git commit -m "feat(traces): Tempo by-id JSON projection + echo/by-id/probe hand
   - `metrics.rs`: `query_range`, `query_instant`.
 - Param parsing: `/api/search` (`q`, `tags`, `start`/`end` epoch secs, `limit` default 20, `spss` default 3, `minDuration`/`maxDuration`); `/api/metrics/query_range` (`q`, `start`, `end`, `step`).
 
-- [ ] **Step 1: Write the failing handler tests (in-process router via `oneshot`)**
+- [x] **Step 1: Write the failing handler tests (in-process router via `oneshot`)**
 
 Create `crates/traces/src/querier/http/search.rs` with tests first. The test builds an `AppState` whose engine is backed by a `CrabkaSpanStore` over a store with one known trace (no broker), drives the router, and asserts the **exact `traces[]/spanSets[]` body** for a search and the **error body** for a bad query.
 
@@ -1473,12 +1473,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib querier::http::search`
 Expected: FAIL — handlers don't exist yet.
 
-- [ ] **Step 3: Implement `search.rs`**
+- [x] **Step 3: Implement `search.rs`**
 
 ```rust
 //! `/api/search`, `/api/v2/search/tags`, `/api/v2/search/tag/{tag}/values`.
@@ -1629,7 +1629,7 @@ fn logfmt_tags_to_traceql(tags: &str) -> Result<String, String> {
 }
 ```
 
-- [ ] **Step 4: Implement `metrics.rs`**
+- [x] **Step 4: Implement `metrics.rs`**
 
 ```rust
 //! `/api/metrics/query_range` + `/api/metrics/query` (TraceQL metrics).
@@ -1724,12 +1724,12 @@ fn trace_metrics_json(resp: &crabka_traceql::TraceMetricsResponse) -> serde_json
 > - **`trace_metrics_json` is a PLACEHOLDER** — the Prometheus-shaped series + exemplars projection is gated on Slice 3's `TraceMetricsResponse` internals; the search + by-id + tags shapes are the in-scope byte-exact assertions. Flagged, not faked.
 > - `logfmt_tags_to_traceql` / `parse_go_duration_ns` — wire to traceql's parsers if exposed; Grafana's Tempo datasource sends `q=` (TraceQL) for Explore, so `tags=` and Go-duration `step` are parity paths.
 
-- [ ] **Step 5: Run to verify handler tests pass**
+- [x] **Step 5: Run to verify handler tests pass**
 
 Run: `cargo test -p crabka-traces --lib querier::http`
 Expected: PASS (json + search handler tests). Adjust `AppState` (engine vs. engine+store) per the accessor decision above.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1750,7 +1750,7 @@ git commit -m "feat(traces): Tempo search/tags/metrics handlers + exact search-b
 - Consumes: `QuerierConfig`, `LiveTier`, `CrabkaSpanStore`, `TraceqlEngine`, `http::router`, the Slice-4 binary's `--target` dispatch + live-store builder, `crabka-grpc-gateway`/broker `serve` pattern (plaintext axum serve).
 - Produces: the `querier` arm of the role binary that builds the live tier + blockstore + store + engine + router and serves the Tempo API on `config.listen_addr`.
 
-- [ ] **Step 1: Add the `querier` arm to the role binary**
+- [x] **Step 1: Add the `querier` arm to the role binary**
 
 Extend the Slice-4 `match target` in `crates/traces/src/bin/crabka-traces.rs`:
 
@@ -1812,7 +1812,7 @@ async fn acquire_live_store_handle()
 
 > The binary has two `todo!()`s (`build_blockstore_from_env`, `acquire_live_store_handle`) gated on Slice 4's object-store config + live-store handle-acquisition surface. They are **wiring**, not logic — fill them when Slice 4's store-construction + live-store handle are available. Everything testable (live/store/engine/router) is exercised by Tasks 2–7 unit tests + the `#[ignore]` e2e below. Keep the binary compiling; `--target querier` fails loudly until Slice 4 wiring lands.
 
-- [ ] **Step 2: Write the `#[ignore]` end-to-end test**
+- [x] **Step 2: Write the `#[ignore]` end-to-end test**
 
 Create `crates/traces/tests/querier_e2e.rs`. Boots an in-process broker (`crabka-broker` test-support), produces a handful of `SpanRecord`s to the WAL topic, starts a Slice-4 live-store consumer, waits for it to catch up, then drives the router and asserts `/api/search?q={}` returns the produced trace and `/api/v2/traces/{id}` reassembles it. Gated `#[ignore]` because it needs a broker.
 
@@ -1848,14 +1848,14 @@ async fn produce_then_search_and_by_id_round_trip() {
 
 > The e2e is a **skeleton with an explicit fill-list**, not fabricated passing code — it pins the *integration contract* (produce → live-store → search/by-id) and is `#[ignore]`d so CI is green without a broker. When Slice 4's produce + live-store paths are in hand, flesh out steps 1–6; the assertions reuse Tasks 6/7's want-bodies.
 
-- [ ] **Step 3: Build the binary + run non-ignored tests + whole-crate gate**
+- [x] **Step 3: Build the binary + run non-ignored tests + whole-crate gate**
 
 Run: `cargo build -p crabka-traces --bin crabka-traces`
 Expected: compiles (the two `todo!()` wiring fns compile; `--target querier` would panic at runtime until Slice 4 wiring — acceptable for this slice).
 Run: `cargo test -p crabka-traces && cargo clippy -p crabka-traces --all-targets && cargo fmt -p crabka-traces --check`
 Expected: all non-`#[ignore]` tests PASS, no warnings, formatting clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cargo fmt -p crabka-traces

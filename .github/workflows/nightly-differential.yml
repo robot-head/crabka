@@ -3,6 +3,11 @@ on:
   schedule:
     - cron: '0 3 * * *'   # 03:00 UTC daily
   workflow_dispatch:
+  # The Docker-heavy `traces-differential` job is opt-in on PRs: add the
+  # `traces-differential` label to a PR to trigger it (it otherwise runs only on
+  # the nightly schedule and via manual dispatch, keeping PR latency low).
+  pull_request:
+    types: [labeled]
 
 # PROPTEST_CASES is reserved for a future extension that adds a proptest-driven
 # variant to differential_all. The current implementation sweeps every active
@@ -14,10 +19,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege GITHUB_TOKEN: read-only by default. The two jobs that open an
+# issue on failure elevate to `issues: write` explicitly (see each job below).
+permissions:
+  contents: read
+
 jobs:
   nightly:
+    # The JVM-protocol differential sweep is scheduled/manual only; the
+    # `pull_request: labeled` trigger exists solely for the `traces-differential`
+    # job below, so skip this job on PR events.
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Elevated only to open the on-failure tracking issue below.
+    permissions:
+      contents: read
+      issues: write
     env:
       PROPTEST_CASES: "256"
     steps:
@@ -43,6 +61,48 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `nightly-differential failed on ${context.sha.slice(0,7)}`,
+              body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['nightly-fail'],
+            });
+
+  # crabka-traces differential-vs-Tempo + Grafana integration. These tests are
+  # `#[ignore = "requires Docker..."]` (see crates/traces/tests/tempo_differential.rs)
+  # because they spin up grafana/tempo + grafana/grafana containers via
+  # testcontainers, so they never run in the default `cargo test --workspace`
+  # path. This job runs them with `--ignored` on the nightly schedule, on manual
+  # dispatch, and on any PR carrying the `traces-differential` label (opt-in, to
+  # keep PR latency low) — mirroring how the repo gates other Docker-heavy suites.
+  traces-differential:
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'traces-differential') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Elevated only to open the on-failure tracking issue below.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      # The grafana/tempo + grafana/grafana images plus the cargo target dir
+      # exhaust the ~14 GB free on the default runner; reclaim the unused
+      # preinstalled SDKs like the other Docker-heavy Linux jobs do.
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: traces-differential
+      - name: Run traces differential-vs-Tempo + Grafana suites (Docker)
+        run: cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture
+      - name: Create issue on failure
+        if: ${{ failure() && github.event_name != 'pull_request' }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `traces-differential failed on ${context.sha.slice(0,7)}`,
               body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               labels: ['nightly-fail'],
             });

@@ -89,7 +89,7 @@ Each file has one responsibility; `livestore.rs` and `blockbuilder.rs` are the o
 **Interfaces:**
 - Produces: a compiling `crabka-traces` crate; `pub enum TracesError` (`thiserror`) with `fn status_code(&self) -> u16`; `pub fn crate_smoke() -> bool` (placeholder, removed in Task 2) so there is a test to run.
 
-- [ ] **Step 1: Add the crate to the workspace + enable trace types**
+- [x] **Step 1: Add the crate to the workspace + enable trace types**
 
 In root `Cargo.toml` `[workspace] members`, add `"crates/traces"`. Change the `opentelemetry-proto` workspace line to enable the trace types (it currently enables only `metrics`):
 
@@ -99,7 +99,7 @@ opentelemetry-proto = { version = "0.32", default-features = false, features = [
 
 > **Verify against `~/.cargo/registry/src/*/opentelemetry-proto-0.32.0/Cargo.toml`:** the `trace` feature gates `opentelemetry_proto::tonic::trace::v1` (confirmed: `lib.rs` has `#[cfg(feature = "trace")] pub mod trace`). Adding `trace` is purely additive — the metrics signal's `metrics`-only usage is unaffected (greenfield, no compat concern). If `thrift` is not already a `[workspace.dependencies]` entry, add `thrift = "0.17"` for the Jaeger compact-Thrift decode (Task 9); confirm before relying on it.
 
-- [ ] **Step 2: Create `crates/traces/Cargo.toml`**
+- [x] **Step 2: Create `crates/traces/Cargo.toml`**
 
 ```toml
 [package]
@@ -156,7 +156,7 @@ crabka-client-core = { path = "../client-core" }
 
 > **Verify each `{ workspace = true }` resolves** against root `Cargo.toml` (`serde_json`, `serde-wincode`, `wincode`, `tower`, `futures`, `url`, `bytes` are already workspace deps — used by sibling crates). `thrift` is added in Step 1 if absent.
 
-- [ ] **Step 3: Create `src/error.rs`**
+- [x] **Step 3: Create `src/error.rs`**
 
 ```rust
 //! Crate-wide error + the ingest-edge HTTP status mapping.
@@ -195,7 +195,7 @@ impl TracesError {
 }
 ```
 
-- [ ] **Step 4: Create `src/lib.rs` + a smoke test**
+- [x] **Step 4: Create `src/lib.rs` + a smoke test**
 
 ```rust
 //! Crabka traces ingest service: distributor (OTLP/Jaeger/Zipkin/Tempo-native
@@ -231,12 +231,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 5: Build + run**
+- [x] **Step 5: Build + run**
 
 Run: `cargo test -p crabka-traces`
 Expected: compiles; 2 tests PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -264,7 +264,7 @@ git commit -m "feat(traces): scaffold crabka-traces crate + trace-proto feature 
   - All derive `serde::{Serialize, Deserialize}` (the WAL record encodes them).
   - `Span::is_root(&self) -> bool` (`parent_span_id.is_none()`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `crates/traces/src/span/mod.rs`:
 
@@ -328,12 +328,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib span`
 Expected: FAIL — `cannot find type Span`.
 
-- [ ] **Step 3: Implement `span/mod.rs`**
+- [x] **Step 3: Implement `span/mod.rs`**
 
 Prepend above the `tests` module:
 
@@ -461,14 +461,14 @@ impl Span {
 
 Add empty `pub mod batch;` / `pub mod nested_set;` files now (filled in Tasks 4 and 5) or comment them out until those tasks; declaring them empty keeps the tree compiling — create `batch.rs`/`nested_set.rs` with just a `//!` doc line for now.
 
-- [ ] **Step 4: Declare + run**
+- [x] **Step 4: Declare + run**
 
 `lib.rs`: replace the placeholder with `pub mod span; pub use span::{AttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind, StatusCode};`. Remove `crate_smoke` and its test (keep the `status_codes_map` test).
 
 Run: `cargo test -p crabka-traces --lib span`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -492,7 +492,7 @@ git commit -m "feat(traces): internal Span model (OTLP-shaped, serde-derived)"
   - `SpanRecord::encode(&self) -> Result<Vec<u8>, TracesError>` / `SpanRecord::decode(&[u8]) -> Result<SpanRecord, TracesError>` (via `serde-wincode`).
   - `fn partition_key(trace_id: &[u8; 16]) -> Bytes` — the produce key; **all spans of a trace land on one partition** (spec §5.2 invariant). The producer MurmurHash2-partitions on this key.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/traces/src/wal.rs`:
 
@@ -549,12 +549,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib wal`
 Expected: FAIL — `cannot find type SpanRecord`.
 
-- [ ] **Step 3: Implement `wal.rs`**
+- [x] **Step 3: Implement `wal.rs`**
 
 ```rust
 //! The traces WAL topic record. Produced by the distributor, consumed by the
@@ -604,14 +604,14 @@ pub fn partition_key(trace_id: &[u8; 16]) -> Bytes {
 
 > **Verify the `serde-wincode` call shape** against `crates/broker/src/bootstrap.rs` / `crates/metadata/src/kraft_translate.rs`: `<SerdeCompat<T> as wincode::Serialize>::serialize(&value) -> Result<Vec<u8>, _>` and `<SerdeCompat<T>>::deserialize(&[u8]) -> Result<T, _>`. If the trait import differs, match the codebase exactly (the metrics slice-4 plan's Task 5 used the identical shape). The partition-key bytes are an internal contract; keep them deterministic and equal for equal `trace_id`.
 
-- [ ] **Step 4: Declare + run**
+- [x] **Step 4: Declare + run**
 
 `lib.rs`: `pub mod wal; pub use wal::{partition_key, SpanRecord, TRACES_WAL_TOPIC};`
 
 Run: `cargo test -p crabka-traces --lib wal`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -634,7 +634,7 @@ git commit -m "feat(traces): SpanRecord WAL record + serde-wincode codec + trace
 
 > The block-builder calls this on the spans of **one trace** (already grouped by `trace_id`). Multiple roots / orphan parents (a span whose `parent_span_id` is not in the set — a late/missing parent) are treated as roots (`parent_id = 0`), matching the spec's two-roots-are-siblings rule and the late-span reality. Disconnected forests get disjoint `[left,right]` ranges from one shared counter, so structural predicates never cross trees within the trace partition (they can't — same `trace_id`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -706,12 +706,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib span::nested_set`
 Expected: FAIL — `cannot find function assign_nested_set`.
 
-- [ ] **Step 3: Implement `nested_set.rs`**
+- [x] **Step 3: Implement `nested_set.rs`**
 
 ```rust
 //! Modified pre-order traversal (nested-set model). At block-build the
@@ -785,12 +785,12 @@ pub fn assign_nested_set(spans: &[Span]) -> Vec<NestedSet> {
 
 > **Determinism:** intervals depend on (a) input order of roots and (b) input order of children — both preserved here. The block-builder must sort spans into a stable order before calling (Task 11 sorts by `(start_ns, span_id)` within a trace) so blocks are reproducible (crash-recovery idempotency, spec §9). The `i32` counter caps at ~2.1B half-steps per trace — far beyond any real trace; if a trace somehow exceeds it, that is a pathological input the limiter (Task 8/distributor) rejects upstream.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `cargo test -p crabka-traces --lib span::nested_set`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -816,7 +816,7 @@ git commit -m "feat(traces): nested-set DFS pre-order (left/right/parent_id, roo
   - `enum WireError` (re-uses `TracesError` mapping) with `fn status_code(&self) -> u16`
   - `fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError>` — flattens `ResourceSpans → ScopeSpans → Span` to internal `Span`s, copying resource attrs onto every span row (spec §4.1 denormalization), converting `trace_id`/`span_id` `Vec<u8>` → fixed arrays, `start_time_unix_nano`/`end_time_unix_nano` → `start_ns`/`duration_ns`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `crates/traces/src/wire/otlp.rs`:
 
@@ -902,12 +902,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib wire::otlp`
 Expected: FAIL — `cannot find function decode_otlp`.
 
-- [ ] **Step 3: Implement `wire/mod.rs`**
+- [x] **Step 3: Implement `wire/mod.rs`**
 
 ```rust
 //! Push-door wire surfaces: format negotiation + the three decoders, each
@@ -950,7 +950,7 @@ pub fn negotiate(path: &str, content_type: Option<&str>) -> Result<WireFormat, W
 
 Create placeholder `wire/zipkin.rs` and `wire/jaeger.rs` with a `//!` doc line (filled in Tasks 6, 9) so the module tree compiles.
 
-- [ ] **Step 4: Implement `wire/otlp.rs`** (prepend above `tests`)
+- [x] **Step 4: Implement `wire/otlp.rs`** (prepend above `tests`)
 
 ```rust
 //! OTLP `TracesData` → `Vec<Span>`. Flattens `ResourceSpans → ScopeSpans →
@@ -1079,14 +1079,14 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
 
 > **Verify against the generated `opentelemetry-proto` 0.32 trace types** (`~/.cargo/registry/src/*/opentelemetry-proto-0.32.0/src/proto/tonic/opentelemetry.proto.trace.v1.rs`): `Span.trace_id`/`span_id`/`parent_span_id` are `Vec<u8>` (confirmed); `Span.events`/`links` are `Vec<span::Event>`/`Vec<span::Link>`; `Status { code: i32, message: String }`; `span::SpanKind` enum order is `Unspecified, Internal, Server, Client, Producer, Consumer` (matches our `SpanKind`). `AnyValue::value` is `Option<any_value::Value>` with `StringValue/BoolValue/IntValue/DoubleValue/BytesValue/ArrayValue/KvlistValue`. If a field name differs, align the code — do not change the asserted behavior.
 
-- [ ] **Step 5: Declare + run**
+- [x] **Step 5: Declare + run**
 
 `lib.rs`: `pub mod wire; pub use wire::{negotiate, WireFormat};`
 
 Run: `cargo test -p crabka-traces --lib wire::otlp`
 Expected: PASS (2 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1106,7 +1106,7 @@ git commit -m "feat(traces): OTLP traces decode + push-door negotiation"
 - Produces:
   - `fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError>` — parse the Zipkin v2 `[ {span}, ... ]` JSON array (`/api/v2/spans`), mapping each Zipkin span to an internal `Span`: hex `traceId`/`id`/`parentId` → fixed byte arrays (Zipkin `traceId` may be 16 *or* 32 hex chars → 8 or 16 bytes, left-padded to 16); `timestamp` (epoch micros) → `start_ns`; `duration` (micros) → `duration_ns`; `kind` (`SERVER`/`CLIENT`/…) → `SpanKind`; `localEndpoint.serviceName` → a `service.name` resource attr; `tags` map → span attrs.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -1153,12 +1153,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib wire::zipkin`
 Expected: FAIL — `cannot find function decode_zipkin`.
 
-- [ ] **Step 3: Implement `wire/zipkin.rs`**
+- [x] **Step 3: Implement `wire/zipkin.rs`**
 
 ```rust
 //! Zipkin v2 JSON (`POST /api/v2/spans`) → `Vec<Span>` (spec §5.1).
@@ -1271,12 +1271,12 @@ pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
 
 > **Zipkin v2 shape reference:** the openzipkin v2 JSON span list is the stable contract (`traceId`/`id`/`parentId` are lowercase-hex; `timestamp`/`duration` are epoch+span micros; `kind` ∈ `{CLIENT,SERVER,PRODUCER,CONSUMER}`; `localEndpoint.serviceName`; `tags` is a flat string→string map; `annotations` carry timestamped events — events mapping is `// TODO(slice4-zipkin-annotations)`, a focused follow-on; the harder OTLP path carries events fully). Cross-check against the openzipkin `zipkin2.v2` JSON doc; if Grafana's Zipkin reporter sends 32-hex traceIds, the `hex_fixed::<16>` left-pad already handles 8-or-16-byte ids.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `cargo test -p crabka-traces --lib wire::zipkin`
 Expected: PASS (2 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1299,7 +1299,7 @@ git commit -m "feat(traces): Zipkin v2 JSON decode"
 
 > **This task is bounded against the slice-1 span schema (churn-prone).** The exact Arrow column list + `span_block_schema()` is owned by the slice-1 traces-blockstore plan. Implement against the column-name constants it exports; if a column is named/typed differently, align to slice-1. The behavior the tests pin (identity bytes round-trip, nested-set columns present and consistent, root columns denormalized) is stable regardless of exact arrow builder calls.
 
-- [ ] **Step 1: Write the failing test (against the real schema)**
+- [x] **Step 1: Write the failing test (against the real schema)**
 
 ```rust
 #[cfg(test)]
@@ -1369,12 +1369,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib span::batch`
 Expected: FAIL — `cannot find function span_batch` (or, if slice-1 constants aren't exported yet, a missing-import error — that means slice 1 isn't merged; this slice depends on it).
 
-- [ ] **Step 3: Implement `span/batch.rs`**
+- [x] **Step 3: Implement `span/batch.rs`**
 
 Structure (fill the builders against the slice-1 schema; the arrow builder calls are the churn-prone part — pin the column names from `crabka_blockstore`):
 
@@ -1498,12 +1498,12 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
 
 > **Verify against the slice-1 span schema:** the column constants + `span_block_schema()` are slice-1's. This implementation assumes the schema contains exactly the listed columns. If slice-1 adds the generic-attribute LIST columns + the events/links struct columns to the mandatory schema (spec §4.1), extend `by_name` to build them (empty/null lists are valid) — the `ok_or_else("missing column")` guard makes a schema mismatch a loud test failure, not silent corruption. Attribute-promotion dedicated columns are configured at block-build; the default-empty promotion set means this slice writes only the listed columns — promotion wiring is `// TODO(slice4-attr-promotion)`.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `cargo test -p crabka-traces --lib span::batch`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1533,7 +1533,7 @@ git commit -m "feat(traces): span Arrow batch builder (identity + nested-set + d
 
 **Tenant** comes from the `X-Scope-OrgID` header (Tempo convention).
 
-- [ ] **Step 1: Write the failing handler tests (in-process, no broker)**
+- [x] **Step 1: Write the failing handler tests (in-process, no broker)**
 
 Use `tower::ServiceExt::oneshot` (the `metrics_server.rs` pattern) with a recording fake `WalSink` so no broker is needed.
 
@@ -1640,12 +1640,12 @@ mod tests {
 
 > Provide `test_state()` / `test_state_with_limits()` helpers building a `DistributorState` over a `RecordingSink` (an `Arc<Mutex<Vec<SpanRecord>>>` counting appends).
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib distributor::tests`
 Expected: FAIL — `cannot find function router`.
 
-- [ ] **Step 3: Implement `distributor/mod.rs`**
+- [x] **Step 3: Implement `distributor/mod.rs`**
 
 Implement:
 - `WalSink` trait + `KafkaSink` (`async fn append`: build `ProducerRecord { topic: TRACES_WAL_TOPIC.into(), key: Some(partition_key(&rec.span.trace_id)), value: Some(Bytes::from(rec.encode()?)), partition: None, ..Default::default() }`, then `producer.send(record).await.await.map_err(...)?.map_err(...)?`).
@@ -1661,12 +1661,12 @@ Body extraction: axum `body::Bytes` extractor gives raw bytes; do not enable an 
 
 > **Verify the producer `.send` ack pattern** (`producer.send(rec).await.await??` — the outer await resolves partition routing, the returned `oneshot::Receiver` awaits the broker ack) against `crates/client-producer/src/producer.rs` (confirmed: `send(&self, ProducerRecord) -> oneshot::Receiver<Result<RecordMetadata, ProducerError>>`, and the call is `async`). For the async-trait shape, follow the codebase convention (`#[async_trait::async_trait]` if used elsewhere, else `-> impl Future`).
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `cargo test -p crabka-traces --lib distributor`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1690,7 +1690,7 @@ git commit -m "feat(traces): distributor axum server — OTLP/Zipkin routes, lim
 
 > **Bounded against the `thrift` crate (churn-prone).** The Jaeger `Batch`/`Span`/`Process`/`Tag` Thrift structs come from the Jaeger IDL (`jaeger.thrift`). Either (a) vendor the generated Rust from `jaeger.thrift` via the `thrift` compiler into `src/wire/jaeger_gen.rs` (preferred: a committed generated file, no build-time thrift dep), or (b) hand-decode the compact-Thrift fields you need. Pin field IDs against the canonical `jaeger.thrift`. This task provides the STRUCTURE + a behavior-pinning test over a known-bytes `Batch`; do not fabricate `thrift`-crate API signatures — verify against the `thrift` crate version pinned in Step 1 (Task 1).
 
-- [ ] **Step 1: Write the failing test (round-trip a Batch the encoder produced)**
+- [x] **Step 1: Write the failing test (round-trip a Batch the encoder produced)**
 
 Build a `Batch` via the generated/vendored Jaeger types, compact-encode it, then assert `decode_jaeger_thrift` recovers the span. (Using the encoder to produce the bytes pins the decode against the real wire shape without hand-writing hex.)
 
@@ -1724,16 +1724,16 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Decide the Jaeger type source + write the encoder helper**
+- [x] **Step 2: Decide the Jaeger type source + write the encoder helper**
 
 Generate Rust from `jaeger.thrift` (`thrift --gen rs jaeger.thrift`) and commit it as `src/wire/jaeger_gen.rs` (option a), or hand-roll the compact-Thrift reader for the `Batch{ process: Process{ serviceName, tags }, spans: [Span{ traceIdLow, traceIdHigh, spanId, parentSpanId, operationName, references, flags, startTime, duration, tags, logs }] }` subset (option b). Add `test_support::encode_sample_batch()` building the `Batch` in the test above. **Verify the `thrift` crate's `TCompactInputProtocol`/`TCompactOutputProtocol` + generated `*::read_from_in_protocol`/`write_to_out_protocol` signatures** against the pinned `thrift` version before relying on them.
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib wire::jaeger`
 Expected: FAIL — `cannot find function decode_jaeger_thrift`.
 
-- [ ] **Step 4: Implement `decode_jaeger_thrift`**
+- [x] **Step 4: Implement `decode_jaeger_thrift`**
 
 Map the decoded `Batch` to `Vec<Span>`:
 - `trace_id`: `traceIdHigh` (i64) into bytes `[0..8]`, `traceIdLow` into `[8..16]` (big-endian).
@@ -1746,14 +1746,14 @@ Map the decoded `Batch` to `Vec<Span>`:
 
 > Keep the mapping in one `fn jaeger_span_to_internal(span, process) -> Result<Span, WireError>` so the gRPC path (later) reuses it.
 
-- [ ] **Step 5: Wire the HTTP route**
+- [x] **Step 5: Wire the HTTP route**
 
 In `distributor/mod.rs`, add `.route("/api/traces", post(jaeger_push))` and a `jaeger_push` handler (tenant + body → `decode_jaeger_thrift` → validate → produce → `202 Accepted`).
 
 Run: `cargo test -p crabka-traces --lib wire::jaeger distributor`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1779,7 +1779,7 @@ git commit -m "feat(traces): Jaeger Thrift receiver decode + /api/traces route"
   - `LiveStore::mem_table(&self, tenant: &str) -> Result<datafusion::datasource::MemTable, TracesError>` — expose the tenant's recent spans as a DataFusion `MemTable` over the slice-1 span schema (reuses `span_batch`).
   - `async fn run(consumer: Consumer, store: Arc<RwLock<LiveStore>>, shutdown: CancellationToken) -> Result<(), TracesError>` — the consumer-group loop: poll → decode `SpanRecord` → `ingest`. **No offset commit needed for correctness** (live-store is rebuildable; it commits periodically only to bound replay on restart). On restart it replays from the committed offset (or earliest) to rebuild.
 
-- [ ] **Step 1: Write the failing tests (no broker)**
+- [x] **Step 1: Write the failing tests (no broker)**
 
 ```rust
 #[cfg(test)]
@@ -1849,12 +1849,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib livestore`
 Expected: FAIL — `cannot find type LiveStore`.
 
-- [ ] **Step 3: Implement `livestore.rs`**
+- [x] **Step 3: Implement `livestore.rs`**
 
 ```rust
 //! Live-store: the hot tier. Consumes the WAL, assembles recent traces by
@@ -1985,14 +1985,14 @@ pub async fn run(
 
 > **Verify `MemTable::try_new(schema, Vec<Vec<RecordBatch>>)` and `TableProvider::schema()`** against the pinned DataFusion rev (`0838a4ddb902535b0e95a1c5a254be7e9c7fe9bf`); `MemTable` lives at `datafusion::datasource::MemTable` (or `datafusion::catalog::MemTable` on some revs). If the path differs, align to the rev. Add `tokio-util` (CancellationToken) to deps if not already present; otherwise use a `tokio::sync::watch` shutdown signal. The eviction uses a frontier-relative cutoff (spec §5.4 "~30–60 min"); wall-clock eviction is a `// TODO(slice4-wallclock-evict)` refinement.
 
-- [ ] **Step 4: Declare + run**
+- [x] **Step 4: Declare + run**
 
 `lib.rs`: `pub mod livestore; pub use livestore::LiveStore;`
 
 Run: `cargo test -p crabka-traces --lib livestore`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2016,7 +2016,7 @@ git commit -m "feat(traces): live-store hot tier — recent-traces MemTable, ret
   - `async fn build_blocks(writer: &BlockWriter, index: &mut TraceIndex, tenant: &str, partition: i32, records: &[SpanRecord], offset_range: (i64, i64)) -> Result<Vec<BlockMeta>, TracesError>` — group → per-trace `span_batch` → concat into one block per tenant → `write_block` → `TraceIndex` updates (trace-id bloom + tag sets).
   - `async fn run(consumer: Consumer, writer: BlockWriter, index: Arc<Mutex<TraceIndex>>, store, index_key: &str, window: Duration, shutdown: CancellationToken) -> Result<(), TracesError>` — poll → accumulate a window → build blocks → **save index + write blocks FIRST**, THEN `commit_sync` (crash-safety order, spec §9). Late spans naturally land in a later window/block; the read path + compactor merge them.
 
-- [ ] **Step 1: Write the failing tests (no broker, InMemory object store)**
+- [x] **Step 1: Write the failing tests (no broker, InMemory object store)**
 
 ```rust
 #[cfg(test)]
@@ -2092,12 +2092,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib blockbuilder`
 Expected: FAIL — `cannot find function object_key` (or a missing `TraceIndex::new`/`BlockWriter::new` import — that means slice 1 isn't merged).
 
-- [ ] **Step 3: Implement `blockbuilder.rs`**
+- [x] **Step 3: Implement `blockbuilder.rs`**
 
 Implement:
 - `object_key`: `format!("traces/{tenant}/{partition:05}/{min_offset:020}-{max_offset:020}-{window_start_ns}.parquet")` — deterministic from the WAL offset range + window, so a re-process after a crash overwrites identical bytes (idempotent; spec §9).
@@ -2114,14 +2114,14 @@ Implement:
 
 > **Verify the `TraceIndex` API** (`TraceIndex::new`, `add_trace_block`, `add_tags`, `save(&store, key)`) and `BlockWriter::write_block` return `BlockMeta { tenant, object_key, min_ts, max_ts, row_count, .. }` against the slice-1 traces-blockstore plan — these are slice-1's exact names. If `add_trace_block`/`add_tags` are spelled differently (e.g. `insert_trace`/`record_tags`), align to slice-1. `arrow::compute::concat_batches(&schema, &batches)` concatenates per-trace batches into one block; verify it against arrow 59. The tag-name/value extraction iterates each span's `resource_attrs`/`span_attrs` keys/values.
 
-- [ ] **Step 4: Declare + run**
+- [x] **Step 4: Declare + run**
 
 `lib.rs`: `pub mod blockbuilder; pub use blockbuilder::{build_blocks, group_by_trace, object_key};`
 
 Run: `cargo test -p crabka-traces --lib blockbuilder`
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2141,7 +2141,7 @@ git commit -m "feat(traces): block-builder — WAL group-by-trace → span block
 **Interfaces:**
 - Produces: a binary with `--target distributor|block-builder|live-store` (later targets `querier|query-frontend|compactor|metrics-generator` stubbed with a "not implemented until slice N" message + exit 2). Distributor wires a real `Producer` + `serve`; block-builder/live-store wire a `Consumer` + `run`.
 
-- [ ] **Step 1: Write the failing test (arg parsing)**
+- [x] **Step 1: Write the failing test (arg parsing)**
 
 ```rust
 #[cfg(test)]
@@ -2169,12 +2169,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --bin crabka-traces`
 Expected: FAIL — `cannot find type Cli`.
 
-- [ ] **Step 3: Implement the binary**
+- [x] **Step 3: Implement the binary**
 
 `#[derive(Parser)] struct Cli { #[arg(long)] target: Target, #[arg(long, default_value = "127.0.0.1:3200")] listen: String, #[arg(long, default_value = "127.0.0.1:9092")] bootstrap: String, ... }` and `#[derive(Clone, ValueEnum)] enum Target { Distributor, BlockBuilder, LiveStore, Querier, QueryFrontend, Compactor, MetricsGenerator }` (clap kebab-cases the variants → `block-builder`, `live-store`, `metrics-generator`).
 
@@ -2186,12 +2186,12 @@ Expected: FAIL — `cannot find type Cli`.
 
 > Keep `main` thin; testable logic lives in the modules. **Note:** the three consumer groups (`block-builder`, `live-store`, and — later — `metrics-generator`) use distinct `group_id`s on the same WAL topic, with independent offsets (spec §3.2) — that is why RF1 is safe.
 
-- [ ] **Step 4: Run**
+- [x] **Step 4: Run**
 
 Run: `cargo test -p crabka-traces --bin crabka-traces`
 Expected: PASS (3 tests). Then `cargo build -p crabka-traces --bin crabka-traces` compiles.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2213,7 +2213,7 @@ git commit -m "feat(traces): role-selectable crabka-traces binary (distributor|b
 
 This is the one test that needs a real broker. Use the in-process broker test-support — `crabka_broker::{Broker, BrokerConfig}` + `BrokerHandle::listen_addr()` are public (verified in `crates/broker/tests/support/mod.rs`), so no Docker is needed and it runs in CI.
 
-- [ ] **Step 1: Write the support helper**
+- [x] **Step 1: Write the support helper**
 
 `crates/traces/tests/support/mod.rs` (path-included submodule; `crabka-broker`/`crabka-client-core` are dev-deps from Task 1):
 
@@ -2241,7 +2241,7 @@ pub async fn start() -> InProcess {
 
 > **Verify `BrokerConfig::for_tests` + `Broker::start` + `BrokerHandle::listen_addr` are public** in `crabka-broker` (confirmed reachable in the broker's own test-support; they are imported from the crate root `crabka_broker::{...}`). If `BrokerConfig::for_tests` turns out to be test-only/`pub(crate)`, fall back to `#[ignore = "requires Docker"]` + `testcontainers` cp-kafka (the `crates/client-core/tests` pattern).
 
-- [ ] **Step 2: Write the round-trip test**
+- [x] **Step 2: Write the round-trip test**
 
 ```rust
 //! End-to-end: POST an OTLP TracesData body through the distributor to a real
@@ -2265,17 +2265,17 @@ async fn otlp_lands_as_span_block() {
 
 Fill the body using the verified producer/consumer/admin APIs (Task 1 deps). Key assertions: the distributor returns 200; the consumer reads back a `SpanRecord` whose `span.trace_id` matches; `build_blocks` produces a `BlockMeta` with the right `row_count`. Also assert (the invariant test): two spans with the same `trace_id` produce to the **same partition** (poll both back from one partition).
 
-- [ ] **Step 3: Run**
+- [x] **Step 3: Run**
 
 Run: `cargo test -p crabka-traces --test ingest_roundtrip`
 Expected: PASS (the WAL record round-trips, same-trace spans share a partition, and a block is written).
 
-- [ ] **Step 4: Whole-crate gate**
+- [x] **Step 4: Whole-crate gate**
 
 Run: `cargo test -p crabka-traces && cargo clippy -p crabka-traces --all-targets && cargo fmt -p crabka-traces --check`
 Expected: all PASS, no warnings, formatting clean.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/traces/

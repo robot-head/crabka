@@ -1,0 +1,139 @@
+//! Shard-equivalence: a search sharded across N jobs (Live + per-block +
+//! per-row-group) equals the unsharded search over identical data — same trace
+//! set, `limit`/`spss` honored. Driven through the public `frontend` API with
+//! `MockQuerier` + `MockCatalog`.
+
+use std::sync::Arc;
+
+use assert2::assert;
+use crabka_traces::frontend::QueryFrontend;
+use crabka_traces::frontend::backend::{MockQuerier, SearchPartial};
+use crabka_traces::frontend::config::FrontendConfig;
+use crabka_traces::frontend::job::{BlockMetaInfo, MockCatalog, RowGroupInfo};
+use crabka_traces::frontend::wire::{Metrics, SpanJson, SpanSetJson, TraceJson};
+
+fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
+    let row_groups = rgs
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| RowGroupInfo {
+            index: u32::try_from(i).unwrap(),
+            compressed_bytes: b,
+        })
+        .collect();
+    BlockMetaInfo {
+        block_id: id.to_string(),
+        start_ns: start,
+        end_ns: end,
+        size_bytes: rgs.iter().sum(),
+        row_groups,
+    }
+}
+
+fn trace_with_spans(tid: &str, start: u64, span_ids: &[&str]) -> TraceJson {
+    let spans: Vec<SpanJson> = span_ids
+        .iter()
+        .map(|&s| SpanJson {
+            span_id: s.to_string(),
+            start_time_unix_nano: start.to_string(),
+            duration_nanos: "1".to_string(),
+            attributes: vec![],
+        })
+        .collect();
+    let matched = u32::try_from(spans.len()).unwrap();
+    TraceJson {
+        trace_id: tid.to_string(),
+        root_service_name: "svc".to_string(),
+        root_trace_name: "GET /".to_string(),
+        start_time_unix_nano: start.to_string(),
+        duration_ms: 1,
+        span_sets: vec![SpanSetJson { spans, matched }],
+    }
+}
+
+fn partial(traces: Vec<TraceJson>, bytes: u64) -> SearchPartial {
+    SearchPartial {
+        traces,
+        metrics: Metrics {
+            completed_jobs: 1,
+            inspected_bytes: bytes,
+            inspected_traces: 1,
+            ..Metrics::default()
+        },
+    }
+}
+
+#[tokio::test]
+async fn sharded_search_equals_unsharded() {
+    // Two blocks; b2 is large (> budget, 2 row-groups) so it fans into 2 jobs.
+    // With a hot window we also get a Live job:
+    //   [Live, b1(whole), b2(rg0), b2(rg1)] = 4 jobs.
+    // trace 01 is split: b1 has span 01, b2-rg0 has span 02 (same traceID).
+    // trace 02 lives wholly in b2-rg1. Live returns nothing.
+    let catalog = MockCatalog::new(vec![
+        block("b1", 0, 100, &[500]),
+        block("b2", 100, 200, &[15_000, 15_000]),
+    ]);
+    let backend = MockQuerier::new();
+    // Dispatch order = plan order = [Live, b1, b2-rg0, b2-rg1] (max_concurrency 1).
+    backend.stub_search(partial(vec![], 0)); // Live: empty
+    backend.stub_search(partial(vec![trace_with_spans("01", 50, &["01"])], 100)); // b1
+    backend.stub_search(partial(vec![trace_with_spans("01", 40, &["02"])], 200)); // b2-rg0
+    backend.stub_search(partial(vec![trace_with_spans("02", 150, &["03"])], 300)); // b2-rg1
+
+    let cfg = FrontendConfig {
+        target_bytes_per_job: 10_000,
+        max_concurrency: 1,
+        hot_frontier_ns: 150,
+        ..FrontendConfig::default()
+    };
+    let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
+
+    let resp = qf.search("t1", "{ }", 0, 300, 20, 10).await.unwrap();
+
+    assert!(qf.backend_ref().search_calls().len() == 4);
+    // Unsharded baseline: trace 01 (spans 01,02 reunioned) + trace 02 (span 03).
+    assert!(resp.traces.len() == 2);
+    // Newest-first: trace 02 starts at 150, trace 01 at min(50,40)=40.
+    assert!(resp.traces[0].trace_id == "02");
+    assert!(resp.traces[1].trace_id == "01");
+    let t1_spans: usize = resp.traces[1]
+        .span_sets
+        .iter()
+        .map(|ss| ss.spans.len())
+        .sum();
+    assert!(t1_spans == 2);
+    // metrics: 4 total jobs, 4 completed, 2 blocks, bytes summed = 600.
+    assert!(resp.metrics.total_jobs == 4);
+    assert!(resp.metrics.completed_jobs == 4);
+    assert!(resp.metrics.total_blocks == 2);
+    assert!(resp.metrics.inspected_bytes == 600);
+}
+
+#[tokio::test]
+async fn limit_and_spss_applied_after_merge() {
+    let catalog = MockCatalog::new(vec![block("b1", 0, 100, &[500])]);
+    let backend = MockQuerier::new();
+    backend.stub_search(partial(
+        vec![
+            trace_with_spans("01", 100, &["01", "02", "03", "04", "05"]),
+            trace_with_spans("02", 300, &["06"]),
+            trace_with_spans("03", 200, &["07"]),
+        ],
+        10,
+    ));
+    let cfg = FrontendConfig {
+        hot_frontier_ns: i64::MAX,
+        ..FrontendConfig::default()
+    };
+    let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
+    // limit 2 (newest-first => 300, 200), spss 2.
+    let resp = qf.search("t1", "{ }", 0, 300, 2, 2).await.unwrap();
+    assert!(resp.traces.len() == 2);
+    assert!(resp.traces[0].start_time_unix_nano == "300");
+    for t in &resp.traces {
+        for ss in &t.span_sets {
+            assert!(ss.spans.len() <= 2);
+        }
+    }
+}

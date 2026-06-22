@@ -1,0 +1,38 @@
+# Union structural operators (&>>, &<<, &>, &<, &~).
+# Union ops return the union of matching right-hand AND left-hand spans that
+# participate in the join, trace-isolated. Derived against the shared testkit
+# fixture tree (trace 1: span1->{span2,span3}, span2->span4).
+
+name: union_descendant_returns_both_sides
+kind: search
+query: { .svc = "a" } &>> { .svc = "c" }
+expect_trace_ids: 1
+expect_span_ids: 1,4
+
+---
+name: union_child_returns_parent_and_children
+kind: search
+query: { .svc = "a" } &> { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 1,2,3
+
+---
+name: union_ancestor_returns_both_sides
+kind: search
+query: { .svc = "c" } &<< { .svc = "a" }
+expect_trace_ids: 1
+expect_span_ids: 1,4
+
+---
+name: union_parent_returns_both_sides
+kind: search
+query: { .svc = "c" } &< { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,4
+
+---
+name: union_sibling_returns_sibling_pair
+kind: search
+query: { .svc = "b" } &~ { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3

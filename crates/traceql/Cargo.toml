@@ -1,0 +1,35 @@
+[package]
+name = "crabka-traceql"
+# Not published: depends on a git pin of datafusion, which crates.io disallows.
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "TraceQL engine for Crabka's Grafana-Tempo-equivalent traces backend"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-traceql"
+readme = "README.md"
+keywords = ["observability", "tempo", "traceql", "datafusion", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+arrow = { workspace = true }
+datafusion = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+futures = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

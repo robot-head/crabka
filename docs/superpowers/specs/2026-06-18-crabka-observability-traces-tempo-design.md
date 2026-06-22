@@ -1,6 +1,6 @@
 # Crabka as a Grafana Observability Backend — Traces Signal (Grafana-Tempo Replacement)
 
-**Status:** Design / approved for planning
+**Status:** Implemented (all 8 slices) — see §14 for as-built notes
 **Date:** 2026-06-18
 **Scope of this spec:** the **traces** signal — a *full* Grafana-Tempo-equivalent
 distributed-tracing backend (not an MVP). Covers OTLP/Jaeger/Zipkin ingest, the
@@ -640,3 +640,62 @@ datasource correlation (no Tempo endpoint), all keyed by `trace_id`.
   sizes.
 - **TraceQL metrics maturity gating** — which TraceQL-metrics functions to ship
   behind an experimental flag, mirroring Tempo's per-version maturity.
+
+## 14. As-built notes (implementation deviations)
+
+The traces signal is implemented across `crates/blockstore`, `crates/traceql`, and
+`crates/traces` and is green (build + unit/integration tests; the
+differential-vs-Tempo and Grafana legs are `#[ignore]`, Docker-gated). The
+implementation honors the spec's *contracts* (TraceQL semantics, Tempo API shapes,
+the nested-set structural model, the `trace_id`-partitioned WAL dedup-avoidance
+invariant). The following deliberate deviations from the original design/plans
+stand as-built:
+
+- **`BlockIndex` seam without a generic `BlockStore`.** The pluggable per-signal
+  index trait (`BlockIndex`) exists; the logs/metrics index (`SeriesIndex`) and
+  `TraceIndex` both implement it, and the profiles signal's `ProfileIndex` embeds
+  `SeriesIndex` — this is the load-bearing generalization the spec required.
+  `BlockStore` is **not** parameterized over `BlockIndex`: the traces write/read
+  path uses `BlockWriter` + `TraceIndex` + declared `span_block_decl()` schema
+  validation directly, so a generic `BlockStore<I>` facade was unnecessary and would
+  have churned the shared logs/metrics/profiles path for no functional gain.
+- **TraceQL-metrics maturity flag omitted (open question resolved).** Per the
+  project rule against default-off feature gates for new behavior, the
+  "experimental" TraceQL-metrics functions (`histogram_over_time`, `compare`,
+  `topk`/`bottomk`, the `quantile`/`avg`/`min`/`max_over_time` family) ship
+  **always-on** rather than behind a cargo feature. Closes the §13 maturity-gating
+  open question: no gate.
+- **Query-frontend is the typed `frontend/` module tree.** It is built as the
+  planned module tree (`wire`/`backend`/`job`/`merge`/`metrics_merge`/`queue`/
+  `config`/`http_backend`/`server` + the `QueryFrontend` orchestrator) with a
+  `QuerierBackend`/`BlockCatalog` trait seam (`MockQuerier`/`MockCatalog` for tests,
+  `HttpQuerier`/`TraceIndexCatalog` in production). It shards (time → tier → block →
+  row-group), fans jobs out with bounded concurrency, and merges over **typed serde
+  wire structs** (not raw `serde_json::Value`), enforcing `limit` (newest-first) and
+  `spss` and accumulating the `metrics{}` job-accounting block. The merge currency is
+  the typed Tempo-JSON wire model rather than the richer `crabka-traceql` result
+  types, because the querier's search JSON is the thin Tempo shape (lossless to union
+  at the wire level). **Trace-by-id is frontend-side typed assembly**: it fans one
+  job per querier (the querier reassembles a trace across blocks and exposes no
+  block-scoped by-id; different queriers' live-stores hold different recent spans),
+  unions the v2 `resourceSpans`, dedupes by `spanID`, and sizes the result to
+  COMPLETE/PARTIAL. Shard failures propagate for the data-partitioning queries
+  (search/tags/metrics); by-id tolerates per-querier failure and fails only if every
+  querier does.
+- **SQL-string planner.** `crabka-traceql` lowers to DataFusion by emitting SQL
+  (incl. the nested-set structural self-join predicate algebra) rather than building
+  `LogicalPlan`s programmatically; the structural predicates match the spec exactly.
+- **Tempo HTTP API in one module.** The querier serves the full Tempo surface from a
+  single `querier/http/mod.rs` rather than split `json`/`traces`/`search`/`metrics`
+  files. Same wire surface.
+- **Conformance-corpus harness limits.** The `.case` golden-corpus DSL covers
+  selectors, typed comparisons, structural (core/negated/union), pipelines, and the
+  TraceQL-metrics families. Tag-discovery and array any/none semantics are exercised
+  by inline `#[cfg(test)]` unit tests but not by the `.case` corpus (the DSL has no
+  `tag_names`/`tag_values` case kind and the shared fixture has no repeated-value
+  attributes); extending the harness is the only way to fold those into the corpus.
+- **Service Graph differential leg.** The `#[ignore]` Grafana test provisions a
+  Prometheus datasource and asserts the metrics-generator emits
+  `traces_service_graph_request_total` with the right edge labels, but the live
+  metrics-generator → Prometheus `remote_write` → Grafana round-trip is not stood up
+  in-container (documented in the test, not faked).

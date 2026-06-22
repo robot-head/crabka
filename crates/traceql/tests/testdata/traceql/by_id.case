@@ -1,0 +1,10 @@
+name: known_trace_by_id
+kind: trace_by_id
+trace_id: 1
+expect_span_count: 4
+
+---
+name: missing_trace_by_id
+kind: trace_by_id
+trace_id: 9
+expect_span_count: 0

@@ -63,6 +63,7 @@ rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 # WASM consensus playground bindings (crates/playground). The matching
 # wasm-bindgen-cli version is derived from Cargo.lock at build time.
 wasm-bindgen = "0.2"
@@ -110,10 +111,12 @@ opentelemetry = { version = "0.32", default-features = false, features = ["trace
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
+tonic = "0.14"
+tonic-prost = "0.14"
 # Slice KIP-714: prost-generated OTLP MetricsData / ExportMetricsServiceRequest
 # message types (aligned with the opentelemetry 0.32 stack). gen-tonic-messages
 # pulls the prost structs without a tonic client; metrics gates the metrics module.
-opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "metrics"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "metrics", "trace"] }
 bon = "3"
 # strum: derive enum<->&'static str (IntoStaticStr) and &str->enum (EnumString)
 # to retire hand-written match-arm conversions. Its whole proc-macro tree
@@ -147,7 +150,6 @@ arc-swap = "1"
 pbkdf2 = { version = "=0.13.0-rc.10", default-features = false, features = ["kdf", "hmac"] }
 hmac = "0.13"
 sha2 = "0.11"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
 ring = "0.17"
 subtle = "2"
 base64 = "0.22"
@@ -162,6 +164,8 @@ connectrpc-axum = "0.1"
 connectrpc-axum-build = "0.1"
 prost = "0.14"
 prost-build = "0.14"
+prost-types = "0.14"
+tonic-prost-build = "0.14"
 # Pure-Rust protobuf compiler — lets crates that drive `prost-build` directly
 # generate code without a `protoc` binary. The Connect crates still need a
 # binary (connectrpc-axum-build always shells out to protoc), so they use the

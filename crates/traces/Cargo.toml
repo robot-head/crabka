@@ -1,0 +1,72 @@
+[package]
+name = "crabka-traces"
+# Not published: depends on a git pin of datafusion, which crates.io disallows.
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Tempo-compatible traces service for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-traces"
+readme = "README.md"
+keywords = ["observability", "tempo", "traceql", "traces", "crabka"]
+categories = ["database-implementations"]
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-broker = { path = "../broker", version = "0.3.7" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
+crabka-traceql = { path = "../traceql", version = "0.3.7" }
+arrow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["json"] }
+base64 = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+datafusion = { workspace = true }
+dashmap = { workspace = true }
+flate2 = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+object_store = { workspace = true }
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+reqwest = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+serde-wincode = { workspace = true }
+snap = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+wincode = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-client-core = { path = "../client-core", version = "0.3.7" }
+crabka-protocol = { path = "../protocol", version = "0.3.7" }
+http-body-util = "0.1"
+parquet = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
+
+[build-dependencies]
+protox = { workspace = true }
+tonic-prost-build = { workspace = true }

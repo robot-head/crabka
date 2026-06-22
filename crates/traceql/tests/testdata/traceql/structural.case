@@ -1,0 +1,40 @@
+name: descendant
+kind: search
+query: { .svc = "a" } >> { .svc = "c" }
+expect_trace_ids: 1
+expect_span_ids: 4
+
+---
+name: ancestor
+kind: search
+query: { .svc = "c" } << { .svc = "a" }
+expect_trace_ids: 1
+expect_span_ids: 1
+
+---
+name: child
+kind: search
+query: { .svc = "a" } > { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: parent
+kind: search
+query: { .svc = "c" } < { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2
+
+---
+name: sibling
+kind: search
+query: { .svc = "b" } ~ { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: trace_isolated_descendant
+kind: search
+query: { .svc = "a" } >> { .svc = "d" }
+expect_trace_ids: 3
+expect_span_ids: 2
