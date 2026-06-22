@@ -8506,6 +8506,41 @@ async fn query_endpoint_applies_metric_query_scalar_arithmetic() {
 }
 
 #[tokio::test]
+async fn query_endpoint_applies_metric_vector_arithmetic_on_modifier() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D%29%20%2B%20on%28%29%20vector%281%29&time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {},
+                            "value": [0.000000019, "2"]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(1819, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_applies_scalar_metric_query_arithmetic() {
     let state = fixture();
     let app = loki_router(state);
