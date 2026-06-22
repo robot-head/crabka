@@ -2502,6 +2502,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "crabka-security",
+ "flate2",
  "futures-util",
  "proptest",
  "reqwest 0.13.4",
