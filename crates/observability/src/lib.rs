@@ -11319,12 +11319,28 @@ fn format_simple_metric_query(query: &MetricQuery) -> Option<String> {
     {
         return None;
     }
+    if let RangeAggregation::QuantileOverTime(quantile) = query.aggregation {
+        return Some(format!(
+            "quantile_over_time({},{}[{}s])",
+            format_quantile(quantile),
+            format_stream_query(&query.stream),
+            query.range_ns / 1_000_000_000
+        ));
+    }
     Some(format!(
         "{}({}[{}s])",
         format_range_aggregation_name(&query.aggregation)?,
         format_stream_query(&query.stream),
         query.range_ns / 1_000_000_000
     ))
+}
+
+fn format_quantile(quantile: Quantile) -> String {
+    ScalarSample::new(
+        i128::from(quantile.numerator),
+        u128::from(quantile.denominator),
+    )
+    .format()
 }
 
 fn format_range_aggregation_name(aggregation: &RangeAggregation) -> Option<&'static str> {
