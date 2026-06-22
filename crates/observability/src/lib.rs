@@ -5630,6 +5630,9 @@ async fn loki_rule_namespace(
         .tenants
         .lock()
         .expect("Loki rule store lock poisoned");
+    if !rules.contains_key(&tenant) {
+        return missing_loki_rule_namespace_response(&tenant, &namespace);
+    }
     let Some(groups) = rules
         .get(&tenant)
         .and_then(|namespaces| namespaces.get(&namespace))
@@ -5639,6 +5642,15 @@ async fn loki_rule_namespace(
     loki_yaml_response(
         StatusCode::OK,
         &groups.values().cloned().collect::<Vec<_>>(),
+    )
+}
+
+fn missing_loki_rule_namespace_response(tenant: &str, namespace: &str) -> Response {
+    text_response(
+        StatusCode::BAD_REQUEST,
+        &format!(
+            "error parsing /loki/rules/{tenant}/{namespace}: /loki/rules/{tenant}/{namespace}: open /loki/rules/{tenant}/{namespace}: no such file or directory\n"
+        ),
     )
 }
 
@@ -5727,6 +5739,12 @@ async fn loki_rule_group(
         .tenants
         .lock()
         .expect("Loki rule store lock poisoned");
+    if !rules.contains_key(&tenant) {
+        return text_response(
+            StatusCode::BAD_REQUEST,
+            "GetRuleGroup unsupported in rule local store\n",
+        );
+    }
     let Some(group) = rules
         .get(&tenant)
         .and_then(|namespaces| namespaces.get(&namespace))

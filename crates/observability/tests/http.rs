@@ -4289,9 +4289,11 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::NOT_FOUND);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = text_body(response).await;
-        assert!(body == "no rule groups found\n");
+        assert!(
+            body == "error parsing /loki/rules/fake/default: /loki/rules/fake/default: open /loki/rules/fake/default: no such file or directory\n"
+        );
     }
 
     for uri in [
@@ -4304,9 +4306,9 @@ async fn ruler_rule_group_read_endpoints_return_loki_not_found_errors() {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::NOT_FOUND);
+        assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = text_body(response).await;
-        assert!(body == "group does not exist\n");
+        assert!(body == "GetRuleGroup unsupported in rule local store\n");
     }
 }
 
@@ -4441,7 +4443,11 @@ rules:
         )
         .await
         .unwrap();
-    assert!(namespace_response.status() == StatusCode::NOT_FOUND);
+    assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(namespace_response).await
+            == "error parsing /loki/rules/tenant-a/default: /loki/rules/tenant-a/default: open /loki/rules/tenant-a/default: no such file or directory\n"
+    );
 }
 
 #[tokio::test]
@@ -5410,8 +5416,11 @@ rules:
         .await
         .unwrap();
 
-    assert!(namespace_response.status() == StatusCode::NOT_FOUND);
-    assert!(text_body(namespace_response).await == "no rule groups found\n");
+    assert!(namespace_response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(namespace_response).await
+            == "error parsing /loki/rules/tenant-a/default: /loki/rules/tenant-a/default: open /loki/rules/tenant-a/default: no such file or directory\n"
+    );
 }
 
 #[tokio::test]
