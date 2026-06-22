@@ -665,15 +665,23 @@ stand as-built:
   `topk`/`bottomk`, the `quantile`/`avg`/`min`/`max_over_time` family) ship
   **always-on** rather than behind a cargo feature. Closes the §13 maturity-gating
   open question: no gate.
-- **Query-frontend is a single-module JSON-merge proxy.** Instead of the planned
-  `frontend/` module tree with a `QuerierBackend`/`BlockCatalog` trait abstraction
-  over typed `crabka-traceql` result types, the frontend
-  (`crates/traces/src/query_frontend.rs`) shards (time → tier → block → row-group),
-  fans out concurrently (`JoinSet` + a `Semaphore` admission queue), and merges raw
-  Tempo JSON. Post-merge it enforces `limit` (newest-first trace cap) and `spss`
-  (spanSets-per-trace cap). Trace-by-id is proxied to a querier rather than
-  fan-out-assembled at the frontend, because queriers read object storage directly
-  and already reassemble a trace across blocks (a valid Tempo topology).
+- **Query-frontend is the typed `frontend/` module tree.** It is built as the
+  planned module tree (`wire`/`backend`/`job`/`merge`/`metrics_merge`/`queue`/
+  `config`/`http_backend`/`server` + the `QueryFrontend` orchestrator) with a
+  `QuerierBackend`/`BlockCatalog` trait seam (`MockQuerier`/`MockCatalog` for tests,
+  `HttpQuerier`/`TraceIndexCatalog` in production). It shards (time → tier → block →
+  row-group), fans jobs out with bounded concurrency, and merges over **typed serde
+  wire structs** (not raw `serde_json::Value`), enforcing `limit` (newest-first) and
+  `spss` and accumulating the `metrics{}` job-accounting block. The merge currency is
+  the typed Tempo-JSON wire model rather than the richer `crabka-traceql` result
+  types, because the querier's search JSON is the thin Tempo shape (lossless to union
+  at the wire level). **Trace-by-id is frontend-side typed assembly**: it fans one
+  job per querier (the querier reassembles a trace across blocks and exposes no
+  block-scoped by-id; different queriers' live-stores hold different recent spans),
+  unions the v2 `resourceSpans`, dedupes by `spanID`, and sizes the result to
+  COMPLETE/PARTIAL. Shard failures propagate for the data-partitioning queries
+  (search/tags/metrics); by-id tolerates per-querier failure and fails only if every
+  querier does.
 - **SQL-string planner.** `crabka-traceql` lowers to DataFusion by emitting SQL
   (incl. the nested-set structural self-join predicate algebra) rather than building
   `LogicalPlan`s programmatically; the structural predicates match the spec exactly.
