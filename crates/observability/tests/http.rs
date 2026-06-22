@@ -9478,6 +9478,88 @@ async fn query_endpoint_applies_metric_binary_set_with_label_replace_operands() 
 }
 
 #[tokio::test]
+async fn query_endpoint_applies_metric_binary_group_left_with_label_replace_operands() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=label_replace%28sum%20by%28app%2C%20env%29%28count_over_time%28%7Benv%3D%22prod%22%7D%5B30s%5D%29%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20%2F%20on%28env%29%20group_left%20label_replace%28sum%20by%28env%29%28count_over_time%28%7Benv%3D%22prod%22%7D%5B30s%5D%29%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29&time=25")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        body.pointer("/data/result")
+            == Some(&json!([
+                {
+                    "metric": {
+                        "app": "api",
+                        "env": "prod",
+                        "service": "api-api"
+                    },
+                    "value": [0.000000025, "0.666666666"]
+                },
+                {
+                    "metric": {
+                        "app": "worker",
+                        "env": "prod",
+                        "service": "worker-api"
+                    },
+                    "value": [0.000000025, "0.333333333"]
+                }
+            ]))
+    );
+}
+
+#[tokio::test]
+async fn query_endpoint_applies_metric_binary_comparison_group_left_with_label_replace_operands() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=label_replace%28sum%20by%28app%2C%20env%29%28count_over_time%28%7Benv%3D%22prod%22%7D%5B30s%5D%29%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20%3C%20bool%20on%28env%29%20group_left%20label_replace%28sum%20by%28env%29%28count_over_time%28%7Benv%3D%22prod%22%7D%5B30s%5D%29%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29&time=25")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        body.pointer("/data/result")
+            == Some(&json!([
+                {
+                    "metric": {
+                        "app": "api",
+                        "env": "prod",
+                        "service": "api-api"
+                    },
+                    "value": [0.000000025, "1"]
+                },
+                {
+                    "metric": {
+                        "app": "worker",
+                        "env": "prod",
+                        "service": "worker-api"
+                    },
+                    "value": [0.000000025, "1"]
+                }
+            ]))
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_accepts_label_join_metric_query() {
     let state = fixture();
     let app = loki_router(state);

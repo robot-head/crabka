@@ -7882,17 +7882,20 @@ enum LabelReplaceMetricBinaryExpression {
     Arithmetic {
         left: String,
         op: MetricScalarArithmeticOp,
+        matching: Option<MetricVectorMatching>,
         right: String,
     },
     Comparison {
         left: String,
         op: ComparisonOp,
         bool_modifier: bool,
+        matching: Option<MetricVectorMatching>,
         right: String,
     },
     Set {
         left: String,
         op: MetricBinarySetOp,
+        matching: Option<MetricVectorMatching>,
         right: String,
     },
 }
@@ -7922,15 +7925,20 @@ fn parse_label_replace_expression(query: &str) -> Option<LabelReplaceExpression>
 fn parse_label_replace_metric_binary_expression(
     query: &str,
 ) -> Option<LabelReplaceMetricBinaryExpression> {
-    if let Some((left, operator, right)) = split_top_level_arithmetic_query(query)
-        && (parse_label_replace_expression(left.trim()).is_some()
-            || parse_label_replace_expression(right.trim()).is_some())
-    {
-        return Some(LabelReplaceMetricBinaryExpression::Arithmetic {
-            left: left.trim().to_string(),
-            op: parse_metric_arithmetic_operator(operator)?,
-            right: right.trim().to_string(),
-        });
+    if let Some((left, operator, right)) = split_top_level_arithmetic_query(query) {
+        let (matching, right) = parse_leading_metric_vector_matching_modifier(right, true)?;
+        let right = right.trim();
+        let left = left.trim();
+        if parse_label_replace_expression(left).is_some()
+            || parse_label_replace_expression(right).is_some()
+        {
+            return Some(LabelReplaceMetricBinaryExpression::Arithmetic {
+                left: left.to_string(),
+                op: parse_metric_arithmetic_operator(operator)?,
+                matching,
+                right: right.to_string(),
+            });
+        }
     }
 
     if let Some((left, operator, right)) = split_top_level_comparison_query(query) {
@@ -7940,30 +7948,105 @@ fn parse_label_replace_metric_binary_expression(
         } else {
             (false, right)
         };
-        if parse_label_replace_expression(left.trim()).is_some()
-            || parse_label_replace_expression(right.trim()).is_some()
+        let (matching, right) = parse_leading_metric_vector_matching_modifier(right, true)?;
+        let right = right.trim();
+        let left = left.trim();
+        if parse_label_replace_expression(left).is_some()
+            || parse_label_replace_expression(right).is_some()
         {
             return Some(LabelReplaceMetricBinaryExpression::Comparison {
-                left: left.trim().to_string(),
+                left: left.to_string(),
                 op: parse_metric_comparison_operator(operator)?,
                 bool_modifier,
-                right: right.trim().to_string(),
+                matching,
+                right: right.to_string(),
             });
         }
     }
 
-    if let Some((left, operator, right)) = split_top_level_set_query(query)
-        && (parse_label_replace_expression(left.trim()).is_some()
-            || parse_label_replace_expression(right.trim()).is_some())
-    {
-        return Some(LabelReplaceMetricBinaryExpression::Set {
-            left: left.trim().to_string(),
-            op: parse_metric_set_operator(operator)?,
-            right: right.trim().to_string(),
-        });
+    if let Some((left, operator, right)) = split_top_level_set_query(query) {
+        let (matching, right) = parse_leading_metric_vector_matching_modifier(right, false)?;
+        let right = right.trim();
+        let left = left.trim();
+        if parse_label_replace_expression(left).is_some()
+            || parse_label_replace_expression(right).is_some()
+        {
+            return Some(LabelReplaceMetricBinaryExpression::Set {
+                left: left.to_string(),
+                op: parse_metric_set_operator(operator)?,
+                matching,
+                right: right.to_string(),
+            });
+        }
     }
 
     None
+}
+
+fn parse_leading_metric_vector_matching_modifier(
+    query: &str,
+    allow_group_modifier: bool,
+) -> Option<(Option<MetricVectorMatching>, &str)> {
+    let query = query.trim_start();
+    for modifier in ["on", "ignoring"] {
+        let Some(rest) = query.strip_prefix(modifier) else {
+            continue;
+        };
+        let (labels, rest) = parse_leading_label_list(rest.trim_start())?;
+        let (group, rest) = parse_leading_metric_vector_group_modifier(rest.trim_start())?;
+        if group.is_some() && !allow_group_modifier {
+            return None;
+        }
+        let matching = match modifier {
+            "on" => MetricVectorMatching::On { labels, group },
+            "ignoring" => MetricVectorMatching::Ignoring { labels, group },
+            _ => unreachable!("modifier loop only produces known modifiers"),
+        };
+        return Some((Some(matching), rest));
+    }
+
+    Some((None, query))
+}
+
+fn parse_leading_label_list(query: &str) -> Option<(Vec<String>, &str)> {
+    let inner = query.strip_prefix('(')?;
+    let labels_end = inner.find(')')?;
+    let labels_text = &inner[..labels_end];
+    let labels = if labels_text.trim().is_empty() {
+        Vec::new()
+    } else {
+        labels_text
+            .split(',')
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    Some((labels, &inner[labels_end + 1..]))
+}
+
+fn parse_leading_metric_vector_group_modifier(
+    query: &str,
+) -> Option<(Option<MetricVectorGroupModifier>, &str)> {
+    for modifier in ["group_left", "group_right"] {
+        let Some(rest) = query.strip_prefix(modifier) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let (labels, rest) = if rest.starts_with('(') {
+            parse_leading_label_list(rest)?
+        } else {
+            (Vec::new(), rest)
+        };
+        let group = match modifier {
+            "group_left" => MetricVectorGroupModifier::Left(labels),
+            "group_right" => MetricVectorGroupModifier::Right(labels),
+            _ => unreachable!("modifier loop only produces known group modifiers"),
+        };
+        return Some((Some(group), rest));
+    }
+
+    Some((None, query))
 }
 
 fn parse_metric_arithmetic_operator(operator: &str) -> Option<MetricScalarArithmeticOp> {
@@ -9130,7 +9213,12 @@ async fn execute_http_label_replace_metric_binary_expression(
     query_text: &str,
 ) -> Result<Value, HttpQueryError> {
     match binary {
-        LabelReplaceMetricBinaryExpression::Arithmetic { left, op, right } => {
+        LabelReplaceMetricBinaryExpression::Arithmetic {
+            left,
+            op,
+            matching,
+            right,
+        } => {
             let mut left = execute_http_metric_binary_operand(
                 state, tenant, time_range, step, kind, &left, query_text,
             )
@@ -9139,13 +9227,14 @@ async fn execute_http_label_replace_metric_binary_expression(
                 state, tenant, time_range, step, kind, &right, query_text,
             )
             .await?;
-            apply_metric_binary_arithmetic_to_loki_result(&mut left, &right, op, None);
+            apply_metric_binary_arithmetic_to_loki_result(&mut left, &right, op, matching.as_ref());
             Ok(left)
         }
         LabelReplaceMetricBinaryExpression::Comparison {
             left,
             op,
             bool_modifier,
+            matching,
             right,
         } => {
             let mut left = execute_http_metric_binary_operand(
@@ -9161,11 +9250,16 @@ async fn execute_http_label_replace_metric_binary_expression(
                 &right,
                 op,
                 bool_modifier,
-                None,
+                matching.as_ref(),
             );
             Ok(left)
         }
-        LabelReplaceMetricBinaryExpression::Set { left, op, right } => {
+        LabelReplaceMetricBinaryExpression::Set {
+            left,
+            op,
+            matching,
+            right,
+        } => {
             let mut left = execute_http_metric_binary_operand(
                 state, tenant, time_range, step, kind, &left, query_text,
             )
@@ -9174,7 +9268,7 @@ async fn execute_http_label_replace_metric_binary_expression(
                 state, tenant, time_range, step, kind, &right, query_text,
             )
             .await?;
-            apply_metric_binary_set_to_loki_result(&mut left, &right, op, None);
+            apply_metric_binary_set_to_loki_result(&mut left, &right, op, matching.as_ref());
             Ok(left)
         }
     }
