@@ -3177,6 +3177,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
     for query in [
         r#"{app="#,
         "vector(-2.5e-1)",
+        "vector(1)orvector(2)",
         "abs(vector(-1.2))",
         r#"count_values by (env) ("hits", count_over_time({app="api"}[1s]))"#,
         r#"approx_topk(1, count_over_time({app="api"}[1s]))"#,
@@ -4232,6 +4233,11 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
 
     let loki_error = loki_format_query_error(&http, &loki_base, Some("vector(-2.5e-1)")).await;
     let crabka_error = crabka_format_query_error(querier.clone(), Some("vector(-2.5e-1)")).await;
+    assert!(crabka_error == loki_error);
+
+    let loki_error = loki_format_query_error(&http, &loki_base, Some("vector(1)orvector(2)")).await;
+    let crabka_error =
+        crabka_format_query_error(querier.clone(), Some("vector(1)orvector(2)")).await;
     assert!(crabka_error == loki_error);
 
     let loki_error = loki_format_query_error(&http, &loki_base, None).await;
