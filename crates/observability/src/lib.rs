@@ -3602,6 +3602,10 @@ fn is_loki_label_name_char(value: char, first: bool) -> bool {
 }
 
 fn parse_loki_proto_labels(labels: &str) -> Result<Labels, DistributorError> {
+    if labels.trim() == "{}" {
+        return Ok(Labels::new());
+    }
+
     let query = parse_query(labels).map_err(|_| DistributorError::InvalidPushLabels)?;
     if !query.pipeline.is_empty() {
         return Err(DistributorError::InvalidPushLabels);
