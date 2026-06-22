@@ -2637,7 +2637,8 @@ impl LogsService for OtlpGrpcLogsService {
 
 #[derive(Debug, Deserialize)]
 struct LokiPushRequest {
-    streams: Value,
+    #[serde(default)]
+    streams: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2648,11 +2649,13 @@ struct LokiTypedPushRequest {
 #[derive(Debug, Deserialize)]
 struct LokiPushStream {
     stream: Labels,
+    #[serde(default)]
     values: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LokiJsonStructuredMetadataDuplicateProbe {
+    #[serde(default)]
     streams: Vec<LokiJsonStructuredMetadataDuplicateProbeStream>,
 }
 
@@ -3103,11 +3106,17 @@ fn validate_loki_json_push_stream_objects(
     payload: LokiPushRequest,
     body: &[u8],
 ) -> Result<LokiTypedPushRequest, DistributorError> {
-    let Some(raw_streams) = payload.streams.as_array() else {
+    let Some(streams) = payload.streams else {
+        return Err(DistributorError::NoValidStreams);
+    };
+    let Some(raw_streams) = streams.as_array() else {
         return Err(DistributorError::InvalidJsonPushValueSyntax(
-            loki_json_push_streams_parse_error(body, &payload.streams),
+            loki_json_push_streams_parse_error(body, &streams),
         ));
     };
+    if raw_streams.is_empty() {
+        return Err(DistributorError::NoValidStreams);
+    }
     let mut streams = Vec::with_capacity(raw_streams.len());
     for stream in raw_streams {
         if !stream.is_object() {
@@ -15376,6 +15385,8 @@ enum DistributorError {
     InvalidJsonTimestampSyntax(String),
     #[error("invalid Loki push payload")]
     InvalidPushPayload,
+    #[error("error at least one valid stream is required for ingestion\n")]
+    NoValidStreams,
     #[error("invalid structured metadata")]
     InvalidStructuredMetadata,
     #[error("{0}")]
@@ -15430,6 +15441,7 @@ impl IntoResponse for DistributorError {
             Self::IngestQuota(IngestLimitError::Unavailable { .. }) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            Self::NoValidStreams => StatusCode::UNPROCESSABLE_ENTITY,
             Self::WalAppendTimeout | Self::WalSink(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::EmptyStreamLabels
             | Self::InvalidOtlpAttribute
@@ -15462,6 +15474,7 @@ impl IntoResponse for DistributorError {
                 | Self::InvalidJsonPushValueSyntax(_)
                 | Self::InvalidJsonTimestampSyntax(_)
                 | Self::InvalidStructuredMetadataSyntax(_)
+                | Self::NoValidStreams
                 | Self::TimestampTooOld { .. }
                 | Self::TimestampTooNew { .. }
         ) {
@@ -15502,6 +15515,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::InvalidPushLabelSyntax(_)
         | DistributorError::InvalidPushPayload
         | DistributorError::InvalidPushValue
+        | DistributorError::NoValidStreams
         | DistributorError::InvalidJsonPushValueSyntax(_)
         | DistributorError::InvalidStructuredMetadata
         | DistributorError::InvalidStructuredMetadataSyntax(_)
