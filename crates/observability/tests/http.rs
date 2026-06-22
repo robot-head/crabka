@@ -6825,6 +6825,31 @@ async fn format_query_endpoint_formats_label_replace_vector_expression_like_loki
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_label_replace_metric_vector_expression_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%20vector%281%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": "label_replace(\n  (count_over_time({app=\"api\"}[30s]) + vector(1.000000)),\n  \"service\",\n  \"$1-api\",\n  \"app\",\n  \"(.*)\"\n)"
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_rejects_label_join_vector_function_like_loki() {
     let state = fixture();
     let app = loki_router(state);
