@@ -7736,6 +7736,18 @@ async fn execute_http_query_for_tenant(
         )?;
         return Ok(value);
     }
+    if let Some(binary) = parse_label_replace_metric_binary_expression(&params.query) {
+        return execute_http_label_replace_metric_binary_expression(
+            state,
+            tenant,
+            time_range,
+            params.step,
+            kind,
+            binary,
+            &params.query,
+        )
+        .await;
+    }
     if let Some(label_replace) = parse_label_replace_expression(&params.query) {
         let mut value = execute_http_metric_expression_query(
             state,
@@ -7866,6 +7878,25 @@ struct LabelReplaceExpression {
     pattern: String,
 }
 
+enum LabelReplaceMetricBinaryExpression {
+    Arithmetic {
+        left: String,
+        op: MetricScalarArithmeticOp,
+        right: String,
+    },
+    Comparison {
+        left: String,
+        op: ComparisonOp,
+        bool_modifier: bool,
+        right: String,
+    },
+    Set {
+        left: String,
+        op: MetricBinarySetOp,
+        right: String,
+    },
+}
+
 fn parse_label_replace_expression(query: &str) -> Option<LabelReplaceExpression> {
     let arguments = split_logql_function_arguments(query, "label_replace")?;
     let [
@@ -7886,6 +7917,86 @@ fn parse_label_replace_expression(query: &str) -> Option<LabelReplaceExpression>
         source_label: parse_logql_string_argument(source_label)?,
         pattern: parse_logql_string_argument(pattern)?,
     })
+}
+
+fn parse_label_replace_metric_binary_expression(
+    query: &str,
+) -> Option<LabelReplaceMetricBinaryExpression> {
+    if let Some((left, operator, right)) = split_top_level_arithmetic_query(query)
+        && (parse_label_replace_expression(left.trim()).is_some()
+            || parse_label_replace_expression(right.trim()).is_some())
+    {
+        return Some(LabelReplaceMetricBinaryExpression::Arithmetic {
+            left: left.trim().to_string(),
+            op: parse_metric_arithmetic_operator(operator)?,
+            right: right.trim().to_string(),
+        });
+    }
+
+    if let Some((left, operator, right)) = split_top_level_comparison_query(query) {
+        let right = right.trim_start();
+        let (bool_modifier, right) = if let Some(rest) = right.strip_prefix("bool") {
+            (true, rest.trim_start())
+        } else {
+            (false, right)
+        };
+        if parse_label_replace_expression(left.trim()).is_some()
+            || parse_label_replace_expression(right.trim()).is_some()
+        {
+            return Some(LabelReplaceMetricBinaryExpression::Comparison {
+                left: left.trim().to_string(),
+                op: parse_metric_comparison_operator(operator)?,
+                bool_modifier,
+                right: right.trim().to_string(),
+            });
+        }
+    }
+
+    if let Some((left, operator, right)) = split_top_level_set_query(query)
+        && (parse_label_replace_expression(left.trim()).is_some()
+            || parse_label_replace_expression(right.trim()).is_some())
+    {
+        return Some(LabelReplaceMetricBinaryExpression::Set {
+            left: left.trim().to_string(),
+            op: parse_metric_set_operator(operator)?,
+            right: right.trim().to_string(),
+        });
+    }
+
+    None
+}
+
+fn parse_metric_arithmetic_operator(operator: &str) -> Option<MetricScalarArithmeticOp> {
+    match operator {
+        "+" => Some(MetricScalarArithmeticOp::Add),
+        "-" => Some(MetricScalarArithmeticOp::Subtract),
+        "*" => Some(MetricScalarArithmeticOp::Multiply),
+        "/" => Some(MetricScalarArithmeticOp::Divide),
+        "%" => Some(MetricScalarArithmeticOp::Modulo),
+        "^" => Some(MetricScalarArithmeticOp::Power),
+        _ => None,
+    }
+}
+
+fn parse_metric_comparison_operator(operator: &str) -> Option<ComparisonOp> {
+    match operator {
+        "==" => Some(ComparisonOp::Equal),
+        "!=" => Some(ComparisonOp::NotEqual),
+        ">" => Some(ComparisonOp::Greater),
+        ">=" => Some(ComparisonOp::GreaterEqual),
+        "<" => Some(ComparisonOp::Less),
+        "<=" => Some(ComparisonOp::LessEqual),
+        _ => None,
+    }
+}
+
+fn parse_metric_set_operator(operator: &str) -> Option<MetricBinarySetOp> {
+    match operator {
+        "and" => Some(MetricBinarySetOp::And),
+        "or" => Some(MetricBinarySetOp::Or),
+        "unless" => Some(MetricBinarySetOp::Unless),
+        _ => None,
+    }
 }
 
 fn loki_instant_scalar_or_vector_response(
@@ -9004,6 +9115,102 @@ async fn execute_http_metric_expression_query(
     }
     let query = parse_metric_query(query).map_err(|source| HttpQueryError::LokiParse {
         query: full_query.to_string(),
+        source,
+    })?;
+    execute_http_metric_query(state, tenant, time_range, step, kind, query).await
+}
+
+async fn execute_http_label_replace_metric_binary_expression(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    binary: LabelReplaceMetricBinaryExpression,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    match binary {
+        LabelReplaceMetricBinaryExpression::Arithmetic { left, op, right } => {
+            let mut left = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &left, query_text,
+            )
+            .await?;
+            let right = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &right, query_text,
+            )
+            .await?;
+            apply_metric_binary_arithmetic_to_loki_result(&mut left, &right, op, None);
+            Ok(left)
+        }
+        LabelReplaceMetricBinaryExpression::Comparison {
+            left,
+            op,
+            bool_modifier,
+            right,
+        } => {
+            let mut left = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &left, query_text,
+            )
+            .await?;
+            let right = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &right, query_text,
+            )
+            .await?;
+            apply_metric_binary_comparison_to_loki_result(
+                &mut left,
+                &right,
+                op,
+                bool_modifier,
+                None,
+            );
+            Ok(left)
+        }
+        LabelReplaceMetricBinaryExpression::Set { left, op, right } => {
+            let mut left = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &left, query_text,
+            )
+            .await?;
+            let right = execute_http_metric_binary_operand(
+                state, tenant, time_range, step, kind, &right, query_text,
+            )
+            .await?;
+            apply_metric_binary_set_to_loki_result(&mut left, &right, op, None);
+            Ok(left)
+        }
+    }
+}
+
+async fn execute_http_metric_binary_operand(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    operand: &str,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    if let Some(label_replace) = parse_label_replace_expression(operand) {
+        let query = parse_metric_query(&label_replace.query).map_err(|source| {
+            HttpQueryError::LokiParse {
+                query: query_text.to_string(),
+                source,
+            }
+        })?;
+        let mut value =
+            execute_http_metric_query(state, tenant, time_range, step, kind, query).await?;
+        apply_label_replace_to_loki_result(
+            &mut value,
+            &label_replace.destination_label,
+            &label_replace.replacement,
+            &label_replace.source_label,
+            &label_replace.pattern,
+            query_text,
+        )?;
+        return Ok(value);
+    }
+
+    let query = parse_metric_query(operand).map_err(|source| HttpQueryError::LokiParse {
+        query: query_text.to_string(),
         source,
     })?;
     execute_http_metric_query(state, tenant, time_range, step, kind, query).await
