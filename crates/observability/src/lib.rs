@@ -11059,6 +11059,10 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_set_expression(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_metric_scalar_arithmetic_expression(query) {
+                Ok(formatted)
+            } else if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
+                Ok(formatted)
             } else if parse_metric_query(query).is_ok()
                 || parse_metric_label_join_query(query).is_ok()
                 || parse_metric_label_replace_query(query).is_ok()
@@ -11207,6 +11211,62 @@ fn format_metric_vector_set_expression(query: &str) -> Option<String> {
     Some(format_metric_vector_binary_expression(
         &left, operator, modifiers, &right,
     ))
+}
+
+fn format_metric_scalar_arithmetic_expression(query: &str) -> Option<String> {
+    let arithmetic = parse_metric_scalar_arithmetic_query(query).ok()?;
+    let metric = format_simple_metric_query(&arithmetic.query)?;
+    let scalar = format_scalar_text(&arithmetic.scalar)?;
+    let operator = format_metric_scalar_arithmetic_operator(arithmetic.op);
+    Some(if arithmetic.scalar_on_left {
+        format!("({scalar} {operator} {metric})")
+    } else {
+        format!("({metric} {operator} {scalar})")
+    })
+}
+
+fn format_metric_scalar_comparison_expression(query: &str) -> Option<String> {
+    let comparison = parse_metric_scalar_comparison_query(query).ok()?;
+    let metric = format_simple_metric_query(&comparison.query)?;
+    let scalar = format_scalar_text(&comparison.scalar)?;
+    let operator = format_metric_scalar_comparison_operator(comparison.op)?;
+    let bool_modifier = if comparison.bool_modifier {
+        " bool"
+    } else {
+        ""
+    };
+    Some(if comparison.scalar_on_left {
+        format!("({scalar} {operator}{bool_modifier} {metric})")
+    } else {
+        format!("({metric} {operator}{bool_modifier} {scalar})")
+    })
+}
+
+fn format_scalar_text(scalar: &str) -> Option<String> {
+    Some(parse_scalar_sample(scalar)?.format())
+}
+
+fn format_metric_scalar_arithmetic_operator(op: MetricScalarArithmeticOp) -> &'static str {
+    match op {
+        MetricScalarArithmeticOp::Add => "+",
+        MetricScalarArithmeticOp::Subtract => "-",
+        MetricScalarArithmeticOp::Multiply => "*",
+        MetricScalarArithmeticOp::Divide => "/",
+        MetricScalarArithmeticOp::Modulo => "%",
+        MetricScalarArithmeticOp::Power => "^",
+    }
+}
+
+fn format_metric_scalar_comparison_operator(op: ComparisonOp) -> Option<&'static str> {
+    match op {
+        ComparisonOp::Equal => Some("=="),
+        ComparisonOp::NotEqual => Some("!="),
+        ComparisonOp::Greater => Some(">"),
+        ComparisonOp::GreaterEqual => Some(">="),
+        ComparisonOp::Less => Some("<"),
+        ComparisonOp::LessEqual => Some("<="),
+        ComparisonOp::RegexEqual | ComparisonOp::RegexNotEqual => None,
+    }
 }
 
 fn split_top_level_set_query(query: &str) -> Option<(&str, &'static str, &str)> {
