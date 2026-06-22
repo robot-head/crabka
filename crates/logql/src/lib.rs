@@ -5809,12 +5809,14 @@ impl<'a> Parser<'a> {
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
             self.pos += 1;
         }
-        if self.pos == whole_start {
-            return Err(self.error("expected quantile scalar"));
-        }
-        let whole = self.input[whole_start..self.pos]
-            .parse::<u64>()
-            .map_err(|_| self.error("expected quantile scalar"))?;
+        let has_whole = self.pos > whole_start;
+        let whole = if has_whole {
+            self.input[whole_start..self.pos]
+                .parse::<u64>()
+                .map_err(|_| self.error("expected quantile scalar"))?
+        } else {
+            0
+        };
 
         let mut denominator = 1_u64;
         let mut fraction = 0_u64;
@@ -5834,6 +5836,9 @@ impl<'a> Parser<'a> {
             fraction = fraction_text
                 .parse::<u64>()
                 .map_err(|_| self.error("expected quantile scalar"))?;
+        }
+        if !has_whole && denominator == 1 {
+            return Err(self.error("expected quantile scalar"));
         }
 
         let numerator = whole

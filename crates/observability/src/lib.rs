@@ -11063,8 +11063,9 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
                 Ok(formatted)
-            } else if parse_metric_query(query).is_ok()
-                || parse_metric_label_join_query(query).is_ok()
+            } else if let Ok(metric_query) = parse_metric_query(query) {
+                Ok(format_metric_query(&metric_query).unwrap_or_else(|| query.trim().to_string()))
+            } else if parse_metric_label_join_query(query).is_ok()
                 || parse_metric_label_replace_query(query).is_ok()
                 || parse_metric_binary_arithmetic_query(query).is_ok()
                 || parse_metric_binary_comparison_query(query).is_ok()
@@ -11455,27 +11456,116 @@ fn split_top_level_arithmetic_query(query: &str) -> Option<(&str, &'static str, 
 }
 
 fn format_simple_metric_query(query: &MetricQuery) -> Option<String> {
-    if query.vector_aggregation.is_some()
-        || query.range_grouping.is_some()
-        || query.offset_ns != 0
-        || query.range_ns % 1_000_000_000 != 0
-    {
+    if query.vector_aggregation.is_some() || query.range_grouping.is_some() {
         return None;
     }
+    format_metric_range_aggregation_query(query)
+}
+
+fn format_metric_query(query: &MetricQuery) -> Option<String> {
+    let mut formatted = format_metric_range_aggregation_query(query)?;
+    if let Some(grouping) = &query.range_grouping {
+        formatted = format!("{formatted} {}", format_vector_grouping(grouping));
+    }
+    if let Some(vector_aggregation) = &query.vector_aggregation {
+        formatted = format_vector_aggregation_query(vector_aggregation, &formatted)?;
+    }
+    Some(formatted)
+}
+
+fn format_metric_range_aggregation_query(query: &MetricQuery) -> Option<String> {
+    let range = format_metric_range_selector(query)?;
     if let RangeAggregation::QuantileOverTime(quantile) = query.aggregation {
         return Some(format!(
-            "quantile_over_time({},{}[{}s])",
+            "quantile_over_time({},{range})",
             format_quantile(quantile),
-            format_stream_query(&query.stream),
-            query.range_ns / 1_000_000_000
         ));
     }
     Some(format!(
-        "{}({}[{}s])",
+        "{}({range})",
         format_range_aggregation_name(&query.aggregation)?,
-        format_stream_query(&query.stream),
-        query.range_ns / 1_000_000_000
     ))
+}
+
+fn format_metric_range_selector(query: &MetricQuery) -> Option<String> {
+    let range = format_loki_duration_ns(query.range_ns)?;
+    let offset = if query.offset_ns == 0 {
+        String::new()
+    } else {
+        let sign = if query.offset_ns < 0 { "-" } else { "" };
+        let duration = format_loki_duration_ns(query.offset_ns.checked_abs()?)?;
+        format!(" offset {sign}{duration}")
+    };
+    Some(format!(
+        "{}[{range}]{offset}",
+        format_stream_query(&query.stream)
+    ))
+}
+
+fn format_vector_aggregation_query(aggregation: &VectorAggregation, inner: &str) -> Option<String> {
+    let grouping = aggregation
+        .grouping
+        .as_ref()
+        .map(|grouping| format!(" {}", format_vector_grouping(grouping)))
+        .unwrap_or_default();
+    match &aggregation.op {
+        VectorAggregationOp::Sum => Some(format!("sum{grouping}({inner})")),
+        VectorAggregationOp::Count => Some(format!("count{grouping}({inner})")),
+        VectorAggregationOp::Min => Some(format!("min{grouping}({inner})")),
+        VectorAggregationOp::Max => Some(format!("max{grouping}({inner})")),
+        VectorAggregationOp::Avg => Some(format!("avg{grouping}({inner})")),
+        VectorAggregationOp::Stddev => Some(format!("stddev{grouping}({inner})")),
+        VectorAggregationOp::Stdvar => Some(format!("stdvar{grouping}({inner})")),
+        VectorAggregationOp::TopK(limit) => Some(format!("topk{grouping}({limit},{inner})")),
+        VectorAggregationOp::BottomK(limit) => Some(format!("bottomk{grouping}({limit},{inner})")),
+        VectorAggregationOp::ApproxTopK(limit) if aggregation.grouping.is_none() => {
+            Some(format!("approx_topk({limit},{inner})"))
+        }
+        VectorAggregationOp::Sort if aggregation.grouping.is_none() => {
+            Some(format!("sort({inner})"))
+        }
+        VectorAggregationOp::SortDesc if aggregation.grouping.is_none() => {
+            Some(format!("sort_desc({inner})"))
+        }
+        VectorAggregationOp::CountValues(_)
+        | VectorAggregationOp::ApproxTopK(_)
+        | VectorAggregationOp::Sort
+        | VectorAggregationOp::SortDesc => None,
+    }
+}
+
+fn format_vector_grouping(grouping: &VectorGrouping) -> String {
+    match grouping {
+        VectorGrouping::By(labels) => format!("by ({})", labels.join(",")),
+        VectorGrouping::Without(labels) => format!("without ({})", labels.join(",")),
+    }
+}
+
+fn format_loki_duration_ns(duration_ns: i64) -> Option<String> {
+    if duration_ns < 0 {
+        return None;
+    }
+    if duration_ns == 0 {
+        return Some("0s".to_string());
+    }
+
+    let mut remaining = duration_ns;
+    let mut formatted = String::new();
+    for (unit_ns, suffix) in [
+        (3_600_000_000_000_i64, "h"),
+        (60_000_000_000_i64, "m"),
+        (1_000_000_000_i64, "s"),
+        (1_000_000_i64, "ms"),
+        (1_000_i64, "us"),
+        (1_i64, "ns"),
+    ] {
+        if remaining >= unit_ns {
+            let value = remaining / unit_ns;
+            remaining %= unit_ns;
+            formatted.push_str(&format!("{value}{suffix}"));
+        }
+    }
+    Some(formatted)
 }
 
 fn format_quantile(quantile: Quantile) -> String {

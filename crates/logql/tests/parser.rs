@@ -2338,6 +2338,23 @@ fn parses_quantile_over_time_unwrap_metric_query() {
 }
 
 #[test]
+fn parses_fraction_only_quantile_over_time_metric_query() {
+    let query = parse_metric_query(
+        r#"quantile_over_time(.75, {app="api"} | logfmt | unwrap cost [30s]) by (app)"#,
+    )
+    .unwrap();
+
+    check!(
+        query.aggregation
+            == RangeAggregation::QuantileOverTime(Quantile {
+                numerator: 3,
+                denominator: 4,
+            })
+    );
+    check!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
+}
+
+#[test]
 fn parses_absent_over_time_metric_query() {
     let query = parse_metric_query(r#"absent_over_time({app="api",env="prod"} [30s])"#).unwrap();
 
