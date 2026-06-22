@@ -10411,13 +10411,10 @@ async fn execute_index_volume_query(
     let response = match kind {
         VolumeKind::Instant => loki_volume_vector_response(volumes, params.end, params.limit),
         VolumeKind::Range => {
-            let step = params
-                .step
-                .unwrap_or_else(|| default_volume_step(params.start, params.end));
-            if step <= 0 {
+            if params.step.is_some_and(|step| step <= 0) {
                 return Err(HttpQueryError::InvalidStep);
             }
-            loki_volume_matrix_response(volumes, params.start, params.end, step, params.limit)
+            loki_volume_vector_response(volumes, params.end, params.limit)
         }
     };
     Ok(add_loki_query_stats_for_stream_plan(response, &plan))
@@ -10509,67 +10506,11 @@ fn loki_volume_vector_response(
     }))
 }
 
-fn loki_volume_matrix_response(
-    volumes: BTreeMap<Labels, BTreeMap<i64, u64>>,
-    start: i64,
-    end: i64,
-    step: i64,
-    limit: usize,
-) -> Value {
-    let ticks = volume_ticks(start, end, step);
-    let result = limit_volume_series(volumes, limit)
-        .into_iter()
-        .map(|(metric, samples)| {
-            let values = ticks
-                .iter()
-                .map(|tick| {
-                    let value = samples
-                        .iter()
-                        .filter(|(sample_time, _)| {
-                            sample_time_bucket(**sample_time, start, step) == *tick
-                        })
-                        .map(|(_, value)| *value)
-                        .fold(0_u64, u64::saturating_add);
-                    json!([*tick, value.to_string()])
-                })
-                .collect::<Vec<_>>();
-            json!({
-                "metric": metric,
-                "values": values,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    loki_success_value(json!({
-        "resultType": "matrix",
-        "result": result,
-    }))
-}
-
 fn limit_volume_series(
     volumes: BTreeMap<Labels, BTreeMap<i64, u64>>,
     limit: usize,
 ) -> Vec<(Labels, BTreeMap<i64, u64>)> {
     volumes.into_iter().take(limit).collect()
-}
-
-fn default_volume_step(start: i64, end: i64) -> i64 {
-    end.checked_sub(start)
-        .filter(|range| *range > 0)
-        .unwrap_or(1)
-}
-
-fn volume_ticks(start: i64, end: i64, step: i64) -> Vec<i64> {
-    let mut ticks = Vec::new();
-    let mut tick = start;
-    while tick <= end {
-        ticks.push(tick);
-        let Some(next) = tick.checked_add(step) else {
-            break;
-        };
-        tick = next;
-    }
-    ticks
 }
 
 fn sample_time_bucket(sample_time: i64, start: i64, step: i64) -> i64 {
@@ -11511,10 +11452,13 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
         }
     }
 
+    let end = end.unwrap_or_else(current_unix_time_ns);
+    let start = start.unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+
     Ok(VolumeParams {
         query: query.ok_or(HttpQueryError::MissingQueryParameter("query"))?,
-        start: start.ok_or(HttpQueryError::MissingQueryParameter("start"))?,
-        end: end.ok_or(HttpQueryError::MissingQueryParameter("end"))?,
+        start,
+        end,
         step,
         limit: limit.unwrap_or(100),
         target_labels,
