@@ -50,7 +50,12 @@ pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
         .send(handlers::send)
         .send_stream(streaming::send_stream)
         .subscribe(streaming::subscribe)
-        .build()
+        // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
+        // `ConnectContext`); plain `.build()` omits it, so every Connect response falls back
+        // to `application/json` regardless of the request's content-type, which breaks proto
+        // connect-go clients (`invalid content-type: "application/json"; expecting
+        // "application/proto"`). Compression/gRPC features are off, so this only adds the layer.
+        .build_connect()
         .layer(axum::Extension(state))
 }
 
