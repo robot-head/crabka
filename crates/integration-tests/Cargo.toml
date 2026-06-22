@@ -34,5 +34,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true }
+flate2 = { workspace = true }
 proptest = { workspace = true }
 uuid = { workspace = true }

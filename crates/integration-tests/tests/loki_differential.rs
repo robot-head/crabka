@@ -5,6 +5,7 @@
 //! result shape that Grafana's built-in Loki datasource consumes.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use assert2::assert;
@@ -19,6 +20,8 @@ use crabka_observability::{
     run_compactor_until_idle,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use flate2::Compression;
+use flate2::write::DeflateEncoder;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use testcontainers::GenericImage;
@@ -1893,6 +1896,8 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let logfmt_template_line = r#"raw=" /checkout/ " path=/api/items msg="template helper""#;
     let logfmt_spacing_template_line = r#"short=hi long=hello-world mark=x msg="spacing helper""#;
     let logfmt_typed_filter_line = r#"duration=25ms bytes_consumed=21MB msg="api typed parser ok""#;
+    let logfmt_ip_line = r#"client=10.2.3.4 msg="api ip filter ok""#;
+    let logfmt_ip_miss_line = r#"client=192.168.2.3 msg="api ip filter miss""#;
     let colored_logfmt_error_line = "\u{1b}[31mstatus=503 msg=\"colored parser error\"\u{1b}[0m";
     let decolored_logfmt_error_line = r#"status=503 msg="colored parser error""#;
     let packed_error_line =
@@ -1924,7 +1929,9 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
                     [(base_ns + 8_000_000_000).to_string(), logfmt_typed_filter_line],
                     [(base_ns + 9_000_000_000).to_string(), colored_logfmt_error_line],
                     [(base_ns + 10_000_000_000).to_string(), logfmt_template_line],
-                    [(base_ns + 11_000_000_000).to_string(), logfmt_spacing_template_line]
+                    [(base_ns + 11_000_000_000).to_string(), logfmt_spacing_template_line],
+                    [(base_ns + 12_000_000_000).to_string(), logfmt_ip_line],
+                    [(base_ns + 13_000_000_000).to_string(), logfmt_ip_miss_line]
                 ]
             },
             {
@@ -1993,7 +2000,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     .await
     .unwrap();
 
-    let end_ns = base_ns + 12_000_000_000;
+    let end_ns = base_ns + 14_000_000_000;
     let json_query =
         r#"{app="api",format="json"} | json | request_method = "GET" | response_status >= 500"#;
     let loki_json_result =
@@ -2352,6 +2359,13 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         crabka_query_range_result(querier.clone(), logfmt_typed_query, base_ns, end_ns).await;
     assert!(crabka_logfmt_typed_result == loki_logfmt_typed_result);
 
+    let ip_filter_query = r#"{app="api",format="logfmt"} |= ip("10.0.0.0/8")"#;
+    let loki_ip_filter_result =
+        loki_query_range_result(&http, &loki_base, ip_filter_query, base_ns, end_ns).await;
+    let crabka_ip_filter_result =
+        crabka_query_range_result(querier.clone(), ip_filter_query, base_ns, end_ns).await;
+    assert!(crabka_ip_filter_result == loki_ip_filter_result);
+
     let metadata_query = r#"{app="api",format="metadata"} | trace_id = "abc""#;
     let loki_metadata_result =
         loki_query_range_result(&http, &loki_base, metadata_query, base_ns, end_ns).await;
@@ -2516,6 +2530,11 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     assert!(json_contains_string(
         &loki_logfmt_typed_result,
         logfmt_typed_filter_line
+    ));
+    assert!(json_contains_string(&loki_ip_filter_result, logfmt_ip_line));
+    assert!(!json_contains_string(
+        &loki_ip_filter_result,
+        logfmt_ip_miss_line
     ));
     assert!(json_contains_string(
         &loki_metadata_result,
@@ -4416,6 +4435,47 @@ async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let distributor = distributor_router_for_status();
+    let payload = json!({
+        "streams": [
+            {
+                "stream": {
+                    "app": "api"
+                },
+                "values": [[current_unix_second_ns().to_string(), "deflated json push"]]
+            }
+        ]
+    })
+    .to_string();
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(payload.as_bytes()).unwrap();
+    let payload = encoder.finish().unwrap();
+    let headers = [
+        ("content-type", "application/json"),
+        ("content-encoding", "deflate"),
+    ];
+
+    let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
+    let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
+
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5325,12 +5385,29 @@ async fn loki_push_error(http: &reqwest::Client, base: &str, payload: &Value) ->
 }
 
 async fn loki_push_raw_error(http: &reqwest::Client, base: &str, payload: &str) -> Value {
-    let response = http
+    loki_push_body_result(
+        http,
+        base,
+        payload.as_bytes().to_vec(),
+        &[("content-type", "application/json")],
+    )
+    .await
+}
+
+async fn loki_push_body_result(
+    http: &reqwest::Client,
+    base: &str,
+    body: Vec<u8>,
+    headers: &[(&str, &str)],
+) -> Value {
+    let mut request = http
         .post(format!("{base}/loki/api/v1/push"))
-        .header("X-Scope-OrgID", "tenant-a")
-        .header("content-type", "application/json")
-        .body(payload.to_string())
-        .send()
+        .header("X-Scope-OrgID", "tenant-a");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = http
+        .execute(request.body(body).build().expect("build Loki push request"))
         .await
         .expect("push invalid payload to Loki");
     let status = response.status().as_u16();
@@ -5343,16 +5420,28 @@ async fn crabka_push_error(app: axum::Router, payload: &Value) -> Value {
 }
 
 async fn crabka_push_raw_error(app: axum::Router, payload: &str) -> Value {
+    crabka_push_body_result(
+        app,
+        payload.as_bytes().to_vec(),
+        &[("content-type", "application/json")],
+    )
+    .await
+}
+
+async fn crabka_push_body_result(
+    app: axum::Router,
+    body: Vec<u8>,
+    headers: &[(&str, &str)],
+) -> Value {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/loki/api/v1/push")
+        .header("X-Scope-OrgID", "tenant-a");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
     let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/loki/api/v1/push")
-                .header("X-Scope-OrgID", "tenant-a")
-                .header("content-type", "application/json")
-                .body(Body::from(payload.to_string()))
-                .unwrap(),
-        )
+        .oneshot(request.body(Body::from(body)).unwrap())
         .await
         .unwrap();
     let status = response.status().as_u16();
