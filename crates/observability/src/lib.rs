@@ -3677,7 +3677,13 @@ fn loki_json_timestamp_value_parse_error(
         .unwrap_or_else(|| {
             loki_decode_error_context(&body, value_start.saturating_add(10)).to_string()
         });
-    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(9));
+    let context_prefix_len = if timestamp.is_object() || timestamp.is_array() {
+        4
+    } else {
+        9
+    };
+    let bigger_context =
+        loki_decode_error_context(&body, value_start.saturating_sub(context_prefix_len));
 
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}|..., bigger context ...|{bigger_context}|...\n"
@@ -15831,5 +15837,34 @@ impl IntoResponse for HttpQueryError {
             return text_response(status, "parse error : syntax error: unexpected $end");
         }
         loki_error(status, error_type, &self.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_loki_numeric_json_timestamp_error_context() {
+        let body = br#"{"streams":[{"stream":{"app":"api"},"values":[[1000000000,"non-string push timestamp"]]}]}"#;
+        let timestamp = json!(1000000000);
+        let line = json!("non-string push timestamp");
+
+        assert_eq!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
+            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
+        );
+    }
+
+    #[test]
+    fn formats_loki_object_json_timestamp_error_context() {
+        let body = br#"{"streams":[{"stream":{"app":"api"},"values":[[{"ts":"1000000000"},"object push timestamp"]]}]}"#;
+        let timestamp = json!({"ts": "1000000000"});
+        let line = json!("object push timestamp");
+
+        assert_eq!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
+            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
+        );
     }
 }
