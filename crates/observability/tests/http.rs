@@ -13721,7 +13721,7 @@ async fn index_volume_endpoint_returns_series_vector_bytes() {
 }
 
 #[tokio::test]
-async fn index_volume_range_endpoint_returns_matrix_with_target_labels() {
+async fn index_volume_range_endpoint_returns_vector_with_target_labels() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
     let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
@@ -13758,20 +13758,16 @@ async fn index_volume_range_endpoint_returns_matrix_with_target_labels() {
             == json!({
                 "status": "success",
                 "data": {
-                    "resultType": "matrix",
+                    "resultType": "vector",
                     "result": [
                         {
                             "metric": {
                                 "app": "api"
                             },
-                            "values": [
-                                [10, expected_block_bytes.to_string()],
-                                [20, "0"],
-                                [30, "0"]
-                            ]
+                            "value": [30, expected_block_bytes.to_string()]
                         }
                     ],
-                    "stats": expected_loki_stats_with(expected_block_bytes, 3, 1)
+                    "stats": expected_loki_stats_with(expected_block_bytes, 0, 1)
                 }
             })
     );
@@ -13815,27 +13811,23 @@ async fn index_volume_range_endpoint_accepts_form_post_query_with_raw_ampersand(
             == json!({
                 "status": "success",
                 "data": {
-                    "resultType": "matrix",
+                    "resultType": "vector",
                     "result": [
                         {
                             "metric": {
                                 "app": "api&edge"
                             },
-                            "values": [
-                                [10, expected_block_bytes.to_string()],
-                                [20, "0"],
-                                [30, "0"]
-                            ]
+                            "value": [30, expected_block_bytes.to_string()]
                         }
                     ],
-                    "stats": expected_loki_stats_with(expected_block_bytes, 3, 1)
+                    "stats": expected_loki_stats_with(expected_block_bytes, 0, 1)
                 }
             })
     );
 }
 
 #[tokio::test]
-async fn index_volume_range_endpoint_returns_matrix_without_target_labels() {
+async fn index_volume_range_endpoint_returns_vector_without_target_labels() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();
     let api = label_index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
@@ -13868,28 +13860,24 @@ async fn index_volume_range_endpoint_returns_matrix_without_target_labels() {
             == json!({
                 "status": "success",
                 "data": {
-                    "resultType": "matrix",
+                    "resultType": "vector",
                     "result": [
                         {
                             "metric": {
                                 "app": "api",
                                 "env": "prod"
                             },
-                            "values": [
-                                [10, expected_block_bytes.to_string()],
-                                [20, "0"],
-                                [30, "0"]
-                            ]
+                            "value": [30, expected_block_bytes.to_string()]
                         }
                     ],
-                    "stats": expected_loki_stats_with(expected_block_bytes, 3, 1)
+                    "stats": expected_loki_stats_with(expected_block_bytes, 0, 1)
                 }
             })
     );
 }
 
 #[tokio::test]
-async fn index_volume_endpoints_require_start_parameter() {
+async fn index_volume_endpoints_default_missing_start_to_recent_range() {
     let state = QuerierState::new(
         tempfile::tempdir().unwrap().keep(),
         LabelIndex::default(),
@@ -13912,11 +13900,17 @@ async fn index_volume_endpoints_require_start_parameter() {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert_loki_error(
-            &json_body(response).await,
-            "bad_data",
-            "missing query parameter `start`",
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": {
+                        "resultType": "vector",
+                        "result": [],
+                        "stats": expected_loki_stats()
+                    }
+                })
         );
     }
 }
@@ -13950,7 +13944,7 @@ async fn index_stats_endpoint_requires_start_parameter() {
 }
 
 #[tokio::test]
-async fn index_volume_endpoints_require_end_parameter() {
+async fn index_volume_endpoints_default_missing_end_to_current_time() {
     let state = QuerierState::new(
         tempfile::tempdir().unwrap().keep(),
         LabelIndex::default(),
@@ -13974,10 +13968,10 @@ async fn index_volume_endpoints_require_end_parameter() {
             .unwrap();
 
         assert!(response.status() == StatusCode::BAD_REQUEST);
-        assert_loki_error(
-            &json_body(response).await,
-            "bad_data",
-            "missing query parameter `end`",
+        assert!(
+            text_body(response)
+                .await
+                .starts_with("the query time range exceeds the limit (query length: ")
         );
     }
 }
