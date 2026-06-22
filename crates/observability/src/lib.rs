@@ -9284,14 +9284,16 @@ async fn execute_http_metric_binary_operand(
     query_text: &str,
 ) -> Result<Value, HttpQueryError> {
     if let Some(label_replace) = parse_label_replace_expression(operand) {
-        let query = parse_metric_query(&label_replace.query).map_err(|source| {
-            HttpQueryError::LokiParse {
-                query: query_text.to_string(),
-                source,
-            }
-        })?;
-        let mut value =
-            execute_http_metric_query(state, tenant, time_range, step, kind, query).await?;
+        let mut value = execute_http_metric_expression_query(
+            state,
+            tenant,
+            time_range,
+            step,
+            kind,
+            &label_replace.query,
+            query_text,
+        )
+        .await?;
         apply_label_replace_to_loki_result(
             &mut value,
             &label_replace.destination_label,
