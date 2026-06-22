@@ -11,7 +11,9 @@ use assert2::assert;
 use axum::Router;
 use axum::extract::State;
 use axum::routing::get;
-use crabka_traces::frontend::backend::{QuerierBackend, SearchJobRequest, TraceByIdJobRequest};
+use crabka_traces::frontend::backend::{
+    QuerierBackend, SearchJobRequest, TagValuesJobRequest, TraceByIdJobRequest,
+};
 use crabka_traces::frontend::http_backend::HttpQuerier;
 use crabka_traces::frontend::job::JobShard;
 
@@ -180,6 +182,44 @@ async fn http_querier_by_id_parses_v2_envelope() {
 
     assert!(out.trace.span_count() == 1);
     assert!(out.trace.status == "COMPLETE");
+}
+
+#[tokio::test]
+async fn http_querier_tag_values_encodes_tag_path_segment() {
+    let seen: Log = Arc::new(Mutex::new(Vec::new()));
+    let app =
+        Router::new()
+            .route(
+                "/api/v2/search/tag/{tag}/values",
+                get(
+                    |State(s): State<Log>,
+                     axum::extract::Path(tag): axum::extract::Path<String>| async move {
+                        s.lock().unwrap().push(tag);
+                        axum::Json(serde_json::json!({ "tagValues": [], "metrics": {} }))
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+    let addr = spawn(app).await;
+    let backend = HttpQuerier::new(vec![addr.to_string()], Duration::from_secs(5)).unwrap();
+
+    // `#` interpolated raw would start a URL fragment and truncate the path
+    // (the stub's `{tag}/values` route would never match). Path-segment
+    // encoding round-trips it intact.
+    backend
+        .tag_values_job(&TagValuesJobRequest {
+            tenant: "t1".to_string(),
+            tag: "a#b".to_string(),
+            start_ns: 0,
+            end_ns: 1,
+            shard: JobShard::Live,
+        })
+        .await
+        .unwrap();
+
+    let log = seen.lock().unwrap();
+    assert!(log.len() == 1);
+    assert!(log[0] == "a#b");
 }
 
 async fn spawn(app: Router) -> SocketAddr {

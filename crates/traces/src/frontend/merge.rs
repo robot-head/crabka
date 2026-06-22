@@ -102,7 +102,19 @@ fn merge_span_sets(existing: &mut Vec<SpanSetJson>, incoming: Vec<SpanSetJson>) 
             existing.push(span_set);
             continue;
         };
-        first.matched = first.matched.saturating_add(span_set.matched);
+        // `matched` is additive across shards, but only for *distinct* matches:
+        // a span already present (a late-span / overlap duplicate) must not be
+        // counted twice. Subtract the already-seen spans from this set's reported
+        // `matched` before folding it in.
+        let duplicates = span_set
+            .spans
+            .iter()
+            .filter(|s| first.spans.iter().any(|e| e.span_id == s.span_id))
+            .count();
+        let new_matches = span_set
+            .matched
+            .saturating_sub(u32::try_from(duplicates).unwrap_or(u32::MAX));
+        first.matched = first.matched.saturating_add(new_matches);
         for span in span_set.spans {
             if !first.spans.iter().any(|s| s.span_id == span.span_id) {
                 first.spans.push(span);
@@ -388,6 +400,38 @@ mod tests {
             .map(|ss| ss.spans.len())
             .sum();
         assert!(total_spans == 1);
+    }
+
+    #[test]
+    fn partial_overlap_does_not_double_count_matched() {
+        // Shard 0: spans 01,02 (matched 2). Shard 1: spans 02(dup),03 (matched 2).
+        // Merged distinct spans = 01,02,03; matched = 2 + (2 - 1 dup) = 3, not 4.
+        let p0 = partial(
+            vec![trace(
+                "01",
+                "s",
+                10,
+                vec![span("01", 10, 5), span("02", 11, 5)],
+            )],
+            50,
+        );
+        let p1 = partial(
+            vec![trace(
+                "01",
+                "s",
+                10,
+                vec![span("02", 11, 5), span("03", 12, 5)],
+            )],
+            50,
+        );
+        let resp = merge_search(vec![p0, p1], 20, 10);
+        let total_spans: usize = resp.traces[0]
+            .span_sets
+            .iter()
+            .map(|ss| ss.spans.len())
+            .sum();
+        assert!(total_spans == 3);
+        assert!(resp.traces[0].span_sets[0].matched == 3);
     }
 
     #[test]

@@ -58,14 +58,6 @@ pub enum JobShard {
     },
 }
 
-/// The shard a by-id job scans (no row-group narrowing — the querier
-/// reassembles a trace across the whole block).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TraceByIdShard {
-    Live,
-    Block(String),
-}
-
 /// The output of planning: the jobs to dispatch + how many blocks they cover
 /// (seeds `metrics.totalBlocks`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,24 +278,6 @@ pub fn plan_search_jobs(
     }
 }
 
-/// Enumerate by-id candidate jobs: one per block (the querier runs the bloom
-/// test), plus a `Live` job when the window reaches the hot tier.
-#[must_use]
-pub fn plan_trace_by_id_jobs(
-    blocks: &[BlockMetaInfo],
-    query_end_ns: i64,
-    hot_frontier_ns: i64,
-) -> Vec<TraceByIdShard> {
-    let mut jobs = Vec::new();
-    if query_end_ns >= hot_frontier_ns {
-        jobs.push(TraceByIdShard::Live);
-    }
-    for b in blocks {
-        jobs.push(TraceByIdShard::Block(b.block_id.clone()));
-    }
-    jobs
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -412,20 +386,5 @@ mod tests {
         let got = cat.blocks("t1", 0, 200).await.unwrap();
         assert!(got.len() == 1);
         assert!(got[0].block_id == "b1");
-    }
-
-    #[test]
-    fn trace_by_id_enumerates_candidate_blocks_plus_live() {
-        let blocks = vec![block("b1", 0, 100, &[500]), block("b2", 100, 200, &[500])];
-        // Query window ends at 300, frontier 150 => Live probed + 2 blocks.
-        let jobs = plan_trace_by_id_jobs(&blocks, 300, 150);
-        assert!(jobs.len() == 3);
-        assert!(
-            jobs.iter()
-                .filter(|j| matches!(j, TraceByIdShard::Block(_)))
-                .count()
-                == 2
-        );
-        assert!(jobs.iter().any(|j| matches!(j, TraceByIdShard::Live)));
     }
 }

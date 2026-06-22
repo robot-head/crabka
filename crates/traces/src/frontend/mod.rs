@@ -26,7 +26,7 @@ pub use config::FrontendConfig;
 pub use http_backend::{HttpQuerier, run_query_frontend};
 pub use job::{
     BlockCatalog, BlockMetaInfo, CatalogError, JobPlan, JobShard, MockCatalog, RowGroupInfo,
-    TraceByIdShard, TraceIndexCatalog, blocks_for_tenant, plan_search_jobs, plan_trace_by_id_jobs,
+    TraceIndexCatalog, blocks_for_tenant, plan_search_jobs,
 };
 pub use merge::{
     TraceStatus, assemble_trace, assembled_span_count, merge_search, merge_tag_names,

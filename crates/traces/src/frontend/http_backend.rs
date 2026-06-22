@@ -230,19 +230,29 @@ impl QuerierBackend for HttpQuerier {
         &self,
         req: &TagValuesJobRequest,
     ) -> Result<TagValuesPartial, BackendError> {
-        let url = format!(
-            "http://{}/api/v2/search/tag/{}/values",
-            self.next_addr(),
-            req.tag
-        );
+        // The tag is a client-supplied path segment (e.g. `span:name`,
+        // `resource.service.name`); build it via `path_segments_mut` so any
+        // special chars (`/`, `?`, `#`, space) are percent-encoded into a single
+        // segment rather than corrupting the path/query when re-parsed.
+        let mut url = reqwest::Url::parse(&format!("http://{}", self.next_addr()))
+            .map_err(|e| BackendError::Transport(format!("invalid querier addr: {e}")))?;
+        url.path_segments_mut()
+            .map_err(|()| BackendError::Transport("querier url cannot be a base".to_string()))?
+            .extend(["api", "v2", "search", "tag", req.tag.as_str(), "values"]);
         let mut params: Vec<(&str, String)> = vec![
             ("start", ns_to_seconds(req.start_ns)),
             ("end", ns_to_seconds(req.end_ns)),
         ];
         push_shard_params(&mut params, &req.shard);
+        {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in &params {
+                pairs.append_pair(key, value);
+            }
+        }
         let resp = self
             .http
-            .get(build_url(&url, &params)?)
+            .get(url)
             .header(TENANT_HEADER, &req.tenant)
             .send()
             .await
