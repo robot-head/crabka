@@ -4176,6 +4176,12 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
 
     assert!(crabka_result == loki_result);
 
+    let query = "vector(2.5e-1)";
+    let loki_result = loki_format_query_result(&http, &loki_base, query).await;
+    let crabka_result = crabka_format_query_result(querier.clone(), query).await;
+
+    assert!(crabka_result == loki_result);
+
     let loki_post_result = loki_format_query_post_result(
         &http,
         &loki_base,
@@ -4216,6 +4222,10 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
 
     let loki_error = loki_format_query_error(&http, &loki_base, Some("{foo=")).await;
     let crabka_error = crabka_format_query_error(querier.clone(), Some("{foo=")).await;
+    assert!(crabka_error == loki_error);
+
+    let loki_error = loki_format_query_error(&http, &loki_base, Some("vector(-2.5e-1)")).await;
+    let crabka_error = crabka_format_query_error(querier.clone(), Some("vector(-2.5e-1)")).await;
     assert!(crabka_error == loki_error);
 
     let loki_error = loki_format_query_error(&http, &loki_base, None).await;

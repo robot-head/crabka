@@ -6769,7 +6769,7 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": "vector(2.5e-1)"
+                "data": "vector(0.250000)"
             })
     );
 }
@@ -7265,6 +7265,31 @@ async fn format_query_endpoint_returns_loki_error_for_invalid_logql() {
             == json!({
                 "status": "invalid-query",
                 "error": "parse error at line 1, col 6: syntax error: unexpected $end, expecting STRING"
+            })
+    );
+}
+
+#[tokio::test]
+async fn format_query_endpoint_rejects_signed_vector_function_literals_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=vector%28-2.5e-1%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "invalid-query",
+                "error": "parse error at line 1, col 8: syntax error: unexpected -, expecting NUMBER"
             })
     );
 }
