@@ -3427,6 +3427,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         "vector(1)orvector(2)",
         "abs(vector(-1.2))",
         r#"count_values by (env) ("hits", count_over_time({app="api"}[1s]))"#,
+        r#"count_values("hits", count_over_time({app="api"}[1s])) by (env)"#,
         r#"approx_topk(1, count_over_time({app="api"}[1s]))"#,
     ] {
         let loki_error = loki_query_error(&http, &loki_base, query).await;
