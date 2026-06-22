@@ -3090,6 +3090,7 @@ fn normalize_loki_http_push(
             serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
         let payload = validate_loki_json_push_stream_objects(payload, &body)?;
         validate_loki_json_push_value_arrays(&payload, &body)?;
+        validate_loki_json_push_timestamp_types(&payload, &body)?;
         validate_loki_json_push_duplicate_keys(&body)?;
         validate_loki_json_structured_metadata_value_types(&payload, &body)?;
         normalize_loki_push(
@@ -3169,6 +3170,29 @@ fn validate_loki_json_push_value_arrays(
             if !value.is_array() {
                 return Err(DistributorError::InvalidJsonPushValueSyntax(
                     loki_json_push_value_parse_error(body, value),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_loki_json_push_timestamp_types(
+    payload: &LokiTypedPushRequest,
+    body: &[u8],
+) -> Result<(), DistributorError> {
+    for stream in &payload.streams {
+        let Some(values) = &stream.values else {
+            continue;
+        };
+        for value in values {
+            let Some(timestamp) = value.get(0) else {
+                continue;
+            };
+            if !timestamp.is_string() {
+                return Err(DistributorError::InvalidJsonTimestampSyntax(
+                    loki_json_timestamp_value_parse_error(body, timestamp, value.get(1)),
                 ));
             }
         }
@@ -3629,6 +3653,34 @@ fn loki_json_timestamp_parse_error(timestamp: &str, line: &str) -> String {
         .unwrap_or(timestamp);
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}\"]]}}]}}|..., bigger context ...|s\":[[\"{timestamp}\",\"{line}\"]]}}]}}|...\n"
+    )
+}
+
+fn loki_json_timestamp_value_parse_error(
+    body: &[u8],
+    timestamp: &Value,
+    line: Option<&Value>,
+) -> String {
+    let body = String::from_utf8_lossy(body);
+    let timestamp_text = timestamp.to_string();
+    let value_start = body.find(&timestamp_text).unwrap_or(body.len());
+    let found_context = line
+        .and_then(Value::as_str)
+        .map(|line| {
+            let start = line
+                .char_indices()
+                .nth(line.chars().count().saturating_sub(6))
+                .map(|(offset, _)| offset)
+                .unwrap_or(0);
+            format!("{}\"]]}}]}}", &line[start..])
+        })
+        .unwrap_or_else(|| {
+            loki_decode_error_context(&body, value_start.saturating_add(10)).to_string()
+        });
+    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(9));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}|..., bigger context ...|{bigger_context}|...\n"
     )
 }
 

@@ -1507,7 +1507,8 @@ append, with real-Loki differential coverage pinning the response body.
 Malformed JSON push entry fields now also match Loki's raw
 `loghttp.PushRequest.Streams` unmarshaler text responses instead of Crabka's
 generic Loki error envelope, covering timestamp strings that fail numeric
-parsing, non-string log-line values, and non-object structured metadata fields.
+parsing, non-string timestamp slots, non-string log-line values, and non-object
+structured metadata fields.
 Timestamp-only JSON push values now match Loki by appending an empty log line
 instead of rejecting the value shape, and extra JSON push value fields after the
 first structured metadata object are ignored like Loki. Non-array JSON push
