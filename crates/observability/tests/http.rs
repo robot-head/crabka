@@ -7388,6 +7388,14 @@ async fn format_query_endpoint_formats_sort_vector_expression_like_loki() {
             "sort_desc%28vector%281%29%2Bcount_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%29",
             r#"sort_desc((vector(1.000000) + count_over_time({app="api"}[30s])))"#,
         ),
+        (
+            "sort%28label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29%29",
+            r#"sort(label_replace(vector(1.000000),"service","api-$1","missing","(.*)"))"#,
+        ),
+        (
+            "sort_desc%28label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%20vector%281%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%29",
+            "sort_desc(\n  label_replace(\n    (count_over_time({app=\"api\"}[30s]) + vector(1.000000)),\n    \"service\",\n    \"$1-api\",\n    \"app\",\n    \"(.*)\"\n  )\n)",
+        ),
     ] {
         let response = app
             .clone()

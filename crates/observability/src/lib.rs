@@ -11365,6 +11365,12 @@ fn format_sort_vector_expression(query: &str) -> Option<String> {
             return None;
         }
         let inner = format_loki_vector_expression(arguments[0].trim())?;
+        if inner.contains('\n') {
+            return Some(format!(
+                "{function}(\n{}\n)",
+                indent_logql_lines(&inner, "  ")
+            ));
+        }
         return Some(format!("{function}({inner})"));
     }
     None
@@ -11386,12 +11392,29 @@ fn format_loki_vector_expression(query: &str) -> Option<String> {
     if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
         return Some(formatted);
     }
+    if let Some(formatted) = format_vector_label_replace_function(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_label_replace_metric_scalar_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_label_replace_metric_vector_expression(query) {
+        return Some(formatted);
+    }
     if let Some(formatted) = format_scalar_vector_expression(query) {
         return Some(formatted);
     }
     parse_metric_query(query)
         .ok()
         .and_then(|query| format_metric_query(&query))
+}
+
+fn indent_logql_lines(value: &str, prefix: &str) -> String {
+    value
+        .lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_logql_quoted_string(value: &str) -> String {
