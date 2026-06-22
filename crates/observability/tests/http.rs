@@ -6757,7 +6757,7 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/format_query?query=vector%28-2.5e-1%29")
+                .uri("/loki/api/v1/format_query?query=vector%282.5e-1%29")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -6769,7 +6769,7 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": "vector(-2.5e-1)"
+                "data": "vector(2.5e-1)"
             })
     );
 }
@@ -13537,7 +13537,7 @@ async fn query_endpoint_accepts_scientific_vector_function_expression() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query?query=vector%28-2.5e-1%29&time=4000000000")
+                .uri("/loki/api/v1/query?query=vector%282.5e-1%29&time=4000000000")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -13555,13 +13555,41 @@ async fn query_endpoint_accepts_scientific_vector_function_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4000000000i64, "-0.25"]
+                            "value": [4000000000i64, "0.25"]
                         }
                     ],
                     "stats": expected_loki_stats()
                 }
             })
     );
+}
+
+#[tokio::test]
+async fn query_endpoint_rejects_signed_vector_function_literals_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (query, sign) in [("vector%28-2.5e-1%29", "-"), ("vector%28%2B.5%29", "+")] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/query?query={query}&time=4000000000"))
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
+            text_body(response).await
+                == format!(
+                    "parse error at line 1, col 8: syntax error: unexpected {sign}, expecting NUMBER"
+                )
+        );
+    }
 }
 
 #[tokio::test]

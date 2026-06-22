@@ -7651,6 +7651,7 @@ async fn execute_http_multi_tenant_query(
     params: &QueryParams,
     kind: QueryKind,
 ) -> Result<Value, HttpQueryError> {
+    reject_signed_vector_function_literal(&params.query)?;
     if let Some(result) = scalar_vector_expression_result(&params.query) {
         let time_range = time_range(params, kind)?;
         validate_loki_range_query_range_limit(kind, time_range)?;
@@ -7700,6 +7701,7 @@ async fn execute_http_query_for_tenant(
     let limit = params.limit;
     let direction = loki_direction(params.direction.as_deref())?;
     let interval = params.interval;
+    reject_signed_vector_function_literal(&params.query)?;
     if let Some(result) = scalar_vector_expression_result(&params.query) {
         let value = match kind {
             QueryKind::Instant => loki_instant_scalar_or_vector_response(time_range.end_ns, result),
@@ -7909,6 +7911,77 @@ fn scalar_vector_expression_result(query: &str) -> Option<ScalarVectorExpression
     } else {
         None
     }
+}
+
+fn reject_signed_vector_function_literal(query: &str) -> Result<(), HttpQueryError> {
+    if !could_be_scalar_vector_expression(query) {
+        return Ok(());
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < query.len() {
+        let ch = query[index..]
+            .chars()
+            .next()
+            .expect("index is always on a char boundary");
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            index += ch.len_utf8();
+            continue;
+        }
+        if query[index..].starts_with("vector(") {
+            let mut sign_index = index + "vector(".len();
+            while let Some(next) = query[sign_index..].chars().next() {
+                if !next.is_whitespace() {
+                    break;
+                }
+                sign_index += next.len_utf8();
+            }
+            if let Some(sign @ ('+' | '-')) = query[sign_index..].chars().next() {
+                let column = query[..sign_index].chars().count() + 1;
+                return Err(HttpQueryError::LokiPlainParse(format!(
+                    "parse error at line 1, col {column}: syntax error: unexpected {sign}, expecting NUMBER"
+                )));
+            }
+        }
+        index += ch.len_utf8();
+    }
+    Ok(())
+}
+
+fn could_be_scalar_vector_expression(query: &str) -> bool {
+    let trimmed = query.trim_start();
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    if first.is_ascii_digit() || matches!(first, '+' | '-' | '.' | '(') {
+        return true;
+    }
+    if first.is_ascii_alphabetic() || first == '_' {
+        let ident_len = trimmed
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        return matches!(
+            &trimmed[..ident_len],
+            "vector" | "label_replace" | "label_join"
+        );
+    }
+    false
 }
 
 fn apply_label_replace_to_loki_result(
@@ -8320,6 +8393,9 @@ impl<'a> VectorScalarExpressionParser<'a> {
         let scalar = rest.strip_prefix("vector(")?;
         let scalar_end = scalar.find(')')?;
         let scalar_text = &scalar[..scalar_end];
+        if scalar_text.starts_with(['+', '-']) {
+            return None;
+        }
         self.position += "vector(".len() + scalar_end + 1;
         let sample = parse_scalar_sample(scalar_text)?;
         self.vector_terms += 1;
@@ -15731,6 +15807,8 @@ enum HttpQueryError {
     ApproxTopKDisabled,
     #[error("parse error at line 1, col 1: syntax error: unexpected IDENTIFIER")]
     CountValuesQuery,
+    #[error("{0}")]
+    LokiPlainParse(String),
     #[error(transparent)]
     QueryAuthorization(#[from] QueryAuthorizationError),
     #[error("{source}")]
@@ -15781,6 +15859,7 @@ impl IntoResponse for HttpQueryError {
             | Self::QueryBytesTooLarge { .. }
             | Self::QueryLengthTooLarge { .. }
             | Self::QuerySeriesTooLarge { .. }
+            | Self::LokiPlainParse(_)
             | Self::CountValuesQuery
             | Self::Plan(_) => StatusCode::BAD_REQUEST,
             Self::ApproxTopKDisabled => StatusCode::INTERNAL_SERVER_ERROR,
@@ -15831,6 +15910,7 @@ impl IntoResponse for HttpQueryError {
                 | Self::InvalidTimestampQueryParameter { .. }
                 | Self::LokiQueryRangeTooLarge { .. }
                 | Self::QueryResolutionTooHigh
+                | Self::LokiPlainParse(_)
                 | Self::ApproxTopKDisabled
                 | Self::CountValuesQuery
         ) {
