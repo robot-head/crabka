@@ -3110,8 +3110,13 @@ fn validate_loki_json_structured_metadata_value_types(
 ) -> Result<(), DistributorError> {
     for stream in &payload.streams {
         for value in &stream.values {
-            let Some(Value::Object(metadata)) = value.get(2) else {
+            let Some(metadata_value) = value.get(2) else {
                 continue;
+            };
+            let Value::Object(metadata) = metadata_value else {
+                return Err(DistributorError::InvalidStructuredMetadataSyntax(
+                    loki_structured_metadata_object_parse_error(body, metadata_value),
+                ));
             };
             if let Some((name, value)) = metadata.iter().find(|(_, value)| !value.is_string()) {
                 return Err(DistributorError::InvalidStructuredMetadataSyntax(
@@ -3122,6 +3127,18 @@ fn validate_loki_json_structured_metadata_value_types(
     }
 
     Ok(())
+}
+
+fn loki_structured_metadata_object_parse_error(body: &[u8], value: &Value) -> String {
+    let body = String::from_utf8_lossy(body);
+    let value_text = value.to_string();
+    let value_start = body.find(&value_text).unwrap_or(body.len());
+    let context = loki_decode_error_context(&body, value_start.saturating_sub(3));
+    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(43));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object, but can't find closing '}}' symbol, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
 }
 
 fn loki_structured_metadata_value_parse_error(body: &[u8], name: &str, value: &Value) -> String {
