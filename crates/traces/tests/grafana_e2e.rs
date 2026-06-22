@@ -1108,7 +1108,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
     assert!(status == ReqwestStatusCode::OK);
     assert!(body == "ready");
 
-    // E4 — trace-by-id, Trace A: COMPLETE, two resourceSpans, root span present.
+    // E4 — trace-by-id, Trace A: COMPLETE, all 4 spans, root span present. The
+    // in-process store groups a trace under its single root service, so the
+    // querier returns one resourceSpan (the root service) carrying every span;
+    // each span keeps its own service.name as a span attribute.
     let trace_a = get_json(
         &client,
         &proxy(&format!("api/v2/traces/{TRACE_A_HEX}?{range}")),
@@ -1119,9 +1122,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
     assert!(
         trace_a["trace"]["resourceSpans"]
             .as_array()
-            .is_some_and(|spans| spans.len() == 2),
-        "expected two resourceSpans (two services): {trace_a}"
+            .is_some_and(|spans| spans.len() == 1),
+        "expected one resourceSpan (root service): {trace_a}"
     );
+    let trace_a_spans = trace_a["trace"]["resourceSpans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
+        .flat_map(|ss| ss["spans"].as_array().into_iter().flatten())
+        .count();
+    assert!(trace_a_spans == 4, "expected 4 spans in Trace A: {trace_a}");
     let root_b64 = b64(&ROOT_SPAN_ID);
     let has_root = trace_a["trace"]["resourceSpans"]
         .as_array()
@@ -1179,9 +1190,16 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .trace
         .expect("TraceByIDResponse carries the trace");
     assert!(
-        decoded.resource_spans.len() == 2,
-        "protobuf trace should carry both services' resource spans: {decoded:?}"
+        decoded.resource_spans.len() == 1,
+        "protobuf trace groups under the root service: {decoded:?}"
     );
+    let pb_spans: usize = decoded
+        .resource_spans
+        .iter()
+        .flat_map(|rs| rs.scope_spans.iter())
+        .map(|ss| ss.spans.len())
+        .sum();
+    assert!(pb_spans == 4, "protobuf trace should carry all 4 spans");
 
     // E6 — bad-length trace id -> 400.
     let (status, body) = get_text(&client, &proxy("api/v2/traces/abcd")).await?;
@@ -1340,13 +1358,17 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(|v| Some((v["type"].as_str()?, v["value"].as_str()?)))
         .collect();
+    // resource.service.name values are the per-trace ROOT services (the store
+    // groups each trace under one root); checkout-frontend (Trace A) and
+    // bulk-svc (Trace B) are both roots. cart-backend is a non-root service, so
+    // it appears as a span attribute, not a resource value.
     assert!(typed.contains(&("string", "checkout-frontend")), "{values}");
-    assert!(typed.contains(&("string", "cart-backend")), "{values}");
+    assert!(typed.contains(&("string", "bulk-svc")), "{values}");
 
-    // E17 — v2 typed values for the intrinsic span.duration (type "duration").
+    // E17 — v2 typed values for the intrinsic span:duration (type "duration").
     let values = get_json(
         &client,
-        &proxy(&format!("api/v2/search/tag/span.duration/values?{range}")),
+        &proxy(&format!("api/v2/search/tag/span:duration/values?{range}")),
     )
     .await?;
     let all_durations = values["tagValues"]
