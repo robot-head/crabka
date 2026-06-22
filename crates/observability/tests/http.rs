@@ -931,6 +931,30 @@ async fn loki_push_endpoint_accepts_deflated_json_payloads() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_malformed_deflate_payload_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .header("content-encoding", "deflate")
+                .body(Body::from("not deflate"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "EOF\n");
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_unsupported_content_encoding_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());

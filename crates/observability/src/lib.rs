@@ -18292,6 +18292,9 @@ impl IntoResponse for DistributorError {
                 &loki_gzip_decode_error_text(source),
             );
         }
+        if let Self::LokiDeflateDecode(_) = &self {
+            return text_response(StatusCode::BAD_REQUEST, "EOF\n");
+        }
 
         let status = match &self {
             Self::IngestBodyTooLarge { .. }
