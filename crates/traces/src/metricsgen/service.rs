@@ -144,13 +144,15 @@ where
                     .lock()
                     .expect("metrics generator mutex poisoned");
                 *pending = generator.collect(timestamp_ms);
-                drop(generator);
-                self.sync_edge_checkpoints();
             }
             pending.len()
         };
 
         if payload_count == 0 {
+            // No payload to flush; still persist live half-edge checkpoints. This
+            // path only *saves* current edges (no expiry accounting is pending),
+            // so it cannot lose unpaired counts.
+            self.sync_edge_checkpoints();
             return Ok(0);
         }
 
@@ -161,6 +163,13 @@ where
             written += 1;
         }
         self.source.commit().await?;
+
+        // Only now that the payload carrying any expired-edge unpaired-span
+        // accounting is durably written AND offsets are committed do we sync
+        // (and tombstone) edge checkpoints. A write/commit failure above returns
+        // early via `?`, leaving the expired-edge checkpoints intact for retry —
+        // matching the write-then-commit crash-safety already used for payloads.
+        self.sync_edge_checkpoints();
         Ok(written)
     }
 
@@ -424,6 +433,49 @@ mod tests {
         clock.set(11_000_000_000);
         assert!(svc.collect_once().await.unwrap() == 1);
 
+        assert!(store.load_all("A").is_empty());
+    }
+
+    #[tokio::test]
+    async fn collect_keeps_expired_edge_checkpoint_when_write_fails() {
+        let store = Arc::new(InMemoryCheckpointStore::default());
+        let clock = MockClock::new(0);
+        let source = Arc::new(MockSpanSource::default());
+        let sink = Arc::new(MockRemoteWriteSink::default());
+        let svc = MetricsGenService::new(
+            MetricsGenConfig::default(),
+            Arc::new(clock.clone()),
+            source.clone(),
+            sink.clone(),
+        )
+        .with_checkpoint_store(store.clone());
+
+        source.push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
+        assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert!(store.load_all("A").len() == 1);
+
+        // Advance past the edge TTL so the collect expires it, but force the sink
+        // write to fail. The unpaired-span accounting is carried in the (pending)
+        // payload, so the expired-edge checkpoint MUST survive for retry — never
+        // tombstone before the payload is durably written and committed.
+        clock.set(11_000_000_000);
+        svc.sink.fail_next();
+        assert!(svc.collect_once().await.is_err());
+        assert!(svc.source.commits() == 0);
+        assert!(store.load_all("A").len() == 1);
+
+        // A subsequent successful collect still emits/accounts the unpaired count
+        // and only then tombstones the checkpoint.
+        let written = svc.collect_once().await.unwrap();
+        assert!(written == 1);
+        let payload = svc.sink.writes().pop().unwrap();
+        assert!(
+            payload
+                .series
+                .iter()
+                .any(|s| s.name == "traces_service_graph_unpaired_spans_total")
+        );
+        assert!(svc.source.commits() == 1);
         assert!(store.load_all("A").is_empty());
     }
 

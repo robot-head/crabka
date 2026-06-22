@@ -140,6 +140,12 @@ impl EdgeStore {
             if connection_type != ConnectionType::Unset {
                 edge.connection_type = connection_type;
             }
+            // Backfill the peer.service virtual node on the update path too, so the
+            // result is order-independent: an edge that transitions to (or already
+            // is) VirtualNode gets its peer label set regardless of which span
+            // carried the signal first.
+            let edge_connection_type = edge.connection_type;
+            fill_virtual_node(edge, span, is_client, edge_connection_type);
             if edge.client_service.is_some() && edge.server_service.is_some() {
                 let edge = self.edges.remove(&key).expect("edge exists after get_mut");
                 self.complete(edge);
@@ -1057,6 +1063,51 @@ mod tests {
                     ("server".to_string(), "db-proxy".to_string()),
                 ]
         );
+    }
+
+    #[test]
+    fn virtual_node_peer_backfill_is_order_independent_on_edge_update() {
+        // An edge created first (no virtual-node signal), then updated by a span
+        // carrying peer.service must end up labeled virtual_node WITH the peer
+        // backfilled into the server label — the same result as if the
+        // virtual-node span had arrived first (the create path).
+        let mut store = EdgeStore::new(&MetricsGenConfig::default());
+        let server = span(
+            "backend",
+            [0xB; 8],
+            [0xA; 8],
+            SpanKind::Server,
+            StatusCode::Ok,
+            1,
+        );
+        let mut client = span(
+            "frontend",
+            [0xA; 8],
+            [0; 8],
+            SpanKind::Client,
+            StatusCode::Ok,
+            1,
+        );
+        client
+            .attributes
+            .push(("peer.service".into(), "db-proxy".into()));
+
+        // Server arrives first and creates the edge with no virtual-node signal.
+        assert!(store.record_span(&server, 0) == RecordOutcome::Recorded);
+        // Client update carries the virtual-node / peer.service signal.
+        assert!(store.record_span(&client, 1) == RecordOutcome::Completed);
+
+        let out = store.drain(1_000);
+        let labels = labels_for(&out, "traces_service_graph_request_total");
+        assert!(
+            labels
+                .iter()
+                .any(|(k, v)| k == "connection_type" && v == "virtual_node")
+        );
+        // peer.service ("db-proxy") backfilled into the server label even though
+        // the real server span ("backend") already set it on the create path.
+        assert!(labels.iter().any(|(k, v)| k == "server" && v == "db-proxy"));
+        assert!(labels.iter().any(|(k, v)| k == "client" && v == "frontend"));
     }
 
     #[test]
