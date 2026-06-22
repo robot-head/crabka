@@ -277,7 +277,10 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
   default no-rule-dir behavior: Loki's native rules endpoint returns the
   tenant-specific missing-rule-directory `400` text response, while the
   Prometheus rules and alerts endpoints return empty success envelopes with
-  `errorType` and `error` fields. It also exposes `/ruler/ring` as a
+  `errorType` and `error` fields. The deprecated `/api/prom/rules` root alias
+  follows the native Loki rules response, while `/api/prom/alerts` remains
+  unmounted and returns Loki's plain-text `404 page not found` body. It also
+  exposes `/ruler/ring` as a
   Loki-compatible HTML status page for that current in-process ruler API
   surface.
 - The HTTP routers now also expose Loki's deprecated `/api/prom/*` aliases for
@@ -1130,7 +1133,10 @@ The querier also exposes read-only ruler inventory responses at
 alert inventory even when Crabka has no configured ruler backend. Real-Loki
 differential coverage pins Loki's default no-rule-dir response for the native
 rules endpoint and the empty Prometheus rules/alerts success envelopes,
-including their empty `errorType` and `error` fields. `/ruler/ring` now returns
+including their empty `errorType` and `error` fields. The deprecated
+`/api/prom/rules` root alias follows the native Loki rules response, while
+`/api/prom/alerts` remains unmounted and returns Loki's plain-text
+`404 page not found` body. `/ruler/ring` now returns
 a Loki-compatible `Cortex Ruler Status` HTML page for the current in-process
 ruler API surface.
 The querier also handles

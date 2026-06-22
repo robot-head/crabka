@@ -425,6 +425,8 @@ async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
         "/loki/api/v1/rules/default/api-errors",
         "/prometheus/api/v1/rules",
         "/prometheus/api/v1/alerts",
+        "/api/prom/rules",
+        "/api/prom/alerts",
         "/api/prom/rules/default",
         "/api/prom/rules/default/api-errors",
     ] {

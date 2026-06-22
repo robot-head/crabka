@@ -4753,7 +4753,8 @@ pub fn loki_router(state: QuerierState) -> Router {
             "/api/prom/query_range",
             get(query_range).post(query_range_post),
         )
-        .route("/api/prom/rules", get(prometheus_rules))
+        .route("/api/prom/rules", get(loki_rules))
+        .route("/api/prom/alerts", get(loki_page_not_found))
         .route("/scheduler/ring", get(scheduler_ring))
         .route(
             "/api/prom/rules/{namespace}",
@@ -5605,6 +5606,10 @@ async fn loki_rules(State(state): State<QuerierState>, headers: HeaderMap) -> Re
         return missing_loki_rule_directory_response(&tenant);
     };
     loki_yaml_response(StatusCode::OK, &namespaces)
+}
+
+async fn loki_page_not_found() -> Response {
+    text_response(StatusCode::NOT_FOUND, "404 page not found\n")
 }
 
 fn missing_loki_rule_directory_response(tenant: &str) -> Response {
