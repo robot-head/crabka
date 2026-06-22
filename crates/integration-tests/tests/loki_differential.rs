@@ -3012,6 +3012,22 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, 0, 20_000_000_000, "10s").await;
     let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, 0, 20_000_000_000, "10s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)")"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, 0, 20_000_000_000, "10s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, 0, 20_000_000_000, "10s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") or vector(2)"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, 0, 20_000_000_000, "10s").await;
+    let crabka_result =
         crabka_query_range_result_with_step(querier, query, 0, 20_000_000_000, "10s").await;
 
     assert!(crabka_result == loki_result);
