@@ -177,7 +177,7 @@ async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
         BlockIndex::default(),
     ));
 
-    for path in ["/ready", "/log_level"] {
+    for path in ["/ready", "/log_level", "/memberlist"] {
         let loki_result = loki_status_probe_result(&http, &loki_base, path).await;
         let crabka_result = crabka_status_probe_result(querier.clone(), path).await;
 
