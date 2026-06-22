@@ -5329,6 +5329,34 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let distributor = distributor_router_for_status();
+    let payload = LokiProtoPushRequest { streams: vec![] };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+    let headers = [("content-type", "application/x-protobuf")];
+
+    let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
+    let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
+
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())

@@ -3432,6 +3432,10 @@ fn normalize_loki_proto_push(
         }
     }
 
+    if records.is_empty() {
+        return Err(DistributorError::NoValidStreams);
+    }
+
     Ok(records)
 }
 
