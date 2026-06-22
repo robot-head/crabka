@@ -5371,6 +5371,48 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_response() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let distributor = distributor_router_for_status();
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: "{}".to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: Some(LokiProtoTimestamp {
+                    seconds: current_unix_second_ns() / 1_000_000_000,
+                    nanos: 0,
+                }),
+                line: "empty protobuf stream labels".to_string(),
+                structured_metadata: vec![],
+                parsed: vec![],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+    let headers = [("content-type", "application/x-protobuf")];
+
+    let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
+    let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
+
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata_push_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5510,6 +5552,107 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_nam
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
     assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let (broker, bootstrap, _broker_dir) = boot_crabka().await;
+    let data_root = TempDir::new().expect("data root");
+    let object_root = TempDir::new().expect("object root");
+    let object_store_url = format!("file://{}", object_root.path().display());
+    let topic = "__crabka_observability_loki_protobuf_parsed_differential";
+    let index_prefix = "observability/logs";
+    create_topic(&bootstrap, topic).await;
+    broker.wait_until_partition_present(topic, 0).await;
+
+    let base_ns = ((current_unix_second_ns() - 60_000_000_000) / 1_000_000_000) * 1_000_000_000;
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: r#"{app="api"}"#.to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: Some(LokiProtoTimestamp {
+                    seconds: base_ns / 1_000_000_000,
+                    nanos: 0,
+                }),
+                line: "protobuf parsed label".to_string(),
+                structured_metadata: vec![],
+                parsed: vec![LokiProtoLabelPair {
+                    name: "parsed_status".to_string(),
+                    value: "200".to_string(),
+                }],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+    let headers = [("content-type", "application/x-protobuf")];
+
+    let loki_push = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
+
+    let distributor_config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
+    let distributor = build_service_router(
+        &distributor_config,
+        build_service_dependencies(&distributor_config)
+            .await
+            .unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let crabka_push = crabka_push_body_result(distributor, payload, &headers).await;
+    assert!(crabka_push == loki_push);
+
+    let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
+    compactor_config.object_store_url = Some(object_store_url.clone());
+    compactor_config.index_prefix = Some(index_prefix.to_string());
+    compactor_config.wal_group_id = "loki-protobuf-parsed-differential-compactor".to_string();
+    let descriptors = run_compactor_until_idle(
+        &compactor_config,
+        build_service_dependencies(&compactor_config).await.unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(descriptors.len() == 1);
+
+    let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
+    querier_config.object_store_url = Some(object_store_url);
+    querier_config.index_prefix = Some(index_prefix.to_string());
+    querier_config.tenant = Some("tenant-a".to_string());
+    querier_config.querier_index_source = QuerierIndexSource::TenantObjectStoreManifest;
+    querier_config.wal_group_id = "loki-protobuf-parsed-differential-querier".to_string();
+    let querier = build_service_router(
+        &querier_config,
+        build_service_dependencies(&querier_config).await.unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let query = r#"{app="api"} | parsed_status = "200""#;
+    let loki_result =
+        loki_query_range_result_once(&http, &loki_base, query, base_ns, base_ns + 1_000_000_000)
+            .await;
+    let crabka_result =
+        crabka_query_range_result(querier, query, base_ns, base_ns + 1_000_000_000).await;
+
+    assert!(crabka_result == loki_result);
+    broker.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6764,6 +6907,30 @@ async fn loki_query_range_result(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn loki_query_range_result_once(
+    http: &reqwest::Client,
+    base: &str,
+    query: &str,
+    start_ns: i64,
+    end_ns: i64,
+) -> Value {
+    let body: Value = http
+        .get(format!("{base}/loki/api/v1/query_range"))
+        .query(&[
+            ("query", query.to_string()),
+            ("start", start_ns.to_string()),
+            ("end", end_ns.to_string()),
+            ("direction", "forward".to_string()),
+        ])
+        .send()
+        .await
+        .expect("query Loki")
+        .json()
+        .await
+        .expect("Loki JSON response");
+    stable_loki_result(&body)
 }
 
 async fn loki_api_prom_query_range_result(
