@@ -1644,6 +1644,7 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
     let mut left = vec![0_i32; batch.num_rows()];
     let mut right = vec![0_i32; batch.num_rows()];
     let mut parent_id = vec![0_i32; batch.num_rows()];
+    let mut child_count = vec![0_i32; batch.num_rows()];
 
     for rows in by_trace.values() {
         let mut positions = BTreeMap::new();
@@ -1670,6 +1671,13 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
                 }
                 _ => roots.push(row),
             }
+        }
+
+        // childCount is PER TRACE: each parent's direct children, scoped to this
+        // trace's rows. The nested-set `left` values reset to 1 per trace, so a
+        // batch-global count would collide across traces and over-count.
+        for (&parent_row, kids) in &children {
+            child_count[parent_row] = i32::try_from(kids.len()).unwrap_or(i32::MAX);
         }
 
         let mut counter = 1_i32;
@@ -1704,18 +1712,6 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
         }
     }
 
-    let child_count = left
-        .iter()
-        .map(|node_left| {
-            i32::try_from(
-                parent_id
-                    .iter()
-                    .filter(|parent| *parent == node_left)
-                    .count(),
-            )
-            .unwrap_or(i32::MAX)
-        })
-        .collect::<Vec<_>>();
     replace_scan_int32_columns(
         batch,
         &[
@@ -2681,6 +2677,68 @@ mod tests {
                 .iter()
                 .any(|value| value.type_ == "string")
         );
+    }
+
+    #[test]
+    fn child_count_is_per_trace_in_multi_trace_scan_batch() {
+        // Two traces in ONE scan batch, each root -> child. Per-trace nested-set
+        // numbering resets `left` to 1, so both roots get left=1 and both
+        // children get parent_id=1. `span:childCount` must be counted PER TRACE
+        // (1 each), not across the whole batch (which collides on left=1 and
+        // inflates each root to 2).
+        let schema = test_schema();
+        let mut trace_id = FixedSizeBinaryBuilder::with_capacity(4, 16);
+        for t in [[7_u8; 16], [7; 16], [9; 16], [9; 16]] {
+            trace_id.append_value(t).unwrap();
+        }
+        let mut span_id = FixedSizeBinaryBuilder::with_capacity(4, 8);
+        for s in [[1_u8; 8], [2; 8], [1; 8], [2; 8]] {
+            span_id.append_value(s).unwrap();
+        }
+        let mut parent = FixedSizeBinaryBuilder::with_capacity(4, 8);
+        parent.append_null(); // trace A root
+        parent.append_value([1; 8]).unwrap(); // trace A child -> A root
+        parent.append_null(); // trace B root
+        parent.append_value([1; 8]).unwrap(); // trace B child -> B root
+        let s4 = |a: &str, b: &str| StringArray::from(vec![a, a, b, b]);
+        let i32_4 = || Int32Array::from(vec![0, 0, 0, 0]);
+        let i64_4 = || Int64Array::from(vec![0_i64, 0, 0, 0]);
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(trace_id.finish()) as ArrayRef,
+                Arc::new(span_id.finish()),
+                Arc::new(parent.finish()),
+                Arc::new(i32_4()), // ns_left (recomputed)
+                Arc::new(i32_4()), // ns_right (recomputed)
+                Arc::new(i32_4()), // parent_id (recomputed)
+                Arc::new(i32_4()), // child_count (recomputed)
+                Arc::new(s4("api", "web")),
+                Arc::new(s4("GET /", "GET /x")),
+                Arc::new(i64_4()),
+                Arc::new(i64_4()),
+                Arc::new(StringArray::from(vec!["root", "child", "root", "child"])),
+                Arc::new(i32_4()),
+                Arc::new(i64_4()),
+                Arc::new(i64_4()),
+                Arc::new(i32_4()),
+                Arc::new(s4("", "")),
+                Arc::new(s4("tracer", "tracer")),
+                Arc::new(s4("", "")),
+                Arc::new(s4("a", "b")),
+            ],
+        )
+        .unwrap();
+
+        let out = recompute_batch_nested_sets(&batch).unwrap();
+        // Per-trace `left` reset (collision confirms the multi-trace scenario).
+        assert!(int32_value(&out, COL_NS_LEFT, 0).unwrap() == 1);
+        assert!(int32_value(&out, COL_NS_LEFT, 2).unwrap() == 1);
+        // Each root has exactly one child; children have none — NOT inflated to 2.
+        assert!(int32_value(&out, COL_CHILD_COUNT, 0).unwrap() == 1);
+        assert!(int32_value(&out, COL_CHILD_COUNT, 1).unwrap() == 0);
+        assert!(int32_value(&out, COL_CHILD_COUNT, 2).unwrap() == 1);
+        assert!(int32_value(&out, COL_CHILD_COUNT, 3).unwrap() == 0);
     }
 
     #[tokio::test]
