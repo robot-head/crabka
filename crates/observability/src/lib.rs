@@ -8409,6 +8409,9 @@ async fn execute_http_metric_query(
     if matches!(kind, QueryKind::Range) && metric_query_uses_approx_topk(&query) {
         return Err(HttpQueryError::ApproxTopKRangeQuery);
     }
+    if metric_query_uses_count_values(&query) {
+        return Err(HttpQueryError::CountValuesQuery);
+    }
     let scan_range = metric_scan_range(&query, time_range)?;
     let state = state.with_request_tenant_index(tenant, scan_range).await?;
     let plan = plan_stream_query(
@@ -8476,6 +8479,13 @@ fn metric_query_uses_approx_topk(query: &MetricQuery) -> bool {
         .vector_aggregation
         .as_ref()
         .is_some_and(|aggregation| matches!(aggregation.op, VectorAggregationOp::ApproxTopK(_)))
+}
+
+fn metric_query_uses_count_values(query: &MetricQuery) -> bool {
+    query
+        .vector_aggregation
+        .as_ref()
+        .is_some_and(|aggregation| matches!(aggregation.op, VectorAggregationOp::CountValues(_)))
 }
 
 async fn execute_http_metric_binary_arithmetic_query(
@@ -15407,6 +15417,8 @@ enum HttpQueryError {
     QuerySeriesTooLarge { series: usize, max_series: usize },
     #[error("approx_topk is only supported for instant query")]
     ApproxTopKRangeQuery,
+    #[error("parse error at line 1, col 1: syntax error: unexpected IDENTIFIER")]
+    CountValuesQuery,
     #[error(transparent)]
     QueryAuthorization(#[from] QueryAuthorizationError),
     #[error("{source}")]
@@ -15458,6 +15470,7 @@ impl IntoResponse for HttpQueryError {
             | Self::QueryLengthTooLarge { .. }
             | Self::QuerySeriesTooLarge { .. }
             | Self::ApproxTopKRangeQuery
+            | Self::CountValuesQuery
             | Self::Plan(_) => StatusCode::BAD_REQUEST,
             Self::QueryAuthorization(QueryAuthorizationError::Unauthorized { .. }) => {
                 StatusCode::FORBIDDEN
@@ -15506,6 +15519,7 @@ impl IntoResponse for HttpQueryError {
                 | Self::InvalidTimestampQueryParameter { .. }
                 | Self::LokiQueryRangeTooLarge { .. }
                 | Self::QueryResolutionTooHigh
+                | Self::CountValuesQuery
         ) {
             return text_response(status, &self.to_string());
         }
