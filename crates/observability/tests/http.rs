@@ -4240,20 +4240,21 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert!(api_prom_rules_response.status() == StatusCode::OK);
+    assert!(api_prom_rules_response.status() == StatusCode::BAD_REQUEST);
+    let content_type = api_prom_rules_response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = text_body(api_prom_rules_response).await;
+    assert!(content_type.starts_with("text/plain"));
     assert!(
-        json_body(api_prom_rules_response).await
-            == json!({
-                "status": "success",
-                "data": {
-                    "groups": []
-                },
-                "errorType": "",
-                "error": ""
-            })
+        body == "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n"
     );
 
     let prometheus_alerts_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/prometheus/api/v1/alerts")
@@ -4275,6 +4276,27 @@ async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
                 "error": ""
             })
     );
+
+    let api_prom_alerts_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/prom/alerts")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(api_prom_alerts_response.status() == StatusCode::NOT_FOUND);
+    let content_type = api_prom_alerts_response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = text_body(api_prom_alerts_response).await;
+    assert!(content_type.starts_with("text/plain"));
+    assert!(body == "404 page not found\n");
 }
 
 #[tokio::test]
@@ -4527,64 +4549,80 @@ rules:
         .unwrap();
     assert!(create_response.status() == StatusCode::ACCEPTED);
 
-    for uri in ["/prometheus/api/v1/rules", "/api/prom/rules"] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .header("X-Scope-OrgID", "tenant-a")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/prometheus/api/v1/rules")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
-        assert!(
-            json_body(response).await
-                == json!({
-                    "status": "success",
-                    "data": {
-                        "groups": [
-                            {
-                                "name": "api-errors",
-                                "file": "default",
-                                "interval": 60,
-                                "limit": 0,
-                                "rules": [
-                                    {
-                                        "type": "alerting",
-                                        "name": "ApiErrors",
-                                        "query": "count_over_time({app=\"api\"} |= \"error\" [5m]) > 0",
-                                        "duration": 120,
-                                        "labels": {
-                                            "severity": "page"
-                                        },
-                                        "annotations": {
-                                            "summary": "API errors detected"
-                                        },
-                                        "alerts": [],
-                                        "health": "ok"
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "api-errors",
+                            "file": "default",
+                            "interval": 60,
+                            "limit": 0,
+                            "rules": [
+                                {
+                                    "type": "alerting",
+                                    "name": "ApiErrors",
+                                    "query": "count_over_time({app=\"api\"} |= \"error\" [5m]) > 0",
+                                    "duration": 120,
+                                    "labels": {
+                                        "severity": "page"
                                     },
-                                    {
-                                        "type": "recording",
-                                        "name": "job:api_errors:rate5m",
-                                        "query": "sum(rate({app=\"api\"} |= \"error\" [5m]))",
-                                        "labels": {
-                                            "job": "api"
-                                        },
-                                        "health": "ok"
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    "errorType": "",
-                    "error": ""
-                })
-        );
-    }
+                                    "annotations": {
+                                        "summary": "API errors detected"
+                                    },
+                                    "alerts": [],
+                                    "health": "ok"
+                                },
+                                {
+                                    "type": "recording",
+                                    "name": "job:api_errors:rate5m",
+                                    "query": "sum(rate({app=\"api\"} |= \"error\" [5m]))",
+                                    "labels": {
+                                        "job": "api"
+                                    },
+                                    "health": "ok"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "errorType": "",
+                "error": ""
+            })
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/prom/rules")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    let body = text_body(response).await;
+    assert!(body.contains("default:"));
+    assert!(body.contains("- name: api-errors\n"));
+    assert!(body.contains("alert: ApiErrors\n"));
 }
 
 async fn post_loki_rule_group_for_test(app: &axum::Router, namespace: &str, rule_group: &str) {
