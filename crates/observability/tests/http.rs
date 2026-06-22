@@ -4177,7 +4177,7 @@ async fn distributor_ring_endpoint_returns_loki_status_page() {
 }
 
 #[tokio::test]
-async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
+async fn ruler_endpoints_match_empty_rule_and_alert_lists() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -4192,7 +4192,7 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
         .await
         .unwrap();
 
-    assert!(loki_rules_response.status() == StatusCode::OK);
+    assert!(loki_rules_response.status() == StatusCode::BAD_REQUEST);
     let content_type = loki_rules_response
         .headers()
         .get("content-type")
@@ -4200,8 +4200,10 @@ async fn ruler_endpoints_return_empty_rule_and_alert_lists() {
         .unwrap_or_default()
         .to_string();
     let body = text_body(loki_rules_response).await;
-    assert!(content_type.starts_with("application/yaml"));
-    assert!(body == "{}\n");
+    assert!(content_type.starts_with("text/plain"));
+    assert!(
+        body == "unable to read rule dir /loki/rules/fake: open /loki/rules/fake: no such file or directory\n"
+    );
 
     let prometheus_rules_response = app
         .clone()
@@ -9940,7 +9942,7 @@ async fn query_range_endpoint_returns_loki_error_for_invalid_since() {
     assert!(response.status() == StatusCode::BAD_REQUEST);
     assert!(
         text_body(response).await
-            == "could not parse 'since' parameter: not a valid duration string: \"-1000000000\""
+            == "could not parse 'since' parameter: not a valid duration string: \"-1\""
     );
 }
 

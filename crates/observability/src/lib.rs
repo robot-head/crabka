@@ -5601,10 +5601,18 @@ async fn loki_rules(State(state): State<QuerierState>, headers: HeaderMap) -> Re
         .tenants
         .lock()
         .expect("Loki rule store lock poisoned");
-    let namespaces = rules.get(&tenant).map(loki_rule_namespace_response);
-    loki_yaml_response(
-        StatusCode::OK,
-        &namespaces.unwrap_or_else(BTreeMap::<String, Vec<serde_yaml::Value>>::new),
+    let Some(namespaces) = rules.get(&tenant).map(loki_rule_namespace_response) else {
+        return missing_loki_rule_directory_response(&tenant);
+    };
+    loki_yaml_response(StatusCode::OK, &namespaces)
+}
+
+fn missing_loki_rule_directory_response(tenant: &str) -> Response {
+    text_response(
+        StatusCode::BAD_REQUEST,
+        &format!(
+            "unable to read rule dir /loki/rules/{tenant}: open /loki/rules/{tenant}: no such file or directory\n"
+        ),
     )
 }
 
@@ -11649,25 +11657,36 @@ fn parse_loki_timestamp_query_param(
         })
 }
 
-fn parse_loki_duration_query_param(
-    _name: &'static str,
-    value: &str,
-) -> Result<i64, HttpQueryError> {
-    if let Ok(seconds) = value.parse::<i64>() {
-        return seconds.checked_mul(1_000_000_000).ok_or_else(|| {
+fn parse_loki_duration_query_param(name: &'static str, value: &str) -> Result<i64, HttpQueryError> {
+    let duration = if let Ok(seconds) = value.parse::<i64>() {
+        seconds.checked_mul(1_000_000_000).ok_or_else(|| {
             HttpQueryError::InvalidDurationQueryParameter {
                 value: value.to_string(),
             }
+        })?
+    } else if let Some(duration_ns) = parse_decimal_seconds_timestamp(value) {
+        duration_ns
+    } else {
+        parse_prometheus_duration(value).ok_or_else(|| {
+            if name == "since" {
+                HttpQueryError::InvalidSinceQueryParameter {
+                    value: value.to_string(),
+                }
+            } else {
+                HttpQueryError::InvalidDurationQueryParameter {
+                    value: value.to_string(),
+                }
+            }
+        })?
+    };
+
+    if name == "since" && duration <= 0 {
+        return Err(HttpQueryError::InvalidSinceQueryParameter {
+            value: value.to_string(),
         });
     }
 
-    if let Some(duration_ns) = parse_decimal_seconds_timestamp(value) {
-        return Ok(duration_ns);
-    }
-
-    parse_prometheus_duration(value).ok_or_else(|| HttpQueryError::InvalidDurationQueryParameter {
-        value: value.to_string(),
-    })
+    Ok(duration)
 }
 
 fn parse_loki_tail_delay_for_query_param(value: &str) -> Result<i64, HttpQueryError> {
