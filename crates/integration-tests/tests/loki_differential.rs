@@ -2843,6 +2843,14 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
     assert!(crabka_metric_vector_result == loki_metric_vector_result);
 
+    let vector_metric_group_right_query = r#"vector(1) + on() group_right(app, env) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
+    let loki_vector_metric_group_right_result =
+        loki_query_result(&http, &loki_base, vector_metric_group_right_query, time_ns).await;
+    let crabka_vector_metric_group_right_result =
+        crabka_query_result(querier.clone(), vector_metric_group_right_query, time_ns).await;
+
+    assert!(crabka_vector_metric_group_right_result == loki_vector_metric_group_right_result);
+
     let metric_vector_comparison_query = r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s]) > bool on() vector(0)"#;
     let loki_metric_vector_comparison_result =
         loki_query_result(&http, &loki_base, metric_vector_comparison_query, time_ns).await;

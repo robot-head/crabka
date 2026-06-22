@@ -10813,6 +10813,7 @@ fn include_metric_group_labels(
         return;
     };
     for label in labels {
+        output_metric.remove(label);
         if let Some(value) = source_metric.get(label).and_then(Value::as_str) {
             output_metric.insert(label.clone(), json!(value));
         }
