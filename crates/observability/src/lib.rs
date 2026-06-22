@@ -3075,6 +3075,16 @@ fn normalize_loki_http_push(
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let body = decode_loki_http_body(headers, body)?;
     if is_loki_json_content_type(headers)? {
+        let raw_payload: Value =
+            serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
+        if raw_payload.is_null() {
+            return Err(DistributorError::NoValidStreams);
+        }
+        if !raw_payload.is_object() {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_payload_parse_error(&body),
+            ));
+        }
         let payload =
             serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
         let payload = validate_loki_json_push_stream_objects(payload, &body)?;
@@ -3184,6 +3194,23 @@ fn loki_json_push_value_parse_error(body: &[u8], value: &Value) -> String {
 
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Unknown value type, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
+}
+
+fn loki_json_push_payload_parse_error(body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(body);
+    let value_start = body
+        .char_indices()
+        .find_map(|(index, char)| (!char.is_whitespace()).then_some(index))
+        .unwrap_or(body.len());
+    let found = body[value_start..].chars().next().unwrap_or('\0');
+    let context_start = previous_char_boundary(&body, value_start);
+    let context_end = previous_char_boundary(&body, body.len().min(context_start + 11));
+    let context = &body[context_start..context_end];
+    let bigger_context = loki_decode_error_context(&body, value_start);
+
+    format!(
+        "readObjectStart: expect {{ or n, but found {found}, error found in #1 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
     )
 }
 
