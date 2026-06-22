@@ -988,7 +988,7 @@ async fn loki_push_endpoint_rejects_unsupported_content_encoding_without_wal_app
         .unwrap();
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(&json_body(response).await, "bad_data", "not supported");
+    assert!(text_body(response).await == "Content-Encoding \"br\" not supported\n");
     assert!(sink.records().is_empty());
 }
 
