@@ -421,8 +421,12 @@ async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
 
     for path in [
         "/loki/api/v1/rules",
+        "/loki/api/v1/rules/default",
+        "/loki/api/v1/rules/default/api-errors",
         "/prometheus/api/v1/rules",
         "/prometheus/api/v1/alerts",
+        "/api/prom/rules/default",
+        "/api/prom/rules/default/api-errors",
     ] {
         let loki_result = loki_ruler_inventory_result(&http, &loki_base, path).await;
         let crabka_result = crabka_ruler_inventory_result(querier.clone(), path).await;
