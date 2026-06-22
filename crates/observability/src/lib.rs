@@ -11068,6 +11068,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_label_replace_query(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_label_replace_metric_scalar_expression(query) {
+                Ok(formatted)
             } else if let Some(formatted) = format_label_replace_metric_vector_expression(query) {
                 Ok(formatted)
             } else if let Some(formatted) = format_sort_vector_expression(query) {
@@ -11296,6 +11298,31 @@ fn format_metric_label_replace_query(query: &str) -> Option<String> {
         format_logql_quoted_string(&label_replace.source_label),
         format_logql_quoted_string(&label_replace.pattern),
     ))
+}
+
+fn format_label_replace_metric_scalar_expression(query: &str) -> Option<String> {
+    let arguments = split_logql_function_arguments(query, "label_replace")?;
+    if arguments.len() != 5 {
+        return None;
+    }
+    let vector = format_metric_scalar_vector_expression(arguments[0].trim())?;
+    Some(format!(
+        "label_replace({vector},{},{},{},{})",
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[1].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[2].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[3].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[4].trim())?),
+    ))
+}
+
+fn format_metric_scalar_vector_expression(query: &str) -> Option<String> {
+    if let Some(formatted) = format_metric_scalar_arithmetic_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
+        return Some(formatted);
+    }
+    None
 }
 
 fn format_label_replace_metric_vector_expression(query: &str) -> Option<String> {

@@ -4333,6 +4333,12 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
 
     assert!(crabka_result == loki_result);
 
+    let query = r#"label_replace(count_over_time({app="api"}[30s]) + 1.25e-1, "service", "$1-api", "app", "(.*)")"#;
+    let loki_result = loki_format_query_result(&http, &loki_base, query).await;
+    let crabka_result = crabka_format_query_result(querier.clone(), query).await;
+
+    assert!(crabka_result == loki_result);
+
     let loki_post_result = loki_format_query_post_result(
         &http,
         &loki_base,
