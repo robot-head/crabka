@@ -642,8 +642,19 @@ fn value_div(lhs: Value, rhs: Value) -> Result<Value> {
         (_, Value::Int(0) | Value::Float(0.0)) => {
             Err(TraceqlError::Parse("division by zero".into()))
         }
-        (Value::Int(lhs), Value::Int(rhs)) if lhs % rhs == 0 => Ok(Value::Int(lhs / rhs)),
-        (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? / i64_to_f64(rhs)?)),
+        (Value::Int(lhs), Value::Int(rhs)) => {
+            let rem = lhs
+                .checked_rem(rhs)
+                .ok_or_else(|| TraceqlError::Parse("integer division out of range".into()))?;
+            if rem == 0 {
+                let quot = lhs
+                    .checked_div(rhs)
+                    .ok_or_else(|| TraceqlError::Parse("integer division out of range".into()))?;
+                Ok(Value::Int(quot))
+            } else {
+                Ok(Value::Float(i64_to_f64(lhs)? / i64_to_f64(rhs)?))
+            }
+        }
         (Value::Float(lhs), Value::Float(rhs)) => Ok(Value::Float(lhs / rhs)),
         (Value::Int(lhs), Value::Float(rhs)) => Ok(Value::Float(i64_to_f64(lhs)? / rhs)),
         (Value::Float(lhs), Value::Int(rhs)) => Ok(Value::Float(lhs / i64_to_f64(rhs)?)),
@@ -660,8 +671,14 @@ fn value_mod(lhs: Value, rhs: Value) -> Result<Value> {
         (_, Value::Int(0) | Value::Duration(0)) => {
             Err(TraceqlError::Parse("modulo by zero".into()))
         }
-        (Value::Int(lhs), Value::Int(rhs)) => Ok(Value::Int(lhs % rhs)),
-        (Value::Duration(lhs), Value::Duration(rhs)) => Ok(Value::Duration(lhs % rhs)),
+        (Value::Int(lhs), Value::Int(rhs)) => lhs
+            .checked_rem(rhs)
+            .map(Value::Int)
+            .ok_or_else(|| TraceqlError::Parse("integer modulo out of range".into())),
+        (Value::Duration(lhs), Value::Duration(rhs)) => lhs
+            .checked_rem(rhs)
+            .map(Value::Duration)
+            .ok_or_else(|| TraceqlError::Parse("duration modulo out of range".into())),
         (lhs, rhs) => arithmetic_type_error("%", &lhs, &rhs),
     }
 }
@@ -1090,5 +1107,56 @@ mod tests {
     #[test]
     fn double_equals_is_rejected() {
         assert!(parse("{ .a == 1 }").is_err());
+    }
+
+    #[test]
+    fn value_fold_min_div_neg_one_errors_not_panics() {
+        // (0 - 9223372036854775807 - 1) folds to i64::MIN; (0 - 1) folds to -1.
+        // i64::MIN / -1 and i64::MIN % -1 overflow and must surface as a Parse
+        // error rather than panicking the parser (DoS via crafted query).
+        let div = parse("{ .x = (0 - 9223372036854775807 - 1) / (0 - 1) }");
+        assert!(matches!(div, Err(TraceqlError::Parse(_))));
+
+        let rem = parse("{ .x = (0 - 9223372036854775807 - 1) % (0 - 1) }");
+        assert!(matches!(rem, Err(TraceqlError::Parse(_))));
+    }
+
+    #[test]
+    fn value_fold_div_and_mod_still_work() {
+        let q = parse("{ .x = 6 / 2 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!("selector")
+        };
+        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
+            panic!("cmp")
+        };
+        assert!(*rhs == Value::Int(3));
+
+        let q = parse("{ .x = 7 % 3 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!("selector")
+        };
+        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
+            panic!("cmp")
+        };
+        assert!(*rhs == Value::Int(1));
+    }
+
+    #[test]
+    fn quantile_leading_zero_fraction_preserved() {
+        for (query, expected) in [
+            ("{ .a = 1 } | quantile_over_time(span:duration, .05)", 0.05),
+            ("{ .a = 1 } | quantile_over_time(span:duration, .99)", 0.99),
+            ("{ .a = 1 } | quantile_over_time(span:duration, .5)", 0.5),
+            ("{ .a = 1 } | quantile_over_time(span:duration, .9)", 0.9),
+        ] {
+            let q = parse(query).unwrap();
+            let [Pipeline::Aggregate(Aggregate::QuantileOverTime { quantiles, .. })] =
+                q.pipeline.as_slice()
+            else {
+                panic!("quantile pipeline for {query}")
+            };
+            assert!(*quantiles == vec![expected]);
+        }
     }
 }

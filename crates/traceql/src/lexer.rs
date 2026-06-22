@@ -79,6 +79,23 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             )));
         }
 
+        // A `.` immediately followed by a digit (e.g. `.05`, `.99`) is a
+        // leading-dot fractional number, lexed as a single `Token::Float` so
+        // leading zeros survive. A `.` followed by an identifier (e.g.
+        // `.service`) remains a `Dot` for attribute-scope syntax.
+        if ch == '.'
+            && rest[1..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_ascii_digit())
+        {
+            let (tok, len) = scan_number_or_duration(rest)?;
+            tokens.push(tok);
+            i += len;
+            prev = Prev::Ident;
+            continue;
+        }
+
         if let Some((tok, len)) = op_token(rest) {
             i += len;
             prev = match tok {
@@ -394,5 +411,20 @@ mod tests {
         assert!(toks("true false") == vec![Token::Bool(true), Token::Bool(false)]);
         assert!(toks("1.5") == vec![Token::Float(1.5)]);
         assert!(toks("100ms") == vec![Token::Ident("100ms".into())]);
+    }
+
+    #[test]
+    fn leading_dot_fraction_is_single_float_preserving_zeros() {
+        assert!(toks(".05") == vec![Token::Float(0.05)]);
+        assert!(toks(".99") == vec![Token::Float(0.99)]);
+        assert!(toks(".5") == vec![Token::Float(0.5)]);
+        assert!(toks(".009") == vec![Token::Float(0.009)]);
+    }
+
+    #[test]
+    fn leading_dot_ident_remains_dot_scope() {
+        // A dot followed by an identifier must stay `Dot` + `Ident`, never a float.
+        assert!(toks(".service") == vec![Token::Dot, Token::Ident("service".into())]);
+        assert!(toks(".http.status") == vec![Token::Dot, Token::Ident("http.status".into())]);
     }
 }
