@@ -1025,7 +1025,9 @@ async fn loki_push_endpoint_treats_non_json_content_type_as_snappy_protobuf() {
         .unwrap();
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(&json_body(response).await, "bad_data", "snappy");
+    // Real Loki 3.4.2 returns a plain-text body (`Content-Type: text/plain`) for a
+    // failed snappy-protobuf decode on a non-JSON push, not a JSON error envelope.
+    assert!(text_body(response).await == "snappy: corrupt input\n");
     assert!(sink.records().is_empty());
 }
 
@@ -5100,7 +5102,7 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
     let response = querier_app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000000&direction=forward")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000001&direction=forward")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -5218,7 +5220,7 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
     let response = querier_app
         .oneshot(
             Request::builder()
-                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000000&direction=forward")
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D&start=14000000000&end=17000000001&direction=forward")
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
                 .unwrap(),
@@ -12781,8 +12783,14 @@ async fn query_range_endpoint_uses_default_end_with_since() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(json_body(response).await == expected_api_error());
+    // `since` with no explicit `end` resolves `end = now`, `start = now - since`, so the
+    // resolved range equals `since` (= 2_000_000_000s). Real Loki 3.4.2 caps the resolved
+    // query range at 30d1h (721h), so this 555555h33m20s window is rejected with 400.
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "the query time range exceeds the limit (query length: 555555h33m20s, limit: 30d1h)"
+    );
 }
 
 #[tokio::test]
@@ -13003,7 +13011,7 @@ async fn query_range_endpoint_accepts_range_selector_before_pipeline() {
 }
 
 #[tokio::test]
-async fn query_range_endpoint_accepts_vector_function_expression() {
+async fn query_range_endpoint_rejects_signed_vector_function_literals_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -13018,26 +13026,13 @@ async fn query_range_endpoint_accepts_vector_function_expression() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
+    // Real Loki 3.4.2 rejects a signed literal inside `vector(...)`: a unary `-` is
+    // not a NUMBER token, so the LogQL parser errors at column 8 (same as the instant
+    // `/query` endpoint — see `query_endpoint_rejects_signed_vector_function_literals_like_loki`).
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": {
-                    "resultType": "matrix",
-                    "result": [
-                        {
-                            "metric": {},
-                            "values": [
-                                [0, "-0.25"],
-                                [0.00000001, "-0.25"],
-                                [0.00000002, "-0.25"]
-                            ]
-                        }
-                    ],
-                    "stats": expected_loki_stats()
-                }
-            })
+        text_body(response).await
+            == "parse error at line 1, col 8: syntax error: unexpected -, expecting NUMBER"
     );
 }
 

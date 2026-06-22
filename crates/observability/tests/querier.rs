@@ -1729,9 +1729,11 @@ async fn executes_absent_over_time_query_for_empty_plan() {
                     "resultType": "matrix",
                     "result": [
                         {
+                            // Real Loki 3.4.2's `absent_over_time` synthesizes a series from the
+                            // selector's equality matchers only — no `detected_level` (there is no
+                            // log line to detect a level from).
                             "metric": {
                                 "app": "api",
-                                "detected_level": "unknown",
                                 "env": "prod"
                             },
                             "values": [
