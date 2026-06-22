@@ -2142,6 +2142,29 @@ async fn loki_push_endpoint_rejects_invalid_snappy_protobuf_without_wal_append()
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_invalid_protobuf_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(vec![0x03, 0x08, 0xff, 0xff, 0xff]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "unexpected EOF\n");
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
