@@ -290,6 +290,48 @@ async fn loki_push_endpoint_ignores_extra_json_value_fields_like_loki() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_decodes_empty_json_value_as_zero_timestamp_empty_line_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                },
+                                "values": [
+                                    []
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(records[0].labels == labels([("app", "api"), ("service_name", "api")]));
+    assert!(records[0].timestamp_ns == 0);
+    assert!(records[0].line.is_empty());
+    assert!(records[0].structured_metadata.is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_non_array_json_value_like_loki() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
