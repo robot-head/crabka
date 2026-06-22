@@ -4705,6 +4705,59 @@ pub fn parse_metric_binary_set_query(input: &str) -> Result<MetricBinarySet, Par
     Parser::new(input).parse_metric_binary_set()
 }
 
+fn parse_metric_subexpression(input: &str) -> Result<MetricQuery, ParseError> {
+    Parser::new(strip_outer_metric_parentheses(input)).parse_metric()
+}
+
+fn strip_outer_metric_parentheses(input: &str) -> &str {
+    let mut trimmed = input.trim();
+    while let Some(inner) = outer_metric_parentheses_inner(trimmed) {
+        trimmed = inner.trim();
+    }
+    trimmed
+}
+
+fn outer_metric_parentheses_inner(input: &str) -> Option<&str> {
+    let mut chars = input.char_indices();
+    if chars.next()?.1 != '(' {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut quote_delimiter = None;
+    let mut escaped = false;
+    for (index, ch) in input.char_indices() {
+        if let Some(delimiter) = quote_delimiter {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote_delimiter = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' | '`' => quote_delimiter = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    let close_end = index + ch.len_utf8();
+                    if close_end == input.len() {
+                        return Some(&input[1..index]);
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricQuery {
     pub aggregation: RangeAggregation,
@@ -5091,7 +5144,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(MetricLabelReplace {
-            query: Parser::new(&metric_query).parse_metric()?,
+            query: parse_metric_subexpression(&metric_query)?,
             destination_label,
             replacement,
             source_label,
@@ -5127,7 +5180,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(MetricLabelJoin {
-            query: Parser::new(&metric_query).parse_metric()?,
+            query: parse_metric_subexpression(&metric_query)?,
             destination_label,
             separator,
             source_labels,
@@ -5203,7 +5256,7 @@ impl<'a> Parser<'a> {
                 }
                 self.pos = self.input.len();
                 MetricScalarComparison {
-                    query: Parser::new(&metric_query_text).parse_metric()?,
+                    query: parse_metric_subexpression(&metric_query_text)?,
                     op,
                     bool_modifier,
                     scalar,
@@ -5213,7 +5266,7 @@ impl<'a> Parser<'a> {
             Err(_) => {
                 self.pos = start;
                 let metric_query_text = self.parse_metric_expression_argument()?;
-                let query = Parser::new(&metric_query_text).parse_metric()?;
+                let query = parse_metric_subexpression(&metric_query_text)?;
                 let op = self.parse_comparison_op()?;
                 self.skip_ws();
                 let bool_modifier = self.consume_keyword("bool");
@@ -5250,7 +5303,7 @@ impl<'a> Parser<'a> {
                 }
                 self.pos = self.input.len();
                 MetricScalarArithmetic {
-                    query: Parser::new(&metric_query_text).parse_metric()?,
+                    query: parse_metric_subexpression(&metric_query_text)?,
                     op,
                     scalar,
                     scalar_on_left: true,
@@ -5259,7 +5312,7 @@ impl<'a> Parser<'a> {
             Err(_) => {
                 self.pos = start;
                 let (metric_query_text, op) = self.parse_metric_arithmetic_argument()?;
-                let query = Parser::new(&metric_query_text).parse_metric()?;
+                let query = parse_metric_subexpression(&metric_query_text)?;
                 let scalar = self.parse_scalar_literal_text()?;
                 MetricScalarArithmetic {
                     query,
@@ -5287,10 +5340,10 @@ impl<'a> Parser<'a> {
         }
         self.pos = self.input.len();
         let arithmetic = MetricBinaryArithmetic {
-            left: Parser::new(&left_text).parse_metric()?,
+            left: parse_metric_subexpression(&left_text)?,
             op,
             matching,
-            right: Parser::new(&right_text).parse_metric()?,
+            right: parse_metric_subexpression(&right_text)?,
         };
         self.skip_ws();
         if self.pos != self.input.len() {
@@ -5313,11 +5366,11 @@ impl<'a> Parser<'a> {
         }
         self.pos = self.input.len();
         let comparison = MetricBinaryComparison {
-            left: Parser::new(&left_text).parse_metric()?,
+            left: parse_metric_subexpression(&left_text)?,
             op,
             bool_modifier,
             matching,
-            right: Parser::new(&right_text).parse_metric()?,
+            right: parse_metric_subexpression(&right_text)?,
         };
         self.skip_ws();
         if self.pos != self.input.len() {
@@ -5337,10 +5390,10 @@ impl<'a> Parser<'a> {
         }
         self.pos = self.input.len();
         let set = MetricBinarySet {
-            left: Parser::new(&left_text).parse_metric()?,
+            left: parse_metric_subexpression(&left_text)?,
             op,
             matching,
-            right: Parser::new(&right_text).parse_metric()?,
+            right: parse_metric_subexpression(&right_text)?,
         };
         self.skip_ws();
         if self.pos != self.input.len() {
