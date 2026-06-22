@@ -894,6 +894,46 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
 
     assert!(crabka_result == loki_result);
 
+    let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) + on() vector(1)"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) > bool on() vector(0)"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) and on() vector(1)"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"vector(1) + on() group_right(app, env) count_over_time({app="api",env="prod"} |= "error" [2s])"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
+    let query = r#"vector(1) or on() count_over_time({app="api",env="prod"} |= "error" [2s])"#;
+    let loki_result =
+        loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
+    let crabka_result =
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
+
+    assert!(crabka_result == loki_result);
+
     let query = r#"absent_over_time({app="missing",env="prod"} [2s])"#;
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
