@@ -8,19 +8,25 @@
 #![allow(clippy::default_trait_access)]
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use crabka_pprof::PprofProfile;
+use crabka_pprof::proto;
 use crabka_profiles::distributor::{self, DistributorState, WalSink};
 use crabka_profiles::hot_store::WalTailProfileStore;
 use crabka_profiles::ingest::TenantLimitConfig;
 use crabka_profiles::limits::OverridesProvider;
 use crabka_profiles::query::{self, QuerierState};
 use crabka_profiles::{ProfileRecord, ProfilesError};
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::core::{Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{GenericImage, ImageExt};
 use tokio::sync::oneshot;
@@ -29,6 +35,14 @@ const TENANT: &str = "tenant-a";
 const PROFILE_ENV: &str = "pprofdiff";
 const PROFILE_TYPE: &str = "goroutines:goroutine:count:goroutine:count";
 const SELECTOR: &str = r#"{env="pprofdiff"}"#;
+
+const TENANT_B: &str = "tenant-b";
+const CPU_PROFILE_TYPE: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+const CPU_NAME: &str = "process_cpu";
+const E2E_SERVICE: &str = "checkout";
+const E2E_SELECTOR: &str = r#"{service_name="checkout"}"#;
+const FUNC_WORK: &str = "main.work";
+const FUNC_HOT: &str = "main.hotloop";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -228,6 +242,9 @@ async fn start_grafana() -> TestResult<testcontainers::ContainerAsync<GenericIma
         .with_exposed_port(3000.tcp())
         .with_wait_for(WaitFor::seconds(5))
         .with_env_var("GF_SECURITY_ADMIN_PASSWORD", "admin")
+        // Let the container reach the in-process Crabka querier on the host via
+        // host.docker.internal (host-gateway mapping; works on Docker Desktop + Linux).
+        .with_host("host.docker.internal", Host::HostGateway)
         .start()
         .await?)
 }
@@ -1457,4 +1474,576 @@ fn connect_diff_differential_rejects_tick_drift() {
 
     let err = assert_diff_equal(&expected, &actual).unwrap_err();
     assert!(err.to_string().contains("Diff mismatch"));
+}
+
+// ---------------------------------------------------------------------------
+// Comprehensive Grafana end-to-end test
+//
+// Unlike `grafana_accepts_pyroscope_datasource_pointing_at_crabka` (which only
+// registers a datasource and reads it back), this test drives the *full* path:
+// ingest a known profile through the real distributor push door, then stand up
+// real Grafana with its built-in Pyroscope datasource pointed at Crabka and
+// prove that Grafana → grafana-pyroscope-datasource → Crabka works for
+//   (1) the config-test / health probe (ProfileTypes through the plugin),
+//   (2) a flamegraph query driven *through* Grafana (the real Explore path),
+//   (3) multi-tenant isolation enforced through Grafana's per-datasource
+//       X-Scope-OrgID header injection.
+// ---------------------------------------------------------------------------
+
+/// Regression for the Grafana-compat bug surfaced by `grafana_renders_crabka_profiles_end_to_end`:
+/// Grafana's built-in Pyroscope datasource is a connect-go client that issues unary requests
+/// with `Content-Type: application/proto` and rejects any 200 response whose content-type does
+/// not echo `application/proto`. The Docker-free reproduction sends a real `application/proto`
+/// `ProfileTypes` request and asserts the response content-type echoes it. (Docker-free, runs in CI.)
+#[tokio::test]
+async fn querier_echoes_proto_content_type_for_proto_requests() -> TestResult {
+    let store = WalTailProfileStore::new();
+    let crabka = start_crabka_public(CapturingSink::default(), store).await?;
+    let client = reqwest::Client::new();
+
+    // An all-default ProfileTypesRequest (start=end=0) encodes to zero proto bytes, so an
+    // empty body with Content-Type application/proto is a valid Connect unary proto request.
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{}/querier.v1.QuerierService/ProfileTypes",
+            crabka.querier_port
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "application/proto")
+        .header("x-scope-orgid", TENANT)
+        .body(Vec::<u8>::new())
+        .send()
+        .await?;
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let body = response.text().await.unwrap_or_default();
+
+    crabka.shutdown();
+
+    assert!(
+        status.is_success(),
+        "ProfileTypes (application/proto) returned {status}: ct=`{content_type}` body=`{body}`"
+    );
+    assert!(
+        content_type.starts_with("application/proto"),
+        "ProfileTypes (application/proto) response must echo application/proto, got `{content_type}` (status {status})"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the grafana/grafana image"]
+async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
+    let client = reqwest::Client::new();
+
+    let sample_time_ns = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
+        .map_err(|_| "current time does not fit i64 nanoseconds")?;
+    let now_ms = sample_time_ns / 1_000_000;
+    let from_ms = now_ms - 3_600_000;
+    let to_ms = now_ms + 3_600_000;
+
+    // 1. Ingest a known CPU profile for tenant-a through the real distributor push door,
+    //    then replay the captured WAL records into the querier's hot store.
+    let gzipped = synthetic_cpu_pprof(sample_time_ns)?;
+    let sink = CapturingSink::default();
+    let store = WalTailProfileStore::new();
+    let crabka = start_crabka_public(sink.clone(), store.clone()).await?;
+    post_cpu_profile(&client, &crabka.distributor_base, Some(TENANT), &gzipped).await?;
+    for record in sink
+        .records
+        .lock()
+        .map_err(|_| "capturing sink lock poisoned")?
+        .clone()
+    {
+        store.append_record(record)?;
+    }
+
+    // 2. Real Grafana + its built-in Pyroscope datasource, one per tenant. Each datasource
+    //    injects its own X-Scope-OrgID via the standard custom-HTTP-header mechanism, so the
+    //    backend plugin tags every outgoing request to Crabka with the tenant.
+    let grafana = start_grafana().await?;
+    let grafana_base = mapped_base_url(&grafana, 3000).await?;
+    wait_for_http_ok(&client, &grafana_base, &["/api/health"]).await?;
+    let crabka_url = format!("http://host.docker.internal:{}", crabka.querier_port);
+    let uid_a = create_pyroscope_datasource(
+        &client,
+        &grafana_base,
+        "Crabka Profiles A",
+        &crabka_url,
+        TENANT,
+    )
+    .await?;
+    let uid_b = create_pyroscope_datasource(
+        &client,
+        &grafana_base,
+        "Crabka Profiles B",
+        &crabka_url,
+        TENANT_B,
+    )
+    .await?;
+
+    // 3. Config-test / health probe: Grafana's datasource health check drives ProfileTypes
+    //    through the plugin to Crabka (the spec's health surface; there is no /ready).
+    let health = datasource_health_until_ok(&client, &grafana_base, &uid_a).await?;
+    assert!(
+        datasource_health_is_ok(&health),
+        "tenant-a datasource health not OK: {health}"
+    );
+
+    // 4. Drive a flamegraph query THROUGH Grafana and assert Crabka's symbolized data returns.
+    let query_a = GrafanaQuery {
+        grafana_base: &grafana_base,
+        uid: &uid_a,
+        profile_type: CPU_PROFILE_TYPE,
+        selector: E2E_SELECTOR,
+        from_ms,
+        to_ms,
+    };
+    let (names_a, positive_a) =
+        grafana_profile_evidence_until(&client, &query_a, |names, positive| {
+            positive && names.contains(FUNC_WORK)
+        })
+        .await?;
+    assert!(
+        names_a.contains(FUNC_WORK),
+        "Grafana query did not return {FUNC_WORK}: {names_a:?}"
+    );
+    assert!(
+        names_a.contains(FUNC_HOT),
+        "Grafana query did not return {FUNC_HOT}: {names_a:?}"
+    );
+    assert!(
+        positive_a,
+        "Grafana query returned no positive sample value"
+    );
+
+    // 5. Multi-tenant isolation THROUGH Grafana: tenant-b's datasource must not see any of
+    //    tenant-a's profiles, labels, or frames.
+    let query_b = GrafanaQuery {
+        grafana_base: &grafana_base,
+        uid: &uid_b,
+        profile_type: CPU_PROFILE_TYPE,
+        selector: E2E_SELECTOR,
+        from_ms,
+        to_ms,
+    };
+    let (names_b, positive_b) = grafana_profile_evidence(&client, &query_b).await?;
+    assert!(
+        !names_b.contains(FUNC_WORK) && !names_b.contains(FUNC_HOT),
+        "tenant-b leaked tenant-a frames through Grafana: {names_b:?}"
+    );
+    assert!(
+        !positive_b,
+        "tenant-b saw tenant-a sample values through Grafana"
+    );
+
+    crabka.shutdown();
+    Ok(())
+}
+
+/// Build a tiny, deterministic single-sample-type CPU pprof (gzipped) with two known
+/// functions (`main.work`, `main.hotloop`) so the flamegraph names are assertable.
+fn synthetic_cpu_pprof(time_nanos: i64) -> TestResult<Vec<u8>> {
+    // string_table: 0="" 1="cpu" 2="nanoseconds" 3=main.work 4=main.hotloop 5="app.go"
+    let profile = proto::Profile {
+        sample_type: vec![proto::ValueType { r#type: 1, unit: 2 }],
+        sample: vec![
+            proto::Sample {
+                location_id: vec![2, 1], // leaf-first: main.hotloop -> main.work
+                value: vec![100],
+                label: Vec::new(),
+            },
+            proto::Sample {
+                location_id: vec![1], // main.work
+                value: vec![40],
+                label: Vec::new(),
+            },
+        ],
+        mapping: vec![proto::Mapping {
+            id: 1,
+            has_functions: true,
+            ..Default::default()
+        }],
+        location: vec![
+            proto::Location {
+                id: 1,
+                mapping_id: 1,
+                address: 0x1000,
+                line: vec![proto::Line {
+                    function_id: 1,
+                    line: 10,
+                    column: 0,
+                }],
+                is_folded: false,
+            },
+            proto::Location {
+                id: 2,
+                mapping_id: 1,
+                address: 0x2000,
+                line: vec![proto::Line {
+                    function_id: 2,
+                    line: 20,
+                    column: 0,
+                }],
+                is_folded: false,
+            },
+        ],
+        function: vec![
+            proto::Function {
+                id: 1,
+                name: 3,
+                system_name: 3,
+                filename: 5,
+                start_line: 1,
+            },
+            proto::Function {
+                id: 2,
+                name: 4,
+                system_name: 4,
+                filename: 5,
+                start_line: 2,
+            },
+        ],
+        string_table: vec![
+            String::new(),
+            "cpu".to_string(),
+            "nanoseconds".to_string(),
+            FUNC_WORK.to_string(),
+            FUNC_HOT.to_string(),
+            "app.go".to_string(),
+        ],
+        time_nanos,
+        duration_nanos: 1_000_000_000,
+        period_type: Some(proto::ValueType { r#type: 1, unit: 2 }),
+        period: 10_000_000,
+        ..Default::default()
+    };
+    gzip_bytes(&PprofProfile::from(profile).encode())
+}
+
+fn gzip_bytes(bytes: &[u8]) -> TestResult<Vec<u8>> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(bytes)?;
+    Ok(encoder.finish()?)
+}
+
+async fn post_cpu_profile(
+    client: &reqwest::Client,
+    base: &str,
+    tenant: Option<&str>,
+    gzipped_pprof: &[u8],
+) -> TestResult {
+    let body = json!({
+        "series": [{
+            "labels": [
+                { "name": "__name__", "value": CPU_NAME },
+                { "name": "service_name", "value": E2E_SERVICE },
+                { "name": "env", "value": "e2e" }
+            ],
+            "samples": [{
+                "rawProfile": BASE64.encode(gzipped_pprof),
+                "ID": "crabka-grafana-e2e"
+            }]
+        }]
+    });
+    let mut request = client
+        .post(format!("{base}/push.v1.PusherService/Push"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&body);
+    if let Some(tenant) = tenant {
+        request = request.header("x-scope-orgid", tenant);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    if status != StatusCode::OK {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("push.v1 cpu profile to {base} returned {status}: {body}").into());
+    }
+    Ok(())
+}
+
+struct CrabkaPublic {
+    distributor_base: String,
+    querier_port: u16,
+    distributor_shutdown: Option<oneshot::Sender<()>>,
+    querier_shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl CrabkaPublic {
+    fn shutdown(mut self) {
+        if let Some(tx) = self.distributor_shutdown.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.querier_shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Like `start_crabka_pair`, but binds the querier on all interfaces so the Grafana
+/// container can reach it via `host.docker.internal:<port>`. The distributor stays
+/// host-local (the test pushes to it directly).
+async fn start_crabka_public(
+    sink: CapturingSink,
+    store: WalTailProfileStore,
+) -> TestResult<CrabkaPublic> {
+    let (distributor_shutdown, distributor_rx) = oneshot::channel();
+    let distributor_state = Arc::new(DistributorState {
+        sink: Arc::new(sink),
+        limits: TenantLimitConfig::default(),
+        profile_overrides: OverridesProvider::new(Default::default()),
+        active_series: Default::default(),
+        ingestion_buckets: Default::default(),
+        relabel: Vec::new(),
+        max_decompressed: 16 * 1024 * 1024,
+    });
+    let distributor_addr =
+        distributor::serve("127.0.0.1:0".parse()?, distributor_state, async move {
+            let _ = distributor_rx.await;
+        })
+        .await?;
+
+    let (querier_shutdown, querier_rx) = oneshot::channel();
+    let querier_state = Arc::new(QuerierState::new(Arc::new(store)));
+    let querier_addr = query::serve("0.0.0.0:0".parse()?, querier_state, async move {
+        let _ = querier_rx.await;
+    })
+    .await?;
+
+    Ok(CrabkaPublic {
+        distributor_base: format!("http://{distributor_addr}"),
+        querier_port: querier_addr.port(),
+        distributor_shutdown: Some(distributor_shutdown),
+        querier_shutdown: Some(querier_shutdown),
+    })
+}
+
+async fn create_pyroscope_datasource(
+    client: &reqwest::Client,
+    grafana_base: &str,
+    name: &str,
+    crabka_url: &str,
+    tenant: &str,
+) -> TestResult<String> {
+    let payload = json!({
+        "name": name,
+        "type": "grafana-pyroscope-datasource",
+        "access": "proxy",
+        "url": crabka_url,
+        "jsonData": { "httpHeaderName1": "X-Scope-OrgID" },
+        "secureJsonData": { "httpHeaderValue1": tenant }
+    });
+    let created: Value = client
+        .post(format!("{grafana_base}/api/datasources"))
+        .basic_auth("admin", Some("admin"))
+        .json(&payload)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    created
+        .get("datasource")
+        .and_then(|datasource| datasource.get("uid"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("datasource create response missing uid: {created}").into())
+}
+
+async fn datasource_health_until_ok(
+    client: &reqwest::Client,
+    grafana_base: &str,
+    uid: &str,
+) -> TestResult<Value> {
+    let mut last = None;
+    for _ in 0..120 {
+        match datasource_health(client, grafana_base, uid).await {
+            Ok(value) if datasource_health_is_ok(&value) => return Ok(value),
+            Ok(value) => last = Some(format!("datasource health not OK: {value}")),
+            Err(err) => last = Some(err.to_string()),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(last
+        .unwrap_or_else(|| "datasource health never became OK".to_string())
+        .into())
+}
+
+async fn datasource_health(
+    client: &reqwest::Client,
+    grafana_base: &str,
+    uid: &str,
+) -> TestResult<Value> {
+    let response = client
+        .get(format!("{grafana_base}/api/datasources/uid/{uid}/health"))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await?;
+    if !status.is_success() {
+        return Err(format!("datasource health returned {status}: {text}").into());
+    }
+    serde_json::from_str(&text)
+        .map_err(|err| format!("datasource health returned non-JSON `{text}`: {err}").into())
+}
+
+fn datasource_health_is_ok(value: &Value) -> bool {
+    value
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("ok"))
+}
+
+struct GrafanaQuery<'a> {
+    grafana_base: &'a str,
+    uid: &'a str,
+    profile_type: &'a str,
+    selector: &'a str,
+    from_ms: i64,
+    to_ms: i64,
+}
+
+/// Collect the function names and a positive-value flag returned for a profile query,
+/// driven through Grafana. Tries the real `/api/ds/query` Explore path first (the backend
+/// plugin applies the datasource's X-Scope-OrgID header), then the data-source proxy →
+/// Crabka flamebearer as a best-effort second source. The union is returned.
+async fn grafana_profile_evidence(
+    client: &reqwest::Client,
+    query: &GrafanaQuery<'_>,
+) -> TestResult<(BTreeSet<String>, bool)> {
+    let mut names = BTreeSet::new();
+    let mut positive = false;
+
+    if let Ok(value) = ds_query_profile(client, query).await {
+        let (frame_names, frame_positive) = evidence_from_ds_query(&value);
+        names.extend(frame_names);
+        positive = positive || frame_positive;
+    }
+
+    if let Some(value) = proxy_render(client, query).await {
+        names.extend(flame_names(&value));
+        positive = positive || flame_ticks(&value).is_some_and(|ticks| ticks > 0);
+    }
+
+    Ok((names, positive))
+}
+
+async fn grafana_profile_evidence_until(
+    client: &reqwest::Client,
+    query: &GrafanaQuery<'_>,
+    ready: impl Fn(&BTreeSet<String>, bool) -> bool,
+) -> TestResult<(BTreeSet<String>, bool)> {
+    let mut last = None;
+    for _ in 0..120 {
+        match grafana_profile_evidence(client, query).await {
+            Ok((names, positive)) if ready(&names, positive) => return Ok((names, positive)),
+            Ok((names, positive)) => {
+                last = Some(format!(
+                    "evidence not ready: names={names:?} positive={positive}"
+                ));
+            }
+            Err(err) => last = Some(err.to_string()),
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Err(last
+        .unwrap_or_else(|| "Grafana profile evidence never became ready".to_string())
+        .into())
+}
+
+async fn ds_query_profile(client: &reqwest::Client, query: &GrafanaQuery<'_>) -> TestResult<Value> {
+    let body = json!({
+        "from": query.from_ms.to_string(),
+        "to": query.to_ms.to_string(),
+        "queries": [{
+            "refId": "A",
+            "datasource": { "type": "grafana-pyroscope-datasource", "uid": query.uid },
+            "queryType": "profile",
+            "profileTypeId": query.profile_type,
+            "labelSelector": query.selector,
+            "groupBy": [],
+            "maxNodes": 8192,
+            "intervalMs": 60000,
+            "maxDataPoints": 1000
+        }]
+    });
+    let response = client
+        .post(format!("{}/api/ds/query", query.grafana_base))
+        .basic_auth("admin", Some("admin"))
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let text = response.text().await?;
+    if !status.is_success() {
+        return Err(format!("/api/ds/query returned {status}: {text}").into());
+    }
+    serde_json::from_str(&text)
+        .map_err(|err| format!("/api/ds/query returned non-JSON `{text}`: {err}").into())
+}
+
+/// Walk the Grafana dataframe response column-major: collect every string cell as a
+/// candidate frame name and flag any strictly-positive numeric cell. Schema-agnostic so it
+/// tolerates Grafana version drift in field names.
+fn evidence_from_ds_query(value: &Value) -> (BTreeSet<String>, bool) {
+    let mut names = BTreeSet::new();
+    let mut positive = false;
+    let Some(results) = value.get("results").and_then(Value::as_object) else {
+        return (names, positive);
+    };
+    for result in results.values() {
+        let Some(frames) = result.get("frames").and_then(Value::as_array) else {
+            continue;
+        };
+        for frame in frames {
+            let Some(columns) = frame.pointer("/data/values").and_then(Value::as_array) else {
+                continue;
+            };
+            for column in columns {
+                let Some(cells) = column.as_array() else {
+                    continue;
+                };
+                for cell in cells {
+                    if let Some(text) = cell.as_str() {
+                        names.insert(text.to_string());
+                    } else if cell.as_f64().is_some_and(|number| number > 0.0) {
+                        positive = true;
+                    }
+                }
+            }
+        }
+    }
+    (names, positive)
+}
+
+/// Best-effort: query Crabka's legacy flamebearer render through Grafana's data-source
+/// proxy. Returns `None` if the proxy route is unavailable (then `/api/ds/query` carries
+/// the test).
+async fn proxy_render(client: &reqwest::Client, query: &GrafanaQuery<'_>) -> Option<Value> {
+    let render_query = format!("{}{}", query.profile_type, query.selector);
+    let encoded = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("query", &render_query)
+        .append_pair("from", &query.from_ms.to_string())
+        .append_pair("until", &query.to_ms.to_string())
+        .append_pair("format", "json")
+        .finish();
+    let response = client
+        .get(format!(
+            "{}/api/datasources/proxy/uid/{}/pyroscope/render?{encoded}",
+            query.grafana_base, query.uid
+        ))
+        .basic_auth("admin", Some("admin"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json().await.ok()
 }

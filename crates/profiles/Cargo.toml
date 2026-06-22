@@ -64,4 +64,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 reqwest = { workspace = true, features = ["json"] }
 testcontainers = { workspace = true }
 base64 = { workspace = true }
+flate2 = { workspace = true }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }
+crabka-pprof = { path = "../pprof", version = "0.3.7" }
