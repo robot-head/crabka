@@ -22,7 +22,9 @@ use crabka_observability::{
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
+use prost::Message as _;
 use serde_json::{Value, json};
+use snap::raw::Encoder as SnappyEncoder;
 use tempfile::TempDir;
 use testcontainers::GenericImage;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -34,6 +36,50 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tower::ServiceExt;
 
 const LOKI_PORT: u16 = 3100;
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct LokiProtoPushRequest {
+    #[prost(message, repeated, tag = "1")]
+    streams: Vec<LokiProtoStream>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct LokiProtoStream {
+    #[prost(string, tag = "1")]
+    labels: String,
+    #[prost(message, repeated, tag = "2")]
+    entries: Vec<LokiProtoEntry>,
+    #[prost(uint64, tag = "3")]
+    hash: u64,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct LokiProtoEntry {
+    #[prost(message, optional, tag = "1")]
+    timestamp: Option<LokiProtoTimestamp>,
+    #[prost(string, tag = "2")]
+    line: String,
+    #[prost(message, repeated, tag = "3")]
+    structured_metadata: Vec<LokiProtoLabelPair>,
+    #[prost(message, repeated, tag = "4")]
+    parsed: Vec<LokiProtoLabelPair>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct LokiProtoTimestamp {
+    #[prost(int64, tag = "1")]
+    seconds: i64,
+    #[prost(int32, tag = "2")]
+    nanos: i32,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct LokiProtoLabelPair {
+    #[prost(string, tag = "1")]
+    name: String,
+    #[prost(string, tag = "2")]
+    value: String,
+}
 
 async fn boot_crabka() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().expect("tempdir");
@@ -5274,6 +5320,48 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
 
     let distributor = distributor_router_for_status();
     let payload = vec![0x03, 0x08, 0xff, 0xff, 0xff];
+    let headers = [("content-type", "application/x-protobuf")];
+
+    let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
+    let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
+
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let distributor = distributor_router_for_status();
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: r#"{app="api", app="worker"}"#.to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: Some(LokiProtoTimestamp {
+                    seconds: current_unix_second_ns() / 1_000_000_000,
+                    nanos: 0,
+                }),
+                line: "duplicate protobuf label".to_string(),
+                structured_metadata: vec![],
+                parsed: vec![],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
     let headers = [("content-type", "application/x-protobuf")];
 
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;

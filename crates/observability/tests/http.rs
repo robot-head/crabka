@@ -2201,6 +2201,10 @@ async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append
         .unwrap();
 
     assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "stream '{app=\"api\", app=\"worker\", service_name=\"api\"}' has duplicate label name: 'app'\n"
+    );
     assert!(sink.records().is_empty());
 }
 
