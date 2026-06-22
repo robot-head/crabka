@@ -6850,6 +6850,31 @@ async fn format_query_endpoint_formats_metric_vector_arithmetic_expression_like_
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_quantile_metric_vector_arithmetic_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=quantile_over_time%280.75%2C%7Bapp%3D%22api%22%7D%20%7C%20logfmt%20%7C%20unwrap%20cost%20%5B30s%5D%29%2Bvector%281%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"(quantile_over_time(0.75,{app="api"} | logfmt | unwrap cost[30s]) + vector(1.000000))"#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_vector_metric_arithmetic_expression_like_loki() {
     let state = fixture();
     let app = loki_router(state);
