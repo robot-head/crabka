@@ -3124,6 +3124,20 @@ fn validate_loki_json_push_stream_objects(
                 loki_json_push_stream_parse_error(body, stream),
             ));
         }
+        if let Some(labels) = stream.get("stream") {
+            if !labels.is_object() {
+                return Err(DistributorError::InvalidJsonPushValueSyntax(
+                    loki_json_push_labels_field_parse_error(body),
+                ));
+            }
+        }
+        if let Some(values) = stream.get("values") {
+            if !values.is_array() {
+                return Err(DistributorError::InvalidJsonPushValueSyntax(
+                    loki_json_push_values_field_parse_error(body, values),
+                ));
+            }
+        }
         let stream = serde_json::from_value(stream.clone())
             .map_err(|_| DistributorError::InvalidPushPayload)?;
         streams.push(stream);
@@ -3173,12 +3187,34 @@ fn loki_json_push_value_parse_error(body: &[u8], value: &Value) -> String {
     )
 }
 
+fn loki_json_push_values_field_parse_error(body: &[u8], value: &Value) -> String {
+    let body = String::from_utf8_lossy(body);
+    let value_text = value.to_string();
+    let value_start = body.find(&value_text).unwrap_or(body.len());
+    let context = loki_decode_error_context(&body, value_start.saturating_add(3));
+    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(37));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Unknown value type, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
+}
+
 fn loki_json_push_stream_parse_error(body: &[u8], value: &Value) -> String {
     let body = String::from_utf8_lossy(body);
     let value_text = value.to_string();
     let value_start = body.find(&value_text).unwrap_or(body.len());
     let context = loki_decode_error_context(&body, value_start.saturating_add(4));
     let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(12));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object, but can't find closing '}}' symbol, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
+}
+
+fn loki_json_push_labels_field_parse_error(body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(body);
+    let context = loki_decode_error_context(&body, body.len().saturating_sub(12));
+    let bigger_context = loki_decode_error_context(&body, body.len().saturating_sub(52));
 
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object, but can't find closing '}}' symbol, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"

@@ -1515,7 +1515,9 @@ values now also return Loki's raw `Unknown value type` decoder response, and
 non-array `streams` fields and non-object JSON stream entries return Loki's raw
 stream decoder responses. Missing or empty top-level JSON `streams` now return
 Loki's `422` no-valid-streams text response, while stream objects with omitted
-`values` are accepted as no-op `204` pushes like Loki. The
+`values` are accepted as no-op `204` pushes like Loki. Stream objects with
+non-array `values` fields or non-object `stream` fields now return Loki's raw
+decoder text responses instead of Crabka's generic invalid-payload envelope. The
 configured OTLP HTTP ingest path now shares the same timestamp windows before
 WAL append and matches Loki's `400` protobuf status-message body for future
 OTLP timestamps. Configured distributors now also perform a broker-backed tenant
