@@ -11793,7 +11793,7 @@ fn format_vector_label_replace_function(query: &str) -> Option<String> {
     if arguments.len() != 5 {
         return None;
     }
-    let vector = format_vector_function_text(arguments[0].trim())?;
+    let vector = format_vector_only_expression(arguments[0].trim())?;
     Some(format!(
         "label_replace({vector},{},{},{},{})",
         format_logql_quoted_string(&parse_logql_string_argument(arguments[1].trim())?),
@@ -11801,6 +11801,27 @@ fn format_vector_label_replace_function(query: &str) -> Option<String> {
         format_logql_quoted_string(&parse_logql_string_argument(arguments[3].trim())?),
         format_logql_quoted_string(&parse_logql_string_argument(arguments[4].trim())?),
     ))
+}
+
+fn format_vector_only_expression(query: &str) -> Option<String> {
+    if let Some(formatted) = format_vector_function_text(query) {
+        return Some(formatted);
+    }
+
+    let query = query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if let Some(formatted) = format_vector_set_expression(&query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_vector_arithmetic_expression(&query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_vector_comparison_expression(&query) {
+        return Some(formatted);
+    }
+    None
 }
 
 fn split_logql_function_arguments<'a>(query: &'a str, name: &str) -> Option<Vec<&'a str>> {
