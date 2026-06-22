@@ -163,7 +163,7 @@ async fn real_tempo_and_crabka_match_basic_by_id_and_search() -> TestResult {
     )
     .await?;
 
-    let tempo_trace = get_trace_by_id(&client, &tempo_query, None, query_range).await?;
+    let tempo_trace = get_trace_by_id_until_found(&client, &tempo_query, None, query_range).await?;
     let crabka_trace =
         get_trace_by_id(&client, &crabka.base_url, Some(TENANT), query_range).await?;
     assert_trace_shape_matches(&tempo_trace, &crabka_trace);
@@ -922,6 +922,45 @@ async fn get_json_until_positive_metric_total(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     Err(format!("timed out waiting for positive metric total from {url}: {last}").into())
+}
+
+/// Real Tempo has ingestion latency: a freshly pushed trace is not immediately
+/// queryable by id — `/api/v2/traces/{id}` returns 404 until the span is flushed
+/// out of the ingester. Poll until the trace materialises, mirroring how the
+/// search legs poll for non-empty results. (Crabka serves its in-process store
+/// synchronously, so only the real-Tempo side needs this.)
+async fn get_trace_by_id_until_found(
+    client: &reqwest::Client,
+    base: &str,
+    tenant: Option<&str>,
+    query_range: &str,
+) -> TestResult<JsonValue> {
+    let url = format!("{base}/api/v2/traces/{TRACE_ID_HEX}?{query_range}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        let mut req = client.get(&url);
+        if let Some(tenant) = tenant {
+            req = req.header("x-scope-orgid", tenant);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        let body = resp.bytes().await?;
+        if status == ReqwestStatusCode::OK {
+            let json: JsonValue = serde_json::from_slice(&body)?;
+            if json["trace"]["resourceSpans"]
+                .as_array()
+                .is_some_and(|spans| !spans.is_empty())
+            {
+                return Ok(json);
+            }
+            last = json.to_string();
+        } else {
+            last = format!("{status} {}", String::from_utf8_lossy(&body));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    Err(format!("timed out waiting for trace by id from {url}: {last}").into())
 }
 
 fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
