@@ -7914,9 +7914,14 @@ fn scalar_vector_expression_result(query: &str) -> Option<ScalarVectorExpression
 }
 
 fn reject_signed_vector_function_literal(query: &str) -> Result<(), HttpQueryError> {
-    signed_vector_function_literal_error(query)
+    scalar_vector_plain_parse_error(query)
         .map(HttpQueryError::LokiPlainParse)
         .map_or(Ok(()), Err)
+}
+
+fn scalar_vector_plain_parse_error(query: &str) -> Option<String> {
+    signed_vector_function_literal_error(query)
+        .or_else(|| unspaced_vector_set_operator_error(query))
 }
 
 fn signed_vector_function_literal_error(query: &str) -> Option<String> {
@@ -7960,6 +7965,52 @@ fn signed_vector_function_literal_error(query: &str) -> Option<String> {
                 let column = query[..sign_index].chars().count() + 1;
                 return Some(format!(
                     "parse error at line 1, col {column}: syntax error: unexpected {sign}, expecting NUMBER"
+                ));
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
+fn unspaced_vector_set_operator_error(query: &str) -> Option<String> {
+    if !could_be_scalar_vector_expression(query) {
+        return None;
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < query.len() {
+        let ch = query[index..]
+            .chars()
+            .next()
+            .expect("index is always on a char boundary");
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == ')' {
+            let next_index = index + ch.len_utf8();
+            if ["and", "or", "unless"]
+                .iter()
+                .any(|operator| query[next_index..].starts_with(operator))
+            {
+                let column = query[..next_index].chars().count() + 1;
+                return Some(format!(
+                    "parse error at line 1, col {column}: syntax error: unexpected IDENTIFIER"
                 ));
             }
         }
@@ -10993,7 +11044,7 @@ fn parse_format_query_param(raw_query: Option<&str>) -> Result<String, HttpQuery
 }
 
 fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
-    if let Some(error) = signed_vector_function_literal_error(query) {
+    if let Some(error) = scalar_vector_plain_parse_error(query) {
         return Err(HttpQueryError::LokiFormatPlainParse(error));
     }
 

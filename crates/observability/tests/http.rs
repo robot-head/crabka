@@ -7320,6 +7320,37 @@ async fn format_query_endpoint_rejects_signed_vector_function_literals_like_loki
 }
 
 #[tokio::test]
+async fn format_query_endpoint_rejects_unspaced_vector_set_operators_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for query in [
+        "vector%281%29orvector%282%29",
+        "vector%281%29andvector%282%29",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "invalid-query",
+                    "error": "parse error at line 1, col 10: syntax error: unexpected IDENTIFIER"
+                })
+        );
+    }
+}
+
+#[tokio::test]
 async fn format_query_endpoint_returns_loki_error_for_missing_query() {
     let state = fixture();
     let app = loki_router(state);
@@ -13638,6 +13669,35 @@ async fn query_endpoint_rejects_signed_vector_function_literals_like_loki() {
                 == format!(
                     "parse error at line 1, col 8: syntax error: unexpected {sign}, expecting NUMBER"
                 )
+        );
+    }
+}
+
+#[tokio::test]
+async fn query_endpoint_rejects_unspaced_vector_set_operators_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for query in [
+        "vector%281%29orvector%282%29",
+        "vector%281%29andvector%282%29",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/query?query={query}&time=4000000000"))
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert!(
+            text_body(response).await
+                == "parse error at line 1, col 10: syntax error: unexpected IDENTIFIER"
         );
     }
 }
