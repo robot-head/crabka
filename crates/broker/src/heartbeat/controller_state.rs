@@ -37,6 +37,71 @@ struct BrokerEntry {
     state: BrokerLivenessState,
 }
 
+/// Monotonic time source for liveness tracking.
+///
+/// Production uses the real clock. Tests use a controllable clock so the
+/// liveness windows are driven by explicit advances instead of wall-clock
+/// `std::thread::sleep` — sleeps flake when the CI runner is loaded, because the
+/// gap between a re-seed and the next `tick` can exceed a short timeout and
+/// spuriously mark a broker dead.
+enum Clock {
+    Real,
+    #[cfg(test)]
+    Test(std::sync::Arc<TestClockInner>),
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        match self {
+            Clock::Real => Instant::now(),
+            #[cfg(test)]
+            Clock::Test(inner) => {
+                inner.base
+                    + Duration::from_nanos(
+                        inner
+                            .offset_nanos
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+struct TestClockInner {
+    base: Instant,
+    offset_nanos: std::sync::atomic::AtomicU64,
+}
+
+/// Test handle for the controllable [`Clock`]. Shares its inner state with the
+/// `Clock::Test` handed to [`ControllerLivenessState::with_clock`], so `advance`
+/// is observed by the liveness state under test.
+#[cfg(test)]
+struct TestClock(std::sync::Arc<TestClockInner>);
+
+#[cfg(test)]
+impl TestClock {
+    fn new() -> Self {
+        Self(std::sync::Arc::new(TestClockInner {
+            base: Instant::now(),
+            // Start an hour in so `seed_brokers_expiring_after`'s `checked_sub`
+            // never underflows the monotonic clock in short-lived test processes.
+            offset_nanos: std::sync::atomic::AtomicU64::new(3_600_000_000_000),
+        }))
+    }
+
+    fn advance(&self, by: Duration) {
+        self.0.offset_nanos.fetch_add(
+            u64::try_from(by.as_nanos()).expect("advance fits u64 nanos"),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    fn clock(&self) -> Clock {
+        Clock::Test(self.0.clone())
+    }
+}
+
 /// Controller-side heartbeat registry.
 ///
 /// One instance lives on the `Broker` struct. Handlers call
@@ -45,6 +110,7 @@ struct BrokerEntry {
 /// every second to expire stale entries.
 pub(crate) struct ControllerLivenessState {
     timeout: Duration,
+    clock: Clock,
     brokers: Mutex<HashMap<u64, BrokerEntry>>,
     /// Brokers that signaled `want_shut_down=true` on a recent
     /// heartbeat. The controller tries to move leadership away from
@@ -58,6 +124,19 @@ impl ControllerLivenessState {
     pub(crate) fn new(timeout: Duration) -> Self {
         Self {
             timeout,
+            clock: Clock::Real,
+            brokers: Mutex::new(HashMap::new()),
+            wants_shutdown: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Construct with a test-controlled [`Clock`] so liveness windows are driven
+    /// by explicit `advance` calls instead of wall-clock sleeps.
+    #[cfg(test)]
+    fn with_clock(timeout: Duration, clock: Clock) -> Self {
+        Self {
+            timeout,
+            clock,
             brokers: Mutex::new(HashMap::new()),
             wants_shutdown: Mutex::new(HashSet::new()),
         }
@@ -87,7 +166,7 @@ impl ControllerLivenessState {
     /// broker was already alive (or is new).
     pub(crate) async fn record_heartbeat(&self, broker_id: u64) -> Option<LivenessTransition> {
         let mut map = self.brokers.lock().await;
-        let now = Instant::now();
+        let now = self.clock.now();
         let entry = map.entry(broker_id).or_insert(BrokerEntry {
             last_heartbeat: now,
             state: BrokerLivenessState::Alive,
@@ -111,7 +190,7 @@ impl ControllerLivenessState {
     /// transitions that occurred this tick.
     pub(crate) async fn tick(&self) -> Vec<LivenessTransition> {
         let mut map = self.brokers.lock().await;
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut transitions = Vec::new();
         for (&id, entry) in map.iter_mut() {
             if entry.state == BrokerLivenessState::Alive
@@ -171,7 +250,7 @@ impl ControllerLivenessState {
     /// detected by [`tick`](Self::tick) after `timeout` ms.
     pub(crate) async fn seed_brokers(&self, broker_ids: impl IntoIterator<Item = u64>) {
         let mut map = self.brokers.lock().await;
-        let now = Instant::now();
+        let now = self.clock.now();
         for id in broker_ids {
             map.entry(id)
                 .and_modify(|entry| {
@@ -195,7 +274,7 @@ impl ControllerLivenessState {
         grace: Duration,
     ) {
         let mut map = self.brokers.lock().await;
-        let now = Instant::now();
+        let now = self.clock.now();
         let backdated = self.timeout.saturating_sub(grace);
         let last_heartbeat = now.checked_sub(backdated).unwrap_or(now);
         for id in broker_ids {
@@ -223,11 +302,12 @@ mod tests {
 
     #[tokio::test]
     async fn tick_marks_expired_broker_dead() {
-        // Use a very short timeout so we can expire without sleeping.
-        let liveness = ControllerLivenessState::new(Duration::from_nanos(1));
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
         liveness.record_heartbeat(2).await;
-        // Spin until at least 1ns has elapsed (nearly instant on any OS).
-        std::thread::sleep(Duration::from_millis(1));
+        // Advance past the timeout deterministically (no wall-clock sleep).
+        clock.advance(Duration::from_millis(11));
         let transitions = liveness.tick().await;
         assert!(transitions == vec![LivenessTransition::AliveToDead(2)]);
         assert!(liveness.state(2).await == Some(BrokerLivenessState::Dead));
@@ -235,9 +315,11 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_after_dead_emits_revival() {
-        let liveness = ControllerLivenessState::new(Duration::from_nanos(1));
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
         liveness.record_heartbeat(3).await;
-        std::thread::sleep(Duration::from_millis(1));
+        clock.advance(Duration::from_millis(11));
         let _ = liveness.tick().await; // broker 3 → Dead
         let transition = liveness.record_heartbeat(3).await;
         assert!(transition == Some(LivenessTransition::DeadToAlive(3)));
@@ -246,11 +328,14 @@ mod tests {
 
     #[tokio::test]
     async fn expiring_seed_times_out_without_fresh_heartbeat() {
-        let liveness = ControllerLivenessState::new(Duration::from_millis(10));
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
         liveness
             .seed_brokers_expiring_after([7], Duration::from_nanos(1))
             .await;
-        std::thread::sleep(Duration::from_millis(1));
+        // Only ~1ns of grace was granted; any advance past it expires the seed.
+        clock.advance(Duration::from_millis(1));
 
         let transitions = liveness.tick().await;
 
@@ -259,9 +344,12 @@ mod tests {
 
     #[tokio::test]
     async fn normal_seed_gives_brokers_full_timeout_window() {
-        let liveness = ControllerLivenessState::new(Duration::from_millis(50));
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(50), clock.clock());
         liveness.seed_brokers([7]).await;
-        std::thread::sleep(Duration::from_millis(1));
+        // Well within the 50ms window — deterministically still alive.
+        clock.advance(Duration::from_millis(1));
 
         let transitions = liveness.tick().await;
 
@@ -271,12 +359,19 @@ mod tests {
 
     #[tokio::test]
     async fn normal_seed_refreshes_existing_entries() {
-        let liveness = ControllerLivenessState::new(Duration::from_millis(10));
+        let clock = TestClock::new();
+        let liveness =
+            ControllerLivenessState::with_clock(Duration::from_millis(10), clock.clock());
         liveness.record_heartbeat(7).await;
-        std::thread::sleep(Duration::from_millis(20));
+        // Let the original heartbeat go stale relative to the 10ms window...
+        clock.advance(Duration::from_millis(20));
 
+        // ...a normal re-seed must REFRESH the existing entry to a full window,
         liveness.seed_brokers([7]).await;
-        std::thread::sleep(Duration::from_millis(1));
+        // so 1ms later it is nowhere near expiry. Were the refresh missing, the
+        // entry would be ~21ms stale here and `tick` would mark it dead — which
+        // is exactly the regression this test guards.
+        clock.advance(Duration::from_millis(1));
         let transitions = liveness.tick().await;
 
         assert!(transitions.is_empty());
