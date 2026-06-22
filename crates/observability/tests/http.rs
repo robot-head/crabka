@@ -537,6 +537,41 @@ async fn loki_push_endpoint_accepts_missing_json_values_like_loki() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_accepts_null_json_values_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                },
+                                "values": null
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(text_body(response).await.is_empty());
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_non_array_json_values_like_loki() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
@@ -609,6 +644,43 @@ async fn loki_push_endpoint_rejects_non_object_json_labels_like_loki() {
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
     ));
     assert!(body.contains("labels field is not an object"));
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
+async fn loki_push_endpoint_rejects_null_json_labels_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": null,
+                                "values": [["19", "null labels field"]]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    let body = text_body(response).await;
+    assert!(body.contains(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object"
+    ));
+    assert!(body.contains("null labels field"));
     assert!(sink.records().is_empty());
 }
 

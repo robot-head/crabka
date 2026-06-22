@@ -1515,10 +1515,10 @@ values now also return Loki's raw `Unknown value type` decoder response, and
 non-array `streams` fields and non-object JSON stream entries return Loki's raw
 stream decoder responses. Missing or empty top-level JSON `streams` now return
 Loki's `422` no-valid-streams text response, while stream objects with omitted
-`values` or omitted `stream` labels are accepted as no-op `204` pushes like
-Loki. Stream objects with non-array `values` fields or non-object `stream`
-fields now return Loki's raw decoder text responses instead of Crabka's generic
-invalid-payload envelope.
+or `null` `values` fields or omitted `stream` labels are accepted as no-op `204`
+pushes like Loki. Stream objects with non-array, non-null `values` fields or
+non-object `stream` fields, including `stream: null`, now return Loki's raw
+decoder text responses instead of Crabka's generic invalid-payload envelope.
 Top-level JSON array payloads now return Loki's `readObjectStart` decoder text,
 and top-level `null` payloads return Loki's `422` no-valid-streams text. The
 configured OTLP HTTP ingest path now shares the same timestamp windows before

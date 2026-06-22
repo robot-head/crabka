@@ -2651,7 +2651,7 @@ struct LokiPushStream {
     #[serde(default)]
     stream: Option<Labels>,
     #[serde(default)]
-    values: Vec<Value>,
+    values: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2663,7 +2663,7 @@ struct LokiJsonStructuredMetadataDuplicateProbe {
 #[derive(Debug, Deserialize)]
 struct LokiJsonStructuredMetadataDuplicateProbeStream {
     #[serde(default)]
-    values: Vec<LokiJsonStructuredMetadataValueDuplicateProbe>,
+    values: Option<Vec<LokiJsonStructuredMetadataValueDuplicateProbe>>,
 }
 
 #[derive(Debug)]
@@ -3143,7 +3143,7 @@ fn validate_loki_json_push_stream_objects(
             }
         }
         if let Some(values) = stream.get("values") {
-            if !values.is_array() {
+            if !values.is_array() && !values.is_null() {
                 return Err(DistributorError::InvalidJsonPushValueSyntax(
                     loki_json_push_values_field_parse_error(body, values),
                 ));
@@ -3162,7 +3162,10 @@ fn validate_loki_json_push_value_arrays(
     body: &[u8],
 ) -> Result<(), DistributorError> {
     for stream in &payload.streams {
-        for value in &stream.values {
+        let Some(values) = &stream.values else {
+            continue;
+        };
+        for value in values {
             if !value.is_array() {
                 return Err(DistributorError::InvalidJsonPushValueSyntax(
                     loki_json_push_value_parse_error(body, value),
@@ -3178,7 +3181,10 @@ fn validate_loki_json_push_duplicate_keys(body: &[u8]) -> Result<(), Distributor
     let metadata_probe: LokiJsonStructuredMetadataDuplicateProbe =
         serde_json::from_slice(body).map_err(|_| DistributorError::InvalidStructuredMetadata)?;
     for stream in metadata_probe.streams {
-        for value in stream.values {
+        let Some(values) = stream.values else {
+            continue;
+        };
+        for value in values {
             let _ = value;
         }
     }
@@ -3268,7 +3274,10 @@ fn validate_loki_json_structured_metadata_value_types(
     body: &[u8],
 ) -> Result<(), DistributorError> {
     for stream in &payload.streams {
-        for value in &stream.values {
+        let Some(values) = &stream.values else {
+            continue;
+        };
+        for value in values {
             let Some(metadata_value) = value.get(2) else {
                 continue;
             };
@@ -3459,7 +3468,10 @@ fn normalize_loki_push(
         let mut stream_labels = original_stream_labels.clone();
         discover_service_name_label(&mut stream_labels);
 
-        for value in stream.values {
+        let Some(values) = stream.values else {
+            continue;
+        };
+        for value in values {
             let Some(value) = value.as_array() else {
                 return Err(DistributorError::InvalidPushValue);
             };
