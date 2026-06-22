@@ -3277,7 +3277,8 @@ fn normalize_loki_push(
 
     for stream in payload.streams {
         validate_loki_stream_labels(&stream.stream)?;
-        let mut stream_labels = stream.stream;
+        let original_stream_labels = stream.stream;
+        let mut stream_labels = original_stream_labels.clone();
         discover_service_name_label(&mut stream_labels);
 
         for value in stream.values {
@@ -3287,7 +3288,13 @@ fn normalize_loki_push(
             let timestamp = timestamp
                 .as_str()
                 .ok_or(DistributorError::InvalidTimestamp)?;
-            let line = line.as_str().ok_or(DistributorError::InvalidLine)?;
+            let line = line.as_str().ok_or_else(|| {
+                DistributorError::InvalidJsonLineSyntax(loki_json_line_parse_error(
+                    &original_stream_labels,
+                    timestamp,
+                    line,
+                ))
+            })?;
             let timestamp_ns = timestamp.parse().map_err(|_| {
                 DistributorError::InvalidJsonTimestampSyntax(loki_json_timestamp_parse_error(
                     timestamp, line,
@@ -3427,6 +3434,23 @@ fn loki_json_timestamp_parse_error(timestamp: &str, line: &str) -> String {
         .unwrap_or(timestamp);
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}\"]]}}]}}|..., bigger context ...|s\":[[\"{timestamp}\",\"{line}\"]]}}]}}|...\n"
+    )
+}
+
+fn loki_json_line_parse_error(stream_labels: &Labels, timestamp: &str, line: &Value) -> String {
+    let line = line.to_string();
+    let found_context = format!(
+        "{}\",{}]]}}]}}",
+        timestamp
+            .char_indices()
+            .nth(timestamp.chars().count().saturating_sub(2))
+            .map(|(offset, _)| &timestamp[offset..])
+            .unwrap_or(timestamp),
+        line
+    );
+    let labels = serde_json::to_string(stream_labels).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value is string, but can't find closing '\"' symbol, error found in #10 byte of ...|{found_context}|..., bigger context ...|ream\":{labels},\"values\":[[\"{timestamp}\",{line}]]}}]}}|...\n"
     )
 }
 
@@ -15222,8 +15246,6 @@ pub enum QueryError {
 enum DistributorError {
     #[error("empty stream labels")]
     EmptyStreamLabels,
-    #[error("invalid log line")]
-    InvalidLine,
     #[error("invalid OTLP attribute")]
     InvalidOtlpAttribute,
     #[error("invalid OTLP payload")]
@@ -15238,6 +15260,8 @@ enum DistributorError {
     InvalidPushLabels,
     #[error("{0}")]
     InvalidPushLabelSyntax(String),
+    #[error("{0}")]
+    InvalidJsonLineSyntax(String),
     #[error("{0}")]
     InvalidJsonTimestampSyntax(String),
     #[error("invalid Loki push payload")]
@@ -15298,10 +15322,10 @@ impl IntoResponse for DistributorError {
             }
             Self::WalAppendTimeout | Self::WalSink(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::EmptyStreamLabels
-            | Self::InvalidLine
             | Self::InvalidOtlpAttribute
             | Self::InvalidOtlpPayload
             | Self::InvalidPushLabels
+            | Self::InvalidJsonLineSyntax(_)
             | Self::InvalidJsonTimestampSyntax(_)
             | Self::InvalidPushLabelSyntax(_)
             | Self::InvalidPushPayload
@@ -15323,6 +15347,7 @@ impl IntoResponse for DistributorError {
         if matches!(
             &self,
             Self::InvalidPushLabelSyntax(_)
+                | Self::InvalidJsonLineSyntax(_)
                 | Self::InvalidJsonTimestampSyntax(_)
                 | Self::InvalidStructuredMetadataSyntax(_)
                 | Self::TimestampTooOld { .. }
@@ -15357,10 +15382,10 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
             tonic::Status::unavailable(message)
         }
         DistributorError::EmptyStreamLabels
-        | DistributorError::InvalidLine
         | DistributorError::InvalidOtlpAttribute
         | DistributorError::InvalidOtlpPayload
         | DistributorError::InvalidPushLabels
+        | DistributorError::InvalidJsonLineSyntax(_)
         | DistributorError::InvalidJsonTimestampSyntax(_)
         | DistributorError::InvalidPushLabelSyntax(_)
         | DistributorError::InvalidPushPayload
