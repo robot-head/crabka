@@ -34,7 +34,7 @@ arrow = { version = "59", default-features = false, features = ["ipc"] }
 # Parquet blocks on object storage. Pinned to apache/datafusion `main` because
 # that revision tracks arrow 59 / parquet 59 / object_store 0.13.2, matching the
 # workspace pins. The latest released datafusion line is on an older arrow major.
-datafusion = { git = "https://github.com/apache/datafusion", rev = "f7598e3bceb7754ff0b4a1f9d34363498b4da907" }
+datafusion = { git = "https://github.com/apache/datafusion", rev = "67425b4b8baf5d48d6e491548a056938e75e2525" }
 parquet = { version = "59", default-features = false, features = ["arrow", "async", "object_store"] }
 columnar = "0.13"
 bytes = "1"
