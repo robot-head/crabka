@@ -3536,6 +3536,35 @@ async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    let raw_query = "query=%7Bapp%3D%22api%22%7D&delay_for=6";
+    let loki_error = loki_tail_ws_raw_error(&loki_base, raw_query).await;
+    let crabka_error = crabka_tail_ws_raw_error(querier, raw_query).await;
+
+    assert!(crabka_error == loki_error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -6653,11 +6682,16 @@ fn stable_query_or_error_response(status: u16, body: &str) -> Value {
 }
 
 async fn loki_tail_ws_error(base: &str, query: Option<&str>) -> Value {
+    let raw_query = query.map(|query| format!("query={}", percent_encode_component(query)));
+    loki_tail_ws_raw_error(base, raw_query.as_deref().unwrap_or_default()).await
+}
+
+async fn loki_tail_ws_raw_error(base: &str, raw_query: &str) -> Value {
     let mut uri = base.replacen("http://", "ws://", 1);
     uri.push_str("/loki/api/v1/tail");
-    if let Some(query) = query {
-        uri.push_str("?query=");
-        uri.push_str(&percent_encode_component(query));
+    if !raw_query.is_empty() {
+        uri.push('?');
+        uri.push_str(raw_query);
     }
     let mut request = uri.into_client_request().unwrap();
     request
@@ -6667,15 +6701,20 @@ async fn loki_tail_ws_error(base: &str, query: Option<&str>) -> Value {
 }
 
 async fn crabka_tail_ws_error(app: axum::Router, query: Option<&str>) -> Value {
+    let raw_query = query.map(|query| format!("query={}", percent_encode_component(query)));
+    crabka_tail_ws_raw_error(app, raw_query.as_deref().unwrap_or_default()).await
+}
+
+async fn crabka_tail_ws_raw_error(app: axum::Router, raw_query: &str) -> Value {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     let mut uri = format!("ws://{addr}/loki/api/v1/tail");
-    if let Some(query) = query {
-        uri.push_str("?query=");
-        uri.push_str(&percent_encode_component(query));
+    if !raw_query.is_empty() {
+        uri.push('?');
+        uri.push_str(raw_query);
     }
     let mut request = uri.into_client_request().unwrap();
     request
