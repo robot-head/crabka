@@ -4207,6 +4207,12 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
 
     assert!(crabka_result == loki_result);
 
+    let query = r#"count_over_time({app="api"}[10s] offset 1500ms)"#;
+    let loki_result = loki_format_query_result(&http, &loki_base, query).await;
+    let crabka_result = crabka_format_query_result(querier.clone(), query).await;
+
+    assert!(crabka_result == loki_result);
+
     let query = r#"1>bool count_over_time({app="api"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;

@@ -7300,6 +7300,47 @@ async fn format_query_endpoint_formats_vector_aggregation_like_loki() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_metric_offsets_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (query, expected) in [
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B10s%5D%20offset%205m%29",
+            r#"count_over_time({app="api"}[10s] offset 5m0s)"#,
+        ),
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B10s%5D%20offset%201h%29",
+            r#"count_over_time({app="api"}[10s] offset 1h0m0s)"#,
+        ),
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B10s%5D%20offset%201500ms%29",
+            r#"count_over_time({app="api"}[10s] offset 1.5s)"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_range_grouping_like_loki() {
     let state = fixture();
     let app = loki_router(state);

@@ -11533,7 +11533,7 @@ fn format_metric_range_selector(query: &MetricQuery) -> Option<String> {
         String::new()
     } else {
         let sign = if query.offset_ns < 0 { "-" } else { "" };
-        let duration = format_loki_duration_ns(query.offset_ns.checked_abs()?)?;
+        let duration = format_loki_offset_duration_ns(query.offset_ns.checked_abs()?)?;
         format!(" offset {sign}{duration}")
     };
     Some(format!(
@@ -11606,6 +11606,73 @@ fn format_loki_duration_ns(duration_ns: i64) -> Option<String> {
         }
     }
     Some(formatted)
+}
+
+fn format_loki_offset_duration_ns(duration_ns: i64) -> Option<String> {
+    if duration_ns < 0 {
+        return None;
+    }
+    if duration_ns == 0 {
+        return Some("0s".to_string());
+    }
+
+    const HOUR_NS: i64 = 3_600_000_000_000;
+    const MINUTE_NS: i64 = 60_000_000_000;
+    const SECOND_NS: i64 = 1_000_000_000;
+    const MILLISECOND_NS: i64 = 1_000_000;
+    const MICROSECOND_NS: i64 = 1_000;
+
+    let mut remaining = duration_ns;
+    let hours = remaining / HOUR_NS;
+    remaining %= HOUR_NS;
+    let minutes = remaining / MINUTE_NS;
+    remaining %= MINUTE_NS;
+
+    if hours > 0 {
+        return Some(format!(
+            "{hours}h{minutes}m{}",
+            format_loki_offset_seconds(remaining)
+        ));
+    }
+    if minutes > 0 {
+        return Some(format!(
+            "{minutes}m{}",
+            format_loki_offset_seconds(remaining)
+        ));
+    }
+    if remaining >= SECOND_NS {
+        return Some(format_loki_offset_seconds(remaining));
+    }
+    if remaining >= MILLISECOND_NS {
+        return Some(format_loki_decimal_unit(remaining, MILLISECOND_NS, 6, "ms"));
+    }
+    if remaining >= MICROSECOND_NS {
+        return Some(format_loki_decimal_unit(
+            remaining,
+            MICROSECOND_NS,
+            3,
+            "\u{00b5}s",
+        ));
+    }
+    Some(format!("{remaining}ns"))
+}
+
+fn format_loki_offset_seconds(duration_ns: i64) -> String {
+    format_loki_decimal_unit(duration_ns, 1_000_000_000, 9, "s")
+}
+
+fn format_loki_decimal_unit(duration_ns: i64, unit_ns: i64, width: usize, suffix: &str) -> String {
+    let whole = duration_ns / unit_ns;
+    let fractional_ns = duration_ns % unit_ns;
+    if fractional_ns == 0 {
+        return format!("{whole}{suffix}");
+    }
+
+    let mut fraction = format!("{fractional_ns:0width$}");
+    while fraction.ends_with('0') {
+        fraction.pop();
+    }
+    format!("{whole}.{fraction}{suffix}")
 }
 
 fn format_quantile(quantile: Quantile) -> String {
