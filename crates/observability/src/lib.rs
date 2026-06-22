@@ -3841,13 +3841,10 @@ fn loki_proto_label_pairs_to_labels(
 ) -> Result<Labels, DistributorError> {
     let mut labels_by_name = Labels::new();
     for label in labels {
-        if label.name.is_empty()
-            || labels_by_name
-                .insert(label.name.clone(), label.value.clone())
-                .is_some()
-        {
+        if label.name.is_empty() {
             return Err(DistributorError::InvalidStructuredMetadata);
         }
+        labels_by_name.insert(label.name.clone(), label.value.clone());
     }
     let labels = labels_by_name;
     validate_loki_structured_metadata(&labels)?;
