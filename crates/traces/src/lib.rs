@@ -6,6 +6,7 @@ pub mod blockbuilder;
 pub mod compactor;
 pub mod distributor;
 pub mod error;
+pub mod frontend;
 pub mod limits;
 pub mod livestore;
 pub mod metricsgen;

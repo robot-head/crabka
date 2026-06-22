@@ -1,0 +1,448 @@
+//! axum HTTP surface for the query-frontend: the Tempo query endpoints, tenant
+//! extraction, the v2 by-id `status`/`message` envelope, and time-param parsing
+//! that matches the querier's contract (`start`/`end` are epoch **seconds**,
+//! fractional allowed).
+//!
+//! The router is generic over the backend/catalog pair so tests drive
+//! `MockQuerier`+`MockCatalog` and production binds `HttpQuerier`+
+//! `TraceIndexCatalog`.
+
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde_json::json;
+
+use crate::frontend::QueryFrontend;
+use crate::frontend::backend::QuerierBackend;
+use crate::frontend::job::BlockCatalog;
+use crate::frontend::merge::TraceStatus;
+use crate::frontend::wire::parse_hex16;
+
+const TENANT_HEADER: &str = "x-scope-orgid";
+
+/// Build the query-frontend router for any backend/catalog pair.
+pub fn router_with_backend<B, C>(qf: Arc<QueryFrontend<B, C>>) -> Router
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    Router::new()
+        .route("/api/echo", get(echo))
+        .route("/ready", get(ready))
+        .route("/status", get(ready))
+        .route("/api/search", get(search::<B, C>))
+        .route("/api/v2/traces/{trace_id}", get(trace_by_id::<B, C>))
+        .route("/api/v2/search/tags", get(search_tags_v2::<B, C>))
+        .route(
+            "/api/v2/search/tag/{tag}/values",
+            get(search_tag_values_v2::<B, C>),
+        )
+        .route("/api/metrics/query_range", get(query_range::<B, C>))
+        .route("/api/metrics/query", get(query_instant::<B, C>))
+        .with_state(qf)
+}
+
+async fn echo() -> &'static str {
+    "echo"
+}
+
+async fn ready() -> &'static str {
+    "ready"
+}
+
+async fn search<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    let tenant = tenant(&headers);
+    let query = match search_query(&uri) {
+        Ok(Some(q)) => q,
+        Ok(None) => return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response(),
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let (start_ns, end_ns) = match required_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let limit = bounded_count(&uri, "limit", qf.default_limit());
+    let spss = bounded_count(&uri, "spss", qf.default_spss());
+
+    let resp = qf
+        .search(&tenant, &query, start_ns, end_ns, limit, spss)
+        .await;
+    Json(resp).into_response()
+}
+
+async fn trace_by_id<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    if trace_id.len() != 32 || hex::decode(&trace_id).is_err() {
+        return (StatusCode::BAD_REQUEST, "trace id must be 32 hex chars").into_response();
+    }
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let tid = parse_hex16(&trace_id);
+    let (trace, _metrics, status) = qf.trace_by_id(&tenant, tid, start_ns, end_ns).await;
+
+    let Some(trace) = trace else {
+        return (StatusCode::NOT_FOUND, "trace not found").into_response();
+    };
+    // v2 envelope: { trace, status, message }. Per the querier's contract the
+    // by-id endpoint does NOT carry a metrics block.
+    let message = match status {
+        TraceStatus::Partial => "trace exceeds max size; returned partially".to_string(),
+        TraceStatus::Complete => String::new(),
+    };
+    Json(json!({
+        "trace": trace.trace,
+        "status": status.as_str(),
+        "message": message,
+    }))
+    .into_response()
+}
+
+async fn search_tags_v2<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let scope = match scope_param(&uri) {
+        Ok(scope) => scope,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let (tags, _metrics) = qf.tag_names(&tenant, scope, start_ns, end_ns).await;
+    let scopes: Vec<_> = tags
+        .iter()
+        .map(|st| json!({ "name": scope_name(st.scope), "tags": &st.tags }))
+        .collect();
+    Json(json!({ "scopes": scopes, "metrics": { "inspectedBytes": "0" } })).into_response()
+}
+
+async fn search_tag_values_v2<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    Path(tag): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let (values, _metrics) = qf.tag_values(&tenant, &tag, start_ns, end_ns).await;
+    let tag_values: Vec<_> = values
+        .iter()
+        .map(|v| json!({ "type": &v.type_, "value": &v.value }))
+        .collect();
+    Json(json!({ "tagValues": tag_values, "metrics": { "inspectedBytes": "0" } })).into_response()
+}
+
+async fn query_range<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    let tenant = tenant(&headers);
+    let Some(query) = query_param(&uri, "q") else {
+        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    };
+    let (start_ns, end_ns) = match required_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let step_ns = match required_step(&uri) {
+        Ok(step) => step,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    let exemplar_limit = exemplar_limit(&uri);
+    let resp = qf
+        .metrics_query(
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            step_ns,
+            false,
+            exemplar_limit,
+        )
+        .await;
+    Json(resp).into_response()
+}
+
+async fn query_instant<B, C>(
+    State(qf): State<Arc<QueryFrontend<B, C>>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response
+where
+    B: QuerierBackend + 'static,
+    C: BlockCatalog + 'static,
+{
+    let tenant = tenant(&headers);
+    let Some(query) = query_param(&uri, "q") else {
+        return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
+    };
+    // Instant query: a window via start/end, else a single `time` point.
+    let (start_ns, end_ns) =
+        if query_param(&uri, "start").is_some() || query_param(&uri, "end").is_some() {
+            match required_time_bounds(&uri) {
+                Ok(bounds) => bounds,
+                Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+            }
+        } else {
+            let ts = match optional_seconds(&uri, "time") {
+                Ok(value) => value.unwrap_or(0),
+                Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+            };
+            (ts, ts)
+        };
+    let step_ns = end_ns.saturating_sub(start_ns).max(1);
+    let exemplar_limit = exemplar_limit(&uri);
+    let resp = qf
+        .metrics_query(
+            &tenant,
+            &query,
+            start_ns,
+            end_ns,
+            step_ns,
+            true,
+            exemplar_limit,
+        )
+        .await;
+    Json(resp).into_response()
+}
+
+// --- param helpers (mirror the querier's contract) --------------------------
+
+fn tenant(headers: &HeaderMap) -> String {
+    headers
+        .get(TENANT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("anonymous")
+        .to_string()
+}
+
+fn query_param(uri: &Uri, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
+        .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+/// `q` (`TraceQL`) or the legacy `tags` logfmt form.
+fn search_query(uri: &Uri) -> Result<Option<String>, &'static str> {
+    if let Some(q) = query_param(uri, "q") {
+        return Ok(Some(q));
+    }
+    query_param(uri, "tags")
+        .map(|tags| tags_to_traceql(&tags).ok_or("invalid query parameter tags"))
+        .transpose()
+}
+
+fn tags_to_traceql(tags: &str) -> Option<String> {
+    let parts: Vec<String> = parse_logfmt_tags(tags)?
+        .into_iter()
+        .map(|(key, value)| {
+            let field = if key.contains(':') {
+                key
+            } else {
+                format!(".{}", key.strip_prefix('.').unwrap_or(&key))
+            };
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("{field} = \"{escaped}\"")
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(" && ")))
+}
+
+fn parse_logfmt_tags(tags: &str) -> Option<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let mut rest = tags.trim_start();
+    while !rest.is_empty() {
+        let key_end = rest.find('=')?;
+        let key = &rest[..key_end];
+        if key.is_empty() || key.chars().any(char::is_whitespace) {
+            return None;
+        }
+        rest = &rest[key_end + 1..];
+        let (value, consumed) = parse_logfmt_value(rest)?;
+        out.push((key.to_string(), value));
+        rest = rest[consumed..].trim_start();
+    }
+    Some(out)
+}
+
+fn parse_logfmt_value(input: &str) -> Option<(String, usize)> {
+    if let Some(input) = input.strip_prefix('"') {
+        let mut value = String::new();
+        let mut escaped = false;
+        for (idx, ch) in input.char_indices() {
+            if escaped {
+                value.push(match ch {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    other => other,
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                return Some((value, idx + 2));
+            } else {
+                value.push(ch);
+            }
+        }
+        return None;
+    }
+    let end = input
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(input.len());
+    Some((input[..end].to_string(), end))
+}
+
+fn bounded_count(uri: &Uri, key: &str, default: usize) -> usize {
+    query_param(uri, key)
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn required_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
+    let start_ns = required_seconds(uri, "start")?;
+    let end_ns = required_seconds(uri, "end")?;
+    if end_ns < start_ns {
+        return Err("end must be >= start".to_string());
+    }
+    Ok((start_ns, end_ns))
+}
+
+fn optional_time_bounds(uri: &Uri) -> Result<(i64, i64), String> {
+    let start_ns = optional_seconds(uri, "start")?.unwrap_or(0);
+    let end_ns = optional_seconds(uri, "end")?.unwrap_or(i64::MAX);
+    if end_ns < start_ns {
+        return Err("end must be >= start".to_string());
+    }
+    Ok((start_ns, end_ns))
+}
+
+fn required_seconds(uri: &Uri, key: &str) -> Result<i64, String> {
+    let Some(value) = query_param(uri, key) else {
+        return Err(format!("missing query parameter {key}"));
+    };
+    parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
+}
+
+fn optional_seconds(uri: &Uri, key: &str) -> Result<Option<i64>, String> {
+    query_param(uri, key)
+        .map(|value| {
+            parse_seconds_to_ns(&value).ok_or_else(|| format!("invalid query parameter {key}"))
+        })
+        .transpose()
+}
+
+fn required_step(uri: &Uri) -> Result<i64, String> {
+    let Some(value) = query_param(uri, "step") else {
+        return Err("missing query parameter step".to_string());
+    };
+    let step = parse_seconds_to_ns(&value).ok_or("invalid step")?;
+    if step <= 0 {
+        return Err("step must be positive".to_string());
+    }
+    Ok(step)
+}
+
+fn parse_seconds_to_ns(value: &str) -> Option<i64> {
+    let (negative, value) = value
+        .strip_prefix('-')
+        .map_or((false, value), |rest| (true, rest));
+    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || !fraction.bytes().all(|b| b.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return None;
+    }
+    let whole_ns = whole.parse::<i64>().ok()?.checked_mul(1_000_000_000)?;
+    let fraction_ns = if fraction.is_empty() {
+        0
+    } else {
+        format!("{fraction:0<9}").parse::<i64>().ok()?
+    };
+    let ns = whole_ns.checked_add(fraction_ns)?;
+    if negative { ns.checked_neg() } else { Some(ns) }
+}
+
+fn exemplar_limit(uri: &Uri) -> Option<usize> {
+    match query_param(uri, "exemplars").as_deref() {
+        Some("false" | "0") => Some(0),
+        Some("true") | None => None,
+        Some(value) => value.parse().ok().or(None),
+    }
+}
+
+fn scope_param(uri: &Uri) -> Result<Option<crabka_traceql::TagScope>, &'static str> {
+    query_param(uri, "scope")
+        .map(|s| parse_scope(&s).ok_or("invalid scope"))
+        .transpose()
+}
+
+fn parse_scope(name: &str) -> Option<crabka_traceql::TagScope> {
+    Some(match name {
+        "resource" => crabka_traceql::TagScope::Resource,
+        "span" => crabka_traceql::TagScope::Span,
+        "intrinsic" => crabka_traceql::TagScope::Intrinsic,
+        "event" => crabka_traceql::TagScope::Event,
+        "link" => crabka_traceql::TagScope::Link,
+        "instrumentation" => crabka_traceql::TagScope::Instrumentation,
+        _ => return None,
+    })
+}
+
+fn scope_name(scope: crabka_traceql::TagScope) -> &'static str {
+    match scope {
+        crabka_traceql::TagScope::Resource => "resource",
+        crabka_traceql::TagScope::Span => "span",
+        crabka_traceql::TagScope::Intrinsic => "intrinsic",
+        crabka_traceql::TagScope::Event => "event",
+        crabka_traceql::TagScope::Link => "link",
+        crabka_traceql::TagScope::Instrumentation => "instrumentation",
+    }
+}

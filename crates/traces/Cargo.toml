@@ -32,6 +32,7 @@ clap = { workspace = true }
 datafusion = { workspace = true }
 dashmap = { workspace = true }
 flate2 = { workspace = true }
+futures = { workspace = true }
 hex = { workspace = true }
 object_store = { workspace = true }
 opentelemetry-proto = { workspace = true }
