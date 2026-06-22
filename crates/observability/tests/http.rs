@@ -6875,6 +6875,31 @@ async fn format_query_endpoint_formats_vector_group_modifier_like_loki() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_vector_group_modifier_without_labels_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=vector%281%29%2Bon%28app%29group_left%20vector%282%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": "(vector(1.000000) + on (app) group_left vector(2.000000))"
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_vector_comparison_expression_like_loki() {
     let state = fixture();
     let app = loki_router(state);
