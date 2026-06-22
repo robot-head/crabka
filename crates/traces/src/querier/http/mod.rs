@@ -104,6 +104,7 @@ where
         .route("/api/echo", get(echo))
         .route("/ready", get(ready))
         .route("/status", get(ready))
+        .route("/api/status/buildinfo", get(buildinfo))
         .route("/api/search", get(search::<S>))
         .route("/api/search/tags", get(search_tags::<S>))
         .route("/api/v2/search/tags", get(search_tags_v2::<S>))
@@ -115,6 +116,7 @@ where
         .route("/api/metrics/query_range", get(query_range::<S>))
         .route("/api/metrics/query", get(query_instant::<S>))
         .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
+        .route("/api/traces/{trace_id}", get(trace_by_id_v1::<S>))
         .with_state(AppState { engine, cfg })
 }
 
@@ -124,6 +126,26 @@ async fn echo() -> &'static str {
 
 async fn ready() -> &'static str {
     "ready"
+}
+
+/// Tempo-compatible build info. Grafana's Tempo datasource probes this on every
+/// query to detect the backend version; without it Grafana treats the backend as
+/// a legacy Tempo and falls back to endpoints we do not serve (breaking the
+/// trace-by-id view). The Prometheus-style `{status, data:{version,...}}` shape
+/// matches Tempo's `/api/status/buildinfo`.
+async fn buildinfo() -> Response {
+    Json(json!({
+        "status": "success",
+        "data": {
+            "version": "2.6.0",
+            "revision": "crabka",
+            "branch": "main",
+            "buildUser": "crabka",
+            "buildDate": "",
+            "goVersion": "",
+        },
+    }))
+    .into_response()
 }
 
 async fn search<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
@@ -520,9 +542,9 @@ where
     {
         Ok(Some(trace)) => {
             if wants_protobuf(&headers) {
-                match trace_protobuf(&trace, state.cfg.max_trace_spans) {
+                match trace_by_id_response_protobuf(&trace, state.cfg.max_trace_spans) {
                     Ok(bytes) => {
-                        ([(header::CONTENT_TYPE, "application/x-protobuf")], bytes).into_response()
+                        ([(header::CONTENT_TYPE, "application/protobuf")], bytes).into_response()
                     }
                     Err(err) => {
                         (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
@@ -530,6 +552,52 @@ where
                 }
             } else {
                 Json(trace_json(&trace, state.cfg.max_trace_spans)).into_response()
+            }
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+/// Tempo v1 trace-by-id (`/api/traces/{id}`). Grafana's Tempo *backend*
+/// datasource fetches the trace-view here with `Accept: application/protobuf`
+/// and proto-decodes the body as OTLP, so we default to OTLP `TracesData`
+/// protobuf (Tempo's v1 default), falling back to the wrapped JSON for humans.
+async fn trace_by_id_v1<S>(
+    State(state): State<AppState<S>>,
+    headers: HeaderMap,
+    Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let Ok(trace_id) = decode_trace_id(&trace_id) else {
+        return (StatusCode::BAD_REQUEST, "trace id must be 32 hex chars").into_response();
+    };
+    let tenant = tenant(&headers);
+    let (start_ns, end_ns) = match optional_time_bounds(&uri) {
+        Ok(bounds) => bounds,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    match state
+        .engine
+        .trace_by_id_within(&tenant, &trace_id, start_ns, end_ns)
+        .await
+    {
+        Ok(Some(trace)) => {
+            if wants_json(&headers) {
+                Json(trace_json(&trace, state.cfg.max_trace_spans)).into_response()
+            } else {
+                match trace_protobuf(&trace, state.cfg.max_trace_spans) {
+                    Ok(bytes) => {
+                        ([(header::CONTENT_TYPE, "application/protobuf")], bytes).into_response()
+                    }
+                    Err(err) => {
+                        (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
+                    }
+                }
             }
         }
         Ok(None) => (StatusCode::NOT_FOUND, "trace not found").into_response(),
@@ -555,6 +623,21 @@ fn wants_protobuf(headers: &HeaderMap) -> bool {
                 let media_type = part.split(';').next().unwrap_or_default().trim();
                 media_type.eq_ignore_ascii_case("application/protobuf")
                     || media_type.eq_ignore_ascii_case("application/x-protobuf")
+            })
+        })
+}
+
+fn wants_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|part| {
+                part.split(';')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .eq_ignore_ascii_case("application/json")
             })
         })
 }
@@ -1556,11 +1639,8 @@ fn trace_json(trace: &TraceSpans, max_trace_spans: usize) -> Value {
     })
 }
 
-fn trace_protobuf(
-    trace: &TraceSpans,
-    max_trace_spans: usize,
-) -> Result<Vec<u8>, prost::EncodeError> {
-    let data = OtlpTracesData {
+fn trace_traces_data(trace: &TraceSpans, max_trace_spans: usize) -> OtlpTracesData {
+    OtlpTracesData {
         resource_spans: resource_span_groups(trace, trace.spans.len().min(max_trace_spans))
             .into_iter()
             .map(|(attrs, spans)| OtlpResourceSpans {
@@ -1572,9 +1652,41 @@ fn trace_protobuf(
                 ..OtlpResourceSpans::default()
             })
             .collect(),
-    };
+    }
+}
+
+/// OTLP `TracesData` protobuf — the Tempo v1 `/api/traces/{id}` body, which
+/// Grafana's Tempo datasource decodes as `tempopb.Trace` (wire-identical to
+/// `TracesData`: both are field 1 = repeated `ResourceSpans`).
+fn trace_protobuf(
+    trace: &TraceSpans,
+    max_trace_spans: usize,
+) -> Result<Vec<u8>, prost::EncodeError> {
+    let data = trace_traces_data(trace, max_trace_spans);
     let mut bytes = Vec::with_capacity(data.encoded_len());
     data.encode(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Tempo `TraceByIDResponse` (`message TraceByIDResponse { Trace trace = 1; }`),
+/// the `/api/v2/traces/{id}` protobuf body. Grafana's Tempo datasource decodes
+/// the v2 trace-by-id response into this message; the inner `Trace` is
+/// wire-identical to OTLP `TracesData`, so we model the field as `TracesData`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+struct TraceByIdResponse {
+    #[prost(message, optional, tag = "1")]
+    trace: Option<OtlpTracesData>,
+}
+
+fn trace_by_id_response_protobuf(
+    trace: &TraceSpans,
+    max_trace_spans: usize,
+) -> Result<Vec<u8>, prost::EncodeError> {
+    let response = TraceByIdResponse {
+        trace: Some(trace_traces_data(trace, max_trace_spans)),
+    };
+    let mut bytes = Vec::with_capacity(response.encoded_len());
+    response.encode(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -3276,10 +3388,11 @@ overrides:
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        let data = TracesData::decode(bytes).unwrap();
+        // v2 returns a Tempo TraceByIDResponse wrapping the OTLP trace.
+        let data = TraceByIdResponse::decode(bytes).unwrap().trace.unwrap();
 
         assert!(status == StatusCode::OK);
-        assert!(content_type.as_deref() == Some("application/x-protobuf"));
+        assert!(content_type.as_deref() == Some("application/protobuf"));
         assert!(data.resource_spans.len() == 1);
         assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
         assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
@@ -3307,8 +3420,93 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
 
         assert!(status == StatusCode::OK);
-        assert!(content_type.as_deref() == Some("application/x-protobuf"));
+        assert!(content_type.as_deref() == Some("application/protobuf"));
+        assert!(TraceByIdResponse::decode(bytes).unwrap().trace.is_some());
+    }
+
+    #[tokio::test]
+    async fn buildinfo_reports_tempo_version() {
+        // Grafana's Tempo datasource probes this to detect backend capabilities.
+        let (status, body) = get_json("/api/status/buildinfo").await;
+        assert!(status == StatusCode::OK);
+        assert!(body["status"] == "success");
+        assert!(body["data"]["version"].as_str() == Some("2.6.0"));
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_v1_returns_bare_otlp_protobuf() {
+        // Grafana's backend falls back to the v1 endpoint and decodes it as
+        // `tempopb.Trace` (wire-identical to a bare OTLP `TracesData`).
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .header("accept", "application/protobuf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let data = TracesData::decode(bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(content_type.as_deref() == Some("application/protobuf"));
+        assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
+        assert!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_v1_defaults_to_protobuf_without_accept() {
+        // Tempo's v1 endpoint defaults to protobuf when no Accept is given.
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+
+        assert!(content_type.as_deref() == Some("application/protobuf"));
         assert!(TracesData::decode(bytes).is_ok());
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_v1_honors_json_accept() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/traces/09090909090909090909090909090909")
+                    .header("x-scope-orgid", "tenant-a")
+                    .header("accept", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(status == StatusCode::OK);
+        assert!(body["status"] == "COMPLETE");
+        assert!(body["trace"]["resourceSpans"].as_array().is_some());
     }
 
     #[tokio::test]

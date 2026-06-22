@@ -89,6 +89,15 @@ use tower::ServiceExt as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+/// Mirror of Tempo's `TraceByIDResponse` (`message TraceByIDResponse { Trace
+/// trace = 1 }`) for decoding the v2 trace-by-id protobuf body. The inner
+/// `Trace` is wire-identical to OTLP `TracesData`, so we model it as such.
+#[derive(Clone, PartialEq, prost::Message)]
+struct TraceByIdResponse {
+    #[prost(message, optional, tag = "1")]
+    trace: Option<TracesData>,
+}
+
 const TENANT: &str = "tenant-a";
 const DOCKER_HOST_ALIAS: &str = "host.testcontainers.internal";
 const GRAFANA_TEMPO_DATASOURCE_UID: &str = "crabka-traces";
@@ -1143,15 +1152,18 @@ async fn grafana_e2e_full_surface() -> TestResult {
         "expected 4 returned spans"
     );
 
-    // E4b — trace-by-id PROTOBUF content negotiation. Grafana's Tempo datasource
-    // always requests JSON, so this querier branch (Accept: application/x-protobuf
-    // -> OTLP TracesData protobuf) is verified directly against the querier.
+    // E4b — trace-by-id PROTOBUF, the format Grafana's Tempo *backend* uses for
+    // the trace-view: GET /api/v2/traces/{id} with Accept: application/protobuf
+    // returns a Tempo `TraceByIDResponse` wrapping the OTLP trace. Verified
+    // directly against the querier (this exact path is what makes the Grafana
+    // waterfall render; a raw OTLP body trips "failed to convert ... unexpected
+    // EOF" in the plugin).
     let pb = client
         .get(format!(
             "{}/api/v2/traces/{TRACE_A_HEX}?{range}",
             crabka.local_base_url
         ))
-        .header("accept", "application/x-protobuf")
+        .header("accept", "application/protobuf")
         .header("x-scope-orgid", TENANT)
         .send()
         .await?;
@@ -1160,10 +1172,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
         pb.headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
-            == Some("application/x-protobuf"),
+            == Some("application/protobuf"),
         "protobuf negotiation should set content-type"
     );
-    let decoded = TracesData::decode(pb.bytes().await?)?;
+    let decoded = TraceByIdResponse::decode(pb.bytes().await?)?
+        .trace
+        .expect("TraceByIDResponse carries the trace");
     assert!(
         decoded.resource_spans.len() == 2,
         "protobuf trace should carry both services' resource spans: {decoded:?}"
