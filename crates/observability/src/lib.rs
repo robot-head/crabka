@@ -11063,6 +11063,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_metric_label_replace_query(query) {
+                Ok(formatted)
             } else if let Ok(metric_query) = parse_metric_query(query) {
                 Ok(format_metric_query(&metric_query).unwrap_or_else(|| query.trim().to_string()))
             } else if parse_metric_label_join_query(query).is_ok()
@@ -11268,6 +11270,34 @@ fn format_metric_scalar_comparison_operator(op: ComparisonOp) -> Option<&'static
         ComparisonOp::LessEqual => Some("<="),
         ComparisonOp::RegexEqual | ComparisonOp::RegexNotEqual => None,
     }
+}
+
+fn format_metric_label_replace_query(query: &str) -> Option<String> {
+    let label_replace = parse_metric_label_replace_query(query).ok()?;
+    let metric = format_metric_query(&label_replace.query)?;
+    Some(format!(
+        "label_replace({metric},{},{},{},{})",
+        format_logql_quoted_string(&label_replace.destination_label),
+        format_logql_quoted_string(&label_replace.replacement),
+        format_logql_quoted_string(&label_replace.source_label),
+        format_logql_quoted_string(&label_replace.pattern),
+    ))
+}
+
+fn format_logql_quoted_string(value: &str) -> String {
+    let mut formatted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => formatted.push_str("\\\\"),
+            '"' => formatted.push_str("\\\""),
+            '\n' => formatted.push_str("\\n"),
+            '\r' => formatted.push_str("\\r"),
+            '\t' => formatted.push_str("\\t"),
+            other => formatted.push(other),
+        }
+    }
+    formatted.push('"');
+    formatted
 }
 
 fn split_top_level_set_query(query: &str) -> Option<(&str, &'static str, &str)> {
@@ -11607,6 +11637,10 @@ fn format_vector_function_text(query: &str) -> Option<String> {
 }
 
 fn format_scalar_vector_expression(query: &str) -> Option<String> {
+    if let Some(formatted) = format_vector_label_replace_function(query) {
+        return Some(formatted);
+    }
+
     let query = query
         .chars()
         .filter(|ch| !ch.is_whitespace())
@@ -11635,6 +11669,92 @@ fn format_scalar_vector_expression(query: &str) -> Option<String> {
         ScalarVectorExpressionResult::Scalar { sample } => Some(sample),
         ScalarVectorExpressionResult::Vector { .. } => None,
     }
+}
+
+fn format_vector_label_replace_function(query: &str) -> Option<String> {
+    let arguments = split_logql_function_arguments(query, "label_replace")?;
+    if arguments.len() != 5 {
+        return None;
+    }
+    let vector = format_vector_function_text(arguments[0].trim())?;
+    Some(format!(
+        "label_replace({vector},{},{},{},{})",
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[1].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[2].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[3].trim())?),
+        format_logql_quoted_string(&parse_logql_string_argument(arguments[4].trim())?),
+    ))
+}
+
+fn split_logql_function_arguments<'a>(query: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let query = query.trim();
+    let rest = query.strip_prefix(name)?.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let mut arguments = Vec::new();
+    let mut start = 0;
+    let mut parens = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in rest.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '`' => quote = Some(ch),
+            '(' => parens += 1,
+            ')' if parens > 0 => parens -= 1,
+            ',' if parens == 0 => {
+                arguments.push(rest[start..index].trim());
+                start = index + ch.len_utf8();
+            }
+            ')' => {
+                arguments.push(rest[start..index].trim());
+                if rest[index + ch.len_utf8()..].trim().is_empty() {
+                    return Some(arguments);
+                }
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_logql_string_argument(argument: &str) -> Option<String> {
+    if let Some(inner) = argument
+        .strip_prefix('`')
+        .and_then(|argument| argument.strip_suffix('`'))
+    {
+        return Some(inner.to_string());
+    }
+
+    let inner = argument
+        .strip_prefix('"')
+        .and_then(|argument| argument.strip_suffix('"'))?;
+    let mut parsed = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            parsed.push(match chars.next()? {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '"' => '"',
+                '\\' => '\\',
+                other => other,
+            });
+        } else {
+            parsed.push(ch);
+        }
+    }
+    Some(parsed)
 }
 
 fn format_vector_set_expression(query: &str) -> Option<String> {
