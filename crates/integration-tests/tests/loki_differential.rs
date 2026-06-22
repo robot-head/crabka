@@ -2559,6 +2559,18 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
                     [base_ns.to_string(), r#"{"request":{"method":"GET"},"response":{"status":200}}"#],
                     [(base_ns + 1_000_000_000).to_string(), r#"{"request":{"method":"GET"},"response":{"status":500}}"#]
                 ]
+            },
+            {
+                "stream": {
+                    "app": "api",
+                    "env": "prod",
+                    "format": "logfmt"
+                },
+                "values": [
+                    [base_ns.to_string(), "cost=1.5 requests=1 size=1KiB latency=100ms api unwrap metric one"],
+                    [(base_ns + 1_000_000_000).to_string(), "cost=2.5 requests=3 size=2KiB latency=200ms api unwrap metric two"],
+                    [(base_ns + 2_000_000_000).to_string(), "cost=0.5 requests=2 size=512B latency=1s api unwrap metric reset"]
+                ]
             }
         ]
     });
@@ -2610,9 +2622,37 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
     let crabka_result =
-        crabka_query_range_result_with_step(querier, query, base_ns, end_ns, "1s").await;
+        crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
     assert!(crabka_result == loki_result);
+
+    for query in [
+        r#"sum_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"avg_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"stdvar_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"stddev_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"quantile_over_time(0.75, {app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"min_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"max_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"first_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"last_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
+        r#"rate_counter({app="api",format="logfmt"} | logfmt | unwrap requests | __error__ = "" [3s])"#,
+        r#"sum_over_time({app="api",format="logfmt"} | logfmt | unwrap bytes(size) | __error__ = "" [3s])"#,
+        r#"sum_over_time({app="api",format="logfmt"} | logfmt | unwrap duration(latency) | __error__ = "" [3s])"#,
+        r#"sum_over_time({app="api",format="logfmt"} | logfmt | unwrap duration_seconds(latency) | __error__ = "" [3s])"#,
+    ] {
+        let loki_result =
+            loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s")
+                .await;
+        let crabka_result =
+            crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s")
+                .await;
+
+        assert!(
+            crabka_result == loki_result,
+            "unwrapped range metric mismatch for query {query}"
+        );
+    }
     broker.shutdown().await;
 }
 
@@ -3043,6 +3083,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         r#"{app="#,
         "abs(vector(-1.2))",
         r#"count_values by (env) ("hits", count_over_time({app="api"}[1s]))"#,
+        r#"approx_topk(1, count_over_time({app="api"}[1s]))"#,
     ] {
         let loki_error = loki_query_error(&http, &loki_base, query).await;
         let crabka_error = crabka_query_error(querier.clone(), query).await;
@@ -4630,15 +4671,17 @@ async fn crabka_otlp_error(app: axum::Router, payload: &Value) -> Value {
 async fn loki_query_result(http: &reqwest::Client, base: &str, query: &str, time_ns: i64) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let body: Value = http
+        let response = http
             .get(format!("{base}/loki/api/v1/query"))
             .query(&[("query", query.to_string()), ("time", time_ns.to_string())])
             .send()
             .await
-            .expect("query Loki")
-            .json()
-            .await
-            .expect("Loki JSON response");
+            .expect("query Loki");
+        let status = response.status();
+        let body_text = response.text().await.expect("Loki response body");
+        let body: Value = serde_json::from_str(&body_text).unwrap_or_else(|error| {
+            panic!("Loki JSON response: status={status}, body={body_text:?}, error={error}")
+        });
         if !body["data"]["result"]
             .as_array()
             .unwrap_or(&Vec::new())

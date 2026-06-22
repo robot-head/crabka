@@ -7500,8 +7500,10 @@ async fn query_range_endpoint_rejects_approx_topk_metric_query() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(&json_body(response).await, "bad_data", "instant query");
+    assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        text_body(response).await == "approx_topk is not enabled. See -limits.shard_aggregations"
+    );
 }
 
 #[tokio::test]

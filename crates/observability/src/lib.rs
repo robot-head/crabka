@@ -8406,8 +8406,8 @@ async fn execute_http_metric_query(
     kind: QueryKind,
     query: MetricQuery,
 ) -> Result<Value, HttpQueryError> {
-    if matches!(kind, QueryKind::Range) && metric_query_uses_approx_topk(&query) {
-        return Err(HttpQueryError::ApproxTopKRangeQuery);
+    if metric_query_uses_approx_topk(&query) {
+        return Err(HttpQueryError::ApproxTopKDisabled);
     }
     if metric_query_uses_count_values(&query) {
         return Err(HttpQueryError::CountValuesQuery);
@@ -15415,8 +15415,8 @@ enum HttpQueryError {
     },
     #[error("query matched {series} series, exceeding configured limit {max_series}")]
     QuerySeriesTooLarge { series: usize, max_series: usize },
-    #[error("approx_topk is only supported for instant query")]
-    ApproxTopKRangeQuery,
+    #[error("approx_topk is not enabled. See -limits.shard_aggregations")]
+    ApproxTopKDisabled,
     #[error("parse error at line 1, col 1: syntax error: unexpected IDENTIFIER")]
     CountValuesQuery,
     #[error(transparent)]
@@ -15469,9 +15469,9 @@ impl IntoResponse for HttpQueryError {
             | Self::QueryBytesTooLarge { .. }
             | Self::QueryLengthTooLarge { .. }
             | Self::QuerySeriesTooLarge { .. }
-            | Self::ApproxTopKRangeQuery
             | Self::CountValuesQuery
             | Self::Plan(_) => StatusCode::BAD_REQUEST,
+            Self::ApproxTopKDisabled => StatusCode::INTERNAL_SERVER_ERROR,
             Self::QueryAuthorization(QueryAuthorizationError::Unauthorized { .. }) => {
                 StatusCode::FORBIDDEN
             }
@@ -15519,6 +15519,7 @@ impl IntoResponse for HttpQueryError {
                 | Self::InvalidTimestampQueryParameter { .. }
                 | Self::LokiQueryRangeTooLarge { .. }
                 | Self::QueryResolutionTooHigh
+                | Self::ApproxTopKDisabled
                 | Self::CountValuesQuery
         ) {
             return text_response(status, &self.to_string());
