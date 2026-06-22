@@ -11062,6 +11062,12 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_label_replace_metric_binary_set(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_metric_binary_arithmetic_query(query) {
+                Ok(formatted)
+            } else if let Some(formatted) = format_metric_binary_comparison_query(query) {
+                Ok(formatted)
+            } else if let Some(formatted) = format_metric_binary_set_query(query) {
+                Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_arithmetic_expression(query) {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_comparison_expression(query) {
@@ -11227,6 +11233,144 @@ fn format_metric_vector_binary_expression(
             modifiers.text, modifiers.right_separator
         ),
         None => format!("({left} {operator} {right})"),
+    }
+}
+
+fn format_metric_binary_arithmetic_query(query: &str) -> Option<String> {
+    let (left_text, _, right_text) = split_top_level_arithmetic_query(query)?;
+    let (_, right_text) = split_leading_vector_binary_modifiers(right_text);
+    parse_metric_query(left_text.trim()).ok()?;
+    parse_metric_query(right_text.trim()).ok()?;
+    let arithmetic = parse_metric_binary_arithmetic_query(query).ok()?;
+    let left = format_metric_query(&arithmetic.left)?;
+    let right = format_metric_query(&arithmetic.right)?;
+    let operator = format_metric_scalar_arithmetic_operator(arithmetic.op);
+    Some(format_metric_binary_expression(
+        &left,
+        operator,
+        false,
+        arithmetic.matching.as_ref(),
+        &right,
+    ))
+}
+
+fn format_metric_binary_comparison_query(query: &str) -> Option<String> {
+    let (left_text, _, right_text) = split_top_level_comparison_query(query)?;
+    let right_text = right_text.trim_start();
+    let right_text = right_text
+        .strip_prefix("bool")
+        .map(str::trim_start)
+        .unwrap_or(right_text);
+    let (_, right_text) = split_leading_vector_binary_modifiers(right_text);
+    parse_metric_query(left_text.trim()).ok()?;
+    parse_metric_query(right_text.trim()).ok()?;
+    let comparison = parse_metric_binary_comparison_query(query).ok()?;
+    let left = format_metric_query(&comparison.left)?;
+    let right = format_metric_query(&comparison.right)?;
+    let operator = format_metric_scalar_comparison_operator(comparison.op)?;
+    Some(format_metric_binary_expression(
+        &left,
+        operator,
+        comparison.bool_modifier,
+        comparison.matching.as_ref(),
+        &right,
+    ))
+}
+
+fn format_metric_binary_set_query(query: &str) -> Option<String> {
+    let (left_text, _, right_text) = split_top_level_set_query(query)?;
+    let (_, right_text) = split_leading_vector_binary_modifiers(right_text);
+    parse_metric_query(left_text.trim()).ok()?;
+    parse_metric_query(right_text.trim()).ok()?;
+    let set = parse_metric_binary_set_query(query).ok()?;
+    let left = format_metric_query(&set.left)?;
+    let right = format_metric_query(&set.right)?;
+    let operator = format_metric_binary_set_operator(set.op);
+    Some(format_metric_binary_expression(
+        &left,
+        operator,
+        false,
+        set.matching.as_ref(),
+        &right,
+    ))
+}
+
+fn format_metric_binary_expression(
+    left: &str,
+    operator: &str,
+    bool_modifier: bool,
+    matching: Option<&MetricVectorMatching>,
+    right: &str,
+) -> String {
+    let bool_text = if bool_modifier { " bool" } else { "" };
+    let Some(matching) = matching else {
+        return format!("({left} {operator}{bool_text} {right})");
+    };
+    let matching = format_metric_vector_matching(matching);
+    if matching.has_group {
+        return format!(
+            "  {left}\n{operator}{bool_text} {}\n  {right}",
+            matching.text
+        );
+    }
+    format!("({left} {operator}{bool_text} {}  {right})", matching.text)
+}
+
+struct FormattedMetricVectorMatching {
+    text: String,
+    has_group: bool,
+}
+
+fn format_metric_vector_matching(matching: &MetricVectorMatching) -> FormattedMetricVectorMatching {
+    match matching {
+        MetricVectorMatching::On { labels, group } => FormattedMetricVectorMatching {
+            text: format_metric_vector_matching_text("on", labels, group.as_ref()),
+            has_group: group.is_some(),
+        },
+        MetricVectorMatching::Ignoring { labels, group } => FormattedMetricVectorMatching {
+            text: format_metric_vector_matching_text("ignoring", labels, group.as_ref()),
+            has_group: group.is_some(),
+        },
+    }
+}
+
+fn format_metric_vector_matching_text(
+    modifier: &str,
+    labels: &[String],
+    group: Option<&MetricVectorGroupModifier>,
+) -> String {
+    let mut text = format!("{modifier} ({})", labels.join(","));
+    if let Some(group) = group {
+        text.push(' ');
+        text.push_str(&format_metric_vector_group_modifier(group));
+    }
+    text
+}
+
+fn format_metric_vector_group_modifier(group: &MetricVectorGroupModifier) -> String {
+    match group {
+        MetricVectorGroupModifier::Left(labels) => {
+            format_metric_vector_group_modifier_text("group_left", labels)
+        }
+        MetricVectorGroupModifier::Right(labels) => {
+            format_metric_vector_group_modifier_text("group_right", labels)
+        }
+    }
+}
+
+fn format_metric_vector_group_modifier_text(modifier: &str, labels: &[String]) -> String {
+    if labels.is_empty() {
+        modifier.to_string()
+    } else {
+        format!("{modifier} ({})", labels.join(","))
+    }
+}
+
+fn format_metric_binary_set_operator(op: MetricBinarySetOp) -> &'static str {
+    match op {
+        MetricBinarySetOp::And => "and",
+        MetricBinarySetOp::Or => "or",
+        MetricBinarySetOp::Unless => "unless",
     }
 }
 
