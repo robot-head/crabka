@@ -11094,6 +11094,9 @@ fn format_scalar_vector_expression(query: &str) -> Option<String> {
     if let Some(formatted) = format_vector_set_expression(&query) {
         return Some(formatted);
     }
+    if let Some(formatted) = format_vector_arithmetic_expression(&query) {
+        return Some(formatted);
+    }
     match scalar_vector_expression_result(&query)? {
         ScalarVectorExpressionResult::Scalar { sample } => Some(sample),
         ScalarVectorExpressionResult::Vector { .. } => None,
@@ -11109,6 +11112,33 @@ fn format_vector_set_expression(query: &str) -> Option<String> {
             if end == query.len() {
                 return Some(format!("({left} {operator} {right})"));
             }
+        }
+    }
+    None
+}
+
+fn format_vector_arithmetic_expression(query: &str) -> Option<String> {
+    let (left, position) = parse_formatted_vector_function(query, 0)?;
+    let (operator, right_position) = parse_vector_arithmetic_operator(query, position)?;
+    let (right, end) = parse_formatted_vector_function(query, right_position)?;
+    if end == query.len() {
+        Some(format!("({left} {operator} {right})"))
+    } else {
+        None
+    }
+}
+
+fn parse_vector_arithmetic_operator(query: &str, position: usize) -> Option<(&'static str, usize)> {
+    for (raw, formatted) in [
+        ("+", "+"),
+        ("-", "-"),
+        ("*", "*"),
+        ("/", "/"),
+        ("%", "%"),
+        ("^", "^"),
+    ] {
+        if query[position..].starts_with(raw) {
+            return Some((formatted, position + raw.len()));
         }
     }
     None
