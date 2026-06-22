@@ -7225,6 +7225,56 @@ async fn format_query_endpoint_accepts_metric_binary_arithmetic_query() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_vector_aggregation_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=sum%28rate%28%7Bapp%3D%22api%22%7D%7C%3D%22error%22%5B5m%5D%29%29%20by%20%28env%2Cstatus%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"sum by (env,status)(rate({app="api"} |= "error"[5m]))"#
+            })
+    );
+}
+
+#[tokio::test]
+async fn format_query_endpoint_formats_range_grouping_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=quantile_over_time%28.75%2C%7Bapp%3D%22api%22%7D%7Clogfmt%7Cunwrap%20cost%5B30s%5D%29%20by%28app%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"quantile_over_time(0.75,{app="api"} | logfmt | unwrap cost[30s]) by (app)"#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_accepts_range_selector_before_pipeline() {
     let state = fixture();
     let app = loki_router(state);
@@ -7269,7 +7319,7 @@ async fn format_query_endpoint_accepts_approx_topk_metric_query() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"approx_topk(2, count_over_time({app="api"} |= "error" [30s]))"#
+                "data": r#"approx_topk(2,count_over_time({app="api"} |= "error"[30s]))"#
             })
     );
 }
