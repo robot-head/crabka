@@ -3666,9 +3666,7 @@ fn loki_proto_label_pairs_to_labels(
         }
         labels_by_name.insert(label.name.clone(), label.value.clone());
     }
-    let labels = labels_by_name;
-    validate_loki_structured_metadata(&labels)?;
-    Ok(labels)
+    Ok(labels_by_name)
 }
 
 fn normalize_otlp_proto_logs(
@@ -4203,13 +4201,6 @@ fn parse_structured_metadata(
             Ok((name.clone(), value.to_string()))
         })
         .collect::<Result<BTreeMap<_, _>, DistributorError>>()
-}
-
-fn validate_loki_structured_metadata(metadata: &Labels) -> Result<(), DistributorError> {
-    if metadata.keys().any(|name| !is_loki_label_name(name)) {
-        return Err(DistributorError::InvalidStructuredMetadata);
-    }
-    Ok(())
 }
 
 fn metadata_value_to_string(value: &Value) -> String {
