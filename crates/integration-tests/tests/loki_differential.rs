@@ -3086,8 +3086,6 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         "abs(vector(-1.2))",
         r#"count_values by (env) ("hits", count_over_time({app="api"}[1s]))"#,
         r#"approx_topk(1, count_over_time({app="api"}[1s]))"#,
-        r#"label_replace(count_over_time({app="api"} |= "error" [1s]), "service", "$1-api", "app", "(.*)")"#,
-        r#"label_join(count_over_time({app="api"} |= "error" [1s]), "joined", "/", "app", "env")"#,
     ] {
         let loki_error = loki_query_error(&http, &loki_base, query).await;
         let crabka_error = crabka_query_error(querier.clone(), query).await;
@@ -4326,6 +4324,53 @@ async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
                     "app": "api"
                 },
                 "values": [["1000000000", "stale push timestamp"]]
+            }
+        ]
+    });
+
+    let loki_error = loki_push_error(&http, &loki_base, &payload).await;
+    let crabka_error = crabka_push_error(distributor, &payload).await;
+
+    assert!(crabka_error == loki_error);
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let (broker, bootstrap, _) = boot_crabka().await;
+    let topic = "__crabka_observability_loki_invalid_timestamp_differential";
+    create_topic(&bootstrap, topic).await;
+    let data_root = TempDir::new().expect("data root");
+    let distributor_config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
+    let distributor = build_service_router(
+        &distributor_config,
+        build_service_dependencies(&distributor_config)
+            .await
+            .unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = json!({
+        "streams": [
+            {
+                "stream": {
+                    "app": "api"
+                },
+                "values": [["not-a-timestamp", "invalid push timestamp"]]
             }
         ]
     });

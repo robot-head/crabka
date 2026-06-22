@@ -1503,7 +1503,10 @@ in-memory router tests leave that gate disabled so deterministic fixture
 timestamps can continue to exercise query behavior. Configured distributors also
 enforce Loki's default ten-minute creation grace for future Loki push samples,
 returning the same plain-text `400` timestamp-too-new response before WAL
-append, with real-Loki differential coverage pinning the response body. The
+append, with real-Loki differential coverage pinning the response body.
+Malformed JSON push timestamp strings now also match Loki's raw
+`loghttp.PushRequest.Streams` unmarshaler text response instead of Crabka's
+generic Loki error envelope. The
 configured OTLP HTTP ingest path now shares the same timestamp windows before
 WAL append and matches Loki's `400` protobuf status-message body for future
 OTLP timestamps. Configured distributors now also perform a broker-backed tenant
