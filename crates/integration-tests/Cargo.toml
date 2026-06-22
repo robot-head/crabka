@@ -36,4 +36,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true }
 flate2 = { workspace = true }
 proptest = { workspace = true }
+prost = { workspace = true }
+snap = { workspace = true }
 uuid = { workspace = true }
