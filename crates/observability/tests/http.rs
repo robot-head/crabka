@@ -6719,7 +6719,7 @@ async fn format_query_endpoint_accepts_label_replace_metric_query() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"label_replace(count_over_time({app="api"} |= "error" [30s]), "service", "$1-api", "app", "(.*)")"#
+                "data": r#"label_replace(count_over_time({app="api"} |= "error"[30s]),"service","$1-api","app","(.*)")"#
             })
     );
 }
@@ -6770,6 +6770,31 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
             == json!({
                 "status": "success",
                 "data": "vector(0.250000)"
+            })
+    );
+}
+
+#[tokio::test]
+async fn format_query_endpoint_formats_label_replace_vector_function_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"label_replace(vector(1.000000),"service","api-$1","missing","(.*)")"#
             })
     );
 }
