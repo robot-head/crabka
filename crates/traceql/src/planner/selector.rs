@@ -760,4 +760,718 @@ mod tests {
         let ok = comparison_to_sql(&field, ComparisonOp::Gt, &Value::Float(1.5));
         assert!(ok.is_ok());
     }
+
+    fn intrinsic_field(intrinsic: Intrinsic) -> Field {
+        Field {
+            scope: Scope::Intrinsic(intrinsic),
+            key: String::new(),
+        }
+    }
+
+    fn attr_field(scope: Scope, key: &str) -> Field {
+        Field {
+            scope,
+            key: key.into(),
+        }
+    }
+
+    // ---- field_to_column: every intrinsic + every attribute scope ----
+
+    #[test]
+    fn field_to_column_maps_all_intrinsics() {
+        let cases = [
+            (Intrinsic::Name, COL_NAME),
+            (Intrinsic::Duration, COL_DURATION),
+            (Intrinsic::Kind, COL_KIND),
+            (Intrinsic::Status, COL_STATUS_CODE),
+            (Intrinsic::StatusMessage, COL_STATUS_MESSAGE),
+            (Intrinsic::Id, COL_SPAN_ID),
+            (Intrinsic::ParentId, COL_PARENT_SPAN_ID),
+            (Intrinsic::TraceDuration, COL_TRACE_DURATION),
+            (Intrinsic::TraceRootName, COL_ROOT_SPAN_NAME),
+            (Intrinsic::TraceRootService, COL_ROOT_SERVICE_NAME),
+            (Intrinsic::TraceId, COL_TRACE_ID),
+            (Intrinsic::NestedSetLeft, COL_NS_LEFT),
+            (Intrinsic::NestedSetRight, COL_NS_RIGHT),
+            (Intrinsic::NestedSetParent, COL_PARENT_ID),
+            (Intrinsic::ChildCount, COL_CHILD_COUNT),
+            (Intrinsic::InstrumentationName, COL_INSTRUMENTATION_NAME),
+            (
+                Intrinsic::InstrumentationVersion,
+                COL_INSTRUMENTATION_VERSION,
+            ),
+            (Intrinsic::EventName, COL_EVENT_NAME),
+            (Intrinsic::EventTimeSinceStart, COL_EVENT_TIME_SINCE_START),
+            (Intrinsic::LinkTraceId, COL_LINK_TRACE_ID),
+            (Intrinsic::LinkSpanId, COL_LINK_SPAN_ID),
+        ];
+        for (intrinsic, expected) in cases {
+            let col = field_to_column(&intrinsic_field(intrinsic.clone()));
+            assert!(col == expected, "intrinsic {intrinsic:?} -> {col}");
+        }
+    }
+
+    #[test]
+    fn field_to_column_service_name_resolves_to_root_service() {
+        // `service.name` short-circuits to the root-service column for both the
+        // ambiguous (Both) and explicit Resource scopes.
+        assert!(field_to_column(&attr_field(Scope::Both, "service.name")) == COL_ROOT_SERVICE_NAME);
+        assert!(
+            field_to_column(&attr_field(Scope::Resource, "service.name")) == COL_ROOT_SERVICE_NAME
+        );
+    }
+
+    #[test]
+    fn field_to_column_attribute_scopes_get_attr_prefix() {
+        for scope in [
+            Scope::Both,
+            Scope::Span,
+            Scope::Resource,
+            Scope::Parent,
+            Scope::Event,
+            Scope::Link,
+            Scope::Instrumentation,
+        ] {
+            let col = field_to_column(&attr_field(scope.clone(), "region"));
+            assert!(
+                col == format!("{ATTR_PREFIX}region"),
+                "scope {scope:?} -> {col}"
+            );
+        }
+    }
+
+    // ---- comparison_to_sql: every operator, nil, regex ----
+
+    #[test]
+    fn comparison_to_sql_covers_all_operators() {
+        let field = attr_field(Scope::Both, "x");
+        let col = ident(&field_to_column(&field));
+        let cases = [
+            (ComparisonOp::Eq, format!("{col} = 1")),
+            (ComparisonOp::Neq, format!("{col} != 1")),
+            (ComparisonOp::Lt, format!("{col} < 1")),
+            (ComparisonOp::Lte, format!("{col} <= 1")),
+            (ComparisonOp::Gt, format!("{col} > 1")),
+            (ComparisonOp::Gte, format!("{col} >= 1")),
+        ];
+        for (op, expected) in cases {
+            let sql = comparison_to_sql(&field, op, &Value::Int(1)).unwrap();
+            assert!(sql == expected, "{op:?} -> {sql}");
+        }
+    }
+
+    #[test]
+    fn comparison_to_sql_nil_uses_null_predicates() {
+        let field = attr_field(Scope::Both, "x");
+        let col = ident(&field_to_column(&field));
+        assert!(
+            comparison_to_sql(&field, ComparisonOp::Eq, &Value::Nil).unwrap()
+                == format!("{col} IS NULL")
+        );
+        assert!(
+            comparison_to_sql(&field, ComparisonOp::Neq, &Value::Nil).unwrap()
+                == format!("{col} IS NOT NULL")
+        );
+    }
+
+    #[test]
+    fn comparison_to_sql_regex_is_anchored() {
+        let field = attr_field(Scope::Both, "x");
+        let col = ident(&field_to_column(&field));
+        let re = comparison_to_sql(&field, ComparisonOp::Re, &Value::Str("ab".into())).unwrap();
+        assert!(re == format!("regexp_like({col}, '^(?:ab)$')"));
+        let nre = comparison_to_sql(&field, ComparisonOp::Nre, &Value::Str("ab".into())).unwrap();
+        assert!(nre == format!("NOT regexp_like({col}, '^(?:ab)$')"));
+    }
+
+    #[test]
+    fn comparison_to_sql_regex_against_non_string_errors() {
+        let field = attr_field(Scope::Both, "x");
+        for op in [ComparisonOp::Re, ComparisonOp::Nre] {
+            let err = comparison_to_sql(&field, op, &Value::Int(3));
+            assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        }
+    }
+
+    // ---- field_expr_to_sql: And / Or / Not / Field ----
+
+    #[test]
+    fn field_expr_to_sql_combines_boolean_operators() {
+        let sql = field_expr_to_sql(&selector("{ .a = 1 && .b = 2 }")).unwrap();
+        assert!(sql == "(\"attr.a\" = 1 AND \"attr.b\" = 2)");
+
+        let sql = field_expr_to_sql(&selector("{ .a = 1 || .b = 2 }")).unwrap();
+        assert!(sql == "(\"attr.a\" = 1 OR \"attr.b\" = 2)");
+
+        let sql = field_expr_to_sql(&selector("{ !(.a = 1) }")).unwrap();
+        assert!(sql == "(NOT \"attr.a\" = 1)");
+    }
+
+    #[test]
+    fn field_expr_to_sql_bare_field_is_presence_check() {
+        let sql = field_expr_to_sql(&selector("{ .a }")).unwrap();
+        assert!(sql == "\"attr.a\" IS NOT NULL");
+    }
+
+    // ---- selector_sql variants: span-only, parent-join, nested ----
+
+    #[test]
+    fn selector_sql_plain_predicate_filters_table() {
+        let sql = selector_sql("\"spans\"", &selector("{ .a = 1 }")).unwrap();
+        assert!(sql == "SELECT * FROM \"spans\" WHERE \"attr.a\" = 1");
+    }
+
+    #[test]
+    fn selector_sql_parent_scope_emits_self_join() {
+        let sql = selector_sql("\"spans\"", &selector("{ parent.a = 1 }")).unwrap();
+        // Parent scope joins the table to itself on trace_id / parent_id linkage
+        // and qualifies the parent predicate with the `p` alias.
+        assert!(sql.contains("FROM \"spans\" AS s JOIN \"spans\" AS p"));
+        assert!(sql.contains("WHERE p.\"attr.a\" = 1"));
+        assert!(sql.contains("s.\"parent_id\" = p.\"nested_set_left\""));
+    }
+
+    #[test]
+    fn selector_sql_nested_scope_without_parent_selects_all() {
+        // An event/link scoped selector has its filtering applied at scan time,
+        // so the SQL projection is an unfiltered passthrough.
+        let sql = selector_sql("\"spans\"", &selector("{ event.foo = 1 }")).unwrap();
+        assert!(sql == "SELECT * FROM \"spans\"");
+    }
+
+    #[test]
+    fn selector_sql_nested_and_parent_emits_qualified_parent_join() {
+        // Mixing a nested (event) scope with a parent scope drives the
+        // parent-qualified branch of `selector_sql_with_parent_table`.
+        let fe = selector("{ event.foo = 1 && parent.a = 2 }");
+        let sql = selector_sql_with_parent_table("\"spans\"", "\"parents\"", &fe).unwrap();
+        assert!(sql.contains("FROM \"spans\" AS s JOIN \"parents\" AS p"));
+        assert!(sql.contains("p.\"attr.a\" = 2"));
+    }
+
+    // ---- parent_field_expr_to_sql_qualified: And/Or/Not pruning ----
+
+    #[test]
+    fn parent_predicate_extracts_only_parent_conjuncts() {
+        // AND keeps the parent conjunct and drops the non-parent one.
+        let fe = selector("{ parent.a = 1 && .b = 2 }");
+        let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
+            .unwrap()
+            .unwrap();
+        assert!(pred == "p.\"attr.a\" = 1");
+    }
+
+    #[test]
+    fn parent_predicate_keeps_both_parent_conjuncts() {
+        let fe = selector("{ parent.a = 1 && parent.b = 2 }");
+        let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
+            .unwrap()
+            .unwrap();
+        assert!(pred == "(p.\"attr.a\" = 1 AND p.\"attr.b\" = 2)");
+    }
+
+    #[test]
+    fn parent_predicate_bare_parent_field_is_presence() {
+        let fe = selector("{ parent.a }");
+        let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
+            .unwrap()
+            .unwrap();
+        assert!(pred == "p.\"attr.a\" IS NOT NULL");
+    }
+
+    #[test]
+    fn parent_predicate_or_requires_both_sides_parent() {
+        // A mixed OR cannot be pushed into the parent join (no safe predicate).
+        let mixed = selector("{ parent.a = 1 || .b = 2 }");
+        assert!(
+            parent_field_expr_to_sql_qualified(&mixed, "s", "p")
+                .unwrap()
+                .is_none()
+        );
+
+        // Both sides parent -> a parent OR predicate is produced.
+        let both = selector("{ parent.a = 1 || parent.b = 2 }");
+        let pred = parent_field_expr_to_sql_qualified(&both, "s", "p")
+            .unwrap()
+            .unwrap();
+        assert!(pred == "(p.\"attr.a\" = 1 OR p.\"attr.b\" = 2)");
+    }
+
+    #[test]
+    fn parent_predicate_negation_wraps_inner() {
+        let fe = selector("{ !(parent.a = 1) }");
+        let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
+            .unwrap()
+            .unwrap();
+        assert!(pred == "(NOT p.\"attr.a\" = 1)");
+    }
+
+    #[test]
+    fn parent_predicate_non_parent_leaf_yields_none() {
+        let fe = selector("{ .b = 2 }");
+        assert!(
+            parent_field_expr_to_sql_qualified(&fe, "s", "p")
+                .unwrap()
+                .is_none()
+        );
+        let bare = selector("{ .b }");
+        assert!(
+            parent_field_expr_to_sql_qualified(&bare, "s", "p")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parent_predicate_and_of_non_parent_leaves_yields_none() {
+        // Drives the And arm where both sides lower to None (no parent conjunct
+        // anywhere) -> the whole And predicate is None.
+        let fe = selector("{ .a = 1 && .b = 2 }");
+        assert!(
+            parent_field_expr_to_sql_qualified(&fe, "s", "p")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    // ---- field_expr_to_sql_qualified: parent alias routing ----
+
+    #[test]
+    fn qualified_sql_routes_parent_to_parent_alias() {
+        let fe = selector("{ parent.a = 1 && .b = 2 }");
+        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
+        assert!(sql == "(p.\"attr.a\" = 1 AND s.\"attr.b\" = 2)");
+
+        let fe = selector("{ parent.a = 1 || .b = 2 }");
+        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
+        assert!(sql == "(p.\"attr.a\" = 1 OR s.\"attr.b\" = 2)");
+
+        let fe = selector("{ !(parent.a = 1) }");
+        let sql = field_expr_to_sql_qualified(&fe, "s", "p").unwrap();
+        assert!(sql == "(NOT p.\"attr.a\" = 1)");
+
+        let bare = selector("{ parent.a }");
+        let sql = field_expr_to_sql_qualified(&bare, "s", "p").unwrap();
+        assert!(sql == "p.\"attr.a\" IS NOT NULL");
+    }
+
+    // ---- comparison_value_sql: enums, hex widths, errors ----
+
+    #[test]
+    fn comparison_value_sql_maps_status_enum() {
+        let status = intrinsic_field(Intrinsic::Status);
+        for (name, code) in [("unset", 0), ("ok", 1), ("error", 2), ("ERROR", 2)] {
+            let sql = comparison_value_sql(&status, &Value::Str(name.into())).unwrap();
+            assert!(sql == code.to_string(), "status {name} -> {sql}");
+        }
+        let err = comparison_value_sql(&status, &Value::Str("bogus".into()));
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    #[test]
+    fn comparison_value_sql_maps_kind_enum() {
+        let kind = intrinsic_field(Intrinsic::Kind);
+        for (name, code) in [
+            ("unspecified", 0),
+            ("internal", 1),
+            ("server", 2),
+            ("client", 3),
+            ("producer", 4),
+            ("consumer", 5),
+            ("Server", 2),
+        ] {
+            let sql = comparison_value_sql(&kind, &Value::Str(name.into())).unwrap();
+            assert!(sql == code.to_string(), "kind {name} -> {sql}");
+        }
+        let err = comparison_value_sql(&kind, &Value::Str("bogus".into()));
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    #[test]
+    fn comparison_value_sql_non_string_enum_falls_through_to_int() {
+        // A numeric value against an enum intrinsic skips enum mapping and is
+        // emitted as a plain integer literal.
+        let kind = intrinsic_field(Intrinsic::Kind);
+        let sql = comparison_value_sql(&kind, &Value::Int(3)).unwrap();
+        assert!(sql == "3");
+    }
+
+    #[test]
+    fn comparison_value_sql_trace_id_requires_16_byte_hex() {
+        let trace = intrinsic_field(Intrinsic::TraceId);
+        let hex = "0123456789abcdef0123456789abcdef"; // 32 chars = 16 bytes
+        let sql = comparison_value_sql(&trace, &Value::Str(hex.into())).unwrap();
+        assert!(sql == format!("X'{hex}'"));
+
+        // Wrong length is rejected.
+        let err = comparison_value_sql(&trace, &Value::Str("abcd".into()));
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+
+        // Non-string value is rejected with the hex-string error.
+        let err = comparison_value_sql(&trace, &Value::Int(1));
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    #[test]
+    fn comparison_value_sql_span_id_requires_8_byte_hex() {
+        for intrinsic in [Intrinsic::Id, Intrinsic::ParentId, Intrinsic::LinkSpanId] {
+            let field = intrinsic_field(intrinsic.clone());
+            let hex = "0011223344556677"; // 16 chars = 8 bytes
+            let sql = comparison_value_sql(&field, &Value::Str(hex.into())).unwrap();
+            assert!(sql == format!("X'{hex}'"), "{intrinsic:?}");
+        }
+        let link_trace = intrinsic_field(Intrinsic::LinkTraceId);
+        let hex = "0123456789abcdef0123456789abcdef";
+        let sql = comparison_value_sql(&link_trace, &Value::Str(hex.into())).unwrap();
+        assert!(sql == format!("X'{hex}'"));
+    }
+
+    #[test]
+    fn comparison_value_sql_uppercases_to_lowercase_hex() {
+        let trace = intrinsic_field(Intrinsic::TraceId);
+        let hex = "0123456789ABCDEF0123456789ABCDEF";
+        let sql = comparison_value_sql(&trace, &Value::Str(hex.into())).unwrap();
+        assert!(sql == "X'0123456789abcdef0123456789abcdef'");
+    }
+
+    #[test]
+    fn fixed_hex_lit_rejects_non_hex_characters() {
+        // Right length but a non-hex digit ('g') -> error.
+        let err = fixed_hex_lit("0123456789abcdeg", 8);
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    #[test]
+    fn comparison_value_sql_plain_field_uses_value_sql() {
+        let field = attr_field(Scope::Both, "x");
+        assert!(comparison_value_sql(&field, &Value::Int(7)).unwrap() == "7");
+        assert!(comparison_value_sql(&field, &Value::Str("hi".into())).unwrap() == "'hi'");
+        assert!(comparison_value_sql(&field, &Value::Bool(true)).unwrap() == "true");
+        assert!(comparison_value_sql(&field, &Value::Duration(5)).unwrap() == "5");
+    }
+
+    // ---- value_sql: bool literal, nil error ----
+
+    #[test]
+    fn value_sql_bool_and_nil() {
+        assert!(value_sql(&Value::Bool(true)).unwrap() == "true");
+        assert!(value_sql(&Value::Bool(false)).unwrap() == "false");
+        let err = value_sql(&Value::Nil);
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    // ---- intrinsic_name: error-message labels ----
+
+    #[test]
+    fn intrinsic_name_labels_known_intrinsics() {
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::TraceId)) == "trace:id");
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Id)) == "span:id");
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::ParentId)) == "span:parentID");
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Kind)) == "span:kind");
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Status)) == "span:status");
+        // Anything else collapses to the generic label.
+        assert!(intrinsic_name(&Scope::Both) == "intrinsic");
+        assert!(intrinsic_name(&Scope::Intrinsic(Intrinsic::Name)) == "intrinsic");
+    }
+
+    #[test]
+    fn enum_value_sql_non_enum_scope_errors() {
+        // enum_value_sql guards against being called for a non-enum scope.
+        let err = enum_value_sql(&Scope::Both, "ok");
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    // ---- comparison_to_sql_qualified: operators + nil + regex ----
+
+    #[test]
+    fn comparison_to_sql_qualified_covers_operators_nil_and_regex() {
+        let field = attr_field(Scope::Parent, "a");
+        let col = qualified_field_ident(&field, "s", "p");
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Eq, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} = 1")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Neq, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} != 1")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Lt, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} < 1")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Lte, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} <= 1")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Gt, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} > 1")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Gte, &Value::Int(1), "s", "p")
+                .unwrap()
+                == format!("{col} >= 1")
+        );
+        // nil
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Eq, &Value::Nil, "s", "p").unwrap()
+                == format!("{col} IS NULL")
+        );
+        assert!(
+            comparison_to_sql_qualified(&field, ComparisonOp::Neq, &Value::Nil, "s", "p").unwrap()
+                == format!("{col} IS NOT NULL")
+        );
+        // regex
+        assert!(
+            comparison_to_sql_qualified(
+                &field,
+                ComparisonOp::Re,
+                &Value::Str("x".into()),
+                "s",
+                "p"
+            )
+            .unwrap()
+                == format!("regexp_like({col}, '^(?:x)$')")
+        );
+        assert!(
+            comparison_to_sql_qualified(
+                &field,
+                ComparisonOp::Nre,
+                &Value::Str("x".into()),
+                "s",
+                "p"
+            )
+            .unwrap()
+                == format!("NOT regexp_like({col}, '^(?:x)$')")
+        );
+        // regex against non-string errors
+        let err = comparison_to_sql_qualified(&field, ComparisonOp::Re, &Value::Int(1), "s", "p");
+        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+    }
+
+    #[test]
+    fn qualified_field_ident_routes_non_parent_to_span_alias() {
+        let span = attr_field(Scope::Span, "a");
+        assert!(qualified_field_ident(&span, "s", "p") == "s.\"attr.a\"");
+        let parent = attr_field(Scope::Parent, "a");
+        assert!(qualified_field_ident(&parent, "s", "p") == "p.\"attr.a\"");
+    }
+
+    // ---- matcher disjuncts: nested negation + Or prefilter ----
+
+    #[test]
+    fn nested_negation_lowers_to_negated_matcher_disjuncts() {
+        // `!{ event.foo = 1 }` is a nested scope negation, which lowers to a
+        // single disjunct of one negated matcher and is usable as a prefilter.
+        let ms = field_expr_to_matchers(&selector("{ !(event.foo = 1) }"));
+        assert!(ms.len() == 1);
+        assert!(ms[0].scope == MatchScope::Event);
+        assert!(ms[0].key == "foo");
+        assert!(ms[0].negated);
+        assert!(ms[0].op == MatchCmp::Eq);
+    }
+
+    #[test]
+    fn non_nested_negation_does_not_prefilter() {
+        // A negation over a non-nested scope returns no matchers.
+        let ms = field_expr_to_matchers(&selector("{ !(.a = 1) }"));
+        assert!(ms.is_empty());
+    }
+
+    #[test]
+    fn or_of_comparisons_produces_disjunct_per_branch() {
+        let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 || .b = 2 }")).unwrap();
+        assert!(disjuncts.len() == 2);
+        assert!(disjuncts[0][0].key == "a");
+        assert!(disjuncts[1][0].key == "b");
+    }
+
+    #[test]
+    fn and_of_comparisons_cross_products_into_single_disjunct() {
+        let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 && .b = 2 }")).unwrap();
+        assert!(disjuncts.len() == 1);
+        assert!(disjuncts[0].len() == 2);
+    }
+
+    #[test]
+    fn top_level_negation_of_non_nested_has_no_disjuncts() {
+        // `field_expr_to_matcher_disjuncts` returns None for a non-nested Not,
+        // signalling the prefilter cannot be derived.
+        assert!(field_expr_to_matcher_disjuncts(&selector("{ !(.a = 1) }")).is_none());
+    }
+
+    #[test]
+    fn nested_de_morgan_negation_expands_disjuncts() {
+        // !(event.a = 1 || event.b = 2) -> AND of two negated matchers -> single disjunct.
+        let disjuncts =
+            field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 || event.b = 2) }"))
+                .unwrap();
+        assert!(disjuncts.len() == 1);
+        assert!(disjuncts[0].len() == 2);
+        assert!(disjuncts[0].iter().all(|m| m.negated));
+    }
+
+    #[test]
+    fn nested_de_morgan_negation_of_and_expands_to_two_disjuncts() {
+        // !(event.a = 1 && event.b = 2) -> OR of two negated matchers -> two disjuncts.
+        let disjuncts =
+            field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 && event.b = 2) }"))
+                .unwrap();
+        assert!(disjuncts.len() == 2);
+        assert!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated));
+    }
+
+    #[test]
+    fn double_nested_negation_restores_positive_matcher() {
+        // !!(event.a = 1) -> back to a non-negated matcher.
+        let disjuncts =
+            field_expr_to_matcher_disjuncts(&selector("{ !(!(event.a = 1)) }")).unwrap();
+        assert!(disjuncts.len() == 1);
+        assert!(disjuncts[0].len() == 1);
+        assert!(!disjuncts[0][0].negated);
+    }
+
+    // ---- matcher_from_field_expr & friends: scope / cmp / value mapping ----
+
+    #[test]
+    fn matcher_from_bare_field_is_presence_neq_nil() {
+        let m = matcher_from_field_expr(&selector("{ resource.region }")).unwrap();
+        assert!(m.scope == MatchScope::Resource);
+        assert!(m.key == "region");
+        assert!(m.op == MatchCmp::Neq);
+        assert!(m.value == MatchValue::Nil);
+        assert!(!m.negated);
+    }
+
+    #[test]
+    fn matcher_from_boolean_expr_is_none() {
+        assert!(matcher_from_field_expr(&selector("{ .a = 1 && .b = 2 }")).is_none());
+        assert!(matcher_from_field_expr(&selector("{ .a = 1 || .b = 2 }")).is_none());
+        assert!(matcher_from_field_expr(&selector("{ !(.a = 1) }")).is_none());
+    }
+
+    #[test]
+    fn match_scope_covers_every_scope() {
+        assert!(match_scope(&Scope::Both) == MatchScope::Both);
+        assert!(match_scope(&Scope::Span) == MatchScope::Span);
+        assert!(match_scope(&Scope::Resource) == MatchScope::Resource);
+        assert!(match_scope(&Scope::Parent) == MatchScope::Parent);
+        assert!(match_scope(&Scope::Event) == MatchScope::Event);
+        assert!(match_scope(&Scope::Link) == MatchScope::Link);
+        assert!(match_scope(&Scope::Instrumentation) == MatchScope::Instrumentation);
+        assert!(match_scope(&Scope::Intrinsic(Intrinsic::Name)) == MatchScope::Intrinsic);
+    }
+
+    #[test]
+    fn match_cmp_covers_every_operator() {
+        assert!(match_cmp(ComparisonOp::Eq) == MatchCmp::Eq);
+        assert!(match_cmp(ComparisonOp::Neq) == MatchCmp::Neq);
+        assert!(match_cmp(ComparisonOp::Lt) == MatchCmp::Lt);
+        assert!(match_cmp(ComparisonOp::Lte) == MatchCmp::Lte);
+        assert!(match_cmp(ComparisonOp::Gt) == MatchCmp::Gt);
+        assert!(match_cmp(ComparisonOp::Gte) == MatchCmp::Gte);
+        assert!(match_cmp(ComparisonOp::Re) == MatchCmp::Re);
+        assert!(match_cmp(ComparisonOp::Nre) == MatchCmp::Nre);
+    }
+
+    #[test]
+    fn match_value_covers_every_value_kind() {
+        assert!(match_value(&Value::Str("x".into())) == MatchValue::Str("x".into()));
+        assert!(match_value(&Value::Int(3)) == MatchValue::Int(3));
+        assert!(match_value(&Value::Duration(9)) == MatchValue::Int(9));
+        assert!(match_value(&Value::Float(1.5)) == MatchValue::Float(1.5));
+        assert!(match_value(&Value::Bool(true)) == MatchValue::Bool(true));
+        assert!(match_value(&Value::Nil) == MatchValue::Nil);
+    }
+
+    #[test]
+    fn matcher_key_uses_intrinsic_canonical_names() {
+        let cases = [
+            (Intrinsic::Name, "span:name"),
+            (Intrinsic::Duration, "span:duration"),
+            (Intrinsic::Kind, "span:kind"),
+            (Intrinsic::Status, "span:status"),
+            (Intrinsic::StatusMessage, "span:statusMessage"),
+            (Intrinsic::Id, "span:id"),
+            (Intrinsic::ParentId, "span:parentID"),
+            (Intrinsic::TraceDuration, "trace:duration"),
+            (Intrinsic::TraceRootName, "trace:rootName"),
+            (Intrinsic::TraceRootService, "trace:rootService"),
+            (Intrinsic::TraceId, "trace:id"),
+            (Intrinsic::NestedSetLeft, "span:nestedSetLeft"),
+            (Intrinsic::NestedSetRight, "span:nestedSetRight"),
+            (Intrinsic::NestedSetParent, "span:nestedSetParent"),
+            (Intrinsic::ChildCount, "span:childCount"),
+            (Intrinsic::InstrumentationName, "instrumentation:name"),
+            (Intrinsic::InstrumentationVersion, "instrumentation:version"),
+            (Intrinsic::EventName, "event:name"),
+            (Intrinsic::EventTimeSinceStart, "event:timeSinceStart"),
+            (Intrinsic::LinkTraceId, "link:traceID"),
+            (Intrinsic::LinkSpanId, "link:spanID"),
+        ];
+        for (intrinsic, expected) in cases {
+            let key = matcher_key(&intrinsic_field(intrinsic.clone()));
+            assert!(key == expected, "{intrinsic:?} -> {key}");
+        }
+        // Non-intrinsic scopes keep the raw attribute key.
+        assert!(matcher_key(&attr_field(Scope::Span, "http.method")) == "http.method");
+    }
+
+    // ---- ident / string_lit / anchored escaping ----
+
+    #[test]
+    fn ident_escapes_embedded_quotes() {
+        assert!(ident("a\"b") == "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn string_lit_escapes_single_quotes() {
+        assert!(string_lit("a'b") == "'a''b'");
+    }
+
+    #[test]
+    fn anchored_wraps_pattern() {
+        assert!(anchored("ab") == "^(?:ab)$");
+    }
+
+    // ---- has_nested_scope / has_parent_scope across combinators ----
+
+    #[test]
+    fn has_nested_scope_detects_event_link_and_intrinsics() {
+        assert!(has_nested_scope(&selector("{ event.foo = 1 }")));
+        assert!(has_nested_scope(&selector("{ link.foo = 1 }")));
+        assert!(has_nested_scope(&selector("{ event:name = \"x\" }")));
+        assert!(has_nested_scope(&selector("{ link:traceID = \"x\" }")));
+        assert!(has_nested_scope(&selector("{ .a = 1 || event.b = 2 }")));
+        assert!(has_nested_scope(&selector("{ !(link.b = 2) }")));
+        assert!(!has_nested_scope(&selector("{ .a = 1 && .b = 2 }")));
+    }
+
+    #[test]
+    fn has_parent_scope_detects_parent_across_combinators() {
+        assert!(has_parent_scope(&selector("{ parent.a = 1 }")));
+        assert!(has_parent_scope(&selector("{ .a = 1 && parent.b = 2 }")));
+        assert!(has_parent_scope(&selector("{ !(parent.b = 2) }")));
+        assert!(!has_parent_scope(&selector("{ .a = 1 }")));
+    }
+
+    #[test]
+    fn negate_matcher_toggles_flag() {
+        let m = SpanMatcher {
+            scope: MatchScope::Span,
+            key: "a".into(),
+            op: MatchCmp::Eq,
+            value: MatchValue::Int(1),
+            negated: false,
+        };
+        let n = negate_matcher(m.clone());
+        assert!(n.negated);
+        let back = negate_matcher(n);
+        assert!(!back.negated);
+    }
 }

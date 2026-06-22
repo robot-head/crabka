@@ -1657,4 +1657,1159 @@ mod tests {
                 ]
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Helpers for scan/matcher-driven tests.
+    // ---------------------------------------------------------------------
+
+    use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher};
+
+    fn matcher(scope: MatchScope, key: &str, op: MatchCmp, value: MatchValue) -> SpanMatcher {
+        SpanMatcher {
+            scope,
+            key: key.into(),
+            op,
+            value,
+            negated: false,
+        }
+    }
+
+    fn rich_span() -> InputSpan {
+        InputSpan {
+            trace_id: [7; 16],
+            span_id: [1; 8],
+            parent_span_id: Some([2; 8]),
+            name: "checkout".into(),
+            kind: 2,
+            start_unix_nano: 1000,
+            duration_nanos: 5_000_000,
+            status_code: 2,
+            status_message: "boom".into(),
+            instrumentation_name: "tracer".into(),
+            instrumentation_version: "1.2.3".into(),
+            attrs: vec![
+                ("http.method".into(), AttrValue::Str("GET".into())),
+                ("http.status".into(), AttrValue::Int(500)),
+                ("ratio".into(), AttrValue::Float(0.5)),
+                ("ok".into(), AttrValue::Bool(true)),
+            ],
+            events: vec![EventRef {
+                time_since_start_nano: 50,
+                name: "exception".into(),
+                attributes: vec![("ev.attr".into(), AttrValue::Str("kaboom".into()))],
+            }],
+            links: vec![LinkRef {
+                trace_id: [9; 16],
+                span_id: [8; 8],
+                attributes: vec![("ln.attr".into(), AttrValue::Int(42))],
+            }],
+        }
+    }
+
+    async fn row_count(r: &ScanResult) -> i64 {
+        let df = r
+            .ctx
+            .sql(&format!("SELECT count(*) AS c FROM {}", r.span_table))
+            .await
+            .unwrap();
+        let out = df.collect().await.unwrap();
+        out[0]
+            .column(0)
+            .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
+            .value(0)
+    }
+
+    // ---- scan with projection: event/link attr columns + AttrBuilder ----
+
+    #[tokio::test]
+    async fn scan_projects_typed_attr_columns_and_nested_attrs() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "POST /pay", vec![rich_span()]);
+
+        // Presence-style projection matchers (`!= nil`) request the event/link
+        // attribute columns without filtering out the rows that carry them.
+        let projection = vec![
+            matcher(MatchScope::Event, "ev.attr", MatchCmp::Neq, MatchValue::Nil),
+            matcher(MatchScope::Link, "ln.attr", MatchCmp::Neq, MatchValue::Nil),
+        ];
+        let options = ScanOptions {
+            job: None,
+            projection_matchers: projection,
+        };
+        let r = s
+            .scan_with_options("t", &[], 0, 10_000, &options)
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 1);
+
+        // The typed span attributes (Int/Float/Bool) and the projected event &
+        // link attribute columns are present and carry the right values.
+        let df = r
+            .ctx
+            .sql(&format!(
+                "SELECT \"attr.http.status\" AS hs, \"attr.ratio\" AS ra, \"attr.ok\" AS ok, \
+                 \"attr.__event.ev.attr\" AS ev, \"attr.__link.ln.attr\" AS ln FROM {}",
+                r.span_table
+            ))
+            .await
+            .unwrap();
+        let out = df.collect().await.unwrap();
+        let batch = &out[0];
+        assert!(
+            batch
+                .column(0)
+                .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
+                .value(0)
+                == 500
+        );
+        #[allow(clippy::float_cmp)]
+        let ratio_ok = batch
+            .column(1)
+            .as_primitive::<datafusion::arrow::datatypes::Float64Type>()
+            .value(0)
+            == 0.5;
+        assert!(ratio_ok);
+        assert!(batch.column(2).as_boolean().value(0));
+        assert!(batch.column(3).as_string::<i32>().value(0) == "kaboom");
+        assert!(
+            batch
+                .column(4)
+                .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
+                .value(0)
+                == 42
+        );
+    }
+
+    // ---- span matchers across scopes (matcher_matches / intrinsic_matches) ----
+
+    async fn scan_matches(matchers: &[SpanMatcher]) -> i64 {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "POST /pay", vec![rich_span()]);
+        let r = s.scan("t", matchers, 0, 10_000).await.unwrap();
+        row_count(&r).await
+    }
+
+    #[tokio::test]
+    async fn intrinsic_matchers_match_each_intrinsic() {
+        // String intrinsics.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:name",
+                MatchCmp::Eq,
+                MatchValue::Str("checkout".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:statusMessage",
+                MatchCmp::Eq,
+                MatchValue::Str("boom".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "trace:rootService",
+                MatchCmp::Eq,
+                MatchValue::Str("checkout".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "trace:rootName",
+                MatchCmp::Eq,
+                MatchValue::Str("POST /pay".into()),
+            )])
+            .await
+                == 1
+        );
+        // trace:id and span:id are hex strings.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "trace:id",
+                MatchCmp::Eq,
+                MatchValue::Str("07070707070707070707070707070707".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:id",
+                MatchCmp::Eq,
+                MatchValue::Str("0101010101010101".into()),
+            )])
+            .await
+                == 1
+        );
+        // span:parentID present.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:parentID",
+                MatchCmp::Eq,
+                MatchValue::Str("0202020202020202".into()),
+            )])
+            .await
+                == 1
+        );
+        // Numeric / duration intrinsics.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:duration",
+                MatchCmp::Gt,
+                MatchValue::Int(1_000_000),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "trace:duration",
+                MatchCmp::Gte,
+                MatchValue::Int(0),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:childCount",
+                MatchCmp::Gte,
+                MatchValue::Int(0),
+            )])
+            .await
+                == 1
+        );
+        // Nested-set intrinsics.
+        for key in [
+            "span:nestedSetLeft",
+            "span:nestedSetRight",
+            "span:nestedSetParent",
+        ] {
+            assert!(
+                scan_matches(&[matcher(
+                    MatchScope::Intrinsic,
+                    key,
+                    MatchCmp::Gte,
+                    MatchValue::Int(0),
+                )])
+                .await
+                    == 1,
+                "nested-set intrinsic {key} should match"
+            );
+        }
+        // Instrumentation intrinsics.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "instrumentation:name",
+                MatchCmp::Eq,
+                MatchValue::Str("tracer".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "instrumentation:version",
+                MatchCmp::Eq,
+                MatchValue::Str("1.2.3".into()),
+            )])
+            .await
+                == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn enum_intrinsics_match_by_name_and_int() {
+        // kind=server (2) and status=error (2) via enum string names.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:kind",
+                MatchCmp::Eq,
+                MatchValue::Str("server".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:status",
+                MatchCmp::Eq,
+                MatchValue::Str("error".into()),
+            )])
+            .await
+                == 1
+        );
+        // Same intrinsics via integer enum values.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:kind",
+                MatchCmp::Eq,
+                MatchValue::Int(2),
+            )])
+            .await
+                == 1
+        );
+        // An unknown enum name yields no match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:status",
+                MatchCmp::Eq,
+                MatchValue::Str("nonsense".into()),
+            )])
+            .await
+                == 0
+        );
+        // A float/bool expected value cannot match an enum intrinsic.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:kind",
+                MatchCmp::Eq,
+                MatchValue::Bool(true),
+            )])
+            .await
+                == 0
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_matchers_cover_resource_instrumentation_span_and_both() {
+        // Resource service.name.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Resource,
+                "service.name",
+                MatchCmp::Eq,
+                MatchValue::Str("checkout".into()),
+            )])
+            .await
+                == 1
+        );
+        // Resource non-service.name key falls back to nil matching (no match
+        // for an Eq-with-value).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Resource,
+                "other",
+                MatchCmp::Eq,
+                MatchValue::Str("x".into()),
+            )])
+            .await
+                == 0
+        );
+        // Instrumentation by bare name/version keys.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Instrumentation,
+                "name",
+                MatchCmp::Eq,
+                MatchValue::Str("tracer".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Instrumentation,
+                "version",
+                MatchCmp::Eq,
+                MatchValue::Str("1.2.3".into()),
+            )])
+            .await
+                == 1
+        );
+        // Span attribute, typed Int.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.status",
+                MatchCmp::Eq,
+                MatchValue::Int(500),
+            )])
+            .await
+                == 1
+        );
+        // Both scope: resource OR span attribute. The span attribute matches.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Both,
+                "http.method",
+                MatchCmp::Eq,
+                MatchValue::Str("GET".into()),
+            )])
+            .await
+                == 1
+        );
+        // Parent scope always matches (returns true).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Parent,
+                "anything",
+                MatchCmp::Eq,
+                MatchValue::Str("x".into()),
+            )])
+            .await
+                == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn span_attr_matchers_cover_all_value_types() {
+        // Float attribute.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ratio",
+                MatchCmp::Lt,
+                MatchValue::Float(1.0),
+            )])
+            .await
+                == 1
+        );
+        // Bool attribute.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ok",
+                MatchCmp::Eq,
+                MatchValue::Bool(true),
+            )])
+            .await
+                == 1
+        );
+        // String regex.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Re,
+                MatchValue::Str("GE.".into()),
+            )])
+            .await
+                == 1
+        );
+        // Negated regex (no row matches -> 0).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Nre,
+                MatchValue::Str("GE.".into()),
+            )])
+            .await
+                == 0
+        );
+        // Eq against Nil on a present attribute -> no match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Eq,
+                MatchValue::Nil,
+            )])
+            .await
+                == 0
+        );
+        // Neq against Nil on a present attribute -> matches (present).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Neq,
+                MatchValue::Nil,
+            )])
+            .await
+                == 1
+        );
+        // Eq against Nil on an absent attribute -> matches (absent).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "missing",
+                MatchCmp::Eq,
+                MatchValue::Nil,
+            )])
+            .await
+                == 1
+        );
+    }
+
+    // ---- nested event/link selectors (scan rows) ----
+
+    #[tokio::test]
+    async fn event_and_link_scope_matchers_select_rows() {
+        // Event-scope attribute matcher selects the matching event row.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Event,
+                "ev.attr",
+                MatchCmp::Eq,
+                MatchValue::Str("kaboom".into()),
+            )])
+            .await
+                == 1
+        );
+        // Event intrinsic name matcher.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "event:name",
+                MatchCmp::Eq,
+                MatchValue::Str("exception".into()),
+            )])
+            .await
+                == 1
+        );
+        // Event intrinsic timeSinceStart matcher.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "event:timeSinceStart",
+                MatchCmp::Eq,
+                MatchValue::Int(50),
+            )])
+            .await
+                == 1
+        );
+        // Link-scope attribute matcher.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Link,
+                "ln.attr",
+                MatchCmp::Eq,
+                MatchValue::Int(42),
+            )])
+            .await
+                == 1
+        );
+        // Link intrinsic traceID / spanID matchers (hex).
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "link:traceID",
+                MatchCmp::Eq,
+                MatchValue::Str("09090909090909090909090909090909".into()),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "link:spanID",
+                MatchCmp::Eq,
+                MatchValue::Str("0808080808080808".into()),
+            )])
+            .await
+                == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_matchers_against_span_without_events_or_links() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
+
+        // An event-presence (`event:name != nil`) matcher must fail when the
+        // span has no events, exercising the absence path.
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "event:name",
+                    MatchCmp::Neq,
+                    MatchValue::Nil,
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 0);
+
+        // `event:name = nil` must match a span with no events (absence).
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "event:name",
+                    MatchCmp::Eq,
+                    MatchValue::Nil,
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 1);
+
+        // Same for links.
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "link:spanID",
+                    MatchCmp::Eq,
+                    MatchValue::Nil,
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 1);
+    }
+
+    #[tokio::test]
+    async fn event_matcher_against_present_events_but_no_match_yields_zero() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "POST /pay", vec![rich_span()]);
+
+        // The span has an event named "exception"; requiring name "other"
+        // matches no event row.
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "event:name",
+                    MatchCmp::Eq,
+                    MatchValue::Str("other".into()),
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 0);
+    }
+
+    // ---- tag_values: drive every intrinsic/value collector branch ----
+
+    async fn tag_values_for(tag: &str) -> Vec<TypedValue> {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "POST /pay", vec![rich_span()]);
+        s.tag_values("t", tag, 0, 10_000).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn tag_values_cover_trace_and_span_intrinsics() {
+        assert!(
+            tag_values_for("trace:duration").await
+                == vec![TypedValue {
+                    type_: "duration".into(),
+                    value: "5000000".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("trace:id").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "07070707070707070707070707070707".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("trace:rootName").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "POST /pay".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("trace:rootService").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "checkout".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:duration").await
+                == vec![TypedValue {
+                    type_: "duration".into(),
+                    value: "5000000".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:id").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "0101010101010101".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:kind").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "2".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:name").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "checkout".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:parentID").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "0202020202020202".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:status").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "2".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:statusMessage").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "boom".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("instrumentation:name").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "tracer".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("instrumentation:version").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "1.2.3".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_values_cover_nested_set_intrinsics() {
+        assert!(
+            tag_values_for("span:nestedSetLeft").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "1".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:nestedSetRight").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "2".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("span:nestedSetParent").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "0".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_values_cover_typed_span_attributes() {
+        // Int, Float, and Bool span attributes round-trip through
+        // typed_value_parts with the right type tags.
+        assert!(
+            tag_values_for(".http.status").await
+                == vec![TypedValue {
+                    type_: "int".into(),
+                    value: "500".into(),
+                }]
+        );
+        assert!(
+            tag_values_for(".ratio").await
+                == vec![TypedValue {
+                    type_: "float".into(),
+                    value: "0.5".into(),
+                }]
+        );
+        assert!(
+            tag_values_for(".ok").await
+                == vec![TypedValue {
+                    type_: "bool".into(),
+                    value: "true".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_values_cover_scoped_attribute_prefixes() {
+        // `span.` and `resource.` prefixes route to the right scope.
+        assert!(
+            tag_values_for("span.http.method").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "GET".into(),
+                }]
+        );
+        assert!(
+            tag_values_for("resource.service.name").await
+                == vec![TypedValue {
+                    type_: "string".into(),
+                    value: "checkout".into(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn tag_values_empty_for_unknown_tag() {
+        assert!(tag_values_for("does.not.exist").await.is_empty());
+    }
+
+    // ---- time-window filtering ----
+
+    #[tokio::test]
+    async fn out_of_range_traces_are_excluded() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
+        // The trace starts at 1000ns; a window entirely after it returns nothing.
+        let r = s.scan("t", &[], 2000, 5000).await.unwrap();
+        assert!(row_count(&r).await == 0);
+        assert!(
+            s.tag_values("t", ".svc", 2000, 5000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(s.tag_names("t", None, 2000, 5000).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_with_negated_matcher_inverts_result() {
+        // A negated span-name matcher excludes the matching span.
+        let neg = SpanMatcher {
+            scope: MatchScope::Intrinsic,
+            key: "span:name".into(),
+            op: MatchCmp::Eq,
+            value: MatchValue::Str("checkout".into()),
+            negated: true,
+        };
+        assert!(scan_matches(&[neg]).await == 0);
+    }
+
+    // ---- comparison operator coverage for typed matchers ----
+
+    #[tokio::test]
+    async fn int_intrinsic_matches_every_operator() {
+        // rich_span has span:duration == 5_000_000.
+        let cases = [
+            (MatchCmp::Eq, 5_000_000, 1),
+            (MatchCmp::Eq, 5_000_001, 0),
+            (MatchCmp::Neq, 5_000_001, 1),
+            (MatchCmp::Neq, 5_000_000, 0),
+            (MatchCmp::Lt, 5_000_001, 1),
+            (MatchCmp::Lt, 5_000_000, 0),
+            (MatchCmp::Lte, 5_000_000, 1),
+            (MatchCmp::Gt, 4_999_999, 1),
+            (MatchCmp::Gte, 5_000_000, 1),
+            // A regex op against an int intrinsic is always false.
+            (MatchCmp::Re, 5_000_000, 0),
+        ];
+        for (op, val, expected) in cases {
+            let got = scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:duration",
+                op,
+                MatchValue::Int(val),
+            )])
+            .await;
+            assert!(
+                got == expected,
+                "duration {op:?} {val} -> {got}, want {expected}"
+            );
+        }
+        // A non-int expected value against an int intrinsic does not match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:duration",
+                MatchCmp::Eq,
+                MatchValue::Str("x".into()),
+            )])
+            .await
+                == 0
+        );
+    }
+
+    #[tokio::test]
+    async fn float_attr_matches_every_operator() {
+        // rich_span has attr ratio == 0.5.
+        let cases = [
+            (MatchCmp::Eq, 0.5, 1),
+            (MatchCmp::Neq, 0.25, 1),
+            (MatchCmp::Lt, 1.0, 1),
+            (MatchCmp::Lte, 0.5, 1),
+            (MatchCmp::Gt, 0.25, 1),
+            (MatchCmp::Gte, 0.5, 1),
+            (MatchCmp::Gt, 0.75, 0),
+        ];
+        for (op, val, expected) in cases {
+            let got = scan_matches(&[matcher(
+                MatchScope::Span,
+                "ratio",
+                op,
+                MatchValue::Float(val),
+            )])
+            .await;
+            assert!(
+                got == expected,
+                "ratio {op:?} {val} -> {got}, want {expected}"
+            );
+        }
+        // A non-float expected value against a float attribute does not match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ratio",
+                MatchCmp::Eq,
+                MatchValue::Int(1),
+            )])
+            .await
+                == 0
+        );
+    }
+
+    #[tokio::test]
+    async fn bool_attr_matches_eq_neq_and_rejects_ordering() {
+        // rich_span has attr ok == true.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ok",
+                MatchCmp::Neq,
+                MatchValue::Bool(false),
+            )])
+            .await
+                == 1
+        );
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ok",
+                MatchCmp::Neq,
+                MatchValue::Bool(true),
+            )])
+            .await
+                == 0
+        );
+        // Ordering operators against a bool attribute are always false.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ok",
+                MatchCmp::Gt,
+                MatchValue::Bool(false),
+            )])
+            .await
+                == 0
+        );
+        // A non-bool expected value against a bool attribute does not match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "ok",
+                MatchCmp::Eq,
+                MatchValue::Int(1),
+            )])
+            .await
+                == 0
+        );
+    }
+
+    #[tokio::test]
+    async fn string_attr_ordering_ops_and_negated_regex_are_false() {
+        // Ordering operators against a string attribute are always false.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Lt,
+                MatchValue::Str("Z".into()),
+            )])
+            .await
+                == 0
+        );
+        // Nre that does NOT match the pattern -> the value passes the negated
+        // regex, so the row matches.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Nre,
+                MatchValue::Str("POST".into()),
+            )])
+            .await
+                == 1
+        );
+        // A non-string expected value against a string attribute does not match.
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Span,
+                "http.method",
+                MatchCmp::Eq,
+                MatchValue::Int(1),
+            )])
+            .await
+                == 0
+        );
+    }
+
+    fn span_with_kind_and_status(kind: i32, status: i32) -> InputSpan {
+        InputSpan {
+            kind,
+            status_code: status,
+            ..rich_span()
+        }
+    }
+
+    #[tokio::test]
+    async fn kind_and_status_enum_names_resolve() {
+        for (name, kind) in [
+            ("unspecified", 0),
+            ("internal", 1),
+            ("server", 2),
+            ("client", 3),
+            ("producer", 4),
+            ("consumer", 5),
+        ] {
+            let mut s = InMemorySpanStore::new();
+            s.push_trace("t", "svc", "op", vec![span_with_kind_and_status(kind, 0)]);
+            let r = s
+                .scan(
+                    "t",
+                    &[matcher(
+                        MatchScope::Intrinsic,
+                        "span:kind",
+                        MatchCmp::Eq,
+                        MatchValue::Str(name.into()),
+                    )],
+                    0,
+                    10_000,
+                )
+                .await
+                .unwrap();
+            assert!(row_count(&r).await == 1, "kind name {name} should resolve");
+        }
+
+        for (name, status) in [("unset", 0), ("ok", 1), ("error", 2)] {
+            let mut s = InMemorySpanStore::new();
+            s.push_trace("t", "svc", "op", vec![span_with_kind_and_status(1, status)]);
+            let r = s
+                .scan(
+                    "t",
+                    &[matcher(
+                        MatchScope::Intrinsic,
+                        "span:status",
+                        MatchCmp::Eq,
+                        MatchValue::Str(name.into()),
+                    )],
+                    0,
+                    10_000,
+                )
+                .await
+                .unwrap();
+            assert!(
+                row_count(&r).await == 1,
+                "status name {name} should resolve"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enum_intrinsic_nil_comparison_uses_presence() {
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "svc", "op", vec![span_with_kind_and_status(2, 0)]);
+        // kind != nil matches a present span (enum_int_matches Nil branch).
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "span:kind",
+                    MatchCmp::Neq,
+                    MatchValue::Nil,
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 1);
+    }
+
+    #[tokio::test]
+    async fn span_without_parent_id_omits_parent_value_and_matches_nil() {
+        let mut s = InMemorySpanStore::new();
+        // A root span has no parent_span_id.
+        s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
+
+        // tag_values for span:parentID yields nothing for a parentless span.
+        assert!(
+            s.tag_values("t", "span:parentID", 0, 10_000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // span:parentID == nil matches the parentless span.
+        let r = s
+            .scan(
+                "t",
+                &[matcher(
+                    MatchScope::Intrinsic,
+                    "span:parentID",
+                    MatchCmp::Eq,
+                    MatchValue::Nil,
+                )],
+                0,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(row_count(&r).await == 1);
+    }
+
+    #[tokio::test]
+    async fn empty_status_message_is_omitted_from_tag_values() {
+        let mut s = InMemorySpanStore::new();
+        // span() leaves status_message empty.
+        s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
+        assert!(
+            s.tag_values("t", "span:statusMessage", 0, 10_000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

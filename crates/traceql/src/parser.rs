@@ -1180,4 +1180,572 @@ mod tests {
             assert!(*quantiles == vec![expected]);
         }
     }
+
+    fn selector_rhs(query: &str) -> Value {
+        let q = parse(query).unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!("selector for {query}")
+        };
+        let FieldExpr::Comparison { rhs, .. } = fe.as_ref() else {
+            panic!("comparison for {query}")
+        };
+        rhs.clone()
+    }
+
+    fn parse_err(query: &str) -> String {
+        match parse(query) {
+            Err(TraceqlError::Parse(msg)) => msg,
+            other => panic!("expected parse error for {query}, got {other:?}"),
+        }
+    }
+
+    // ---- query hints ----
+
+    #[test]
+    fn query_hint_non_boolean_value_errors() {
+        let msg = parse_err("{ .a = 1 } with (most_recent=5)");
+        assert!(msg.contains("expected boolean query hint value"));
+    }
+
+    #[test]
+    fn query_hint_multiple_entries_parse() {
+        let q = parse("{ .a = 1 } | count_over_time() with (most_recent=true, exemplars=true)")
+            .unwrap();
+        assert!(q.hints.most_recent);
+        assert!(q.hints.exemplars == Some(true));
+    }
+
+    #[test]
+    fn query_hint_missing_equals_errors() {
+        // `with (` followed by an identifier then a non-`=` token.
+        let msg = parse_err("{ .a = 1 } with (most_recent true)");
+        assert!(msg.contains("expected Eq"));
+    }
+
+    // ---- pipeline stages ----
+
+    #[test]
+    fn unsupported_pipeline_stage_errors() {
+        let msg = parse_err("{ .a = 1 } | bogus()");
+        assert!(msg.contains("unsupported pipeline stage"));
+        assert!(msg.contains("bogus"));
+    }
+
+    #[test]
+    fn sum_avg_max_min_aggregates_parse() {
+        let q = parse("{ .a = 1 } | sum(.x)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [Pipeline::Aggregate(Aggregate::Sum(_))]
+        ));
+        let q = parse("{ .a = 1 } | avg(.x)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [Pipeline::Aggregate(Aggregate::Avg(_))]
+        ));
+        let q = parse("{ .a = 1 } | max(.x)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [Pipeline::Aggregate(Aggregate::Max(_))]
+        ));
+        let q = parse("{ .a = 1 } | min(.x)").unwrap();
+        assert!(matches!(
+            q.pipeline.as_slice(),
+            [Pipeline::Aggregate(Aggregate::Min(_))]
+        ));
+    }
+
+    #[test]
+    fn over_time_aggregates_parse() {
+        for (query, ok) in [
+            (
+                "{ .a = 1 } | sum_over_time(span:duration)",
+                matches!(
+                    parse("{ .a = 1 } | sum_over_time(span:duration)")
+                        .unwrap()
+                        .pipeline
+                        .as_slice(),
+                    [Pipeline::Aggregate(Aggregate::SumOverTime(_))]
+                ),
+            ),
+            (
+                "{ .a = 1 } | min_over_time(span:duration)",
+                matches!(
+                    parse("{ .a = 1 } | min_over_time(span:duration)")
+                        .unwrap()
+                        .pipeline
+                        .as_slice(),
+                    [Pipeline::Aggregate(Aggregate::MinOverTime(_))]
+                ),
+            ),
+            (
+                "{ .a = 1 } | max_over_time(span:duration)",
+                matches!(
+                    parse("{ .a = 1 } | max_over_time(span:duration)")
+                        .unwrap()
+                        .pipeline
+                        .as_slice(),
+                    [Pipeline::Aggregate(Aggregate::MaxOverTime(_))]
+                ),
+            ),
+        ] {
+            assert!(ok, "over-time aggregate failed for {query}");
+        }
+    }
+
+    #[test]
+    fn histogram_over_time_defaults_to_duration_when_empty() {
+        let q = parse("{ .a = 1 } | histogram_over_time()").unwrap();
+        let [Pipeline::Aggregate(Aggregate::HistogramOverTime(field))] = q.pipeline.as_slice()
+        else {
+            panic!("histogram pipeline")
+        };
+        assert!(field.scope == Scope::Intrinsic(Intrinsic::Duration));
+        assert!(field.key == "duration");
+    }
+
+    #[test]
+    fn select_and_coalesce_pipeline_stages_parse() {
+        let q = parse("{ .a = 1 } | select(.x, .y)").unwrap();
+        let [Pipeline::Select(fields)] = q.pipeline.as_slice() else {
+            panic!("select pipeline")
+        };
+        assert!(fields.len() == 2);
+        assert!(fields[0].key == "x");
+        assert!(fields[1].key == "y");
+
+        let q = parse("{ .a = 1 } | coalesce()").unwrap();
+        assert!(q.pipeline == vec![Pipeline::Coalesce]);
+    }
+
+    #[test]
+    fn with_pipeline_supports_multiple_bindings() {
+        let q = parse("{ .a = 1 } | with(x = .foo, y = .bar)").unwrap();
+        let [Pipeline::With(bindings)] = q.pipeline.as_slice() else {
+            panic!("with pipeline")
+        };
+        assert!(bindings.len() == 2);
+        assert!(bindings[0].name == "x");
+        assert!(bindings[1].name == "y");
+    }
+
+    // ---- rank limits ----
+
+    #[test]
+    fn rank_limit_requires_integer() {
+        let msg = parse_err("{ .a = 1 } | topk(.5)");
+        assert!(msg.contains("expected integer rank limit"));
+    }
+
+    #[test]
+    fn rank_limit_rejects_negative() {
+        let msg = parse_err("{ .a = 1 } | bottomk(0 - 1)");
+        // `0 - 1` is two int tokens; the rank parser only reads the first Int so
+        // it sees `0` then a stray token. Use a directly negative literal path.
+        // A bare negative integer is lexed as Minus Int, so topk reads Minus.
+        assert!(!msg.is_empty());
+        let msg = parse_err("{ .a = 1 } | topk(-2)");
+        assert!(msg.contains("expected integer rank limit"));
+    }
+
+    // ---- quantile edge cases ----
+
+    #[test]
+    fn quantile_accepts_integer_zero_and_one() {
+        let q = parse("{ .a = 1 } | quantile_over_time(span:duration, 0, 1)").unwrap();
+        let [Pipeline::Aggregate(Aggregate::QuantileOverTime { quantiles, .. })] =
+            q.pipeline.as_slice()
+        else {
+            panic!("quantile pipeline")
+        };
+        assert!(*quantiles == vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn quantile_out_of_range_errors() {
+        let msg = parse_err("{ .a = 1 } | quantile_over_time(span:duration, 2)");
+        assert!(msg.contains("quantile out of range"));
+    }
+
+    #[test]
+    fn quantile_non_numeric_token_errors() {
+        let msg = parse_err("{ .a = 1 } | quantile_over_time(span:duration, foo)");
+        assert!(msg.contains("expected quantile"));
+    }
+
+    #[test]
+    fn quantile_leading_dot_non_digit_errors() {
+        let msg = parse_err("{ .a = 1 } | quantile_over_time(span:duration, .foo)");
+        assert!(msg.contains("expected quantile digits"));
+    }
+
+    // ---- spanset / structural parsing ----
+
+    #[test]
+    fn parenthesized_spanset_groups_or() {
+        let q = parse("({ .a = 1 } || { .b = 2 }) && { .c = 3 }").unwrap();
+        let SpansetExpr::And(lhs, _) = &q.root else {
+            panic!("and at top")
+        };
+        assert!(matches!(lhs.as_ref(), SpansetExpr::Or(_, _)));
+    }
+
+    #[test]
+    fn spanset_primary_requires_brace_or_paren() {
+        let msg = parse_err(".a = 1");
+        assert!(msg.contains("expected spanset"));
+    }
+
+    #[test]
+    fn inter_brace_or_is_spanset_level() {
+        let q = parse("{ .a = 1 } || { .b = 2 }").unwrap();
+        assert!(matches!(q.root, SpansetExpr::Or(_, _)));
+    }
+
+    // ---- field parsing ----
+
+    #[test]
+    fn explicit_scope_dot_key_resolves() {
+        for (query, scope) in [
+            ("{ resource.region = \"us\" }", Scope::Resource),
+            ("{ event.foo = 1 }", Scope::Event),
+            ("{ link.foo = 1 }", Scope::Link),
+            ("{ instrumentation.foo = 1 }", Scope::Instrumentation),
+            ("{ parent.foo = 1 }", Scope::Parent),
+        ] {
+            let q = parse(query).unwrap();
+            let SpansetExpr::Selector(fe) = &q.root else {
+                panic!("selector for {query}")
+            };
+            let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+                panic!("comparison for {query}")
+            };
+            assert!(lhs.scope == scope, "scope mismatch for {query}");
+        }
+    }
+
+    #[test]
+    fn unknown_scope_prefix_errors() {
+        let msg = parse_err("{ bogus.foo = 1 }");
+        assert!(msg.contains("unknown scope"));
+    }
+
+    #[test]
+    fn unknown_intrinsic_errors() {
+        let msg = parse_err("{ span:bogus = 1 }");
+        assert!(msg.contains("unknown intrinsic"));
+    }
+
+    #[test]
+    fn bare_ident_is_both_scope() {
+        let q = parse("{ foo = 1 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!("selector")
+        };
+        let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+            panic!("comparison")
+        };
+        assert!(lhs.scope == Scope::Both);
+        assert!(lhs.key == "foo");
+    }
+
+    #[test]
+    fn bare_field_without_comparison_is_existence() {
+        let q = parse("{ .foo }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!("selector")
+        };
+        let FieldExpr::Field(field) = fe.as_ref() else {
+            panic!("bare field")
+        };
+        assert!(field.key == "foo");
+    }
+
+    #[test]
+    fn trace_and_event_intrinsics_resolve() {
+        for (query, intrinsic) in [
+            ("{ trace:rootName = \"x\" }", Intrinsic::TraceRootName),
+            ("{ trace:rootService = \"x\" }", Intrinsic::TraceRootService),
+            ("{ trace:id = \"x\" }", Intrinsic::TraceId),
+            ("{ event:name = \"x\" }", Intrinsic::EventName),
+            ("{ link:traceID = \"x\" }", Intrinsic::LinkTraceId),
+            ("{ link:spanID = \"x\" }", Intrinsic::LinkSpanId),
+            (
+                "{ instrumentation:version = \"x\" }",
+                Intrinsic::InstrumentationVersion,
+            ),
+            ("{ span:nestedSetLeft > 0 }", Intrinsic::NestedSetLeft),
+            ("{ span:nestedSetRight > 0 }", Intrinsic::NestedSetRight),
+            ("{ span:parentId = \"x\" }", Intrinsic::ParentId),
+        ] {
+            let q = parse(query).unwrap();
+            let SpansetExpr::Selector(fe) = &q.root else {
+                panic!("selector for {query}")
+            };
+            let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+                panic!("comparison for {query}")
+            };
+            assert!(
+                lhs.scope == Scope::Intrinsic(intrinsic),
+                "intrinsic mismatch for {query}"
+            );
+        }
+    }
+
+    // ---- value parsing ----
+
+    #[test]
+    fn primary_values_cover_all_literal_kinds() {
+        assert!(selector_rhs("{ .a = \"s\" }") == Value::Str("s".into()));
+        assert!(selector_rhs("{ .a = 42 }") == Value::Int(42));
+        assert!(selector_rhs("{ .a = 1.5 }") == Value::Float(1.5));
+        assert!(selector_rhs("{ .a = true }") == Value::Bool(true));
+        assert!(selector_rhs("{ .a = nil }") == Value::Nil);
+        // bare identifier on a non-duration field folds to a string value.
+        assert!(selector_rhs("{ .a = ident }") == Value::Str("ident".into()));
+    }
+
+    #[test]
+    fn parenthesized_value_groups_arithmetic() {
+        assert!(selector_rhs("{ .a = (1 + 2) * 3 }") == Value::Int(9));
+    }
+
+    #[test]
+    fn missing_value_errors() {
+        let msg = parse_err("{ .a = }");
+        assert!(msg.contains("expected value"));
+    }
+
+    #[test]
+    fn unary_negation_folds() {
+        assert!(selector_rhs("{ .a = -5 }") == Value::Int(-5));
+        assert!(selector_rhs("{ .a = - -5 }") == Value::Int(5));
+    }
+
+    #[test]
+    fn power_operator_folds() {
+        assert!(selector_rhs("{ .a = 2 ^ 3 }") == Value::Int(8));
+        // negative exponent falls back to float.
+        assert!(selector_rhs("{ .a = 2 ^ (0 - 1) }") == Value::Float(0.5));
+    }
+
+    #[test]
+    fn modulo_operator_folds() {
+        assert!(selector_rhs("{ .a = 10 % 3 }") == Value::Int(1));
+    }
+
+    // ---- value arithmetic helpers: mixed int/float ----
+
+    #[test]
+    fn mixed_int_float_arithmetic_promotes_to_float() {
+        assert!(selector_rhs("{ .a = 1 + 2.0 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 2.0 + 1 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 5 - 1.5 }") == Value::Float(3.5));
+        assert!(selector_rhs("{ .a = 5.5 - 1 }") == Value::Float(4.5));
+        assert!(selector_rhs("{ .a = 2 * 1.5 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 1.5 * 2 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 3 / 1.5 }") == Value::Float(2.0));
+        assert!(selector_rhs("{ .a = 3.0 / 2 }") == Value::Float(1.5));
+        assert!(selector_rhs("{ .a = 1.0 + 2.0 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 6.0 / 2.0 }") == Value::Float(3.0));
+        assert!(selector_rhs("{ .a = 1.0 - 0.5 }") == Value::Float(0.5));
+        assert!(selector_rhs("{ .a = 2.0 * 2.0 }") == Value::Float(4.0));
+    }
+
+    #[test]
+    fn float_power_variants_fold() {
+        assert!(selector_rhs("{ .a = 2.0 ^ 2.0 }") == Value::Float(4.0));
+        assert!(selector_rhs("{ .a = 2 ^ 2.0 }") == Value::Float(4.0));
+        assert!(selector_rhs("{ .a = 2.0 ^ 2 }") == Value::Float(4.0));
+    }
+
+    // ---- duration arithmetic ----
+
+    #[test]
+    fn duration_subtraction_and_modulo_fold() {
+        assert!(selector_rhs("{ span:duration = 100ms - 40ms }") == Value::Duration(60_000_000));
+        assert!(selector_rhs("{ span:duration = 100ms % 30ms }") == Value::Duration(10_000_000));
+    }
+
+    #[test]
+    fn duration_scalar_division_folds() {
+        assert!(selector_rhs("{ span:duration = 100ms / 4 }") == Value::Duration(25_000_000));
+    }
+
+    #[test]
+    fn duration_negation_folds() {
+        assert!(selector_rhs("{ span:duration = 0ms - 5ms }") == Value::Duration(-5_000_000));
+    }
+
+    #[test]
+    fn float_negation_folds() {
+        assert!(selector_rhs("{ .a = 0.0 - 2.5 }") == Value::Float(-2.5));
+        assert!(selector_rhs("{ .a = -2.5 }") == Value::Float(-2.5));
+    }
+
+    // ---- arithmetic error / overflow paths ----
+
+    #[test]
+    fn division_by_zero_errors() {
+        assert!(parse_err("{ .a = 1 / 0 }").contains("division by zero"));
+        assert!(parse_err("{ .a = 1.0 / 0.0 }").contains("division by zero"));
+    }
+
+    #[test]
+    fn modulo_by_zero_errors() {
+        assert!(parse_err("{ .a = 1 % 0 }").contains("modulo by zero"));
+    }
+
+    #[test]
+    fn integer_addition_overflow_errors() {
+        let msg = parse_err("{ .a = 9223372036854775807 + 1 }");
+        assert!(msg.contains("integer addition out of range"));
+    }
+
+    #[test]
+    fn integer_multiplication_overflow_errors() {
+        let msg = parse_err("{ .a = 9223372036854775807 * 2 }");
+        assert!(msg.contains("integer multiplication out of range"));
+    }
+
+    #[test]
+    fn integer_exponentiation_overflow_errors() {
+        let msg = parse_err("{ .a = 9223372036854775807 ^ 2 }");
+        assert!(msg.contains("integer exponentiation out of range"));
+    }
+
+    #[test]
+    fn type_mismatched_arithmetic_errors() {
+        // adding a string to an int is unsupported.
+        let msg = parse_err("{ .a = 1 + \"x\" }");
+        assert!(msg.contains("is not supported"));
+    }
+
+    #[test]
+    fn unary_negation_of_string_errors() {
+        let msg = parse_err("{ .a = -\"x\" }");
+        assert!(msg.contains("unary - is not supported"));
+    }
+
+    #[test]
+    fn duration_plus_int_is_type_error() {
+        // duration + bare int is not a supported combination.
+        let msg = parse_err("{ span:duration = 100ms + 5 }");
+        assert!(msg.contains("is not supported"));
+    }
+
+    // ---- numeric pipeline filter value validation ----
+
+    #[test]
+    fn pipeline_filter_rejects_non_numeric_value() {
+        let msg = parse_err("{ .a = 1 } | count() > \"x\"");
+        assert!(msg.contains("expected numeric filter value"));
+    }
+
+    #[test]
+    fn pipeline_filter_accepts_float_value() {
+        let q = parse("{ .a = 1 } | count() > 1.5").unwrap();
+        assert!(
+            q.pipeline[1]
+                == Pipeline::Filter {
+                    op: ComparisonOp::Gt,
+                    value: 1.5,
+                }
+        );
+    }
+
+    // ---- duration literal parsing edge cases ----
+
+    #[test]
+    fn duration_units_all_resolve() {
+        assert!(selector_rhs("{ span:duration = 5ns }") == Value::Duration(5));
+        assert!(selector_rhs("{ span:duration = 5us }") == Value::Duration(5_000));
+        assert!(selector_rhs("{ span:duration = 5ms }") == Value::Duration(5_000_000));
+        assert!(selector_rhs("{ span:duration = 5s }") == Value::Duration(5_000_000_000));
+        assert!(selector_rhs("{ span:duration = 2m }") == Value::Duration(120_000_000_000));
+        assert!(selector_rhs("{ span:duration = 1h }") == Value::Duration(3_600_000_000_000));
+    }
+
+    #[test]
+    fn duration_fractional_component_folds() {
+        assert!(selector_rhs("{ span:duration = 1.5s }") == Value::Duration(1_500_000_000));
+    }
+
+    #[test]
+    fn duration_unknown_unit_errors() {
+        let msg = parse_err("{ span:duration = 5zz }");
+        assert!(msg.contains("unknown duration unit"));
+    }
+
+    #[test]
+    fn non_numeric_duration_ident_errors() {
+        // A bare identifier against a duration field is routed to the duration
+        // parser, which fails because it has no leading number.
+        let msg = parse_err("{ span:duration = abc }");
+        assert!(msg.contains("duration number") || msg.contains("duration"));
+    }
+
+    #[test]
+    fn duration_number_without_unit_errors() {
+        // `5x` lexes as one duration ident: number `5` then unit `x`, which is
+        // an unknown unit. `12` followed by a non-unit char trips the missing
+        // unit path; emulate via a digits-only ident such as `5k`.
+        let msg = parse_err("{ span:duration = 5k }");
+        assert!(msg.contains("unknown duration unit"));
+    }
+
+    #[test]
+    fn bare_int_against_duration_field_folds_as_int() {
+        // A plain integer literal against a duration field is lexed as an Int
+        // token (not a duration ident), so it folds to an Int value.
+        assert!(selector_rhs("{ span:duration = 5 }") == Value::Int(5));
+    }
+
+    #[test]
+    fn all_comparison_operators_parse() {
+        for (query, expected) in [
+            ("{ .a < 5 }", ComparisonOp::Lt),
+            ("{ .a <= 5 }", ComparisonOp::Lte),
+            ("{ .a > 5 }", ComparisonOp::Gt),
+            ("{ .a >= 5 }", ComparisonOp::Gte),
+            ("{ .a != 5 }", ComparisonOp::Neq),
+            ("{ .a =~ \"x\" }", ComparisonOp::Re),
+            ("{ .a !~ \"x\" }", ComparisonOp::Nre),
+            ("{ .a = 5 }", ComparisonOp::Eq),
+        ] {
+            let q = parse(query).unwrap();
+            let SpansetExpr::Selector(fe) = &q.root else {
+                panic!("selector for {query}")
+            };
+            let FieldExpr::Comparison { op, .. } = fe.as_ref() else {
+                panic!("comparison for {query}")
+            };
+            assert!(*op == expected, "op mismatch for {query}");
+        }
+    }
+
+    #[test]
+    fn leading_dot_duration_fraction_folds() {
+        // `.5s` lexes as one duration ident with an empty whole part and a
+        // fractional part, exercising the fraction-scaling branch.
+        assert!(selector_rhs("{ span:duration = .5s }") == Value::Duration(500_000_000));
+    }
+
+    #[test]
+    fn duration_overflow_errors() {
+        // A duration literal far beyond i64 nanoseconds must surface as a parse
+        // error rather than overflowing (the i64::try_from at the end fails).
+        let msg = parse_err("{ span:duration = 100000000000h }");
+        assert!(msg.contains("range"));
+    }
+
+    #[test]
+    fn duration_i128_multiply_overflow_errors() {
+        // A whole-number part that parses as i128 but overflows when scaled by
+        // the hour multiplier must surface "duration out of range". 30 digits
+        // (~1e29) is well within i128, but ×3.6e12 exceeds i128::MAX.
+        let big = "1".to_string() + &"0".repeat(29);
+        let msg = parse_err(&format!("{{ span:duration = {big}h }}"));
+        assert!(msg.contains("duration out of range"));
+    }
 }
