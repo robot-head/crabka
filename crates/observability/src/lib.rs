@@ -3406,7 +3406,14 @@ fn normalize_loki_proto_push(
         discover_service_name_label(&mut stream_labels);
 
         for entry in stream.entries {
-            let timestamp_ns = loki_proto_timestamp_ns(entry.timestamp.as_ref())?;
+            let timestamp_ns = if let Some(timestamp) = entry.timestamp.as_ref() {
+                loki_proto_timestamp_ns(Some(timestamp))?
+            } else {
+                return Err(loki_missing_proto_timestamp_error(
+                    &stream_labels,
+                    reject_old_samples_max_age,
+                ));
+            };
             validate_loki_timestamp_window(
                 timestamp_ns,
                 &stream_labels,
@@ -3659,6 +3666,20 @@ fn loki_proto_timestamp_ns(
         .and_then(|seconds_ns| seconds_ns.checked_add(i64::from(timestamp.nanos)))
         .ok_or(DistributorError::InvalidTimestamp)
         .and_then(validate_ingest_timestamp_ns)
+}
+
+fn loki_missing_proto_timestamp_error(
+    stream_labels: &Labels,
+    max_age: Option<Duration>,
+) -> DistributorError {
+    let max_age = max_age.unwrap_or(LOKI_REJECT_OLD_SAMPLES_MAX_AGE);
+    let oldest_acceptable_timestamp_ns = current_unix_time_ns()
+        .saturating_sub(i64::try_from(max_age.as_nanos()).unwrap_or(i64::MAX));
+    DistributorError::TimestampTooOldString {
+        stream: loki_stale_sample_label_set(stream_labels),
+        timestamp: "0001-01-01T00:00:00Z",
+        oldest_acceptable_timestamp_ns,
+    }
 }
 
 fn loki_proto_label_pairs_to_labels(
