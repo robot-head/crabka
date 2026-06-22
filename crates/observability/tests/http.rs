@@ -366,6 +366,38 @@ async fn loki_push_endpoint_rejects_non_object_json_stream_like_loki() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_non_array_json_streams_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": "not-streams"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    let body = text_body(response).await;
+    assert!(body.contains(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: decode slice: expect [ or n, but found"
+    ));
+    assert!(body.contains("not-streams"));
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_returns_server_error_when_wal_append_fails() {
     let app = distributor_router(FailingWalSink);
 
