@@ -850,6 +850,30 @@ async fn loki_push_endpoint_accepts_gzipped_json_payloads() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_malformed_gzip_payload_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .header("content-encoding", "gzip")
+                .body(Body::from("not gzip"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(text_body(response).await == "unexpected EOF\n");
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_accepts_deflated_json_payloads() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
