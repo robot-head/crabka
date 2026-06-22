@@ -11051,7 +11051,9 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
     match parse_query(query) {
         Ok(query) => Ok(format_stream_query(&query)),
         Err(stream_error) => {
-            if parse_metric_query(query).is_ok()
+            if let Some(formatted) = format_scalar_vector_expression(query) {
+                Ok(formatted)
+            } else if parse_metric_query(query).is_ok()
                 || parse_metric_label_join_query(query).is_ok()
                 || parse_metric_label_replace_query(query).is_ok()
                 || parse_metric_binary_arithmetic_query(query).is_ok()
@@ -11061,8 +11063,6 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 || parse_metric_scalar_comparison_query(query).is_ok()
             {
                 Ok(query.trim().to_string())
-            } else if let Some(formatted) = format_scalar_vector_expression(query) {
-                Ok(formatted)
             } else if scalar_vector_expression_result(query).is_some() {
                 Ok(query.trim().to_string())
             } else {
@@ -11087,15 +11087,45 @@ fn format_scalar_vector_expression(query: &str) -> Option<String> {
         if scalar.starts_with(['+', '-']) {
             return None;
         }
-        return Some(format!(
-            "vector({})",
-            parse_scalar_sample(scalar)?.format_fixed_six()
-        ));
+        if let Some(sample) = parse_scalar_sample(scalar) {
+            return Some(format!("vector({})", sample.format_fixed_six()));
+        }
+    }
+    if let Some(formatted) = format_vector_set_expression(&query) {
+        return Some(formatted);
     }
     match scalar_vector_expression_result(&query)? {
         ScalarVectorExpressionResult::Scalar { sample } => Some(sample),
         ScalarVectorExpressionResult::Vector { .. } => None,
     }
+}
+
+fn format_vector_set_expression(query: &str) -> Option<String> {
+    let (left, position) = parse_formatted_vector_function(query, 0)?;
+    for operator in ["unless", "and", "or"] {
+        if let Some(rest) = query[position..].strip_prefix(operator) {
+            let right_position = query.len() - rest.len();
+            let (right, end) = parse_formatted_vector_function(query, right_position)?;
+            if end == query.len() {
+                return Some(format!("({left} {operator} {right})"));
+            }
+        }
+    }
+    None
+}
+
+fn parse_formatted_vector_function(query: &str, position: usize) -> Option<(String, usize)> {
+    let scalar = query[position..].strip_prefix("vector(")?;
+    let scalar_end = scalar.find(')')?;
+    let scalar_text = &scalar[..scalar_end];
+    if scalar_text.starts_with(['+', '-']) {
+        return None;
+    }
+    let sample = parse_scalar_sample(scalar_text)?.format_fixed_six();
+    Some((
+        format!("vector({sample})"),
+        position + "vector(".len() + scalar_end + 1,
+    ))
 }
 
 fn format_stream_query(query: &StreamQuery) -> String {
