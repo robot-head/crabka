@@ -132,7 +132,10 @@ impl LiveSource for RemoteLiveSource {
     }
 
     async fn trace_spans(&self, tenant: &str, trace_id: &[u8; 16]) -> Result<Option<TraceSpans>> {
-        let path = format!("/api/v2/traces/{}", hex::encode(trace_id));
+        // Use the v1 endpoint for internal federation: it returns the bare OTLP
+        // `TracesData` we decode below. The v2 endpoint wraps the trace in a
+        // Tempo `TraceByIDResponse` for Grafana's backend datasource.
+        let path = format!("/api/traces/{}", hex::encode(trace_id));
         let url = self
             .base_url
             .join(&path)
