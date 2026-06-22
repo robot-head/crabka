@@ -115,6 +115,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_row_group_metadata_reports_every_group() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(crate::COL_FINGERPRINT, DataType::UInt64, false),
+            Field::new(crate::COL_TIMESTAMP, DataType::Int64, false),
+            Field::new("line", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(vec![10_u64, 20])),
+                Arc::new(Int64Array::from(vec![100_i64, 200])),
+                Arc::new(StringArray::from(vec!["first", "second"])),
+            ],
+        )
+        .unwrap();
+
+        // One row per row group → exactly two row groups.
+        let object_writer = ParquetObjectWriter::new(store.clone(), Path::from("meta.parquet"));
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(1))
+            .set_write_batch_size(1)
+            .build();
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, schema.clone(), Some(props)).unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let meta = read_row_group_metadata(store, "meta.parquet")
+            .await
+            .unwrap();
+        assert!(meta.len() == 2);
+        assert!(meta[0].index == 0);
+        assert!(meta[1].index == 1);
+        assert!(meta[0].compressed_bytes > 0);
+        assert!(meta[1].compressed_bytes > 0);
+    }
+
+    #[tokio::test]
     async fn read_block_row_groups_reads_only_selected_groups() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let schema = Arc::new(Schema::new(vec![

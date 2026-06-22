@@ -232,6 +232,70 @@ mod tests {
     }
 
     #[test]
+    fn fnv1_32_xors_each_byte() {
+        // FNV-1: hash = (hash * PRIME) ^ byte, applied per byte. A non-zero
+        // second byte makes `^=` differ from `|=`: pin the exact two-byte hash
+        // so swapping the xor for an or (or and) fails.
+        const PRIME: u32 = 16_777_619;
+        let h0 = 2_166_136_261_u32;
+        let h1 = h0.wrapping_mul(PRIME) ^ 0x01;
+        let expected = h1.wrapping_mul(PRIME) ^ 0xFF;
+        assert!(fnv1_32(&[0x01, 0xFF]) == expected);
+        // Guard: with `|=` the result would be h1.mul(PRIME) | 0xFF, which differs.
+        let or_variant = h1.wrapping_mul(PRIME) | 0xFF;
+        assert!(expected != or_variant);
+    }
+
+    #[test]
+    fn fnv1a_32_xors_then_multiplies_each_byte() {
+        // FNV-1a: hash = (hash ^ byte) * PRIME, per byte. Pin the exact value so
+        // a `0`/`1` stub return or swapping the `^=` for `&=`/`|=` fails.
+        const PRIME: u32 = 16_777_619;
+        let h0 = 2_166_136_261_u32;
+        let h1 = (h0 ^ 0x01).wrapping_mul(PRIME);
+        let expected = (h1 ^ 0xFF).wrapping_mul(PRIME);
+        assert!(fnv1a_32(&[0x01, 0xFF]) == expected);
+        assert!(fnv1a_32(&[0x01, 0xFF]) != 0);
+        assert!(fnv1a_32(&[0x01, 0xFF]) != 1);
+        // `&=` and `|=` produce different hashes for the same input.
+        let and_variant = ((h0 & 0x01).wrapping_mul(PRIME) & 0xFF).wrapping_mul(PRIME);
+        let or_variant = ((h0 | 0x01).wrapping_mul(PRIME) | 0xFF).wrapping_mul(PRIME);
+        assert!(expected != and_variant);
+        assert!(expected != or_variant);
+    }
+
+    #[test]
+    fn probes_force_odd_step_with_or_one() {
+        // `probes` uses h2 = fnv1a_32(id) | 1 as the step. Replacing the `| 1`
+        // with `& 1` (step in {0,1}) or `^ 1` (flips the low bit) changes the
+        // probe positions. Choose a trace id whose fnv1a hash has its low bit
+        // SET so `| 1` and `^ 1` actually diverge, then pin the exact probes.
+        let trace_id = tid(3);
+        assert!(fnv1a_32(&trace_id) & 1 == 1);
+
+        let shard = BloomShard::new(64, 0.01);
+        let h1 = u64::from(fnv1_32(&trace_id));
+        let h2 = u64::from(fnv1a_32(&trace_id)) | 1;
+        let expected: Vec<u64> = (0..u64::from(shard.k))
+            .map(|i| h1.wrapping_add(i.wrapping_mul(h2)) % shard.num_bits)
+            .collect();
+        let got: Vec<u64> = shard.probes(&trace_id).collect();
+        assert!(got == expected);
+
+        // The `& 1` and `^ 1` variants give a different probe sequence.
+        let h2_and = u64::from(fnv1a_32(&trace_id)) & 1;
+        let and_variant: Vec<u64> = (0..u64::from(shard.k))
+            .map(|i| h1.wrapping_add(i.wrapping_mul(h2_and)) % shard.num_bits)
+            .collect();
+        let h2_xor = u64::from(fnv1a_32(&trace_id)) ^ 1;
+        let xor_variant: Vec<u64> = (0..u64::from(shard.k))
+            .map(|i| h1.wrapping_add(i.wrapping_mul(h2_xor)) % shard.num_bits)
+            .collect();
+        assert!(expected != and_variant);
+        assert!(expected != xor_variant);
+    }
+
+    #[test]
     fn snapshot_round_trips() {
         let mut b = ShardedTraceBloom::new(4, 32, 0.01);
         b.insert(&tid(1));

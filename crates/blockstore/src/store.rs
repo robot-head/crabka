@@ -230,6 +230,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn index_returns_the_stores_own_populated_index() {
+        // The accessor must hand back the store's real index, not a fresh
+        // default one: the seeded `app=api` series must resolve.
+        let (bs, _schema) = seeded_store().await;
+        let mut api = Labels::new();
+        api.insert("app", "api");
+        let got = bs
+            .index()
+            .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+            .unwrap();
+        assert!(got == std::collections::BTreeSet::from([api.fingerprint()]));
+    }
+
+    #[tokio::test]
+    async fn scan_block_keys_reads_named_blocks() {
+        let (bs, schema) = seeded_store().await;
+        let (ctx, table) = bs
+            .scan_block_keys(&["blocks/b1.parquet".to_string()], schema)
+            .await
+            .unwrap();
+        // Table name is the fixed logical name, not a stub string.
+        assert!(table == "logs");
+        let df = ctx.sql(&format!("SELECT line FROM {table}")).await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert!(total == 2);
+    }
+
+    #[tokio::test]
+    async fn scan_block_row_groups_reads_selected_groups() {
+        let (bs, schema) = seeded_store().await;
+        let (ctx, table) = bs
+            .scan_block_row_groups("blocks/b1.parquet", &[0], schema)
+            .await
+            .unwrap();
+        assert!(table == "logs");
+        let df = ctx.sql(&format!("SELECT line FROM {table}")).await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        assert!(total == 2);
+    }
+
+    #[tokio::test]
     async fn scan_with_no_matching_blocks_returns_empty_shape() {
         let (bs, schema) = seeded_store().await;
         let matchers = [LabelMatcher::new("app", MatchOp::Eq, "absent")];

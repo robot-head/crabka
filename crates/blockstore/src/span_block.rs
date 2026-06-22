@@ -493,11 +493,16 @@ fn append_kv(sb: &mut StructBuilder, attrs: &[(String, String)]) {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{FixedSizeBinaryArray, Int32Array};
+    use arrow::array::{
+        Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
+        StringArray,
+    };
     use assert2::assert;
 
     use super::*;
-    use crate::span_schema::{SCOL_KIND, SCOL_NESTED_SET_LEFT, SCOL_TRACE_ID, span_block_schema};
+    use crate::span_schema::{
+        PromotedSpanAttr, SCOL_KIND, SCOL_NESTED_SET_LEFT, SCOL_TRACE_ID, span_block_schema,
+    };
 
     fn tid() -> [u8; 16] {
         [1; 16]
@@ -574,5 +579,132 @@ mod tests {
             .downcast_ref::<Int32Array>()
             .unwrap();
         assert!(lefts.value(1) == 2);
+    }
+
+    fn row_with_attrs(attrs: Vec<SpanAttr>) -> SpanRow {
+        let mut row = sample_row(1, None, 1);
+        row.attrs = attrs;
+        row.events = vec![];
+        row.links = vec![];
+        row
+    }
+
+    #[test]
+    fn promotes_double_attr_into_its_column() {
+        // Guards the `Some(AttrValue::Double(values))` match arm in
+        // PromotedAttrBuilder::append: deleting it falls through to
+        // append_null, so the promoted column would be null instead of 1.5.
+        let promoted = [PromotedSpanAttr::double("latency")];
+        let row = row_with_attrs(vec![SpanAttr {
+            key: "latency".into(),
+            is_array: false,
+            value: AttrValue::Double(vec![1.5]),
+        }]);
+        let batch = encode_span_rows_with_promoted_attrs(&[row], &promoted).unwrap();
+        let col = batch
+            .column_by_name(&promoted[0].column_name())
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(!col.is_null(0));
+        assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn promotes_bool_attr_into_its_column() {
+        // Guards the `Some(AttrValue::Bool(values))` match arm.
+        let promoted = [PromotedSpanAttr::bool("ok")];
+        let row = row_with_attrs(vec![SpanAttr {
+            key: "ok".into(),
+            is_array: false,
+            value: AttrValue::Bool(vec![true]),
+        }]);
+        let batch = encode_span_rows_with_promoted_attrs(&[row], &promoted).unwrap();
+        let col = batch
+            .column_by_name(&promoted[0].column_name())
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(!col.is_null(0));
+        assert!(col.value(0));
+    }
+
+    #[test]
+    fn promotes_string_and_int_attrs_into_their_columns() {
+        let promoted = [
+            PromotedSpanAttr::string("svc"),
+            PromotedSpanAttr::int("code"),
+        ];
+        let row = row_with_attrs(vec![
+            SpanAttr {
+                key: "svc".into(),
+                is_array: false,
+                value: AttrValue::Str(vec!["checkout".into()]),
+            },
+            SpanAttr {
+                key: "code".into(),
+                is_array: false,
+                value: AttrValue::Int(vec![42]),
+            },
+        ]);
+        let batch = encode_span_rows_with_promoted_attrs(&[row], &promoted).unwrap();
+
+        let svc = batch
+            .column_by_name(&promoted[0].column_name())
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int32Type>>()
+            .unwrap();
+        let svc_values = svc.values().as_any().downcast_ref::<StringArray>().unwrap();
+        let key = usize::try_from(svc.keys().value(0)).unwrap();
+        assert!(svc_values.value(key) == "checkout");
+
+        let code = batch
+            .column_by_name(&promoted[1].column_name())
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert!(code.value(0) == 42);
+    }
+
+    #[test]
+    fn generic_attr_lists_carry_keys_and_string_values() {
+        // Exercises the str-list and str-list-of-list builders (new_str_list /
+        // new_str_list_list) by reading back the generic attr_keys and
+        // attr_value columns and asserting their exact contents.
+        let row = row_with_attrs(vec![SpanAttr {
+            key: "http.method".into(),
+            is_array: false,
+            value: AttrValue::Str(vec!["GET".into(), "POST".into()]),
+        }]);
+        let batch = encode_span_rows(&[row]).unwrap();
+
+        let keys = batch
+            .column_by_name(crate::span_schema::SCOL_ATTR_KEYS)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let row0_keys = keys.value(0);
+        let row0_keys = row0_keys.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(row0_keys.len() == 1);
+        assert!(row0_keys.value(0) == "http.method");
+
+        let values = batch
+            .column_by_name(crate::span_schema::SCOL_ATTR_VALUE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let row0_values = values.value(0);
+        let row0_values = row0_values.as_any().downcast_ref::<ListArray>().unwrap();
+        let first_attr = row0_values.value(0);
+        let first_attr = first_attr.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(first_attr.len() == 2);
+        assert!(first_attr.value(0) == "GET");
+        assert!(first_attr.value(1) == "POST");
     }
 }

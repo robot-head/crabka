@@ -2574,8 +2574,13 @@ mod tests {
             (MatchCmp::Eq, 0.5, 1),
             (MatchCmp::Neq, 0.25, 1),
             (MatchCmp::Lt, 1.0, 1),
+            // Boundary: value == expected. `<` is strict, so 0.5 < 0.5 is false.
+            // Distinguishes `<` from `<=`.
+            (MatchCmp::Lt, 0.5, 0),
             (MatchCmp::Lte, 0.5, 1),
             (MatchCmp::Gt, 0.25, 1),
+            // Boundary: 0.5 > 0.5 is false. Distinguishes `>` from `>=`.
+            (MatchCmp::Gt, 0.5, 0),
             (MatchCmp::Gte, 0.5, 1),
             (MatchCmp::Gt, 0.75, 0),
         ];
@@ -2815,5 +2820,517 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // ---- direct intrinsic_matches coverage (drives every match arm) ----
+
+    fn stored_trace_with(span: InputSpan) -> StoredTrace {
+        let trace_id = span.trace_id;
+        StoredTrace {
+            trace_id,
+            root_service_name: "rootsvc".into(),
+            root_span_name: "rootname".into(),
+            trace_start_unix_nano: 0,
+            trace_duration_nanos: 1234,
+            spans: vec![span],
+            nested: vec![NestedSet {
+                left: 1,
+                right: 2,
+                parent_id: 0,
+            }],
+        }
+    }
+
+    fn intrinsic(trace: &StoredTrace, key: &str, op: MatchCmp, value: MatchValue) -> bool {
+        let m = matcher(MatchScope::Intrinsic, key, op, value);
+        intrinsic_matches(trace, &trace.spans[0], &trace.nested, 0, &m)
+    }
+
+    #[test]
+    fn intrinsic_matches_event_name_arm_presence_and_value() {
+        let mut sp = span(1, None, "root", vec![]);
+        sp.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "cache.miss".into(),
+            attributes: Vec::new(),
+        }];
+        let trace = stored_trace_with(sp);
+
+        // Presence: span HAS events -> `event:name != nil` is true. The `!` on
+        // `!span.events.is_empty()` is load-bearing: removing it flips this.
+        assert!(intrinsic(
+            &trace,
+            "event:name",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+        // Value match on the event name distinguishes this arm from the `_ => true`
+        // fallthrough.
+        assert!(intrinsic(
+            &trace,
+            "event:name",
+            MatchCmp::Eq,
+            MatchValue::Str("cache.miss".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "event:name",
+            MatchCmp::Eq,
+            MatchValue::Str("other".into())
+        ));
+
+        // A span with NO events: `event:name != nil` is false (absence). This is
+        // the other side of the `!`.
+        let empty = stored_trace_with(span(1, None, "root", vec![]));
+        assert!(!intrinsic(
+            &empty,
+            "event:name",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+    }
+
+    #[test]
+    fn intrinsic_matches_event_time_since_start_arm() {
+        let mut sp = span(1, None, "root", vec![]);
+        sp.events = vec![EventRef {
+            time_since_start_nano: 50,
+            name: "e".into(),
+            attributes: Vec::new(),
+        }];
+        let trace = stored_trace_with(sp);
+
+        assert!(intrinsic(
+            &trace,
+            "event:timeSinceStart",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+        assert!(intrinsic(
+            &trace,
+            "event:timeSinceStart",
+            MatchCmp::Eq,
+            MatchValue::Int(50)
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "event:timeSinceStart",
+            MatchCmp::Eq,
+            MatchValue::Int(51)
+        ));
+
+        let empty = stored_trace_with(span(1, None, "root", vec![]));
+        assert!(!intrinsic(
+            &empty,
+            "event:timeSinceStart",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+    }
+
+    #[test]
+    fn intrinsic_matches_link_trace_id_and_span_id_arms() {
+        let mut sp = span(1, None, "root", vec![]);
+        sp.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: Vec::new(),
+        }];
+        let trace = stored_trace_with(sp);
+
+        // link:traceID presence + value.
+        assert!(intrinsic(
+            &trace,
+            "link:traceID",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+        assert!(intrinsic(
+            &trace,
+            "link:traceID",
+            MatchCmp::Eq,
+            MatchValue::Str("09090909090909090909090909090909".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "link:traceID",
+            MatchCmp::Eq,
+            MatchValue::Str("00000000000000000000000000000000".into())
+        ));
+
+        // link:spanID presence + value.
+        assert!(intrinsic(
+            &trace,
+            "link:spanID",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+        assert!(intrinsic(
+            &trace,
+            "link:spanID",
+            MatchCmp::Eq,
+            MatchValue::Str("0808080808080808".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "link:spanID",
+            MatchCmp::Eq,
+            MatchValue::Str("0000000000000000".into())
+        ));
+
+        // No links: presence is false (other side of the `!`).
+        let empty = stored_trace_with(span(1, None, "root", vec![]));
+        assert!(!intrinsic(
+            &empty,
+            "link:traceID",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+        assert!(!intrinsic(
+            &empty,
+            "link:spanID",
+            MatchCmp::Neq,
+            MatchValue::Nil
+        ));
+    }
+
+    #[test]
+    fn intrinsic_matches_trace_and_span_string_arms() {
+        let mut sp = span(1, Some(2), "root", vec![]);
+        sp.status_message = "boom".into();
+        sp.instrumentation_name = "tracer".into();
+        sp.instrumentation_version = "1.2.3".into();
+        let trace = stored_trace_with(sp);
+
+        // trace:rootService / trace:rootName / trace:duration distinct values
+        // (each arm differs from the `_ => true` fallthrough).
+        assert!(intrinsic(
+            &trace,
+            "trace:rootService",
+            MatchCmp::Eq,
+            MatchValue::Str("rootsvc".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "trace:rootService",
+            MatchCmp::Eq,
+            MatchValue::Str("nope".into())
+        ));
+        assert!(intrinsic(
+            &trace,
+            "trace:rootName",
+            MatchCmp::Eq,
+            MatchValue::Str("rootname".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "trace:rootName",
+            MatchCmp::Eq,
+            MatchValue::Str("nope".into())
+        ));
+        assert!(intrinsic(
+            &trace,
+            "trace:duration",
+            MatchCmp::Eq,
+            MatchValue::Int(1234)
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "trace:duration",
+            MatchCmp::Eq,
+            MatchValue::Int(5)
+        ));
+
+        // statusMessage arm.
+        assert!(intrinsic(
+            &trace,
+            "span:statusMessage",
+            MatchCmp::Eq,
+            MatchValue::Str("boom".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "span:statusMessage",
+            MatchCmp::Eq,
+            MatchValue::Str("nope".into())
+        ));
+
+        // instrumentation:name / instrumentation:version arms.
+        assert!(intrinsic(
+            &trace,
+            "instrumentation:name",
+            MatchCmp::Eq,
+            MatchValue::Str("tracer".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "instrumentation:name",
+            MatchCmp::Eq,
+            MatchValue::Str("nope".into())
+        ));
+        assert!(intrinsic(
+            &trace,
+            "instrumentation:version",
+            MatchCmp::Eq,
+            MatchValue::Str("1.2.3".into())
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "instrumentation:version",
+            MatchCmp::Eq,
+            MatchValue::Str("9.9.9".into())
+        ));
+    }
+
+    #[test]
+    fn intrinsic_matches_nested_set_left_and_right_arms() {
+        let trace = stored_trace_with(span(1, None, "root", vec![]));
+        // nested set is { left: 1, right: 2, parent_id: 0 }.
+        assert!(intrinsic(
+            &trace,
+            "span:nestedSetLeft",
+            MatchCmp::Eq,
+            MatchValue::Int(1)
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "span:nestedSetLeft",
+            MatchCmp::Eq,
+            MatchValue::Int(2)
+        ));
+        assert!(intrinsic(
+            &trace,
+            "span:nestedSetRight",
+            MatchCmp::Eq,
+            MatchValue::Int(2)
+        ));
+        assert!(!intrinsic(
+            &trace,
+            "span:nestedSetRight",
+            MatchCmp::Eq,
+            MatchValue::Int(1)
+        ));
+    }
+
+    #[test]
+    fn collect_span_intrinsic_values_omits_empty_instrumentation_version() {
+        // The `if !span.instrumentation_version.is_empty()` guard must suppress an
+        // empty version. Replacing the guard with `true` would insert an empty
+        // value here.
+        let mut values = BTreeSet::new();
+        let empty = span(1, None, "root", vec![]); // version is empty
+        collect_span_intrinsic_values(&empty, &[], 0, "instrumentation:version", &mut values);
+        assert!(values.is_empty());
+
+        // A non-empty version is collected.
+        let mut values = BTreeSet::new();
+        let with_version = InputSpan {
+            instrumentation_version: "1.2.3".into(),
+            ..span(1, None, "root", vec![])
+        };
+        collect_span_intrinsic_values(
+            &with_version,
+            &[],
+            0,
+            "instrumentation:version",
+            &mut values,
+        );
+        assert!(values == BTreeSet::from([("string".to_string(), "1.2.3".to_string())]));
+    }
+
+    #[test]
+    fn present_value_matches_eq_nil_is_false_neq_nil_is_true() {
+        // A PRESENT value: `= nil` must be false, `!= nil` must be true.
+        assert!(present_value_matches(MatchCmp::Eq, &MatchValue::Nil) == Some(false));
+        assert!(present_value_matches(MatchCmp::Neq, &MatchValue::Nil) == Some(true));
+        // Non-nil comparisons defer to the typed path.
+        assert!(present_value_matches(MatchCmp::Eq, &MatchValue::Int(1)).is_none());
+    }
+
+    #[test]
+    fn event_matcher_matches_absence_event_attr_uses_nil_semantics() {
+        // An Event-scope attribute matcher `= nil` matches an absent event attr;
+        // `!= nil` does not. Deleting the MatchScope::Event arm would force both
+        // to false.
+        let eq_nil = matcher(MatchScope::Event, "x", MatchCmp::Eq, MatchValue::Nil);
+        let neq_nil = matcher(MatchScope::Event, "x", MatchCmp::Neq, MatchValue::Nil);
+        assert!(event_matcher_matches_absence(&eq_nil));
+        assert!(!event_matcher_matches_absence(&neq_nil));
+    }
+
+    #[test]
+    fn link_matcher_matches_absence_link_attr_uses_nil_semantics() {
+        let eq_nil = matcher(MatchScope::Link, "x", MatchCmp::Eq, MatchValue::Nil);
+        let neq_nil = matcher(MatchScope::Link, "x", MatchCmp::Neq, MatchValue::Nil);
+        assert!(link_matcher_matches_absence(&eq_nil));
+        assert!(!link_matcher_matches_absence(&neq_nil));
+    }
+
+    #[test]
+    fn link_matcher_matches_link_rejects_non_matching_value() {
+        // A link attr matcher that does NOT match must return false; replacing the
+        // whole function body with `true` would break this.
+        let link = LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: vec![("ln.kind".into(), AttrValue::Str("retry".into()))],
+        };
+        let hit = matcher(
+            MatchScope::Link,
+            "ln.kind",
+            MatchCmp::Eq,
+            MatchValue::Str("retry".into()),
+        );
+        let miss = matcher(
+            MatchScope::Link,
+            "ln.kind",
+            MatchCmp::Eq,
+            MatchValue::Str("wrong".into()),
+        );
+        assert!(link_matcher_matches_link(&link, &hit));
+        assert!(!link_matcher_matches_link(&link, &miss));
+    }
+
+    #[test]
+    fn instrumentation_matches_rejects_non_matching_value() {
+        // instrumentation_matches must return false for a mismatched name;
+        // replacing the body with `true` would break this.
+        let span = InputSpan {
+            instrumentation_name: "tracer".into(),
+            ..span(1, None, "root", vec![])
+        };
+        let hit = matcher(
+            MatchScope::Instrumentation,
+            "name",
+            MatchCmp::Eq,
+            MatchValue::Str("tracer".into()),
+        );
+        let miss = matcher(
+            MatchScope::Instrumentation,
+            "name",
+            MatchCmp::Eq,
+            MatchValue::Str("other".into()),
+        );
+        assert!(instrumentation_matches(&span, &hit));
+        assert!(!instrumentation_matches(&span, &miss));
+    }
+
+    #[test]
+    fn matcher_matches_event_and_link_arms_filter_by_key() {
+        // matcher_matches' Event/Link arms select attribute values by exact key
+        // (`key == &matcher.key`). With `!=` they would read the wrong attribute.
+        let mut sp = span(1, None, "root", vec![]);
+        sp.events = vec![EventRef {
+            time_since_start_nano: 1,
+            name: "e".into(),
+            attributes: vec![
+                ("want".into(), AttrValue::Str("yes".into())),
+                ("other".into(), AttrValue::Str("no".into())),
+            ],
+        }];
+        sp.links = vec![LinkRef {
+            trace_id: [9; 16],
+            span_id: [8; 8],
+            attributes: vec![
+                ("lwant".into(), AttrValue::Str("yes".into())),
+                ("lother".into(), AttrValue::Str("no".into())),
+            ],
+        }];
+        let trace = stored_trace_with(sp);
+
+        let event_m = matcher(
+            MatchScope::Event,
+            "want",
+            MatchCmp::Eq,
+            MatchValue::Str("yes".into()),
+        );
+        assert!(matcher_matches(
+            &trace,
+            &trace.spans[0],
+            &trace.nested,
+            0,
+            &event_m,
+        ));
+        // The "other" attribute's value is "no", so matching key "want" against
+        // "yes" depends on selecting the correct key.
+        let event_wrong = matcher(
+            MatchScope::Event,
+            "want",
+            MatchCmp::Eq,
+            MatchValue::Str("no".into()),
+        );
+        assert!(!matcher_matches(
+            &trace,
+            &trace.spans[0],
+            &trace.nested,
+            0,
+            &event_wrong,
+        ));
+
+        let link_m = matcher(
+            MatchScope::Link,
+            "lwant",
+            MatchCmp::Eq,
+            MatchValue::Str("yes".into()),
+        );
+        assert!(matcher_matches(
+            &trace,
+            &trace.spans[0],
+            &trace.nested,
+            0,
+            &link_m,
+        ));
+        let link_wrong = matcher(
+            MatchScope::Link,
+            "lwant",
+            MatchCmp::Eq,
+            MatchValue::Str("no".into()),
+        );
+        assert!(!matcher_matches(
+            &trace,
+            &trace.spans[0],
+            &trace.nested,
+            0,
+            &link_wrong,
+        ));
+    }
+
+    #[test]
+    fn span_matches_excludes_event_matchers_from_attribute_pass() {
+        // span_matches keeps only non-event, non-link matchers for the per-span
+        // `.all()` attribute pass: `!is_event && !is_link`. With `||` instead of
+        // `&&`, a NEGATED event-intrinsic matcher would be (wrongly) re-evaluated
+        // via matcher_matches and drop a span that the nested same-event logic
+        // accepted.
+        let mut sp = span(1, None, "root", vec![]);
+        sp.events = vec![
+            EventRef {
+                time_since_start_nano: 10,
+                name: "cache.miss".into(),
+                attributes: Vec::new(),
+            },
+            EventRef {
+                time_since_start_nano: 20,
+                name: "cache.hit".into(),
+                attributes: Vec::new(),
+            },
+        ];
+        let trace = stored_trace_with(sp);
+        // `!event:name = "cache.miss"`: the "cache.hit" event satisfies the
+        // negated same-event matcher, so the span matches.
+        let neg = SpanMatcher {
+            scope: MatchScope::Intrinsic,
+            key: "event:name".into(),
+            op: MatchCmp::Eq,
+            value: MatchValue::Str("cache.miss".into()),
+            negated: true,
+        };
+        assert!(span_matches(
+            &trace,
+            &trace.spans[0],
+            &trace.nested,
+            0,
+            &[neg],
+        ));
     }
 }

@@ -2600,6 +2600,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_by_id_within_returns_spans_in_window() {
+        // Delegates to the store; must surface the real trace, not Ok(None).
+        let e = engine();
+        let got = e
+            .trace_by_id_within("t", &[9; 16], 0, 100_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(got.spans.len() == 2);
+        // A window after the trace retains no spans (but still returns the trace).
+        let out = e
+            .trace_by_id_within("t", &[9; 16], 100_000, 200_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(out.spans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tag_names_and_values_delegate_to_store() {
+        // Both must surface the store's non-empty results, not Ok(vec![]).
+        let e = engine();
+        let names = e.tag_names("t", None, 0, 100_000).await.unwrap();
+        assert!(!names.is_empty());
+        assert!(
+            names
+                .iter()
+                .any(|scoped| scoped.tags.iter().any(|t| t == "svc"))
+        );
+
+        let values = e.tag_values("t", ".svc", 0, 100_000).await.unwrap();
+        assert!(
+            values
+                == vec![
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "a".into(),
+                    },
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "b".into(),
+                    },
+                    TypedValue {
+                        type_: "string".into(),
+                        value: "x".into(),
+                    },
+                ]
+        );
+    }
+
+    #[tokio::test]
     async fn count_over_time_counts_matched_spans_per_bucket() {
         let mut s = InMemorySpanStore::new();
         s.push_trace(
@@ -4130,6 +4181,550 @@ mod tests {
             .await
             .unwrap();
         assert!(max.series[0].points == vec![(0, 30.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn search_response_exposes_exact_span_scalars_and_attrs() {
+        // A single trace with two spans carrying distinct, non-uniform scalar
+        // values so that trivial replacements (None / Some([0;8]) / Some([1;8]) /
+        // i32 0/1/-1) and the `/ 1_000_000` duration_ms division are all
+        // observable.
+        let root = InputSpan {
+            trace_id: [9; 16],
+            span_id: [10; 8],
+            parent_span_id: None,
+            name: "root-op".into(),
+            kind: 2,
+            start_unix_nano: 0,
+            duration_nanos: 5_000_000,
+            status_code: 0,
+            status_message: String::new(),
+            instrumentation_name: "tracer".into(),
+            instrumentation_version: String::new(),
+            attrs: vec![("n".into(), AttrValue::Int(42))],
+            events: Vec::new(),
+            links: Vec::new(),
+        };
+        let child = InputSpan {
+            span_id: [20; 8],
+            parent_span_id: Some([10; 8]),
+            kind: 3,
+            attrs: vec![("svc".into(), AttrValue::Str("api".into()))],
+            ..root.clone()
+        };
+        let mut s = InMemorySpanStore::new();
+        s.push_trace("t", "checkout", "root-op", vec![root, child]);
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let r = e
+            .search("t", "{ span:kind != nil }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        assert!(r.traces.len() == 1);
+        let trace = &r.traces[0];
+        // trace_duration = 5_000_000 ns -> 5 ms (kills `/ -> *` and `/ -> %`).
+        assert!(trace.duration_ms == 5);
+
+        let spans = &trace.span_sets[0].spans;
+        assert!(spans.len() == 2);
+        let root_span = spans.iter().find(|s| s.span_id == [10; 8]).unwrap();
+        let child_span = spans.iter().find(|s| s.span_id == [20; 8]).unwrap();
+
+        // optional_fixed_8: root has no parent (None), child's parent is [10;8],
+        // which is neither [0;8] nor [1;8].
+        assert!(root_span.parent_span_id.is_none());
+        assert!(child_span.parent_span_id == Some([10; 8]));
+
+        // i32_value: kind is 2 / 3, not 0, 1, or -1.
+        assert!(root_span.kind == 2);
+        assert!(child_span.kind == 3);
+
+        // row_attrs: the int attribute is carried through with its exact value
+        // (kills `row_attrs -> Ok(vec![])`).
+        let n_attr = root_span
+            .attributes
+            .iter()
+            .find(|(k, _)| k == "n")
+            .map(|(_, v)| v.clone());
+        assert!(n_attr == Some(AttrValue::Int(42)));
+        let svc_attr = child_span
+            .attributes
+            .iter()
+            .find(|(k, _)| k == "svc")
+            .map(|(_, v)| v.clone());
+        assert!(svc_attr == Some(AttrValue::Str("api".into())));
+    }
+
+    // ---- block-format nested attribute columns (List<List<T>>) ----
+
+    /// Builds `attr_keys` (List<Utf8>) plus the four typed value columns
+    /// (List<List<T>>) for a single row carrying four attributes: a string `s`,
+    /// an int `i`, a float `f`, and a bool `b`. Each attribute is populated only
+    /// in its own typed column; the others are empty inner lists.
+    fn block_attr_batch() -> RecordBatch {
+        use arrow::array::{
+            BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder,
+        };
+
+        // attr_keys: [["s", "i", "f", "b"]].
+        let mut keys = ListBuilder::new(StringBuilder::new());
+        for k in ["s", "i", "f", "b"] {
+            keys.values().append_value(k);
+        }
+        keys.append(true);
+
+        // attr_value (string): [[["hello"], [], [], []]].
+        let mut str_values = ListBuilder::new(ListBuilder::new(StringBuilder::new()));
+        str_values.values().values().append_value("hello");
+        str_values.values().append(true); // s -> ["hello"]
+        str_values.values().append(true); // i -> []
+        str_values.values().append(true); // f -> []
+        str_values.values().append(true); // b -> []
+        str_values.append(true);
+
+        // attr_value_int: [[[], [42], [], []]].
+        let mut int_values = ListBuilder::new(ListBuilder::new(Int64Builder::new()));
+        int_values.values().append(true); // s -> []
+        int_values.values().values().append_value(42);
+        int_values.values().append(true); // i -> [42]
+        int_values.values().append(true); // f -> []
+        int_values.values().append(true); // b -> []
+        int_values.append(true);
+
+        // attr_value_double: [[[], [], [3.5], []]].
+        let mut double_values = ListBuilder::new(ListBuilder::new(Float64Builder::new()));
+        double_values.values().append(true); // s -> []
+        double_values.values().append(true); // i -> []
+        double_values.values().values().append_value(3.5);
+        double_values.values().append(true); // f -> [3.5]
+        double_values.values().append(true); // b -> []
+        double_values.append(true);
+
+        // attr_value_bool: [[[], [], [], [true]]].
+        let mut bool_values = ListBuilder::new(ListBuilder::new(BooleanBuilder::new()));
+        bool_values.values().append(true); // s -> []
+        bool_values.values().append(true); // i -> []
+        bool_values.values().append(true); // f -> []
+        bool_values.values().values().append_value(true);
+        bool_values.values().append(true); // b -> [true]
+        bool_values.append(true);
+
+        let keys = keys.finish();
+        let str_values = str_values.finish();
+        let int_values = int_values.finish();
+        let double_values = double_values.finish();
+        let bool_values = bool_values.finish();
+
+        let schema = Arc::new(Schema::new(vec![
+            ArrowField::new(BLOCK_ATTR_KEYS, keys.data_type().clone(), true),
+            ArrowField::new(BLOCK_ATTR_VALUE, str_values.data_type().clone(), true),
+            ArrowField::new(BLOCK_ATTR_VALUE_INT, int_values.data_type().clone(), true),
+            ArrowField::new(
+                BLOCK_ATTR_VALUE_DOUBLE,
+                double_values.data_type().clone(),
+                true,
+            ),
+            ArrowField::new(BLOCK_ATTR_VALUE_BOOL, bool_values.data_type().clone(), true),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(keys) as ArrayRef,
+                Arc::new(str_values),
+                Arc::new(int_values),
+                Arc::new(double_values),
+                Arc::new(bool_values),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn block_row_attrs_decodes_every_typed_value_column() {
+        // Drives block_row_attrs / block_attr_values_for_key / the typed
+        // *_attr_values readers / row_attr_values / optional_list_column end to
+        // end. Trivial `vec![]`/`None` replacements anywhere on this path drop a
+        // value and fail the equality below.
+        let batch = block_attr_batch();
+        let mut attrs = block_row_attrs(&batch, 0).unwrap();
+        attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(
+            attrs
+                == vec![
+                    ("b".to_string(), AttrValue::Bool(true)),
+                    ("f".to_string(), AttrValue::Float(3.5)),
+                    ("i".to_string(), AttrValue::Int(42)),
+                    ("s".to_string(), AttrValue::Str("hello".into())),
+                ]
+        );
+    }
+
+    #[test]
+    fn block_attr_values_for_key_picks_the_populated_type_per_index() {
+        // Each attr_idx has exactly one populated typed column. The `if
+        // !values.is_empty()` guards select that column; removing a `!` would
+        // skip the populated column and return the wrong (empty/fallthrough)
+        // type.
+        let batch = block_attr_batch();
+        let str_values = optional_list_column(&batch, BLOCK_ATTR_VALUE).unwrap();
+        let int_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_INT).unwrap();
+        let double_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_DOUBLE).unwrap();
+        let bool_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_BOOL).unwrap();
+
+        // optional_list_column must actually find the columns (kills `-> Ok(None)`).
+        assert!(str_values.is_some());
+        assert!(int_values.is_some());
+        assert!(double_values.is_some());
+        assert!(bool_values.is_some());
+
+        let for_idx = |idx| {
+            block_attr_values_for_key(str_values, int_values, double_values, bool_values, 0, idx)
+                .unwrap()
+        };
+        assert!(for_idx(0) == vec![AttrValue::Str("hello".into())]);
+        assert!(for_idx(1) == vec![AttrValue::Int(42)]);
+        assert!(for_idx(2) == vec![AttrValue::Float(3.5)]);
+        assert!(for_idx(3) == vec![AttrValue::Bool(true)]);
+    }
+
+    #[test]
+    fn typed_block_attr_readers_return_exact_values() {
+        // Directly exercise each typed reader so trivial returns
+        // (vec![] / vec![0] / vec![1] / vec![-1] / vec!["xyzzy"] / etc.) and the
+        // `!values.is_null` filter are all observable.
+        let batch = block_attr_batch();
+        let str_values = optional_list_column(&batch, BLOCK_ATTR_VALUE).unwrap();
+        let int_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_INT).unwrap();
+        let double_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_DOUBLE).unwrap();
+        let bool_values = optional_list_column(&batch, BLOCK_ATTR_VALUE_BOOL).unwrap();
+
+        assert!(
+            string_attr_values(str_values, 0, 0, BLOCK_ATTR_VALUE).unwrap()
+                == vec!["hello".to_string()]
+        );
+        assert!(i64_attr_values(int_values, 0, 1, BLOCK_ATTR_VALUE_INT).unwrap() == vec![42]);
+        assert!(
+            f64_attr_values(double_values, 0, 2, BLOCK_ATTR_VALUE_DOUBLE).unwrap() == vec![3.5]
+        );
+        assert!(bool_attr_values(bool_values, 0, 3, BLOCK_ATTR_VALUE_BOOL).unwrap() == vec![true]);
+
+        // An index whose inner list is empty yields an empty vec (not a trivial
+        // non-empty replacement).
+        assert!(
+            string_attr_values(str_values, 0, 1, BLOCK_ATTR_VALUE)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            i64_attr_values(int_values, 0, 0, BLOCK_ATTR_VALUE_INT)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            f64_attr_values(double_values, 0, 0, BLOCK_ATTR_VALUE_DOUBLE)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            bool_attr_values(bool_values, 0, 0, BLOCK_ATTR_VALUE_BOOL)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn row_attr_values_bounds_check_returns_none_out_of_range() {
+        // `attr_idx >= row_values.len()` must short-circuit to Ok(None):
+        //  * `>= -> <` would reject in-range indices instead.
+        //  * `|| -> &&` would stop short-circuiting and index out of bounds.
+        let batch = block_attr_batch();
+        let str_values = optional_list_column(&batch, BLOCK_ATTR_VALUE).unwrap();
+        // In range (idx 0) returns Some.
+        assert!(
+            row_attr_values(str_values, 0, 0, BLOCK_ATTR_VALUE)
+                .unwrap()
+                .is_some()
+        );
+        // Out of range (only 4 inner lists exist) returns None without panicking.
+        assert!(
+            row_attr_values(str_values, 0, 99, BLOCK_ATTR_VALUE)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn metric_pipeline_parts_rejects_duplicate_stages() {
+        use crate::ast::{Aggregate, ComparisonOp, Pipeline};
+
+        let by = vec![field(Scope::Span, "svc")];
+
+        // A single aggregate is accepted.
+        assert!(
+            metric_pipeline_parts(&[Pipeline::Aggregate(Aggregate::CountOverTime)])
+                .unwrap()
+                .is_some()
+        );
+
+        // Duplicate aggregate / by / filter / rank / compare stages must abort the
+        // parse (Ok(None)); each match guard `<slot>.is_none()` (and `!compare`)
+        // is what enforces that. Replacing a guard with `true` would accept the
+        // duplicate.
+        assert!(
+            metric_pipeline_parts(&[
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::Aggregate(Aggregate::Rate),
+            ])
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            metric_pipeline_parts(&[
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::By(by.clone()),
+                Pipeline::By(by.clone()),
+            ])
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            metric_pipeline_parts(&[
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::Filter {
+                    op: ComparisonOp::Gt,
+                    value: 1.0,
+                },
+                Pipeline::Filter {
+                    op: ComparisonOp::Gt,
+                    value: 2.0,
+                },
+            ])
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            metric_pipeline_parts(&[
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::TopK(1),
+                Pipeline::TopK(2),
+            ])
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            metric_pipeline_parts(&[
+                Pipeline::Aggregate(Aggregate::CountOverTime),
+                Pipeline::Compare,
+                Pipeline::Compare,
+            ])
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn max_traces_returns_configured_cap() {
+        // The accessor must return the configured cap (default 1000), not a
+        // trivial 0 or 1.
+        let e = engine();
+        assert!(e.max_traces() == 1000);
+        let custom = TraceqlEngine::new(
+            Arc::new(InMemorySpanStore::new()),
+            EngineOpts {
+                max_traces: 7,
+                ..EngineOpts::default()
+            },
+        );
+        assert!(custom.max_traces() == 7);
+    }
+
+    fn field(scope: Scope, key: &str) -> Field {
+        Field {
+            scope,
+            key: key.to_string(),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive per-scope metric column mapping"
+    )]
+    fn metric_field_column_maps_every_scope_to_its_column() {
+        // service.name short-circuits to the root-service column for Both/Resource.
+        assert!(
+            metric_field_column(&field(Scope::Both, "service.name")).unwrap()
+                == COL_ROOT_SERVICE_NAME
+        );
+        assert!(
+            metric_field_column(&field(Scope::Resource, "service.name")).unwrap()
+                == COL_ROOT_SERVICE_NAME
+        );
+        // Generic attribute scopes prefix the key.
+        assert!(
+            metric_field_column(&field(Scope::Span, "http.method")).unwrap() == "attr.http.method"
+        );
+        assert!(
+            metric_field_column(&field(Scope::Event, "k")).unwrap()
+                == format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}k")
+        );
+        // Scope::Link arm.
+        assert!(
+            metric_field_column(&field(Scope::Link, "k")).unwrap()
+                == format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}k")
+        );
+        // Intrinsic arms each map to a distinct column (not the `_ => Err`).
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::Name), "x")).unwrap()
+                == COL_NAME
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::Id), "x")).unwrap()
+                == COL_SPAN_ID
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::ParentId), "x")).unwrap()
+                == COL_PARENT_SPAN_ID
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::NestedSetLeft), "x")).unwrap()
+                == COL_NS_LEFT
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::NestedSetRight), "x")).unwrap()
+                == COL_NS_RIGHT
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::TraceRootService), "x"))
+                .unwrap()
+                == COL_ROOT_SERVICE_NAME
+        );
+        assert!(
+            metric_field_column(&field(Scope::Intrinsic(Intrinsic::TraceRootName), "x")).unwrap()
+                == COL_ROOT_SPAN_NAME
+        );
+        assert!(
+            metric_field_column(&field(
+                Scope::Intrinsic(Intrinsic::InstrumentationVersion),
+                "x"
+            ))
+            .unwrap()
+                == COL_INSTRUMENTATION_VERSION
+        );
+        assert!(
+            metric_field_column(&field(
+                Scope::Intrinsic(Intrinsic::EventTimeSinceStart),
+                "x"
+            ))
+            .unwrap()
+                == COL_EVENT_TIME_SINCE_START
+        );
+    }
+
+    #[test]
+    fn usize_from_integer_f64_validates_and_converts() {
+        // A valid non-negative integer float converts to the exact usize.
+        assert!(usize_from_integer_f64(3.0).unwrap() == 3);
+        assert!(usize_from_integer_f64(0.0).unwrap() == 0);
+        // Boundary on the `< 0.0` check: exactly 0.0 is accepted, but any negative
+        // is rejected (distinguishes `<` from `<=`/`==`).
+        assert!(usize_from_integer_f64(-0.5).is_err());
+        assert!(usize_from_integer_f64(-1.0).is_err());
+        // The `|| value < 0.0 ||` chain: a NaN (non-finite) and a fractional
+        // value are both rejected, so neither `&&` form would pass them.
+        assert!(usize_from_integer_f64(f64::NAN).is_err());
+        assert!(usize_from_integer_f64(f64::INFINITY).is_err());
+        assert!(usize_from_integer_f64(2.5).is_err());
+    }
+
+    #[test]
+    fn metric_filter_passes_covers_every_operator() {
+        use crate::ast::ComparisonOp;
+        let f = |op| MetricFilter { op, value: 5.0 };
+        // Eq / Neq.
+        assert!(metric_filter_passes(5.0, f(ComparisonOp::Eq)));
+        assert!(!metric_filter_passes(6.0, f(ComparisonOp::Eq)));
+        // Neq is the negation of Eq — the `!` is load-bearing.
+        assert!(metric_filter_passes(6.0, f(ComparisonOp::Neq)));
+        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Neq)));
+        // Lt / Lte.
+        assert!(metric_filter_passes(4.0, f(ComparisonOp::Lt)));
+        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Lt)));
+        // Lte is `!is_gt` — both sides matter.
+        assert!(metric_filter_passes(5.0, f(ComparisonOp::Lte)));
+        assert!(!metric_filter_passes(6.0, f(ComparisonOp::Lte)));
+        // Gt / Gte.
+        assert!(metric_filter_passes(6.0, f(ComparisonOp::Gt)));
+        assert!(!metric_filter_passes(5.0, f(ComparisonOp::Gt)));
+        // Gte is `!is_lt` — both sides matter.
+        assert!(metric_filter_passes(5.0, f(ComparisonOp::Gte)));
+        assert!(!metric_filter_passes(4.0, f(ComparisonOp::Gte)));
+    }
+
+    fn metric_start_batch(starts: &[i64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            ArrowField::new(COL_TRACE_ID, DataType::FixedSizeBinary(16), false),
+            ArrowField::new(COL_SPAN_ID, DataType::FixedSizeBinary(8), false),
+            ArrowField::new(COL_START, DataType::Int64, false),
+        ]));
+        let mut trace_id = FixedSizeBinaryBuilder::with_capacity(starts.len(), 16);
+        let mut span_id = FixedSizeBinaryBuilder::with_capacity(starts.len(), 8);
+        for _ in starts {
+            trace_id.append_value([1; 16]).unwrap();
+            span_id.append_value([2; 8]).unwrap();
+        }
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(trace_id.finish()) as ArrayRef,
+                Arc::new(span_id.finish()),
+                Arc::new(Int64Array::from(starts.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn count_plan() -> MetricPlan {
+        MetricPlan {
+            function: MetricFunction::CountOverTime,
+            value: None,
+            quantiles: Vec::new(),
+            by: Vec::new(),
+            filter: None,
+            rank: None,
+            compare: false,
+        }
+    }
+
+    #[test]
+    fn assemble_metrics_response_allows_equal_start_and_end() {
+        // end_ns == start_ns is a valid single-bucket range. The `end_ns < start_ns`
+        // guard must NOT fire on equality (kills `< -> <=` and `< -> ==`).
+        let batch = metric_start_batch(&[0]);
+        let plan = count_plan();
+        let resp = assemble_metrics_response(&[batch], 0, 0, 60_000, &plan, 0, 0).unwrap();
+        assert!(resp.series.len() == 1);
+        assert!(resp.series[0].points == vec![(0, 1.0)]);
+
+        // end_ns < start_ns is rejected.
+        let batch = metric_start_batch(&[0]);
+        assert!(assemble_metrics_response(&[batch], 10, 0, 60_000, &plan, 0, 0).is_err());
+    }
+
+    #[test]
+    fn assemble_metrics_response_range_filter_is_inclusive_at_end_and_exclusive_below_start() {
+        // Rows: one below start (-10), one at start (0), one at end (60_000), one
+        // above end (120_001). With step 60_000 and range [0, 60_000] there are
+        // two buckets. The in-range check is `ts < start || ts > end`:
+        //  * `|| -> &&` would stop skipping the below-start row.
+        //  * `> -> ==` / `> -> >=` would drop the row exactly at end_ns.
+        let batch = metric_start_batch(&[-10, 0, 60_000, 120_001]);
+        let plan = count_plan();
+        let resp = assemble_metrics_response(&[batch], 0, 60_000, 60_000, &plan, 0, 0).unwrap();
+        assert!(resp.series.len() == 1);
+        // bucket 0 (ts 0) -> 1, bucket 1 (ts 60_000) -> 1. The out-of-range rows
+        // (-10 below start, 120_001 above end) are excluded.
+        assert!(resp.series[0].points == vec![(0, 1.0), (60_000, 1.0)]);
     }
 
     #[tokio::test]

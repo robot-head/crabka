@@ -427,4 +427,13 @@ mod tests {
         assert!(toks(".service") == vec![Token::Dot, Token::Ident("service".into())]);
         assert!(toks(".http.status") == vec![Token::Dot, Token::Ident("http.status".into())]);
     }
+
+    #[test]
+    fn lone_ampersand_lexes_as_ident_token() {
+        // A bare `&` (not part of a union/and operator) lexes to an Ident("&"),
+        // not a parse error. Deleting the `'&'` arm in op_token would make the
+        // lexer reject it as an unexpected character.
+        assert!(toks("&") == vec![Token::Ident("&".into())]);
+        assert!(lex("&").is_ok());
+    }
 }

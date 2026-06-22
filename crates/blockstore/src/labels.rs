@@ -110,6 +110,33 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_matches_reference_fnv1a() {
+        // Pin the exact FNV-1a 64-bit hash so swapping the `^=` in `hash_bytes`
+        // for `|=` (which would change every byte mix) makes this fail.
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+        let mut a = Labels::new();
+        a.insert("app", "api");
+
+        // Reference: hash each canonical `name=value\n` byte with FNV-1a.
+        let mut want = OFFSET;
+        for &b in b"app=api\n" {
+            want ^= u64::from(b);
+            want = want.wrapping_mul(PRIME);
+        }
+        assert!(a.fingerprint() == want);
+
+        // The `|=` variant produces a different digest for the same input.
+        let mut or_variant = OFFSET;
+        for &b in b"app=api\n" {
+            or_variant |= u64::from(b);
+            or_variant = or_variant.wrapping_mul(PRIME);
+        }
+        assert!(want != or_variant);
+    }
+
+    #[test]
     fn get_and_iter_round_trip() {
         let mut l = Labels::new();
         l.insert("app", "api");

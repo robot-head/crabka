@@ -571,6 +571,246 @@ mod tests {
     }
 
     #[test]
+    fn matching_fingerprints_returns_matched_set() {
+        let idx = seed();
+        // Specific matcher → exactly the two `app=api` series.
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
+        let got = idx
+            .matching_fingerprints("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+            .unwrap();
+        assert!(got == BTreeSet::from([api_prod, api_dev]));
+
+        // Empty matchers → every series in the tenant (all three).
+        let all = idx.matching_fingerprints("t", &[]).unwrap();
+        assert!(all.len() == 3);
+        assert!(all.contains(&labels(&[("app", "web"), ("env", "prod")]).fingerprint()));
+
+        // Unknown tenant → empty, not a default-seeded set.
+        let none = idx.matching_fingerprints("nope", &[]).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn label_names_for_returns_distinct_sorted_names() {
+        let idx = seed();
+        let names = idx
+            .label_names_for("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+            .unwrap();
+        assert!(names == vec!["app".to_string(), "env".to_string()]);
+
+        let none = idx.label_names_for("nope", &[]).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn label_names_for_fingerprints_returns_distinct_names() {
+        let idx = seed();
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        let names = idx.label_names_for_fingerprints("t", &BTreeSet::from([api_prod]));
+        assert!(names == vec!["app".to_string(), "env".to_string()]);
+
+        let none = idx.label_names_for_fingerprints("nope", &BTreeSet::from([api_prod]));
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn label_values_for_returns_distinct_sorted_values() {
+        let idx = seed();
+        let values = idx
+            .label_values_for("t", "env", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+            .unwrap();
+        assert!(values == vec!["dev".to_string(), "prod".to_string()]);
+
+        // Only the prod series → just "prod".
+        let only_prod = idx
+            .label_values_for("t", "env", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+            .unwrap();
+        assert!(only_prod == vec!["prod".to_string()]);
+
+        let none = idx.label_values_for("nope", "env", &[]).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn label_values_for_fingerprints_returns_distinct_values() {
+        let idx = seed();
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
+        let values =
+            idx.label_values_for_fingerprints("t", "env", &BTreeSet::from([api_prod, api_dev]));
+        assert!(values == vec!["dev".to_string(), "prod".to_string()]);
+
+        let none = idx.label_values_for_fingerprints("nope", "env", &BTreeSet::from([api_prod]));
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn series_projects_requested_label_names() {
+        let idx = seed();
+        let got = idx
+            .series(
+                "t",
+                &[LabelMatcher::new("app", MatchOp::Eq, "api")],
+                &["app".to_string(), "env".to_string()],
+            )
+            .unwrap();
+        assert!(
+            got == vec![
+                vec![
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "dev".to_string())
+                ],
+                vec![
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "prod".to_string())
+                ],
+            ]
+        );
+
+        let none = idx.series("nope", &[], &["app".to_string()]).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn series_for_fingerprints_projects_label_values() {
+        let idx = seed();
+        let web_prod = labels(&[("app", "web"), ("env", "prod")]).fingerprint();
+        let got = idx.series_for_fingerprints(
+            "t",
+            &BTreeSet::from([web_prod]),
+            &["app".to_string(), "env".to_string()],
+        );
+        assert!(
+            got == vec![vec![
+                ("app".to_string(), "web".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]]
+        );
+
+        let none =
+            idx.series_for_fingerprints("nope", &BTreeSet::from([web_prod]), &["app".to_string()]);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn candidate_blocks_for_series_returns_pruned_keys() {
+        let mut idx = seed();
+        let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b1.parquet".into(),
+            min_ts: 0,
+            max_ts: 100,
+            row_count: 1,
+            fingerprints: vec![api_prod],
+        });
+        let got = idx.candidate_blocks_for_series("t", &BTreeSet::from([api_prod]), 0, 150);
+        assert!(got == vec!["b1.parquet".to_string()]);
+    }
+
+    #[test]
+    fn block_time_bounds_spans_overlapping_blocks() {
+        let mut idx = seed();
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b1.parquet".into(),
+            min_ts: 10,
+            max_ts: 100,
+            row_count: 1,
+            fingerprints: vec![],
+        });
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b2.parquet".into(),
+            min_ts: 200,
+            max_ts: 350,
+            row_count: 1,
+            fingerprints: vec![],
+        });
+
+        // Window covering both → combined min/max across them.
+        assert!(idx.block_time_bounds("t", 0, 1_000) == Some((10, 350)));
+
+        // Window covering only b1 → exactly b1's bounds (kills Some((x,y)) stubs).
+        assert!(idx.block_time_bounds("t", 0, 150) == Some((10, 100)));
+
+        // Window that overlaps nothing → None.
+        assert!(idx.block_time_bounds("t", 500, 600) == None);
+
+        // Unknown tenant → None.
+        assert!(idx.block_time_bounds("nope", 0, 1_000) == None);
+    }
+
+    #[test]
+    fn block_time_bounds_overlap_filter_is_inclusive_on_both_ends() {
+        let mut idx = SeriesIndex::new();
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b.parquet".into(),
+            min_ts: 100,
+            max_ts: 200,
+            row_count: 1,
+            fingerprints: vec![],
+        });
+
+        // Touch the block's max at the window's min: b.min_ts(100) <= max_ts(200)
+        // && b.max_ts(200) >= min_ts(200). `<=`→`>` or `>=`→`<` would drop it.
+        assert!(idx.block_time_bounds("t", 200, 300) == Some((100, 200)));
+        // Touch the block's min at the window's max.
+        assert!(idx.block_time_bounds("t", 0, 100) == Some((100, 200)));
+        // A window entirely above the block: with `&&`→`||` this would wrongly
+        // include the block (one side still true), so demand None here.
+        assert!(idx.block_time_bounds("t", 300, 400) == None);
+        // A window entirely below the block: the other side is the true one.
+        assert!(idx.block_time_bounds("t", 0, 50) == None);
+    }
+
+    #[test]
+    fn all_blocks_lists_every_registered_block() {
+        let mut idx = seed();
+        idx.add_block(&BlockMeta {
+            tenant: "t".into(),
+            object_key: "b1.parquet".into(),
+            min_ts: 0,
+            max_ts: 100,
+            row_count: 7,
+            fingerprints: vec![],
+        });
+        idx.add_block(&BlockMeta {
+            tenant: "u".into(),
+            object_key: "b2.parquet".into(),
+            min_ts: 5,
+            max_ts: 9,
+            row_count: 3,
+            fingerprints: vec![],
+        });
+
+        let mut blocks = idx.all_blocks();
+        blocks.sort_by(|a, b| a.object_key.cmp(&b.object_key));
+        assert!(blocks.len() == 2);
+        assert!(blocks[0].object_key == "b1.parquet");
+        assert!(blocks[0].tenant == "t");
+        assert!(blocks[0].row_count == 7);
+        assert!(blocks[1].object_key == "b2.parquet");
+        assert!(blocks[1].tenant == "u");
+        assert!(blocks[1].max_ts == 9);
+    }
+
+    #[test]
+    fn resolve_nre_excludes_regex_matches() {
+        // `Nre` negates the regex match set: the `!matching_fps.contains(fp)`
+        // filter. Deleting the `!` would flip it to keep only the matches.
+        let idx = seed();
+        let got = idx
+            .resolve("t", &[LabelMatcher::new("env", MatchOp::Nre, "pro.*")])
+            .unwrap();
+        // Only the `env=dev` series survives the negated `pro.*` match.
+        let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
+        assert!(got == BTreeSet::from([api_dev]));
+    }
+
+    #[test]
     fn index_implements_block_index_time_prefilter() {
         let mut idx = seed();
         idx.add_block(&BlockMeta {

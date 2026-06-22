@@ -327,6 +327,54 @@ mod tests {
     }
 
     #[test]
+    fn tenants_lists_distinct_sorted_tenants() {
+        let mut idx = TraceIndex::new();
+        idx.add_trace_block("zeta", stats("b1", 0, 100, &[1], &[]));
+        idx.add_trace_block("alpha", stats("b2", 0, 100, &[2], &[]));
+        idx.add_trace_block("alpha", stats("b3", 0, 100, &[3], &[]));
+        assert!(idx.tenants() == vec!["alpha".to_string(), "zeta".to_string()]);
+        assert!(TraceIndex::new().tenants().is_empty());
+    }
+
+    #[test]
+    fn prune_blocks_by_tag_time_filter_needs_both_ends() {
+        let idx = seed();
+        // b1 is [0,100], b2 is [200,300]. A window of [400,500] overlaps
+        // neither. With `&&`→`||` the `min_ts <= max_ts` half stays true for
+        // both blocks, so the filter would wrongly admit them.
+        let got = idx.prune_blocks_by_tag("t", "service.name", None, 400, 500);
+        assert!(got.is_empty());
+
+        // A window snug on b1 only: [50,150] overlaps b1 but not b2.
+        let got = idx.prune_blocks_by_tag("t", "service.name", None, 50, 150);
+        assert!(got == vec!["b1".to_string()]);
+    }
+
+    #[test]
+    fn tag_names_time_filter_needs_both_ends() {
+        let mut idx = TraceIndex::new();
+        idx.add_trace_block("t", stats("b1", 0, 100, &[1], &[("a", "x")]));
+        idx.add_trace_block("t", stats("b2", 200, 300, &[2], &[("b", "y")]));
+
+        // Window [50,150] overlaps only b1 → only its tag name.
+        assert!(idx.tag_names("t", 50, 150) == vec!["a".to_string()]);
+        // Window [400,500] overlaps neither → empty. `&&`→`||` would leak tags.
+        assert!(idx.tag_names("t", 400, 500).is_empty());
+    }
+
+    #[test]
+    fn block_index_candidate_blocks_time_filter_needs_both_ends() {
+        use crate::block_index::BlockIndex;
+
+        let idx = seed();
+        // Window above both blocks: `&&`→`||` would admit b1/b2 via the
+        // still-true `min_ts <= max_ts` half.
+        assert!(BlockIndex::candidate_blocks(&idx, "t", 400, 500).is_empty());
+        // Snug on b2 only.
+        assert!(BlockIndex::candidate_blocks(&idx, "t", 250, 350) == vec!["b2".to_string()]);
+    }
+
+    #[test]
     fn block_index_trait_prefilter_is_time_only() {
         use crate::block_index::BlockIndex;
 
