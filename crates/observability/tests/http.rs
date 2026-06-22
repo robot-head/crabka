@@ -2209,7 +2209,7 @@ async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append
 }
 
 #[tokio::test]
-async fn loki_push_endpoint_rejects_duplicate_protobuf_structured_metadata_without_wal_append() {
+async fn loki_push_endpoint_accepts_duplicate_protobuf_structured_metadata_using_last_value() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
     let payload = LokiProtoPushRequest {
@@ -2253,13 +2253,24 @@ async fn loki_push_endpoint_rejects_duplicate_protobuf_structured_metadata_witho
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert_loki_error(
-        &json_body(response).await,
-        "bad_data",
-        "structured metadata",
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(
+        records[0].labels
+            == labels([
+                ("app", "api"),
+                ("detected_level", "error"),
+                ("service_name", "api"),
+            ])
     );
-    assert!(sink.records().is_empty());
+    assert!(records[0].timestamp_ns == 19);
+    assert!(records[0].line == "api error");
+    assert!(
+        records[0].structured_metadata
+            == BTreeMap::from([("trace_id".to_string(), "def".to_string())])
+    );
 }
 
 #[tokio::test]
