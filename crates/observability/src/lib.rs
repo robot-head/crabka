@@ -3284,16 +3284,16 @@ fn normalize_loki_push(
             let [timestamp, line, metadata @ ..] = value.as_slice() else {
                 return Err(DistributorError::InvalidPushValue);
             };
-            let timestamp_ns = timestamp
+            let timestamp = timestamp
                 .as_str()
-                .ok_or(DistributorError::InvalidTimestamp)?
-                .parse()
-                .map_err(|_| DistributorError::InvalidTimestamp)?;
+                .ok_or(DistributorError::InvalidTimestamp)?;
+            let line = line.as_str().ok_or(DistributorError::InvalidLine)?;
+            let timestamp_ns = timestamp.parse().map_err(|_| {
+                DistributorError::InvalidJsonTimestampSyntax(loki_json_timestamp_parse_error(
+                    timestamp, line,
+                ))
+            })?;
             let timestamp_ns = validate_ingest_timestamp_ns(timestamp_ns)?;
-            let line = line
-                .as_str()
-                .ok_or(DistributorError::InvalidLine)?
-                .to_string();
             if metadata.len() > 1 {
                 return Err(DistributorError::InvalidPushValue);
             }
@@ -3309,7 +3309,7 @@ fn normalize_loki_push(
                 tenant: tenant.clone(),
                 labels,
                 timestamp_ns,
-                line,
+                line: line.to_string(),
                 structured_metadata: parse_structured_metadata(metadata.first())?,
                 position: None,
             });
@@ -3417,6 +3417,17 @@ fn normalize_otlp_logs(
     }
 
     Ok(records)
+}
+
+fn loki_json_timestamp_parse_error(timestamp: &str, line: &str) -> String {
+    let found_context = timestamp
+        .char_indices()
+        .nth(9)
+        .map(|(offset, _)| &timestamp[offset..])
+        .unwrap_or(timestamp);
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}\"]]}}]}}|..., bigger context ...|s\":[[\"{timestamp}\",\"{line}\"]]}}]}}|...\n"
+    )
 }
 
 fn validate_loki_stream_labels(labels: &Labels) -> Result<(), DistributorError> {
@@ -15227,6 +15238,8 @@ enum DistributorError {
     InvalidPushLabels,
     #[error("{0}")]
     InvalidPushLabelSyntax(String),
+    #[error("{0}")]
+    InvalidJsonTimestampSyntax(String),
     #[error("invalid Loki push payload")]
     InvalidPushPayload,
     #[error("invalid structured metadata")]
@@ -15289,6 +15302,7 @@ impl IntoResponse for DistributorError {
             | Self::InvalidOtlpAttribute
             | Self::InvalidOtlpPayload
             | Self::InvalidPushLabels
+            | Self::InvalidJsonTimestampSyntax(_)
             | Self::InvalidPushLabelSyntax(_)
             | Self::InvalidPushPayload
             | Self::InvalidPushValue
@@ -15309,6 +15323,7 @@ impl IntoResponse for DistributorError {
         if matches!(
             &self,
             Self::InvalidPushLabelSyntax(_)
+                | Self::InvalidJsonTimestampSyntax(_)
                 | Self::InvalidStructuredMetadataSyntax(_)
                 | Self::TimestampTooOld { .. }
                 | Self::TimestampTooNew { .. }
@@ -15346,6 +15361,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::InvalidOtlpAttribute
         | DistributorError::InvalidOtlpPayload
         | DistributorError::InvalidPushLabels
+        | DistributorError::InvalidJsonTimestampSyntax(_)
         | DistributorError::InvalidPushLabelSyntax(_)
         | DistributorError::InvalidPushPayload
         | DistributorError::InvalidPushValue
