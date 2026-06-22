@@ -18286,6 +18286,13 @@ enum DistributorError {
 
 impl IntoResponse for DistributorError {
     fn into_response(self) -> Response {
+        if let Self::LokiGzipDecode(source) = &self {
+            return text_response(
+                StatusCode::BAD_REQUEST,
+                &loki_gzip_decode_error_text(source),
+            );
+        }
+
         let status = match &self {
             Self::IngestBodyTooLarge { .. }
             | Self::IngestQuota(IngestLimitError::RateLimited { .. }) => {
@@ -18344,6 +18351,15 @@ impl IntoResponse for DistributorError {
         };
         loki_error(status, error_type, &self.to_string())
     }
+}
+
+fn loki_gzip_decode_error_text(source: &std::io::Error) -> String {
+    let source = source.to_string();
+    let message = match source.as_str() {
+        "unexpected end of file" => "unexpected EOF",
+        other => other,
+    };
+    format!("{message}\n")
 }
 
 fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
