@@ -11056,6 +11056,12 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
         Err(stream_error) => {
             if let Some(formatted) = format_scalar_vector_expression(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_label_replace_metric_binary_arithmetic(query) {
+                Ok(formatted)
+            } else if let Some(formatted) = format_label_replace_metric_binary_comparison(query) {
+                Ok(formatted)
+            } else if let Some(formatted) = format_label_replace_metric_binary_set(query) {
+                Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_arithmetic_expression(query) {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_comparison_expression(query) {
@@ -11102,6 +11108,75 @@ fn label_join_format_query_error(query: &str) -> Option<String> {
         .trim_start()
         .starts_with("label_join")
         .then(|| "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER".to_string())
+}
+
+fn format_label_replace_metric_binary_arithmetic(query: &str) -> Option<String> {
+    let (left_text, operator, right_text) = split_top_level_arithmetic_query(query)?;
+    let (modifiers, right_text) = split_leading_vector_binary_modifiers(right_text);
+    let operator = format_binary_operator_line(operator, false, modifiers);
+    format_label_replace_metric_binary_expression(left_text.trim(), &operator, right_text.trim())
+}
+
+fn format_label_replace_metric_binary_set(query: &str) -> Option<String> {
+    let (left_text, operator, right_text) = split_top_level_set_query(query)?;
+    let (modifiers, right_text) = split_leading_vector_binary_modifiers(right_text);
+    let operator = format_binary_operator_line(operator, false, modifiers);
+    format_label_replace_metric_binary_expression(left_text.trim(), &operator, right_text.trim())
+}
+
+fn format_label_replace_metric_binary_comparison(query: &str) -> Option<String> {
+    let (left_text, operator, right_text) = split_top_level_comparison_query(query)?;
+    let right_text = right_text.trim_start();
+    let (bool_modifier, right_text) = if let Some(rest) = right_text.strip_prefix("bool") {
+        (true, rest.trim_start())
+    } else {
+        (false, right_text)
+    };
+    let (modifiers, right_text) = split_leading_vector_binary_modifiers(right_text);
+    let operator = format_binary_operator_line(operator, bool_modifier, modifiers);
+    format_label_replace_metric_binary_expression(left_text.trim(), &operator, right_text.trim())
+}
+
+fn format_binary_operator_line(
+    operator: &str,
+    bool_modifier: bool,
+    modifiers: Option<FormattedVectorBinaryModifiers>,
+) -> String {
+    let mut formatted = operator.to_string();
+    if bool_modifier {
+        formatted.push_str(" bool");
+    }
+    if let Some(modifiers) = modifiers {
+        formatted.push(' ');
+        formatted.push_str(&modifiers.text);
+    }
+    formatted
+}
+
+fn format_label_replace_metric_binary_expression(
+    left_text: &str,
+    operator: &str,
+    right_text: &str,
+) -> Option<String> {
+    let (left, left_is_label_replace) = format_label_replace_metric_binary_operand(left_text)?;
+    let (right, right_is_label_replace) = format_label_replace_metric_binary_operand(right_text)?;
+    if !left_is_label_replace && !right_is_label_replace {
+        return None;
+    }
+    Some(format!("  {left}\n{operator}\n  {right}"))
+}
+
+fn format_label_replace_metric_binary_operand(query: &str) -> Option<(String, bool)> {
+    if let Some(formatted) = format_metric_label_replace_query(query) {
+        return Some((formatted, true));
+    }
+    if let Some(formatted) = format_vector_function_text(query) {
+        return Some((formatted, false));
+    }
+    parse_metric_query(query)
+        .ok()
+        .and_then(|query| format_simple_metric_query(&query))
+        .map(|formatted| (formatted, false))
 }
 
 fn format_metric_vector_arithmetic_expression(query: &str) -> Option<String> {

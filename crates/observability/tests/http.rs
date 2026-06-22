@@ -6978,24 +6978,36 @@ async fn format_query_endpoint_formats_metric_vector_arithmetic_expression_like_
     let state = fixture();
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/format_query?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2Bvector%281%29")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for (query, expected) in [
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2Bvector%281%29",
+            r#"(count_over_time({app="api"}[30s]) + vector(1.000000))"#,
+        ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%2Bvector%282%29",
+            "  label_replace(count_over_time({app=\"api\"}[30s]),\"service\",\"$1-api\",\"app\",\"(.*)\")\n+\n  vector(2.000000)",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": r#"(count_over_time({app="api"}[30s]) + vector(1.000000))"#
-            })
-    );
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
 }
 
 #[tokio::test]
@@ -7078,24 +7090,36 @@ async fn format_query_endpoint_formats_metric_vector_set_modifier_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/format_query?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20or%20on%28app%29%20vector%281%29")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for (query, expected) in [
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20or%20on%28app%29%20vector%281%29",
+            r#"(count_over_time({app="api"}[30s]) or on (app)  vector(1.000000))"#,
+        ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20or%20vector%282%29",
+            "  label_replace(count_over_time({app=\"api\"}[30s]),\"service\",\"$1-api\",\"app\",\"(.*)\")\nor\n  vector(2.000000)",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": r#"(count_over_time({app="api"}[30s]) or on (app)  vector(1.000000))"#
-            })
-    );
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
 }
 
 #[tokio::test]
@@ -7253,24 +7277,36 @@ async fn format_query_endpoint_formats_metric_vector_bool_comparison_like_loki()
     let state = fixture();
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/format_query?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%3Ebool%20vector%281%29")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for (query, expected) in [
+        (
+            "count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%3Ebool%20vector%281%29",
+            r#"(count_over_time({app="api"}[30s]) > bool vector(1.000000))"#,
+        ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20%3E%20bool%20vector%282%29",
+            "  label_replace(count_over_time({app=\"api\"}[30s]),\"service\",\"$1-api\",\"app\",\"(.*)\")\n> bool\n  vector(2.000000)",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": r#"(count_over_time({app="api"}[30s]) > bool vector(1.000000))"#
-            })
-    );
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
 }
 
 #[tokio::test]
