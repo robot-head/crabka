@@ -203,6 +203,51 @@ async fn loki_push_endpoint_writes_tenant_scoped_wal_records() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_accepts_incomplete_json_value_as_empty_line() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api",
+                                    "env": "prod"
+                                },
+                                "values": [
+                                    ["19"]
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(
+        records[0].labels == labels([("app", "api"), ("env", "prod"), ("service_name", "api")])
+    );
+    assert!(records[0].timestamp_ns == 19);
+    assert!(records[0].line.is_empty());
+    assert!(records[0].structured_metadata.is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_returns_server_error_when_wal_append_fails() {
     let app = distributor_router(FailingWalSink);
 
