@@ -7397,7 +7397,7 @@ async fn format_query_endpoint_formats_scalar_expression_like_loki() {
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_metric_binary_arithmetic_query() {
+async fn format_query_endpoint_formats_metric_binary_arithmetic_query_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -7416,7 +7416,7 @@ async fn format_query_endpoint_accepts_metric_binary_arithmetic_query() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error" [30s])"#
+                "data": r#"(count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error"[30s]))"#
             })
     );
 }
@@ -7577,7 +7577,7 @@ async fn format_query_endpoint_accepts_range_selector_before_pipeline() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"count_over_time({app="api"}[30s] |= "error" | logfmt | status >= 500)"#
+                "data": r#"count_over_time({app="api"} |= "error" | logfmt | status>=500[30s])"#
             })
     );
 }
@@ -7608,7 +7608,7 @@ async fn format_query_endpoint_accepts_approx_topk_metric_query() {
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_metric_binary_comparison_query() {
+async fn format_query_endpoint_formats_metric_binary_comparison_query_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -7627,13 +7627,13 @@ async fn format_query_endpoint_accepts_metric_binary_comparison_query() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"count_over_time({app="api"}[30s]) > bool count_over_time({app="api"} |= "error" [30s])"#
+                "data": r#"(count_over_time({app="api"}[30s]) > bool count_over_time({app="api"} |= "error"[30s]))"#
             })
     );
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_metric_binary_set_query() {
+async fn format_query_endpoint_formats_metric_binary_set_query_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -7652,13 +7652,13 @@ async fn format_query_endpoint_accepts_metric_binary_set_query() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"count_over_time({app="api"}[30s]) and count_over_time({app="api"} |= "error" [30s])"#
+                "data": r#"(count_over_time({app="api"}[30s]) and count_over_time({app="api"} |= "error"[30s]))"#
             })
     );
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_metric_binary_matching_modifier() {
+async fn format_query_endpoint_formats_metric_binary_matching_modifier_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -7677,13 +7677,13 @@ async fn format_query_endpoint_accepts_metric_binary_matching_modifier() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"count_over_time({app="api"}[30s]) / ignoring(app) count_over_time({app="worker"}[30s])"#
+                "data": r#"(count_over_time({app="api"}[30s]) / ignoring (app)  count_over_time({app="worker"}[30s]))"#
             })
     );
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_metric_binary_group_modifier() {
+async fn format_query_endpoint_formats_metric_binary_group_modifier_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -7702,7 +7702,7 @@ async fn format_query_endpoint_accepts_metric_binary_group_modifier() {
         json_body(response).await
             == json!({
                 "status": "success",
-                "data": r#"sum by(app, env)(count_over_time({env="prod"}[30s])) / on(env) group_left sum by(env)(count_over_time({env="prod"}[30s]))"#
+                "data": "  sum by (app,env)(count_over_time({env=\"prod\"}[30s]))\n/ on (env) group_left\n  sum by (env)(count_over_time({env=\"prod\"}[30s]))"
             })
     );
 }
