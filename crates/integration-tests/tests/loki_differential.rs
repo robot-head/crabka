@@ -4360,6 +4360,32 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
         crabka_format_query_error(querier.clone(), Some("vector(1)orvector(2)")).await;
     assert!(crabka_error == loki_error);
 
+    let loki_error = loki_format_query_error(
+        &http,
+        &loki_base,
+        Some(r#"label_join(count_over_time({app="api"}[30s]), "joined", "/", "app")"#),
+    )
+    .await;
+    let crabka_error = crabka_format_query_error(
+        querier.clone(),
+        Some(r#"label_join(count_over_time({app="api"}[30s]), "joined", "/", "app")"#),
+    )
+    .await;
+    assert!(crabka_error == loki_error);
+
+    let loki_error = loki_format_query_error(
+        &http,
+        &loki_base,
+        Some(r#"label_join(vector(1), "joined", "/", "app")"#),
+    )
+    .await;
+    let crabka_error = crabka_format_query_error(
+        querier.clone(),
+        Some(r#"label_join(vector(1), "joined", "/", "app")"#),
+    )
+    .await;
+    assert!(crabka_error == loki_error);
+
     let loki_error = loki_format_query_error(&http, &loki_base, None).await;
     let crabka_error = crabka_format_query_error(querier, None).await;
     assert!(crabka_error == loki_error);

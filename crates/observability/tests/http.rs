@@ -6725,7 +6725,7 @@ async fn format_query_endpoint_accepts_label_replace_metric_query() {
 }
 
 #[tokio::test]
-async fn format_query_endpoint_accepts_label_join_metric_query() {
+async fn format_query_endpoint_rejects_label_join_metric_query_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
@@ -6739,12 +6739,12 @@ async fn format_query_endpoint_accepts_label_join_metric_query() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
+    assert!(response.status() == StatusCode::BAD_REQUEST);
     assert!(
         json_body(response).await
             == json!({
-                "status": "success",
-                "data": r#"label_join(count_over_time({app="api"} |= "error" [30s]), "joined", "/", "app", "env", "missing")"#
+                "status": "invalid-query",
+                "error": "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER"
             })
     );
 }
@@ -6795,6 +6795,31 @@ async fn format_query_endpoint_formats_label_replace_vector_function_like_loki()
             == json!({
                 "status": "success",
                 "data": r#"label_replace(vector(1.000000),"service","api-$1","missing","(.*)")"#
+            })
+    );
+}
+
+#[tokio::test]
+async fn format_query_endpoint_rejects_label_join_vector_function_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=label_join%28vector%281%29%2C%20%22joined%22%2C%20%22%2F%22%2C%20%22app%22%2C%20%22missing%22%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "invalid-query",
+                "error": "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER"
             })
     );
 }
