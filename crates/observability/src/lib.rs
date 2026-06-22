@@ -17333,14 +17333,33 @@ fn wants_loki_parquet(headers: &HeaderMap) -> bool {
     headers
         .get(ACCEPT)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|accept| {
-            accept.split(',').any(|part| {
-                part.trim()
-                    .split(';')
-                    .next()
-                    .is_some_and(|mime| mime.trim().eq_ignore_ascii_case(LOKI_PARQUET_CONTENT_TYPE))
-            })
-        })
+        .is_some_and(|accept| accept.split(',').any(accept_part_allows_loki_parquet))
+}
+
+fn accept_part_allows_loki_parquet(part: &str) -> bool {
+    let mut pieces = part.trim().split(';');
+    let Some(mime) = pieces.next() else {
+        return false;
+    };
+    if !mime.trim().eq_ignore_ascii_case(LOKI_PARQUET_CONTENT_TYPE) {
+        return false;
+    }
+
+    !pieces.any(accept_parameter_is_zero_quality)
+}
+
+fn accept_parameter_is_zero_quality(parameter: &str) -> bool {
+    let Some((name, value)) = parameter.trim().split_once('=') else {
+        return false;
+    };
+    if !name.trim().eq_ignore_ascii_case("q") {
+        return false;
+    }
+
+    value
+        .trim()
+        .parse::<f32>()
+        .is_ok_and(|quality| quality <= 0.0)
 }
 
 fn loki_parquet_response(value: &Value) -> Result<Response, HttpQueryError> {
@@ -17437,7 +17456,7 @@ fn loki_metrics_parquet_response(
                     .and_then(Value::as_array)
                     .ok_or(HttpQueryError::LokiParquet("missing matrix values array"))?;
                 for sample in samples {
-                    let (timestamp_ns, value) = loki_parquet_metric_sample(sample)?;
+                    let (timestamp_ns, value) = loki_parquet_metric_sample(sample, kind)?;
                     timestamps.push(timestamp_ns);
                     label_sets.push(labels.clone());
                     values.push(value);
@@ -17447,7 +17466,7 @@ fn loki_metrics_parquet_response(
                 let sample = series
                     .get("value")
                     .ok_or(HttpQueryError::LokiParquet("missing vector value"))?;
-                let (timestamp_ns, value) = loki_parquet_metric_sample(sample)?;
+                let (timestamp_ns, value) = loki_parquet_metric_sample(sample, kind)?;
                 timestamps.push(timestamp_ns);
                 label_sets.push(labels.clone());
                 values.push(value);
@@ -17476,7 +17495,10 @@ fn loki_metrics_parquet_response(
     loki_parquet_batch_response(&batch)
 }
 
-fn loki_parquet_metric_sample(sample: &Value) -> Result<(i64, f64), HttpQueryError> {
+fn loki_parquet_metric_sample(
+    sample: &Value,
+    kind: LokiMetricParquetKind,
+) -> Result<(i64, f64), HttpQueryError> {
     let sample = sample
         .as_array()
         .ok_or(HttpQueryError::LokiParquet("metric sample is not an array"))?;
@@ -17484,6 +17506,7 @@ fn loki_parquet_metric_sample(sample: &Value) -> Result<(i64, f64), HttpQueryErr
         sample
             .first()
             .ok_or(HttpQueryError::LokiParquet("missing metric timestamp"))?,
+        kind,
     )?;
     let value = sample
         .get(1)
@@ -17497,9 +17520,18 @@ fn loki_parquet_metric_sample(sample: &Value) -> Result<(i64, f64), HttpQueryErr
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
-    reason = "Loki metric JSON timestamps are seconds floats; Parquet timestamps are integer nanoseconds"
+    reason = "Loki metric JSON can carry seconds floats; Parquet timestamps are integer nanoseconds"
 )]
-fn loki_parquet_metric_timestamp_ns(value: &Value) -> Result<i64, HttpQueryError> {
+fn loki_parquet_metric_timestamp_ns(
+    value: &Value,
+    kind: LokiMetricParquetKind,
+) -> Result<i64, HttpQueryError> {
+    if matches!(kind, LokiMetricParquetKind::Vector) {
+        if let Some(timestamp_ns) = value.as_i64() {
+            return Ok(timestamp_ns);
+        }
+    }
+
     if let Some(seconds) = value.as_i64() {
         return seconds
             .checked_mul(1_000_000_000)
