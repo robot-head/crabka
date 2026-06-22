@@ -11079,25 +11079,104 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
 
 fn format_metric_vector_arithmetic_expression(query: &str) -> Option<String> {
     let (left_text, operator, right_text) = split_top_level_arithmetic_query(query)?;
-    if let (Some(left), Some(right)) = (
+    let (modifiers, right_text) = split_leading_vector_binary_modifiers(right_text);
+    let (left, right) = if let (Some(left), Some(right)) = (
         parse_metric_query(left_text.trim())
             .ok()
             .and_then(|query| format_simple_metric_query(&query)),
         format_vector_function_text(right_text.trim()),
     ) {
-        return Some(format!("({left} {operator} {right})"));
-    }
-
-    if let (Some(left), Some(right)) = (
+        (left, right)
+    } else if let (Some(left), Some(right)) = (
         format_vector_function_text(left_text.trim()),
         parse_metric_query(right_text.trim())
             .ok()
             .and_then(|query| format_simple_metric_query(&query)),
     ) {
-        return Some(format!("({left} {operator} {right})"));
-    }
+        (left, right)
+    } else {
+        return None;
+    };
 
+    Some(format_metric_vector_binary_expression(
+        &left, operator, modifiers, &right,
+    ))
+}
+
+fn format_metric_vector_binary_expression(
+    left: &str,
+    operator: &str,
+    modifiers: Option<FormattedVectorBinaryModifiers>,
+    right: &str,
+) -> String {
+    match modifiers {
+        Some(modifiers) => format!(
+            "({left} {operator} {}{}{right})",
+            modifiers.text, modifiers.right_separator
+        ),
+        None => format!("({left} {operator} {right})"),
+    }
+}
+
+fn split_leading_vector_binary_modifiers(
+    query: &str,
+) -> (Option<FormattedVectorBinaryModifiers>, &str) {
+    let Some((matching_modifier, rest)) = split_leading_vector_matching_modifier(query) else {
+        return (None, query.trim_start());
+    };
+    let (group_modifier, rest) = split_leading_vector_group_modifier(rest);
+    (
+        Some(match group_modifier {
+            Some(group_modifier) => FormattedVectorBinaryModifiers {
+                text: format!("{matching_modifier} {group_modifier}"),
+                right_separator: " ",
+            },
+            None => FormattedVectorBinaryModifiers {
+                text: matching_modifier,
+                right_separator: "  ",
+            },
+        }),
+        rest.trim_start(),
+    )
+}
+
+fn split_leading_vector_matching_modifier(query: &str) -> Option<(String, &str)> {
+    let query = query.trim_start();
+    for modifier in ["on", "ignoring"] {
+        if let Some(rest) = query.strip_prefix(modifier) {
+            let labels = rest.trim_start().strip_prefix('(')?;
+            let labels_end = labels.find(')')?;
+            let labels_text = &labels[..labels_end];
+            return Some((
+                format!("{modifier} ({labels_text})"),
+                &labels[labels_end + 1..],
+            ));
+        }
+    }
     None
+}
+
+fn split_leading_vector_group_modifier(query: &str) -> (Option<String>, &str) {
+    let query = query.trim_start();
+    for modifier in ["group_left", "group_right"] {
+        if let Some(rest) = query.strip_prefix(modifier) {
+            let rest = rest.trim_start();
+            let Some(labels) = rest.strip_prefix('(') else {
+                return (Some(modifier.to_string()), rest);
+            };
+            let Some(labels_end) = labels.find(')') else {
+                return (None, query);
+            };
+            let labels_text = &labels[..labels_end];
+            let modifier_text = if labels_text.is_empty() {
+                modifier.to_string()
+            } else {
+                format!("{modifier} ({labels_text})")
+            };
+            return (Some(modifier_text), &labels[labels_end + 1..]);
+        }
+    }
+    (None, query)
 }
 
 fn split_top_level_arithmetic_query(query: &str) -> Option<(&str, &'static str, &str)> {
