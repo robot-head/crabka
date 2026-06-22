@@ -208,7 +208,15 @@ impl CrabkaSpanStore {
             }
         }
 
-        Ok(spans.map(|trace| crabka_traceql::filter_trace_spans_by_time(trace, start_ns, end_ns)))
+        // `start_ns`/`end_ns` are a block/candidate-selection HINT for a by-id
+        // lookup (already applied above via `candidate_blocks_for_trace`), NOT a
+        // hard span-level filter. Real Tempo returns the *whole* trace for a
+        // by-id request even when Grafana sends a narrow window, so spans that
+        // start outside the window (a trace straddling the window edge) are kept
+        // and the assembled trace is returned intact (the caller labels it
+        // COMPLETE). Clipping here would silently drop straddling spans while
+        // still reporting COMPLETE.
+        Ok(spans)
     }
 }
 
@@ -3688,6 +3696,68 @@ mod tests {
         assert!(child.nested_set_parent == root.nested_set_left);
         assert!(child.nested_set_left > root.nested_set_left);
         assert!(child.nested_set_right < root.nested_set_right);
+    }
+
+    #[tokio::test]
+    async fn trace_by_id_within_keeps_spans_straddling_the_window() {
+        // A by-id `start`/`end` is a candidate-selection HINT, not a hard
+        // span-level filter: real Tempo returns the *whole* trace even when
+        // Grafana sends a narrow window. A trace whose spans straddle the window
+        // edge must return ALL its spans (so the caller can label it COMPLETE),
+        // not just the spans whose start falls inside the window.
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let writer = BlockWriter::new(object_store);
+        // Root at 1_000ns (= 0.000001s, well before the query window); child at
+        // 5_000ns. Both belong to the same trace and the same block.
+        let mut root = span_with_nested_refs();
+        root.start_ns = 1_000;
+        let mut child = span_with_nested_refs();
+        child.span_id = [3; 8];
+        child.parent_span_id = Some(root.span_id);
+        child.start_ns = 5_000;
+        let batch = span_batch(&[root.clone(), child.clone()]).unwrap();
+        let meta = writer
+            .write_block_with_decl(
+                "tenant",
+                "blocks/straddle.parquet",
+                span_block_schema(),
+                &[batch],
+                &span_block_decl(),
+                SummaryColumns::new(SCOL_TRACE_ID, SCOL_START_NANO),
+            )
+            .await
+            .unwrap();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&root.trace_id);
+        let mut index = TraceIndex::new();
+        index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: meta.object_key,
+                min_ts: meta.min_ts,
+                max_ts: meta.max_ts,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+
+        // Window [4_000, 6_000] covers only the child by span start, yet the
+        // block (min_ts..max_ts spans both) is still selected, so the whole
+        // trace must come back — both spans, not just the child.
+        let trace = store
+            .trace_by_id_within("tenant", &root.trace_id, 4_000, 6_000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(trace.spans.len() == 2);
+        assert!(trace.spans.iter().any(|s| s.span_id == root.span_id));
+        assert!(trace.spans.iter().any(|s| s.span_id == child.span_id));
     }
 
     #[tokio::test]

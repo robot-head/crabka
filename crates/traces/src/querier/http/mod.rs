@@ -577,14 +577,31 @@ fn tags_to_traceql(tags: &str) -> Option<String> {
     let parts = parse_logfmt_tags(tags)?
         .into_iter()
         .map(|(key, value)| {
-            format!(
-                "{} = \"{}\"",
-                traceql_tag_field(&key),
-                value.replace('\\', "\\\\").replace('"', "\\\"")
-            )
+            // The key becomes an unquoted TraceQL attribute reference, so a key
+            // carrying TraceQL-significant characters would inject query
+            // structure (the value is already quoted+escaped). Reject such keys
+            // rather than interpolating their raw bytes.
+            key_is_safe_attribute(&key).then(|| {
+                format!(
+                    "{} = \"{}\"",
+                    traceql_tag_field(&key),
+                    value.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Option<Vec<_>>>()?;
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(" && ")))
+}
+
+/// A legacy `tags=` key is a safe `TraceQL` attribute reference only if it is
+/// made of identifier characters (alphanumerics plus `._:-`). Anything else
+/// (`{`, `}`, `"`, `\`, `|`, `&`, `=`, whitespace, …) could inject query
+/// structure once interpolated unquoted into the generated `TraceQL`.
+fn key_is_safe_attribute(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
 fn parse_logfmt_tags(tags: &str) -> Option<Vec<(String, String)>> {
@@ -889,7 +906,16 @@ fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
 }
 
 fn search_json(resp: SearchResponse) -> Value {
-    let inspected = resp.inspected_traces;
+    let inspected_traces = resp.inspected_traces;
+    // Spans this response scanned/returned: the distinct matched spans across
+    // every returned trace's spanSets. The frontend folds this per-job sum into
+    // the merged `metrics.inspectedSpans`.
+    let inspected_spans: usize = resp
+        .traces
+        .iter()
+        .flat_map(|trace| trace.span_sets.iter())
+        .map(|set| set.spans.len())
+        .sum();
     json!({
         "traces": resp.traces.into_iter().map(|trace| {
             json!({
@@ -906,9 +932,15 @@ fn search_json(resp: SearchResponse) -> Value {
                 }).collect::<Vec<_>>(),
             })
         }).collect::<Vec<_>>(),
+        // Per-response job accounting the frontend folds (`metrics.add`): this
+        // search ran as one completed job. `inspectedBytes` stays 0 — a real
+        // scanned-bytes figure would require scan-layer instrumentation in the
+        // engine that is out of scope here (follow-up).
         "metrics": {
+            "completedJobs": 1,
             "totalBlocks": 0,
-            "inspectedTraces": inspected,
+            "inspectedTraces": inspected_traces,
+            "inspectedSpans": inspected_spans,
             "inspectedBytes": 0,
         },
     })
@@ -2416,6 +2448,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_rejects_legacy_tags_key_with_traceql_metacharacters() {
+        // A key carrying TraceQL-significant characters (e.g. `}` and `=`) must
+        // not be interpolated into the generated query — it would inject
+        // structure. Rejected as an invalid tags param, not silently executed.
+        // Raw key: `a"} || true {.b`  value: `c`.
+        let malicious = "a%22%7D%20%7C%7C%20true%20%7B.b=c";
+        let (status, body) =
+            get_text(&format!("/api/search?tags={malicious}&start=0&end=10")).await;
+        assert!(status == StatusCode::BAD_REQUEST);
+        assert!(body == "invalid query parameter tags");
+
+        // The unit-level converter rejects a key with a metacharacter (no
+        // structure leaks); only the key is unquoted, so the value side is safe.
+        assert!(tags_to_traceql("a}=c").is_none());
+        assert!(tags_to_traceql("a\"b=c").is_none());
+        // A benign key is still converted to a properly-quoted attribute match,
+        // and a value containing metacharacters stays safely quoted.
+        assert!(tags_to_traceql("svc=b") == Some("{ .svc = \"b\" }".to_string()));
+        assert!(tags_to_traceql("svc=a\"}||x") == Some("{ .svc = \"a\\\"}||x\" }".to_string()));
+    }
+
+    #[tokio::test]
     async fn search_parses_start_end_as_epoch_seconds() {
         let (status, body) =
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
@@ -2868,12 +2922,29 @@ overrides:
                     }]
                 }],
                 "metrics": {
+                    "completedJobs": 1,
                     "totalBlocks": 0,
                     "inspectedTraces": 1,
+                    "inspectedSpans": 1,
                     "inspectedBytes": 0
                 }
             })
         );
+    }
+
+    #[tokio::test]
+    async fn search_metrics_block_reports_real_per_response_accounting() {
+        // A successful search must emit real per-job accounting the frontend
+        // folds: `completedJobs >= 1` and non-zero inspected traces/spans (not
+        // an all-zero block, which would make the merged frontend metrics read 0
+        // even on a successful multi-job search).
+        let (status, body) =
+            get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
+        assert!(status == StatusCode::OK);
+        let metrics = &body["metrics"];
+        assert!(metrics["completedJobs"].as_u64().unwrap() >= 1);
+        assert!(metrics["inspectedTraces"].as_u64().unwrap() >= 1);
+        assert!(metrics["inspectedSpans"].as_u64().unwrap() >= 1);
     }
 
     #[tokio::test]
@@ -3366,23 +3437,59 @@ overrides:
     }
 
     #[tokio::test]
-    async fn by_id_filters_spans_by_start_end_epoch_seconds() {
-        let mut store = InMemorySpanStore::new();
-        store.push_trace(
+    async fn by_id_returns_whole_trace_for_narrow_window_and_marks_complete() {
+        // A by-id `start`/`end` is a candidate-selection HINT, not a hard
+        // span-level filter (real Tempo returns the whole trace for a by-id
+        // lookup). A trace whose spans straddle the window edge must come back
+        // intact, COMPLETE — not clipped to only the in-window spans.
+        let object_store = Arc::new(InMemory::new());
+        let blocks = Arc::new(BlockStore::new(
+            object_store.clone(),
+            Url::parse("memory:///").unwrap(),
+        ));
+        // Two spans of trace `09..` in one block: span 1 starts at 1s (before the
+        // window), span 2 at 5s (inside the window).
+        let mut early = block_span_row(9, 1, "root");
+        early.trace_start_unix_nano = 1_000_000_000;
+        early.start_unix_nano = 1_000_000_000;
+        let mut late = block_span_row(9, 2, "child");
+        late.parent_span_id = Some([1; 8]);
+        late.trace_start_unix_nano = 1_000_000_000;
+        late.start_unix_nano = 5_000_000_000;
+        let batch = encode_span_rows(&[early, late]).unwrap();
+        let object_writer =
+            ParquetObjectWriter::new(object_store.clone(), Path::from("blocks/straddle.parquet"));
+        let mut writer =
+            AsyncArrowWriter::try_new(object_writer, span_block_schema(), None).unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.close().await.unwrap();
+
+        let mut trace_index = TraceIndex::new();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&[9; 16]);
+        trace_index.add_trace_block(
             "tenant-a",
-            "svc-a",
-            "root-a",
-            vec![
-                span_at(9, 1, None, "a", 1_000_000_000),
-                span_at(9, 2, Some(1), "b", 2_000_000_000),
-            ],
+            TraceBlockStats {
+                object_key: "blocks/straddle.parquet".into(),
+                min_ts: 1_000_000_000,
+                max_ts: 5_000_000_000,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
         );
-        let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
-        let app = router(engine);
+        let store = CrabkaSpanStore::new(blocks, Arc::new(trace_index), None);
+        let app = router(Arc::new(TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts::default(),
+        )));
+
+        // Window [4s, 6s] covers only the late span by start, yet the by-id
+        // lookup must return both spans with status COMPLETE.
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/v2/traces/09090909090909090909090909090909?start=2&end=2")
+                    .uri("/api/v2/traces/09090909090909090909090909090909?start=4&end=6")
                     .header("x-scope-orgid", "tenant-a")
                     .body(Body::empty())
                     .unwrap(),
@@ -3397,8 +3504,8 @@ overrides:
             .unwrap();
 
         assert!(status == StatusCode::OK);
-        assert!(spans.len() == 1);
-        assert!(spans[0]["spanId"] == "AgICAgICAgI=");
+        assert!(spans.len() == 2);
+        assert!(body["status"] == "COMPLETE");
     }
 
     #[tokio::test]

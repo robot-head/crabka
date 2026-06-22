@@ -305,16 +305,33 @@ fn tags_to_traceql(tags: &str) -> Option<String> {
     let parts: Vec<String> = parse_logfmt_tags(tags)?
         .into_iter()
         .map(|(key, value)| {
-            let field = if key.contains(':') {
-                key
-            } else {
-                format!(".{}", key.strip_prefix('.').unwrap_or(&key))
-            };
-            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-            format!("{field} = \"{escaped}\"")
+            // The key is interpolated unquoted as a TraceQL attribute reference,
+            // so a key carrying TraceQL-significant characters would inject query
+            // structure (the value is already quoted+escaped). Reject such keys.
+            key_is_safe_attribute(&key).then(|| {
+                let field = if key.contains(':') {
+                    key
+                } else {
+                    format!(".{}", key.strip_prefix('.').unwrap_or(&key))
+                };
+                let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("{field} = \"{escaped}\"")
+            })
         })
-        .collect();
+        .collect::<Option<Vec<String>>>()?;
     (!parts.is_empty()).then(|| format!("{{ {} }}", parts.join(" && ")))
+}
+
+/// A legacy `tags=` key is a safe `TraceQL` attribute reference only if it is
+/// made of identifier characters (alphanumerics plus `._:-`). Anything else
+/// (`{`, `}`, `"`, `\`, `|`, `&`, `=`, whitespace, …) could inject query
+/// structure once interpolated unquoted into the generated `TraceQL`. Kept in
+/// sync with the querier's `key_is_safe_attribute`.
+fn key_is_safe_attribute(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
 }
 
 fn parse_logfmt_tags(tags: &str) -> Option<Vec<(String, String)>> {
@@ -577,5 +594,18 @@ mod tests {
         // Garbage is still rejected.
         assert!(parse_step_to_ns("nonsense").is_none());
         assert!(parse_step_to_ns("30q").is_none());
+    }
+
+    #[test]
+    fn tags_to_traceql_rejects_keys_with_metacharacters() {
+        // Benign keys convert to a properly-quoted attribute match.
+        assert!(tags_to_traceql("svc=b") == Some("{ .svc = \"b\" }".to_string()));
+        assert!(tags_to_traceql("span:name=op") == Some("{ span:name = \"op\" }".to_string()));
+        // A key carrying TraceQL-significant characters injects structure when
+        // interpolated unquoted, so it is rejected.
+        assert!(tags_to_traceql("a}=c").is_none());
+        assert!(tags_to_traceql("a\"b=c").is_none());
+        // The value side stays safely quoted even with metacharacters.
+        assert!(tags_to_traceql("svc=a\"}||x") == Some("{ .svc = \"a\\\"}||x\" }".to_string()));
     }
 }

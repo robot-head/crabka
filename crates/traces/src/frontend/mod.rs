@@ -46,6 +46,19 @@ pub use wire::{
 
 use std::sync::Arc;
 
+/// Map a block-catalog enumeration failure to a backend transport error so the
+/// endpoint surfaces a 5xx instead of silently returning only live-tier results.
+///
+/// A search/tag query **partitions** the data across the live tier + disjoint
+/// cold blocks; an empty block set from a catalog error is indistinguishable
+/// from "no cold blocks", so swallowing it (`unwrap_or_default`) would drop the
+/// cold partitions and return a misleading `200`. This matches the
+/// partitioning-shard-errors-must-surface contract already applied to per-job
+/// search errors.
+fn catalog_error(err: &CatalogError) -> BackendError {
+    BackendError::Transport(err.to_string())
+}
+
 /// The query-frontend pipeline: plan jobs -> queue (bounded fan-out) -> per-job
 /// search -> merge (limit/spss) -> render Tempo JSON, in front of a
 /// [`QuerierBackend`] pool with a [`BlockCatalog`] for block enumeration.
@@ -107,7 +120,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             .catalog
             .blocks(tenant, start_ns, end_ns)
             .await
-            .unwrap_or_default();
+            .map_err(|e| catalog_error(&e))?;
         let plan = job::plan_search_jobs(
             &blocks,
             end_ns,
@@ -209,7 +222,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             .catalog
             .blocks(tenant, start_ns, end_ns)
             .await
-            .unwrap_or_default();
+            .map_err(|e| catalog_error(&e))?;
         let plan = job::plan_search_jobs(
             &blocks,
             end_ns,
@@ -253,7 +266,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             .catalog
             .blocks(tenant, start_ns, end_ns)
             .await
-            .unwrap_or_default();
+            .map_err(|e| catalog_error(&e))?;
         let plan = job::plan_search_jobs(
             &blocks,
             end_ns,
@@ -378,6 +391,7 @@ mod orch_tests {
                 completed_jobs: 1,
                 inspected_bytes: 100,
                 inspected_traces: 1,
+                inspected_spans: 1,
                 ..Metrics::default()
             },
         }
@@ -412,6 +426,12 @@ mod orch_tests {
         assert!(resp.metrics.completed_jobs == 3);
         assert!(resp.metrics.total_blocks == 2);
         assert!(resp.metrics.inspected_bytes == 300);
+        // A successful multi-job search folds real per-job accounting:
+        // completedJobs == totalJobs, and non-zero inspected traces/spans (not
+        // the all-zero block that the querier used to emit).
+        assert!(resp.metrics.completed_jobs == resp.metrics.total_jobs);
+        assert!(resp.metrics.inspected_traces == 3);
+        assert!(resp.metrics.inspected_spans == 3);
     }
 
     #[tokio::test]
@@ -453,5 +473,62 @@ mod orch_tests {
         assert!(qf.backend_ref().trace_calls().len() == 3);
         assert!(metrics.total_jobs == 3);
         assert!(matches!(status, TraceStatus::Complete));
+    }
+
+    /// A catalog whose enumeration always fails (a partition is unreachable).
+    struct FailingCatalog;
+
+    #[async_trait::async_trait]
+    impl crate::frontend::job::BlockCatalog for FailingCatalog {
+        async fn blocks(
+            &self,
+            _tenant: &str,
+            _start_ns: i64,
+            _end_ns: i64,
+        ) -> Result<Vec<BlockMetaInfo>, crate::frontend::job::CatalogError> {
+            Err(crate::frontend::job::CatalogError::Backend(
+                "partition unreachable".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn search_surfaces_catalog_error_instead_of_empty_200() {
+        // A catalog failure drops the cold partitions; swallowing it would return
+        // a misleading live-only 200. It must surface as a backend error (5xx).
+        let backend = MockQuerier::new();
+        let qf = QueryFrontend::new(
+            Arc::new(backend),
+            Arc::new(FailingCatalog),
+            FrontendConfig::default(),
+        );
+        let err = qf.search("t1", "{ }", 0, 300, 20, 3).await.unwrap_err();
+        assert!(matches!(err, BackendError::Transport(_)));
+        // The backend was never fanned out — the catalog error short-circuits.
+        assert!(qf.backend_ref().search_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tag_names_surfaces_catalog_error_instead_of_empty_200() {
+        let backend = MockQuerier::new();
+        let qf = QueryFrontend::new(
+            Arc::new(backend),
+            Arc::new(FailingCatalog),
+            FrontendConfig::default(),
+        );
+        let err = qf.tag_names("t1", None, 0, 300).await.unwrap_err();
+        assert!(matches!(err, BackendError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn tag_values_surfaces_catalog_error_instead_of_empty_200() {
+        let backend = MockQuerier::new();
+        let qf = QueryFrontend::new(
+            Arc::new(backend),
+            Arc::new(FailingCatalog),
+            FrontendConfig::default(),
+        );
+        let err = qf.tag_values("t1", "span.name", 0, 300).await.unwrap_err();
+        assert!(matches!(err, BackendError::Transport(_)));
     }
 }

@@ -352,6 +352,14 @@ pub struct ScopeSpansJson {
 
 /// One OTLP span. `span_id` is extracted for dedup; the whole span is preserved
 /// in `rest` so serialization re-emits the querier's exact span shape.
+///
+/// GAP5 (confirmed correct, not a bug): the by-id span key is `spanId`
+/// **base64**-encoded — the standard OTLP protobuf-JSON byte-field encoding the
+/// querier's `trace_json` emits — whereas search results (`SpanJson`) key on
+/// `spanID` **hex** (Tempo's search shape). The two are different Tempo response
+/// formats, and each pipeline is internally consistent (by-id is base64
+/// end-to-end, search is hex end-to-end), so the respective dedup keys never mix
+/// encodings. No conversion is needed or correct here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OtlpSpanJson {
     #[serde(rename = "spanId", default)]

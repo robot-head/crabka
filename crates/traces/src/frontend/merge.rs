@@ -88,24 +88,21 @@ fn merge_trace(merged: &mut Vec<TraceJson>, trace: TraceJson) {
 /// match count is additive — ported from the legacy `merge_span_sets`).
 fn merge_span_sets(existing: &mut Vec<SpanSetJson>, incoming: Vec<SpanSetJson>) {
     for span_set in incoming {
-        // If every span in this incoming set is already present, skip it (a pure
-        // duplicate from an overlapping shard — no new matches).
-        if !span_set.spans.is_empty()
-            && span_set
-                .spans
-                .iter()
-                .all(|s| span_id_seen(existing, &s.span_id))
-        {
-            continue;
-        }
         let Some(first) = existing.first_mut() else {
             existing.push(span_set);
             continue;
         };
         // `matched` is additive across shards, but only for *distinct* matches:
         // a span already present (a late-span / overlap duplicate) must not be
-        // counted twice. Subtract the already-seen spans from this set's reported
-        // `matched` before folding it in.
+        // counted twice. Subtract the already-seen *returned* spans from this
+        // set's reported `matched` before folding it in.
+        //
+        // Crucially we fold `matched` for EVERY set rather than skipping a set
+        // whose returned spans all happen to be duplicates: under per-shard spss
+        // truncation a set's returned spans are only a subset of what it matched,
+        // so an overlapping returned subset does NOT make the set a pure
+        // duplicate — its non-returned matches (`matched - duplicates`) are still
+        // new and would otherwise be lost (an undercount).
         let duplicates = span_set
             .spans
             .iter()
@@ -121,12 +118,6 @@ fn merge_span_sets(existing: &mut Vec<SpanSetJson>, incoming: Vec<SpanSetJson>) 
             }
         }
     }
-}
-
-fn span_id_seen(span_sets: &[SpanSetJson], span_id: &str) -> bool {
-    span_sets
-        .iter()
-        .any(|ss| ss.spans.iter().any(|s| s.span_id == span_id))
 }
 
 /// Apply Tempo's post-merge `limit`/`spss` truncation: order traces newest-first
@@ -212,12 +203,34 @@ fn union_trace_bodies(
 ) {
     for mut rs in other.trace.resource_spans {
         for ss in &mut rs.scope_spans {
+            // GAP6 (documented-as-acceptable): dedup is global across resources
+            // (one `seen` set), not keyed on `(resource, spanId)`. This matches
+            // OTLP's invariant that a span id is unique within a trace, so the
+            // same span returned by multiple queriers (each reassembles the whole
+            // trace) dedups correctly. The only case it mishandles is *malformed*
+            // input that reuses a span id across resources — then the second
+            // occurrence is dropped. Keying on `(resource, spanId)` would require
+            // serializing each resource `Value` per span (not free) to defend a
+            // spec-violating input, so we keep the cheaper global dedup.
             ss.spans.retain(|span| seen.insert(span.span_id.clone()));
         }
         rs.scope_spans.retain(|ss| !ss.spans.is_empty());
         if !rs.scope_spans.is_empty() {
             // Merge into an existing resourceSpans group with an equal resource,
             // else append a new group.
+            //
+            // GAP4 (documented-as-acceptable): grouping is by raw
+            // `serde_json::Value` equality, so the *same logical resource* with a
+            // different attribute ordering would form two sibling groups. A
+            // correct canonicalization is NOT cheap here: OTLP arrays are
+            // semantically ordered in general, and only the `attributes` array is
+            // order-insensitive — sorting it blindly would require structural
+            // OTLP knowledge this typed-`Value` mirror deliberately doesn't have.
+            // In practice every querier renders a resource through the same
+            // `attrs_json` code path with a deterministic key order, so the same
+            // logical resource serializes identically across queriers and matches
+            // exactly. Duplicated groups would only cosmetically split a resource;
+            // no span is dropped or duplicated.
             if let Some(existing) = acc
                 .trace
                 .resource_spans
@@ -432,6 +445,29 @@ mod tests {
             .sum();
         assert!(total_spans == 3);
         assert!(resp.traces[0].span_sets[0].matched == 3);
+    }
+
+    #[test]
+    fn truncated_overlap_subset_still_folds_its_matched_count() {
+        // Per-shard spss truncation: shard 0 returned only spans 01,02 but
+        // matched 5; shard 1 returned only span 02 (a subset that happens to
+        // overlap shard 0's returned spans) but matched 3. Shard 1 is NOT a pure
+        // duplicate — its returned span is truncated, so its non-returned matches
+        // are still new. Merged matched = 5 + (3 - 1 returned dup) = 7, not 5.
+        let mut p0 = trace("01", "s", 10, vec![span("01", 10, 5), span("02", 11, 5)]);
+        p0.span_sets[0].matched = 5;
+        let mut p1 = trace("01", "s", 10, vec![span("02", 11, 5)]);
+        p1.span_sets[0].matched = 3;
+        let resp = merge_search(vec![partial(vec![p0], 50), partial(vec![p1], 50)], 20, 10);
+        assert!(resp.traces.len() == 1);
+        // Distinct returned spans are still 01,02 (02 deduped).
+        let total_spans: usize = resp.traces[0]
+            .span_sets
+            .iter()
+            .map(|ss| ss.spans.len())
+            .sum();
+        assert!(total_spans == 2);
+        assert!(resp.traces[0].span_sets[0].matched == 7);
     }
 
     #[test]
