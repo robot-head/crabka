@@ -123,9 +123,13 @@ fn summarize(
         let id = batch
             .column_by_name(&summary.id_col)
             .ok_or_else(|| BlockStoreError::InvalidBlock("missing identity column".into()))?;
+        // Only the series/logs/metrics (`UInt64` fingerprint) path populates
+        // `BlockMeta.fingerprints`; trace (span) blocks key the identity column
+        // as `FixedSizeBinary` and never read `fingerprints`, so we skip the
+        // per-row FNV pass entirely for them. `FixedSizeBinary` is still an
+        // accepted id-column type — we just don't fingerprint it.
         let id_u64 = id.as_any().downcast_ref::<UInt64Array>();
-        let id_bytes = id.as_any().downcast_ref::<FixedSizeBinaryArray>();
-        if id_u64.is_none() && id_bytes.is_none() {
+        if id_u64.is_none() && id.as_any().downcast_ref::<FixedSizeBinaryArray>().is_none() {
             return Err(BlockStoreError::InvalidBlock(format!(
                 "`{}` must be UInt64 or FixedSizeBinary",
                 summary.id_col
@@ -138,14 +142,10 @@ fn summarize(
                 min_ts = min_ts.min(v);
                 max_ts = max_ts.max(v);
             }
-            if let Some(fp) = id_u64 {
-                if !fp.is_null(i) {
-                    fps.insert(fp.value(i));
-                }
-            } else if let Some(bytes) = id_bytes
-                && !bytes.is_null(i)
+            if let Some(fp) = id_u64
+                && !fp.is_null(i)
             {
-                fps.insert(fnv1a_64(bytes.value(i)));
+                fps.insert(fp.value(i));
             }
         }
     }
@@ -155,18 +155,6 @@ fn summarize(
     }
 
     Ok((min_ts, max_ts, row_count, fps.into_iter().collect()))
-}
-
-fn fnv1a_64(bytes: &[u8]) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let mut hash = OFFSET;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
 }
 
 #[cfg(test)]
@@ -225,6 +213,46 @@ mod tests {
 
         let head = store.head(&Path::from("blocks/tenant-a/b1.parquet")).await;
         assert!(head.is_ok());
+    }
+
+    fn span_summary_batch() -> RecordBatch {
+        use arrow::array::FixedSizeBinaryArray;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::FixedSizeBinary(16), false),
+            Field::new("start_unix_nano", DataType::Int64, false),
+        ]));
+        let ids: Vec<[u8; 16]> = vec![[1_u8; 16], [2_u8; 16]];
+        let trace_id =
+            FixedSizeBinaryArray::try_from_iter(ids.iter().map(<[u8; 16]>::as_slice)).unwrap();
+        let ts = Int64Array::from(vec![100_i64, 200]);
+        RecordBatch::try_new(schema, vec![Arc::new(trace_id), Arc::new(ts)]).unwrap()
+    }
+
+    #[test]
+    fn summarize_skips_fingerprints_for_span_blocks() {
+        // Span (FixedSizeBinary id) blocks never read `meta.fingerprints`, so
+        // the per-row FNV pass should be skipped and the set left empty. Time
+        // bounds and row count must still be summarized.
+        let batch = span_summary_batch();
+        let (min_ts, max_ts, row_count, fps) = summarize(
+            &[batch],
+            &SummaryColumns::new("trace_id", "start_unix_nano"),
+        )
+        .unwrap();
+        assert!(min_ts == 100);
+        assert!(max_ts == 200);
+        assert!(row_count == 2);
+        assert!(fps.is_empty());
+    }
+
+    #[test]
+    fn summarize_still_fingerprints_series_blocks() {
+        let schema = log_schema();
+        let batch = sample_batch(&schema);
+        let (_min, _max, _rows, mut fps) = summarize(&[batch], &SummaryColumns::series()).unwrap();
+        fps.sort_unstable();
+        assert!(fps == vec![10_u64, 20]);
     }
 
     #[tokio::test]

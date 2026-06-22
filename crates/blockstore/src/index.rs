@@ -25,7 +25,10 @@ struct BlockEntry {
 #[derive(Default, Serialize, Deserialize)]
 struct TenantIndex {
     series: HashMap<SeriesFingerprint, Labels>,
-    postings: HashMap<String, BTreeSet<SeriesFingerprint>>,
+    /// `name -> value -> fingerprints`. Structured (rather than an in-band
+    /// `name\0value` key) so arbitrary label bytes — including NUL — can never
+    /// collide distinct `(name, value)` pairs into one bucket.
+    postings: HashMap<String, HashMap<String, BTreeSet<SeriesFingerprint>>>,
     values: HashMap<String, BTreeSet<String>>,
     blocks: Vec<BlockEntry>,
 }
@@ -50,7 +53,9 @@ impl SeriesIndex {
         t.series.insert(fp, labels.clone());
         for (name, value) in labels.iter() {
             t.postings
-                .entry(posting_key(name, value))
+                .entry(name.clone())
+                .or_default()
+                .entry(value.clone())
                 .or_default()
                 .insert(fp);
             t.values
@@ -353,13 +358,15 @@ impl TenantIndex {
         match matcher.op {
             MatchOp::Eq => Ok(self
                 .postings
-                .get(&posting_key(&matcher.name, &matcher.value))
+                .get(&matcher.name)
+                .and_then(|values| values.get(&matcher.value))
                 .cloned()
                 .unwrap_or_default()),
             MatchOp::Neq => {
                 let excluded = self
                     .postings
-                    .get(&posting_key(&matcher.name, &matcher.value))
+                    .get(&matcher.name)
+                    .and_then(|values| values.get(&matcher.value))
                     .cloned()
                     .unwrap_or_default();
                 Ok(self
@@ -373,12 +380,11 @@ impl TenantIndex {
                 let re = regex::Regex::new(&anchored(&matcher.value))
                     .map_err(|e| BlockStoreError::InvalidBlock(format!("bad regex: {e}")))?;
                 let mut matching_fps = BTreeSet::new();
-                for (key, fps) in &self.postings {
-                    let Some((name, value)) = split_posting_key(key) else {
-                        continue;
-                    };
-                    if name == matcher.name && re.is_match(value) {
-                        matching_fps.extend(fps.iter().copied());
+                if let Some(values) = self.postings.get(&matcher.name) {
+                    for (value, fps) in values {
+                        if re.is_match(value) {
+                            matching_fps.extend(fps.iter().copied());
+                        }
                     }
                 }
                 if matcher.op == MatchOp::Re {
@@ -398,15 +404,6 @@ impl TenantIndex {
 
 fn anchored(pattern: &str) -> String {
     format!("^(?:{pattern})$")
-}
-
-fn posting_key(name: &str, value: &str) -> String {
-    format!("{name}\u{0}{value}")
-}
-
-fn split_posting_key(key: &str) -> Option<(String, &str)> {
-    let (name, value) = key.split_once('\0')?;
-    Some((name.to_string(), value))
 }
 
 #[cfg(test)]
@@ -480,6 +477,28 @@ mod tests {
         let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
         let web_prod = labels(&[("app", "web"), ("env", "prod")]).fingerprint();
         assert!(got == BTreeSet::from([api_prod, web_prod]));
+    }
+
+    #[test]
+    fn eq_does_not_collide_across_nul_boundary() {
+        // `("x", "a\0b")` and `("x\0a", "b")` share the same naive
+        // `name\0value` byte string, so an in-band NUL delimiter would index
+        // both under one bucket and contaminate Eq results across series.
+        let mut idx = SeriesIndex::new();
+        let s1 = labels(&[("x", "a\u{0}b")]);
+        let s2 = labels(&[("x\u{0}a", "b")]);
+        idx.add_series("t", s1.fingerprint(), &s1);
+        idx.add_series("t", s2.fingerprint(), &s2);
+
+        let got = idx
+            .resolve("t", &[LabelMatcher::new("x", MatchOp::Eq, "a\u{0}b")])
+            .unwrap();
+        assert!(got == BTreeSet::from([s1.fingerprint()]));
+
+        let got = idx
+            .resolve("t", &[LabelMatcher::new("x\u{0}a", MatchOp::Eq, "b")])
+            .unwrap();
+        assert!(got == BTreeSet::from([s2.fingerprint()]));
     }
 
     #[test]

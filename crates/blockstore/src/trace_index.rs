@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
 use crate::bloom::ShardedTraceBloom;
-use crate::error::Result;
+use crate::error::{BlockStoreError, Result};
 
 /// The per-block trace footprint registered by a block builder.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -190,7 +190,21 @@ impl TraceIndex {
 
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         let bytes = store.get(&Path::from(key)).await?.bytes().await?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let index: Self = serde_json::from_slice(&bytes)?;
+        // `Deserialize` bypasses the bloom constructors' invariant checks, so a
+        // structurally-valid-but-corrupt snapshot would panic on the first
+        // lookup. Validate here so it surfaces as an error instead.
+        for tenant_index in index.tenants.values() {
+            for block in &tenant_index.blocks {
+                block.bloom.validate().map_err(|e| {
+                    BlockStoreError::Serde(format!(
+                        "corrupt trace bloom for block `{}`: {e}",
+                        block.object_key
+                    ))
+                })?;
+            }
+        }
+        Ok(index)
     }
 }
 
@@ -401,5 +415,73 @@ mod tests {
         let loaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
         let got = loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000);
         assert!(got == vec!["b1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn load_rejects_corrupt_bloom_instead_of_panicking() {
+        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+
+        // A structurally-valid-but-corrupt snapshot: a shard with num_bits == 0
+        // would divide-by-zero on the first `% num_bits` probe. `load` must
+        // surface this as an error rather than letting a later lookup panic.
+        let snapshot = serde_json::json!({
+            "tenants": {
+                "t": {
+                    "blocks": [{
+                        "object_key": "b1",
+                        "min_ts": 0,
+                        "max_ts": 100,
+                        "bloom": { "shards": [{ "bits": [], "num_bits": 0, "k": 1 }] },
+                        "tag_names": [],
+                        "tag_values": {}
+                    }]
+                }
+            }
+        });
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        store
+            .put(
+                &object_store::path::Path::from("index/corrupt.json"),
+                PutPayload::from(serde_json::to_vec(&snapshot).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let loaded = TraceIndex::load(&store, "index/corrupt.json").await;
+        assert!(loaded.is_err());
+    }
+
+    #[tokio::test]
+    async fn load_rejects_empty_shards_bloom() {
+        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+
+        // Empty `shards` would divide-by-zero on `% shards.len()` in shard_of.
+        let snapshot = serde_json::json!({
+            "tenants": {
+                "t": {
+                    "blocks": [{
+                        "object_key": "b1",
+                        "min_ts": 0,
+                        "max_ts": 100,
+                        "bloom": { "shards": [] },
+                        "tag_names": [],
+                        "tag_values": {}
+                    }]
+                }
+            }
+        });
+        let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+        store
+            .put(
+                &object_store::path::Path::from("index/empty-shards.json"),
+                PutPayload::from(serde_json::to_vec(&snapshot).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let loaded = TraceIndex::load(&store, "index/empty-shards.json").await;
+        assert!(loaded.is_err());
     }
 }

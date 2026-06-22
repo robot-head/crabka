@@ -57,6 +57,23 @@ impl BloomShard {
         }
     }
 
+    /// Reject a deserialized shard that would panic on lookup: `num_bits == 0`
+    /// (divide-by-zero in `probes`) or a `bits` vector too short to hold every
+    /// bit position (out-of-bounds index in `maybe_contains`/`insert`).
+    fn validate(&self) -> Result<(), String> {
+        if self.num_bits == 0 {
+            return Err("bloom shard num_bits must be non-zero".into());
+        }
+        let required_words = usize::try_from(self.num_bits.div_ceil(64)).unwrap_or(usize::MAX);
+        if self.bits.len() < required_words {
+            return Err(format!(
+                "bloom shard bits too short: have {}, need {required_words}",
+                self.bits.len()
+            ));
+        }
+        Ok(())
+    }
+
     fn probes(&self, trace_id: &[u8; 16]) -> impl Iterator<Item = u64> + '_ {
         let h1 = u64::from(fnv1_32(trace_id));
         let h2 = u64::from(fnv1a_32(trace_id)) | 1;
@@ -109,6 +126,25 @@ impl ShardedTraceBloom {
             shard.bits.fill(u64::MAX);
         }
         bloom
+    }
+
+    /// Validate invariants that constructors enforce but `Deserialize`
+    /// bypasses, so a corrupt snapshot errors at load time rather than
+    /// panicking on the first lookup. Rejects an empty `shards` vector (would
+    /// divide-by-zero in [`Self::shard_of`]) and any structurally invalid
+    /// shard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message describing the first invariant violated.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.shards.is_empty() {
+            return Err("bloom must have at least one shard".into());
+        }
+        for shard in &self.shards {
+            shard.validate()?;
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -202,5 +238,28 @@ mod tests {
         let json = serde_json::to_vec(&b).unwrap();
         let back: ShardedTraceBloom = serde_json::from_slice(&json).unwrap();
         assert!(back.maybe_contains(&tid(1)));
+    }
+
+    #[test]
+    fn validate_accepts_constructed_bloom() {
+        let b = ShardedTraceBloom::new(4, 32, 0.01);
+        assert!(b.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_corrupt_deserialized_blooms() {
+        // num_bits == 0 → divide-by-zero on probe.
+        let zero_bits: ShardedTraceBloom =
+            serde_json::from_str(r#"{"shards":[{"bits":[],"num_bits":0,"k":1}]}"#).unwrap();
+        assert!(zero_bits.validate().is_err());
+
+        // Empty shards → divide-by-zero in shard_of.
+        let no_shards: ShardedTraceBloom = serde_json::from_str(r#"{"shards":[]}"#).unwrap();
+        assert!(no_shards.validate().is_err());
+
+        // bits too short for num_bits → out-of-bounds index on lookup.
+        let short_bits: ShardedTraceBloom =
+            serde_json::from_str(r#"{"shards":[{"bits":[0],"num_bits":128,"k":1}]}"#).unwrap();
+        assert!(short_bits.validate().is_err());
     }
 }

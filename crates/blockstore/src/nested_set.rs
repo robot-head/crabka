@@ -49,7 +49,14 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
         spans.len()
     ];
     let mut counter = 1_i32;
+    let mut visited = vec![false; spans.len()];
 
+    // DFS from the discovered roots. Then sweep for any span the DFS never
+    // reached — under cyclic/garbage parentage (e.g. A.parent=B, B.parent=A)
+    // a node can be neither a root nor a descendant of one, so it would keep
+    // `{0, 0, 0}` and collide with real roots. Seed each such span as an
+    // additional root so every node gets a valid `left < right` interval.
+    let mut next_seed = 0_usize;
     let mut stack = Vec::new();
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
@@ -58,26 +65,44 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
         });
     }
 
-    while let Some(frame) = stack.pop() {
-        match frame {
-            Frame::Enter { idx, parent_left } => {
-                let left = counter;
-                counter += 1;
-                out[idx].nested_set_left = left;
-                out[idx].parent_id = parent_left;
-                stack.push(Frame::Exit { idx });
-                for &child in children[idx].iter().rev() {
-                    stack.push(Frame::Enter {
-                        idx: child,
-                        parent_left: left,
-                    });
+    loop {
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter { idx, parent_left } => {
+                    if visited[idx] {
+                        continue;
+                    }
+                    visited[idx] = true;
+                    let left = counter;
+                    counter += 1;
+                    out[idx].nested_set_left = left;
+                    out[idx].parent_id = parent_left;
+                    stack.push(Frame::Exit { idx });
+                    for &child in children[idx].iter().rev() {
+                        stack.push(Frame::Enter {
+                            idx: child,
+                            parent_left: left,
+                        });
+                    }
+                }
+                Frame::Exit { idx } => {
+                    out[idx].nested_set_right = counter;
+                    counter += 1;
                 }
             }
-            Frame::Exit { idx } => {
-                out[idx].nested_set_right = counter;
-                counter += 1;
-            }
         }
+
+        // Find the next unvisited span and re-seed the DFS from it as a root.
+        while next_seed < spans.len() && visited[next_seed] {
+            next_seed += 1;
+        }
+        if next_seed >= spans.len() {
+            break;
+        }
+        stack.push(Frame::Enter {
+            idx: next_seed,
+            parent_left: 0,
+        });
     }
 
     out
@@ -170,5 +195,37 @@ mod tests {
         for n in &ns {
             assert!(n.nested_set_left < n.nested_set_right);
         }
+    }
+
+    #[test]
+    fn cyclic_parentage_still_assigns_valid_intervals() {
+        // A.parent = B, B.parent = A. Neither is a root, so a DFS seeded only
+        // from roots would never visit them and leave both at {0, 0, 0} —
+        // colliding with real roots and corrupting structural ops. Every node
+        // must still get a valid `left < right` interval.
+        let spans = vec![node(1, Some(2)), node(2, Some(1))];
+        let ns = assign_nested_set(&spans);
+        for n in &ns {
+            assert!(n.nested_set_left < n.nested_set_right);
+        }
+        // Distinct, non-overlapping intervals → every node was actually visited.
+        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
+        lefts.sort_unstable();
+        lefts.dedup();
+        assert!(lefts.len() == ns.len());
+    }
+
+    #[test]
+    fn three_node_cycle_is_fully_visited() {
+        // A->B->C->A: a pure cycle with no acyclic entry point.
+        let spans = vec![node(1, Some(3)), node(2, Some(1)), node(3, Some(2))];
+        let ns = assign_nested_set(&spans);
+        for n in &ns {
+            assert!(n.nested_set_left < n.nested_set_right);
+        }
+        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
+        lefts.sort_unstable();
+        lefts.dedup();
+        assert!(lefts.len() == ns.len());
     }
 }
