@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder};
 use arrow::datatypes::Int32Type;
 use arrow::record_batch::RecordBatch;
-use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
+use crabka_blockstore::{LabelMatcher, Labels, SeriesMatchOp as MatchOp, series_fingerprint};
 use datafusion::catalog::MemTable;
 use datafusion::prelude::SessionContext;
 use regex::Regex;
@@ -365,7 +365,7 @@ fn fingerprint_labels(labels: &[(String, String)]) -> u64 {
     for (name, value) in labels {
         canonical.insert(name.clone(), value.clone());
     }
-    canonical.fingerprint()
+    series_fingerprint(&canonical)
 }
 
 enum CompiledMatcher<'a> {

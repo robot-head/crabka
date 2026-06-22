@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::array::AsArray;
 use arrow::datatypes::{Int64Type, UInt64Type};
-use crabka_blockstore::{LabelMatcher, MatchOp};
+use crabka_blockstore::{LabelMatcher, SeriesMatchOp as MatchOp};
 
 use crate::{
     FlameGraph, FlameGraphDiff, Frame, Heatmap, LabeledHeatmap, ProfileError, ProfileStore,
