@@ -91,6 +91,7 @@ async fn log_req(req: Request, next: Next) -> AxumResponse {
     resp
 }
 
+#[allow(clippy::too_many_lines, reason = "verbose multi-service demo fixture")]
 fn demo_store() -> InMemorySpanStore {
     let base = base_ns();
     let mut store = InMemorySpanStore::new();
