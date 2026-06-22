@@ -5040,7 +5040,7 @@ pub fn loki_router(state: QuerierState) -> Router {
         )
         .route(
             "/api/prom/query_range",
-            get(query_range).post(query_range_post),
+            get(api_prom_query_range).post(api_prom_query_range_post),
         )
         .route("/api/prom/rules", get(loki_rules))
         .route("/api/prom/alerts", get(loki_page_not_found))
@@ -7117,6 +7117,27 @@ async fn api_prom_query_post(
     handle_api_prom_query(state, headers, Some(&raw_query)).await
 }
 
+async fn api_prom_query_range(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    handle_api_prom_query_range(state, headers, raw_query.as_deref()).await
+}
+
+async fn api_prom_query_range_post(
+    State(state): State<QuerierState>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Bytes,
+) -> Response {
+    let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
+        Ok(raw_query) => raw_query,
+        Err(error) => return error.into_response(),
+    };
+    handle_api_prom_query_range(state, headers, Some(&raw_query)).await
+}
+
 async fn query_range(
     State(state): State<QuerierState>,
     headers: HeaderMap,
@@ -7618,16 +7639,35 @@ async fn handle_api_prom_query(
     };
 
     match execute_http_query(&state, &headers, params, QueryKind::Instant).await {
-        Ok(value)
-            if value.pointer("/data/resultType").and_then(Value::as_str) == Some("streams") =>
-        {
-            json_response(StatusCode::OK, &value)
-        }
-        Ok(_) => text_response(
+        Ok(value) => api_prom_streams_only_response(value),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn handle_api_prom_query_range(
+    state: QuerierState,
+    headers: HeaderMap,
+    raw_query: Option<&str>,
+) -> Response {
+    let params = match parse_query_params(raw_query) {
+        Ok(params) => params,
+        Err(error) => return error.into_response(),
+    };
+
+    match execute_http_query(&state, &headers, params, QueryKind::Range).await {
+        Ok(value) => api_prom_streams_only_response(value),
+        Err(error) => error.into_response(),
+    }
+}
+
+fn api_prom_streams_only_response(value: Value) -> Response {
+    if value.pointer("/data/resultType").and_then(Value::as_str) == Some("streams") {
+        json_response(StatusCode::OK, &value)
+    } else {
+        text_response(
             StatusCode::BAD_REQUEST,
             "rpc error: code = Code(400) desc = legacy endpoints only support streams result type",
-        ),
-        Err(error) => error.into_response(),
+        )
     }
 }
 
