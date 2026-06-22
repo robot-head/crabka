@@ -2643,7 +2643,7 @@ struct LokiPushRequest {
 #[derive(Debug, Deserialize)]
 struct LokiPushStream {
     stream: Labels,
-    values: Vec<Vec<Value>>,
+    values: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3069,6 +3069,7 @@ fn normalize_loki_http_push(
     if is_loki_json_content_type(headers)? {
         let payload =
             serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
+        validate_loki_json_push_value_arrays(&payload, &body)?;
         validate_loki_json_push_duplicate_keys(&body)?;
         validate_loki_json_structured_metadata_value_types(&payload, &body)?;
         normalize_loki_push(
@@ -3092,6 +3093,23 @@ fn normalize_loki_http_push(
     }
 }
 
+fn validate_loki_json_push_value_arrays(
+    payload: &LokiPushRequest,
+    body: &[u8],
+) -> Result<(), DistributorError> {
+    for stream in &payload.streams {
+        for value in &stream.values {
+            if !value.is_array() {
+                return Err(DistributorError::InvalidJsonPushValueSyntax(
+                    loki_json_push_value_parse_error(body, value),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_loki_json_push_duplicate_keys(body: &[u8]) -> Result<(), DistributorError> {
     let metadata_probe: LokiJsonStructuredMetadataDuplicateProbe =
         serde_json::from_slice(body).map_err(|_| DistributorError::InvalidStructuredMetadata)?;
@@ -3102,6 +3120,18 @@ fn validate_loki_json_push_duplicate_keys(body: &[u8]) -> Result<(), Distributor
     }
 
     Ok(())
+}
+
+fn loki_json_push_value_parse_error(body: &[u8], value: &Value) -> String {
+    let body = String::from_utf8_lossy(body);
+    let value_text = value.to_string();
+    let value_start = body.find(&value_text).unwrap_or(body.len());
+    let context = loki_decode_error_context(&body, value_start.saturating_add(10));
+    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(30));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Unknown value type, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
 }
 
 fn validate_loki_json_structured_metadata_value_types(
@@ -3299,6 +3329,9 @@ fn normalize_loki_push(
         discover_service_name_label(&mut stream_labels);
 
         for value in stream.values {
+            let Some(value) = value.as_array() else {
+                return Err(DistributorError::InvalidPushValue);
+            };
             let (timestamp, line, metadata) = match value.as_slice() {
                 [timestamp] => (timestamp, "", [].as_slice()),
                 [timestamp, line, metadata @ ..] => (
@@ -15280,6 +15313,8 @@ enum DistributorError {
     #[error("{0}")]
     InvalidPushLabelSyntax(String),
     #[error("{0}")]
+    InvalidJsonPushValueSyntax(String),
+    #[error("{0}")]
     InvalidJsonLineSyntax(String),
     #[error("{0}")]
     InvalidJsonTimestampSyntax(String),
@@ -15344,6 +15379,7 @@ impl IntoResponse for DistributorError {
             | Self::InvalidOtlpAttribute
             | Self::InvalidOtlpPayload
             | Self::InvalidPushLabels
+            | Self::InvalidJsonPushValueSyntax(_)
             | Self::InvalidJsonLineSyntax(_)
             | Self::InvalidJsonTimestampSyntax(_)
             | Self::InvalidPushLabelSyntax(_)
@@ -15367,6 +15403,7 @@ impl IntoResponse for DistributorError {
             &self,
             Self::InvalidPushLabelSyntax(_)
                 | Self::InvalidJsonLineSyntax(_)
+                | Self::InvalidJsonPushValueSyntax(_)
                 | Self::InvalidJsonTimestampSyntax(_)
                 | Self::InvalidStructuredMetadataSyntax(_)
                 | Self::TimestampTooOld { .. }
@@ -15409,6 +15446,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::InvalidPushLabelSyntax(_)
         | DistributorError::InvalidPushPayload
         | DistributorError::InvalidPushValue
+        | DistributorError::InvalidJsonPushValueSyntax(_)
         | DistributorError::InvalidStructuredMetadata
         | DistributorError::InvalidStructuredMetadataSyntax(_)
         | DistributorError::InvalidTimestamp
