@@ -11055,6 +11055,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_vector_arithmetic_expression(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_metric_vector_comparison_expression(query) {
+                Ok(formatted)
             } else if parse_metric_query(query).is_ok()
                 || parse_metric_label_join_query(query).is_ok()
                 || parse_metric_label_replace_query(query).is_ok()
@@ -11177,6 +11179,89 @@ fn split_leading_vector_group_modifier(query: &str) -> (Option<String>, &str) {
         }
     }
     (None, query)
+}
+
+fn format_metric_vector_comparison_expression(query: &str) -> Option<String> {
+    let (left_text, operator, right_text) = split_top_level_comparison_query(query)?;
+    let right_text = right_text.trim_start();
+    let (bool_modifier, right_text) = if let Some(rest) = right_text.strip_prefix("bool") {
+        (true, rest.trim_start())
+    } else {
+        (false, right_text)
+    };
+    let (modifiers, right_text) = split_leading_vector_binary_modifiers(right_text);
+    let (left, right) = if let (Some(left), Some(right)) = (
+        parse_metric_query(left_text.trim())
+            .ok()
+            .and_then(|query| format_simple_metric_query(&query)),
+        format_vector_function_text(right_text.trim()),
+    ) {
+        (left, right)
+    } else if let (Some(left), Some(right)) = (
+        format_vector_function_text(left_text.trim()),
+        parse_metric_query(right_text.trim())
+            .ok()
+            .and_then(|query| format_simple_metric_query(&query)),
+    ) {
+        (left, right)
+    } else {
+        return None;
+    };
+
+    match (bool_modifier, modifiers) {
+        (true, Some(modifiers)) => Some(format!(
+            "({left} {operator} bool {}{}{right})",
+            modifiers.text, modifiers.right_separator
+        )),
+        (true, None) => Some(format!("({left} {operator} bool {right})")),
+        (false, Some(modifiers)) => Some(format!(
+            "({left} {operator} {}{}{right})",
+            modifiers.text, modifiers.right_separator
+        )),
+        (false, None) => Some(format!("({left} {operator} {right})")),
+    }
+}
+
+fn split_top_level_comparison_query(query: &str) -> Option<(&str, &'static str, &str)> {
+    let mut parens = 0_i32;
+    let mut brackets = 0_i32;
+    let mut braces = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in query.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '`' => quote = Some(ch),
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '>' | '<' | '=' | '!' if parens == 0 && brackets == 0 && braces == 0 => {
+                for operator in [">=", "<=", "==", "!=", ">", "<"] {
+                    if query[index..].starts_with(operator) {
+                        return Some((
+                            &query[..index],
+                            operator,
+                            query[index + operator.len()..].trim_start(),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn split_top_level_arithmetic_query(query: &str) -> Option<(&str, &'static str, &str)> {
