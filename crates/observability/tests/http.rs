@@ -6904,24 +6904,36 @@ async fn format_query_endpoint_formats_vector_set_expression_like_loki() {
     let state = fixture();
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/format_query?query=vector%281%29%20or%20vector%282%29")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for (query, expected) in [
+        (
+            "vector%281%29%20or%20vector%282%29",
+            "(vector(1.000000) or vector(2.000000))",
+        ),
+        (
+            "label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29%20or%20vector%282%29",
+            r#"(label_replace(vector(1.000000),"service","api-$1","missing","(.*)") or vector(2.000000))"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": "(vector(1.000000) or vector(2.000000))"
-            })
-    );
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
 }
 
 #[tokio::test]
@@ -6929,24 +6941,36 @@ async fn format_query_endpoint_formats_vector_arithmetic_expression_like_loki() 
     let state = fixture();
     let app = loki_router(state);
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/loki/api/v1/format_query?query=vector%281%29%2Bvector%282%29")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    for (query, expected) in [
+        (
+            "vector%281%29%2Bvector%282%29",
+            "(vector(1.000000) + vector(2.000000))",
+        ),
+        (
+            "label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29%2Bvector%282%29",
+            r#"(label_replace(vector(1.000000),"service","api-$1","missing","(.*)") + vector(2.000000))"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        json_body(response).await
-            == json!({
-                "status": "success",
-                "data": "(vector(1.000000) + vector(2.000000))"
-            })
-    );
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
 }
 
 #[tokio::test]
