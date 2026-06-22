@@ -436,4 +436,16 @@ mod tests {
         assert!(toks("&") == vec![Token::Ident("&".into())]);
         assert!(lex("&").is_ok());
     }
+
+    #[test]
+    fn number_scan_stops_at_a_non_dot_operator_before_a_digit() {
+        // `scan_number_or_duration` only folds a `.` into the number when the
+        // following char is a digit. The two `&&`s in that guard each matter:
+        // weakening either to `||` makes a non-dot operator that precedes a
+        // digit (e.g. the `+` in `1+2`) get swallowed into the number, so the
+        // whole run is parsed as one float and fails. Asserting `1+2` lexes as
+        // three tokens kills both mutants; `1.5` guards the legit-float path.
+        assert!(toks("1+2") == vec![Token::Int(1), Token::Plus, Token::Int(2)]);
+        assert!(toks("1.5") == vec![Token::Float(1.5)]);
+    }
 }

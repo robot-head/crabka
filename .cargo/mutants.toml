@@ -142,6 +142,12 @@ exclude_re = [
     # fallthrough is indistinguishable downstream. Every other op-token arm IS
     # mutation-tested.
     "traceql/src/lexer\\.rs.*delete match arm Token::Ident\\(_\\) in lex",
+    # `scan_number_or_duration` consumes a `.` only when the NEXT char is a digit
+    # (`chars.nth(1).is_some_and(is_digit)`), and that digit is then consumed on
+    # the following iteration, overwriting `end`. So `end = idx + 1` vs `idx * 1`
+    # (= idx) at the dot is never observable — the trailing digit always resets
+    # `end`. The `&&` guards on those same lines ARE mutation-tested.
+    "traceql/src/lexer\\.rs.*replace \\+ with \\* in scan_number_or_duration",
     # `usize_from_integer_f64` rejects non-finite/negative/fractional inputs; the
     # `||` -> `&&` rewrites of that validation guard still yield `Err` for every
     # differing input (the subsequent `to_string().parse()` fails on it), so the
