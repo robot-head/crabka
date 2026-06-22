@@ -2365,6 +2365,50 @@ async fn loki_push_endpoint_rejects_empty_protobuf_push_like_loki_without_wal_ap
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_invalid_protobuf_labels_like_loki_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: r#"{bad-label="api"}"#.to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: Some(LokiProtoTimestamp {
+                    seconds: 0,
+                    nanos: 19,
+                }),
+                line: "api error".to_string(),
+                structured_metadata: vec![],
+                parsed: vec![],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert!(
+        text_body(response).await
+            == "couldn't parse labels: 1:5: parse error: unexpected character inside braces: '-'\n"
+    );
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());

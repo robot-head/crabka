@@ -3618,7 +3618,11 @@ fn parse_loki_proto_labels(labels: &str) -> Result<Labels, DistributorError> {
         return Ok(Labels::new());
     }
 
-    let query = parse_query(labels).map_err(|_| DistributorError::InvalidPushLabels)?;
+    let query = parse_query(labels).map_err(|_| {
+        loki_proto_label_parse_error(labels)
+            .map(DistributorError::InvalidPushLabelSyntax)
+            .unwrap_or(DistributorError::InvalidPushLabels)
+    })?;
     if !query.pipeline.is_empty() {
         return Err(DistributorError::InvalidPushLabels);
     }
@@ -3654,6 +3658,58 @@ fn parse_loki_proto_labels(labels: &str) -> Result<Labels, DistributorError> {
     }
 
     Ok(labels)
+}
+
+fn loki_proto_label_parse_error(labels: &str) -> Option<String> {
+    let labels = labels.trim();
+    let mut chars = labels.char_indices();
+    if chars.next()? != (0, '{') {
+        return None;
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut expecting_name = true;
+    let mut first_name_char = true;
+
+    for (offset, value) in chars {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if value == '\\' {
+                escaped = true;
+            } else if value == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match value {
+            '"' => in_string = true,
+            ',' => {
+                expecting_name = true;
+                first_name_char = true;
+            }
+            '=' => {
+                expecting_name = false;
+                first_name_char = true;
+            }
+            '}' => break,
+            value if expecting_name && value.is_whitespace() => {}
+            value if expecting_name => {
+                if !is_loki_label_name_char(value, first_name_char) {
+                    let column = labels[..offset].chars().count() + 1;
+                    return Some(format!(
+                        "couldn't parse labels: 1:{column}: parse error: unexpected character inside braces: '{value}'\n"
+                    ));
+                }
+                first_name_char = false;
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn loki_proto_timestamp_ns(
