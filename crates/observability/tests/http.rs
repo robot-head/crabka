@@ -8410,6 +8410,41 @@ async fn query_endpoint_returns_metric_query_as_loki_vector_json() {
 }
 
 #[tokio::test]
+async fn query_endpoint_returns_synthetic_vector_timestamps_as_loki_raw_nanoseconds() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=2%2Avector%283%29&time=20")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {},
+                            "value": [20, "6"]
+                        }
+                    ],
+                    "stats": expected_loki_stats()
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
     let state = fixture();
     let app = loki_router(state);
@@ -11033,6 +11068,37 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert!(lines.value(0) == "api error");
+}
+
+#[tokio::test]
+async fn query_range_endpoint_ignores_zero_quality_parquet_accept() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query_range?query=%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22&start=0&end=30")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header(
+                    "accept",
+                    "application/vnd.apache.parquet;q=0, application/json",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some("application/json")
+    );
+    assert!(json_body(response).await == expected_api_error());
 }
 
 #[tokio::test]
