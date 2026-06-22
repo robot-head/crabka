@@ -7300,6 +7300,43 @@ async fn format_query_endpoint_formats_vector_aggregation_like_loki() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_sort_vector_expression_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    for (query, expected) in [
+        (
+            "sort%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%20vector%281%29%29",
+            r#"sort((count_over_time({app="api"}[30s]) + vector(1.000000)))"#,
+        ),
+        (
+            "sort_desc%28vector%281%29%2Bcount_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%29",
+            r#"sort_desc((vector(1.000000) + count_over_time({app="api"}[30s])))"#,
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/loki/api/v1/format_query?query={query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(
+            json_body(response).await
+                == json!({
+                    "status": "success",
+                    "data": expected
+                })
+        );
+    }
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_metric_offsets_like_loki() {
     let state = fixture();
     let app = loki_router(state);

@@ -11068,6 +11068,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 Ok(formatted)
             } else if let Some(formatted) = format_metric_label_replace_query(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_sort_vector_expression(query) {
+                Ok(formatted)
             } else if let Ok(metric_query) = parse_metric_query(query) {
                 Ok(format_metric_query(&metric_query).unwrap_or_else(|| query.trim().to_string()))
             } else if parse_metric_label_join_query(query).is_ok()
@@ -11292,6 +11294,44 @@ fn format_metric_label_replace_query(query: &str) -> Option<String> {
         format_logql_quoted_string(&label_replace.source_label),
         format_logql_quoted_string(&label_replace.pattern),
     ))
+}
+
+fn format_sort_vector_expression(query: &str) -> Option<String> {
+    for function in ["sort", "sort_desc"] {
+        let Some(arguments) = split_logql_function_arguments(query, function) else {
+            continue;
+        };
+        if arguments.len() != 1 {
+            return None;
+        }
+        let inner = format_loki_vector_expression(arguments[0].trim())?;
+        return Some(format!("{function}({inner})"));
+    }
+    None
+}
+
+fn format_loki_vector_expression(query: &str) -> Option<String> {
+    if let Some(formatted) = format_metric_vector_arithmetic_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_metric_vector_comparison_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_metric_vector_set_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_metric_scalar_arithmetic_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_metric_scalar_comparison_expression(query) {
+        return Some(formatted);
+    }
+    if let Some(formatted) = format_scalar_vector_expression(query) {
+        return Some(formatted);
+    }
+    parse_metric_query(query)
+        .ok()
+        .and_then(|query| format_metric_query(&query))
 }
 
 fn format_logql_quoted_string(value: &str) -> String {
