@@ -2366,6 +2366,27 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         crabka_query_range_result(querier.clone(), ip_filter_query, base_ns, end_ns).await;
     assert!(crabka_ip_filter_result == loki_ip_filter_result);
 
+    let ip_single_filter_query = r#"{app="api",format="logfmt"} |= ip("10.2.3.4")"#;
+    let loki_ip_single_filter_result =
+        loki_query_range_result(&http, &loki_base, ip_single_filter_query, base_ns, end_ns).await;
+    let crabka_ip_single_filter_result =
+        crabka_query_range_result(querier.clone(), ip_single_filter_query, base_ns, end_ns).await;
+    assert!(crabka_ip_single_filter_result == loki_ip_single_filter_result);
+
+    let ip_range_filter_query = r#"{app="api",format="logfmt"} |= ip("10.2.3.0-10.2.3.10")"#;
+    let loki_ip_range_filter_result =
+        loki_query_range_result(&http, &loki_base, ip_range_filter_query, base_ns, end_ns).await;
+    let crabka_ip_range_filter_result =
+        crabka_query_range_result(querier.clone(), ip_range_filter_query, base_ns, end_ns).await;
+    assert!(crabka_ip_range_filter_result == loki_ip_range_filter_result);
+
+    let not_ip_filter_query = r#"{app="api",format="logfmt"} != ip("192.168.0.0/16")"#;
+    let loki_not_ip_filter_result =
+        loki_query_range_result(&http, &loki_base, not_ip_filter_query, base_ns, end_ns).await;
+    let crabka_not_ip_filter_result =
+        crabka_query_range_result(querier.clone(), not_ip_filter_query, base_ns, end_ns).await;
+    assert!(crabka_not_ip_filter_result == loki_not_ip_filter_result);
+
     let metadata_query = r#"{app="api",format="metadata"} | trace_id = "abc""#;
     let loki_metadata_result =
         loki_query_range_result(&http, &loki_base, metadata_query, base_ns, end_ns).await;
@@ -2534,6 +2555,30 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     assert!(json_contains_string(&loki_ip_filter_result, logfmt_ip_line));
     assert!(!json_contains_string(
         &loki_ip_filter_result,
+        logfmt_ip_miss_line
+    ));
+    assert!(json_contains_string(
+        &loki_ip_single_filter_result,
+        logfmt_ip_line
+    ));
+    assert!(!json_contains_string(
+        &loki_ip_single_filter_result,
+        logfmt_ip_miss_line
+    ));
+    assert!(json_contains_string(
+        &loki_ip_range_filter_result,
+        logfmt_ip_line
+    ));
+    assert!(!json_contains_string(
+        &loki_ip_range_filter_result,
+        logfmt_ip_miss_line
+    ));
+    assert!(json_contains_string(
+        &loki_not_ip_filter_result,
+        logfmt_ip_line
+    ));
+    assert!(!json_contains_string(
+        &loki_not_ip_filter_result,
         logfmt_ip_miss_line
     ));
     assert!(json_contains_string(
