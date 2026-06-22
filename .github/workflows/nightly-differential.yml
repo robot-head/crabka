@@ -19,6 +19,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege GITHUB_TOKEN: read-only by default. The two jobs that open an
+# issue on failure elevate to `issues: write` explicitly (see each job below).
+permissions:
+  contents: read
+
 jobs:
   nightly:
     # The JVM-protocol differential sweep is scheduled/manual only; the
@@ -27,6 +32,10 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Elevated only to open the on-failure tracking issue below.
+    permissions:
+      contents: read
+      issues: write
     env:
       PROPTEST_CASES: "256"
     steps:
@@ -69,6 +78,10 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'traces-differential') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Elevated only to open the on-failure tracking issue below.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v7
       # The grafana/tempo + grafana/grafana images plus the cargo target dir
