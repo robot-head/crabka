@@ -248,6 +248,48 @@ async fn loki_push_endpoint_accepts_incomplete_json_value_as_empty_line() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_ignores_extra_json_value_fields_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                },
+                                "values": [
+                                    ["19", "api error", {"trace_id": "abc"}, "extra"]
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].line == "api error");
+    assert!(
+        records[0].structured_metadata
+            == BTreeMap::from([("trace_id".to_string(), "abc".to_string())])
+    );
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_returns_server_error_when_wal_append_fails() {
     let app = distributor_router(FailingWalSink);
 

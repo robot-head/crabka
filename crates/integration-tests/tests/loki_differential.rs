@@ -4498,6 +4498,40 @@ async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let distributor = distributor_router_for_status();
+    let timestamp = current_unix_second_ns().to_string();
+    let payload = json!({
+        "streams": [
+            {
+                "stream": {
+                    "app": "api"
+                },
+                "values": [[timestamp, "extra push value field", {"trace_id": "abc"}, "extra"]]
+            }
+        ]
+    });
+
+    let loki_error = loki_push_error(&http, &loki_base, &payload).await;
+    let crabka_error = crabka_push_error(distributor, &payload).await;
+
+    assert!(crabka_error == loki_error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())

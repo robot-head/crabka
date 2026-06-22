@@ -3323,9 +3323,6 @@ fn normalize_loki_push(
                 ))
             })?;
             let timestamp_ns = validate_ingest_timestamp_ns(timestamp_ns)?;
-            if metadata.len() > 1 {
-                return Err(DistributorError::InvalidPushValue);
-            }
             validate_loki_timestamp_window(
                 timestamp_ns,
                 &stream_labels,
