@@ -25,6 +25,17 @@ ignore = [
     # dependency used by the new internal profiles crates; no fixed release is
     # available through that DataFusion revision.
     "RUSTSEC-2024-0436",
+    # russh CryptoVec allocation DoS advisories. russh is a DEV/TEST-ONLY
+    # transitive dependency: it enters the graph solely via
+    # `testcontainers -> testcontainers-modules` under `[dev-dependencies]`
+    # (`cargo tree -i russh -e normal` is empty), is never a direct dependency,
+    # and appears nowhere in Crabka source. It is not compiled into any
+    # production binary (broker/observability/etc.). The vulnerabilities are
+    # reachable only by a malicious SSH *peer*; testcontainers uses russh as an
+    # SSH client to a developer-controlled Docker host, not an untrusted network
+    # surface. No fixed release is available through testcontainers 0.27.3.
+    "RUSTSEC-2026-0153",
+    "RUSTSEC-2026-0154",
 ]
 
 [licenses]

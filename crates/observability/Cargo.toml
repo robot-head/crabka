@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+# Depends on the git-pinned `datafusion` (no crates.io release), so this crate
+# cannot be published to crates.io; matches crabka-blockstore / crabka-profiles.
+publish = false
 description = "Role-selectable observability service for Crabka's Loki-compatible logs path"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
