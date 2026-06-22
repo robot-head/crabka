@@ -11078,13 +11078,29 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
 }
 
 fn format_metric_vector_arithmetic_expression(query: &str) -> Option<String> {
-    let (left_text, operator, right_text) = split_metric_vector_arithmetic_query(query)?;
-    let left = format_simple_metric_query(&parse_metric_query(left_text.trim()).ok()?)?;
-    let right = format_vector_function_text(right_text.trim())?;
-    Some(format!("({left} {operator} {right})"))
+    let (left_text, operator, right_text) = split_top_level_arithmetic_query(query)?;
+    if let (Some(left), Some(right)) = (
+        parse_metric_query(left_text.trim())
+            .ok()
+            .and_then(|query| format_simple_metric_query(&query)),
+        format_vector_function_text(right_text.trim()),
+    ) {
+        return Some(format!("({left} {operator} {right})"));
+    }
+
+    if let (Some(left), Some(right)) = (
+        format_vector_function_text(left_text.trim()),
+        parse_metric_query(right_text.trim())
+            .ok()
+            .and_then(|query| format_simple_metric_query(&query)),
+    ) {
+        return Some(format!("({left} {operator} {right})"));
+    }
+
+    None
 }
 
-fn split_metric_vector_arithmetic_query(query: &str) -> Option<(&str, &'static str, &str)> {
+fn split_top_level_arithmetic_query(query: &str) -> Option<(&str, &'static str, &str)> {
     let mut parens = 0_i32;
     let mut brackets = 0_i32;
     let mut braces = 0_i32;
@@ -11111,9 +11127,6 @@ fn split_metric_vector_arithmetic_query(query: &str) -> Option<(&str, &'static s
             '}' => braces -= 1,
             '+' | '-' | '*' | '/' | '%' | '^' if parens == 0 && brackets == 0 && braces == 0 => {
                 let right = query[index + ch.len_utf8()..].trim_start();
-                if !right.starts_with("vector") {
-                    continue;
-                }
                 return Some((
                     &query[..index],
                     match ch {
