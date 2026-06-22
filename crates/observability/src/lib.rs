@@ -18295,6 +18295,9 @@ impl IntoResponse for DistributorError {
         if let Self::LokiDeflateDecode(_) = &self {
             return text_response(StatusCode::BAD_REQUEST, "EOF\n");
         }
+        if let Self::UnsupportedLokiContentEncoding(_) = &self {
+            return text_response(StatusCode::BAD_REQUEST, &format!("{self}\n"));
+        }
 
         let status = match &self {
             Self::IngestBodyTooLarge { .. }
