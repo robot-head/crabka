@@ -9565,6 +9565,7 @@ async fn execute_http_label_replace_metric_binary_expression(
             )
             .await?;
             apply_metric_binary_arithmetic_to_loki_result(&mut left, &right, op, matching.as_ref());
+            retain_metric_binary_on_labels(&mut left, matching.as_ref());
             Ok(left)
         }
         LabelReplaceMetricBinaryExpression::Comparison {
@@ -9589,6 +9590,7 @@ async fn execute_http_label_replace_metric_binary_expression(
                 bool_modifier,
                 matching.as_ref(),
             );
+            retain_metric_binary_on_labels(&mut left, matching.as_ref());
             Ok(left)
         }
         LabelReplaceMetricBinaryExpression::Set {
@@ -9640,6 +9642,11 @@ async fn execute_http_metric_binary_operand(
             query_text,
         )?;
         return Ok(value);
+    }
+    if scalar_vector_query_is_vector(operand) {
+        return execute_http_scalar_vector_expression_result(
+            operand, time_range, step, kind, query_text,
+        );
     }
 
     let query = parse_metric_query(operand).map_err(|source| HttpQueryError::LokiParse {
