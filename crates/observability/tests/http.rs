@@ -9396,6 +9396,46 @@ async fn query_endpoint_accepts_label_replace_metric_query() {
 }
 
 #[tokio::test]
+async fn query_endpoint_accepts_parenthesized_label_replace_metric_query() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=%28label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%29&time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {
+                                "app": "api",
+                                "detected_level": "unknown",
+                                "env": "prod",
+                                "service": "api-api"
+                            },
+                            "value": [0.000000019, "1"]
+                        }
+                    ],
+                    "stats": expected_loki_stats_with(1819, 1, 1)
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_accepts_label_replace_metric_binary_expression() {
     let state = fixture();
     let app = loki_router(state);
@@ -9715,6 +9755,27 @@ async fn query_endpoint_accepts_label_join_metric_query() {
                 }
             })
     );
+}
+
+#[tokio::test]
+async fn query_endpoint_rejects_parenthesized_label_join_metric_query_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=%28label_join%28count_over_time%28%7Bapp%3D%22api%22%7D%20%7C%3D%20%22error%22%20%5B30ns%5D%29%2C%20%22joined%22%2C%20%22%2F%22%2C%20%22app%22%2C%20%22env%22%2C%20%22missing%22%29%29&time=19")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    let body = text_body(response).await;
+    assert!(body.contains("expecting range aggregation"), "{body}");
 }
 
 #[tokio::test]
@@ -15247,6 +15308,27 @@ async fn query_endpoint_accepts_label_join_vector_function() {
                 }
             })
     );
+}
+
+#[tokio::test]
+async fn query_endpoint_rejects_parenthesized_label_join_vector_function_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=%28label_join%28vector%281%29%2C%20%22joined%22%2C%20%22%2F%22%2C%20%22app%22%2C%20%22missing%22%29%29&time=4000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    let body = text_body(response).await;
+    assert!(body.contains("expecting range aggregation"), "{body}");
 }
 
 #[tokio::test]
