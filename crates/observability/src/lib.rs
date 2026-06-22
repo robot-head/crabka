@@ -3602,7 +3602,8 @@ fn is_loki_label_name_char(value: char, first: bool) -> bool {
 }
 
 fn parse_loki_proto_labels(labels: &str) -> Result<Labels, DistributorError> {
-    if labels.trim() == "{}" {
+    let labels = labels.trim();
+    if labels.is_empty() || labels == "{}" {
         return Ok(Labels::new());
     }
 
