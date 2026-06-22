@@ -11110,10 +11110,21 @@ fn format_vector_set_expression(query: &str) -> Option<String> {
     let (left, position) = parse_formatted_vector_function(query, 0)?;
     for operator in ["unless", "and", "or"] {
         if let Some(rest) = query[position..].strip_prefix(operator) {
-            let right_position = query.len() - rest.len();
+            let mut right_position = query.len() - rest.len();
+            let matching_modifier = if let Some((modifier, next_position)) =
+                parse_vector_matching_modifier(query, right_position)
+            {
+                right_position = next_position;
+                Some(modifier)
+            } else {
+                None
+            };
             let (right, end) = parse_formatted_vector_function(query, right_position)?;
             if end == query.len() {
-                return Some(format!("({left} {operator} {right})"));
+                return Some(match matching_modifier {
+                    Some(modifier) => format!("({left} {operator} {modifier}  {right})"),
+                    None => format!("({left} {operator} {right})"),
+                });
             }
         }
     }
@@ -11127,14 +11138,23 @@ fn format_vector_comparison_expression(query: &str) -> Option<String> {
     if bool_modifier {
         right_position += "bool".len();
     }
+    let matching_modifier = if let Some((modifier, next_position)) =
+        parse_vector_matching_modifier(query, right_position)
+    {
+        right_position = next_position;
+        Some(modifier)
+    } else {
+        None
+    };
     let (right, end) = parse_formatted_vector_function(query, right_position)?;
     if end != query.len() {
         return None;
     }
-    if bool_modifier {
-        Some(format!("({left} {operator} bool {right})"))
-    } else {
-        Some(format!("({left} {operator} {right})"))
+    match (bool_modifier, matching_modifier) {
+        (true, Some(modifier)) => Some(format!("({left} {operator} bool {modifier}  {right})")),
+        (true, None) => Some(format!("({left} {operator} bool {right})")),
+        (false, Some(modifier)) => Some(format!("({left} {operator} {modifier}  {right})")),
+        (false, None) => Some(format!("({left} {operator} {right})")),
     }
 }
 
@@ -11149,13 +11169,39 @@ fn parse_vector_comparison_operator(query: &str, position: usize) -> Option<(&'s
 
 fn format_vector_arithmetic_expression(query: &str) -> Option<String> {
     let (left, position) = parse_formatted_vector_function(query, 0)?;
-    let (operator, right_position) = parse_vector_arithmetic_operator(query, position)?;
+    let (operator, mut right_position) = parse_vector_arithmetic_operator(query, position)?;
+    let matching_modifier = if let Some((modifier, next_position)) =
+        parse_vector_matching_modifier(query, right_position)
+    {
+        right_position = next_position;
+        Some(modifier)
+    } else {
+        None
+    };
     let (right, end) = parse_formatted_vector_function(query, right_position)?;
     if end == query.len() {
-        Some(format!("({left} {operator} {right})"))
+        Some(match matching_modifier {
+            Some(modifier) => format!("({left} {operator} {modifier}  {right})"),
+            None => format!("({left} {operator} {right})"),
+        })
     } else {
         None
     }
+}
+
+fn parse_vector_matching_modifier(query: &str, position: usize) -> Option<(String, usize)> {
+    for modifier in ["on", "ignoring"] {
+        if let Some(rest) = query[position..].strip_prefix(modifier) {
+            let labels = rest.strip_prefix('(')?;
+            let labels_end = labels.find(')')?;
+            let labels = &labels[..labels_end];
+            return Some((
+                format!("{modifier} ({labels})"),
+                position + modifier.len() + 1 + labels_end + 1,
+            ));
+        }
+    }
+    None
 }
 
 fn parse_vector_arithmetic_operator(query: &str, position: usize) -> Option<(&'static str, usize)> {
