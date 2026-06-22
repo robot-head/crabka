@@ -66,8 +66,10 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
 - The first distributor ingress surface now accepts Loki JSON and
   snappy-compressed protobuf push payloads, normalizing both into
   tenant-scoped WAL records behind a sink trait.
-- Loki JSON push payloads with `Content-Encoding: gzip` now decompress before
-  normalization, matching common client behavior for compressed HTTP pushes.
+- Loki JSON push payloads with `Content-Encoding: gzip` or `deflate` now
+  decompress before normalization, matching common client behavior for
+  compressed HTTP pushes; real-Loki differential coverage pins the deflate
+  response shape.
 - Loki JSON and protobuf push normalization now rejects malformed stream label
   names before appending to the WAL, and protobuf stream label parsing rejects
   duplicate label names instead of silently collapsing them, matching the
@@ -373,6 +375,8 @@ Production slices promoted from spike: `crates/blockstore`, `crates/logql`,
   filter operators together: regex and negative label matchers (`=~`, `!=`)
   combined with contains, not-contains, regex, and not-regex line filters
   (`|=`, `!=`, `|~`, `!~`) return the same stream rows as Loki.
+- Real-Loki differential coverage now also pins Loki IP line filters for CIDR,
+  single-address, range, and negative matcher forms.
 - LogQL line filters now also parse and evaluate Loki's pattern filter
   operators (`|>` and `!>`) for documented `<_>` wildcard patterns, and string
   literals now accept Loki's raw backtick form as well as escaped double quotes.
