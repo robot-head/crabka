@@ -1587,6 +1587,73 @@ async fn service_router_rejects_stale_loki_push_timestamp_without_wal_append() {
 }
 
 #[tokio::test]
+async fn service_router_rejects_missing_protobuf_timestamp_like_loki_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let config = ServiceConfig {
+        target: Role::Distributor,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        object_store_url: None,
+        wal_bootstrap_server: None,
+        wal_topic: "__crabka_observability_logs_wal".to_string(),
+        wal_group_id: "crabka-observability-compactor".to_string(),
+        data_root: ".".into(),
+        querier_index_source: QuerierIndexSource::LocalManifest,
+        tenant: None,
+        index_prefix: None,
+        query_start_ns: None,
+        query_end_ns: None,
+        max_query_range_ns: None,
+        max_query_series: None,
+        max_query_bytes: None,
+        max_query_length: None,
+        max_ingest_body_bytes: None,
+        wal_append_timeout_ms: None,
+    };
+    let app = build_service_router(
+        &config,
+        ServiceDependencies::default().with_wal_sink(sink.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: r#"{app="api"}"#.to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: None,
+                line: "missing protobuf timestamp".to_string(),
+                structured_metadata: vec![],
+                parsed: vec![],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::BAD_REQUEST);
+    let body = text_body(response).await;
+    assert!(body.contains("timestamp too old"));
+    assert!(body.contains("0001-01-01T00:00:00Z"));
+    assert!(body.contains(r#"{app="api", service_name="api"}"#));
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn service_router_rejects_future_loki_push_timestamp_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let config = ServiceConfig {
