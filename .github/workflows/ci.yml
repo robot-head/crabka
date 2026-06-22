@@ -186,6 +186,12 @@ jobs:
             traces:
               - 'crates/traces/**'
               - 'crates/traceql/**'
+              - 'crates/blockstore/**'
+              - 'crates/broker/**'
+              - 'crates/client-consumer/**'
+              - 'crates/client-producer/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.config/nextest.toml'
