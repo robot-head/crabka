@@ -3498,8 +3498,9 @@ fn normalize_loki_push(
             let Some(value) = value.as_array() else {
                 return Err(DistributorError::InvalidPushValue);
             };
-            let (timestamp, line, metadata) = match value.as_slice() {
-                [timestamp] => (timestamp, "", [].as_slice()),
+            let zero_timestamp;
+            let (timestamp, line, metadata, is_empty_value) = match value.as_slice() {
+                [timestamp] => (timestamp, "", [].as_slice(), false),
                 [timestamp, line, metadata @ ..] => (
                     timestamp,
                     line.as_str().ok_or_else(|| {
@@ -3510,8 +3511,12 @@ fn normalize_loki_push(
                         ))
                     })?,
                     metadata,
+                    false,
                 ),
-                [] => return Err(DistributorError::InvalidPushValue),
+                [] => {
+                    zero_timestamp = Value::String("0".to_string());
+                    (&zero_timestamp, "", [].as_slice(), true)
+                }
             };
             let timestamp = timestamp
                 .as_str()
@@ -3522,6 +3527,12 @@ fn normalize_loki_push(
                 ))
             })?;
             let timestamp_ns = validate_ingest_timestamp_ns(timestamp_ns)?;
+            if is_empty_value {
+                validate_loki_empty_json_value_timestamp_window(
+                    &stream_labels,
+                    reject_old_samples_max_age,
+                )?;
+            }
             validate_loki_timestamp_window(
                 timestamp_ns,
                 &stream_labels,
@@ -3542,6 +3553,22 @@ fn normalize_loki_push(
     }
 
     Ok(records)
+}
+
+fn validate_loki_empty_json_value_timestamp_window(
+    stream_labels: &Labels,
+    max_age: Option<Duration>,
+) -> Result<(), DistributorError> {
+    let Some(max_age) = max_age else {
+        return Ok(());
+    };
+    let oldest_acceptable_timestamp_ns = current_unix_time_ns()
+        .saturating_sub(i64::try_from(max_age.as_nanos()).unwrap_or(i64::MAX));
+    Err(DistributorError::TimestampTooOldString {
+        stream: loki_stale_sample_label_set(stream_labels),
+        timestamp: "0001-01-01T00:00:00Z",
+        oldest_acceptable_timestamp_ns,
+    })
 }
 
 fn normalize_loki_proto_push(
@@ -18225,6 +18252,15 @@ enum DistributorError {
         oldest_acceptable_timestamp_ns: i64,
     },
     #[error(
+        "entry for stream '{stream}' has timestamp too old: {timestamp}, oldest acceptable timestamp is: {oldest}\n",
+        oldest = rfc3339_seconds(*oldest_acceptable_timestamp_ns),
+    )]
+    TimestampTooOldString {
+        stream: String,
+        timestamp: &'static str,
+        oldest_acceptable_timestamp_ns: i64,
+    },
+    #[error(
         "entry for stream '{stream}' has timestamp too new: {timestamp}\n",
         timestamp = rfc3339_seconds(*timestamp_ns),
     )]
@@ -18278,6 +18314,7 @@ impl IntoResponse for DistributorError {
             | Self::InvalidStructuredMetadataSyntax(_)
             | Self::InvalidTimestamp
             | Self::TimestampTooOld { .. }
+            | Self::TimestampTooOldString { .. }
             | Self::TimestampTooNew { .. }
             | Self::Http(_)
             | Self::LokiDecode(_)
@@ -18297,6 +18334,7 @@ impl IntoResponse for DistributorError {
                 | Self::InvalidStructuredMetadataSyntax(_)
                 | Self::NoValidStreams
                 | Self::TimestampTooOld { .. }
+                | Self::TimestampTooOldString { .. }
                 | Self::TimestampTooNew { .. }
         ) {
             return text_response(status, &self.to_string());
@@ -18342,6 +18380,7 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         | DistributorError::InvalidStructuredMetadataSyntax(_)
         | DistributorError::InvalidTimestamp
         | DistributorError::TimestampTooOld { .. }
+        | DistributorError::TimestampTooOldString { .. }
         | DistributorError::TimestampTooNew { .. }
         | DistributorError::Http(_)
         | DistributorError::LokiDecode(_)
