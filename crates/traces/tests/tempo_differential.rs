@@ -109,8 +109,12 @@ fn differential_search_corpus() -> Vec<QueryCase> {
             expected_span_id: Some(CHILD_SPAN_ID_HEX),
         },
         QueryCase {
+            // `| count() > 0` is a spanset count FILTER, valid in Tempo's search
+            // API across versions. (`| by(...)` is a metrics-only stage that
+            // real Tempo's /api/search rejects with a parse error, even though
+            // Crabka accepts it as a superset.)
             kind: QueryCaseKind::Pipeline,
-            encoded_query: "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D%20%7C%20count()%20%7C%20by%28span.http.method%29",
+            encoded_query: "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D%20%7C%20count()%20%3E%200",
             expected_span_id: None,
         },
     ]
