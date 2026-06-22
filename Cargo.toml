@@ -75,7 +75,7 @@ once_cell = "1"
 # client used across the Rust data ecosystem (DataFusion, Polars, Delta-rs).
 # Crabka's S3-compatible and native-GCS RemoteStorageManagers (KIP-405) are
 # built on it.
-object_store = { version = "0.13", features = ["aws", "gcp"] }
+object_store = { version = "0.14", features = ["aws", "gcp"] }
 url = "2"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 multer = "3"
