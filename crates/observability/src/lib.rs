@@ -10761,6 +10761,7 @@ fn apply_metric_binary_set_to_loki_result(
                 left_results.push(right_series.clone());
             }
         }
+        sort_loki_metric_results_by_labels(left_results);
         return;
     }
 
@@ -10796,6 +10797,10 @@ fn apply_metric_binary_set_to_loki_result(
 
 fn metric_series_labels(series: &Value) -> Option<Labels> {
     series.get("metric").and_then(json_object_to_labels)
+}
+
+fn sort_loki_metric_results_by_labels(results: &mut [Value]) {
+    results.sort_by(|left, right| metric_series_labels(left).cmp(&metric_series_labels(right)));
 }
 
 fn metric_vector_matching_key(labels: &Labels, matching: Option<&MetricVectorMatching>) -> Labels {
