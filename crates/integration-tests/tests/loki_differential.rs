@@ -2867,6 +2867,14 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
     assert!(crabka_metric_vector_set_result == loki_metric_vector_set_result);
 
+    let vector_metric_set_query = r#"vector(1) or on() count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
+    let loki_vector_metric_set_result =
+        loki_query_result(&http, &loki_base, vector_metric_set_query, time_ns).await;
+    let crabka_vector_metric_set_result =
+        crabka_query_result(querier.clone(), vector_metric_set_query, time_ns).await;
+
+    assert!(crabka_vector_metric_set_result == loki_vector_metric_set_result);
+
     let label_replace_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]) / count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)")"#;
     let loki_label_replace_result =
         loki_query_result(&http, &loki_base, label_replace_query, time_ns).await;
