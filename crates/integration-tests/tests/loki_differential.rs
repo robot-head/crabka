@@ -3095,6 +3095,51 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    for (path, raw_query) in [
+        (
+            "/loki/api/v1/query",
+            "query=%7Bapp%3D%22api%22%7D&time=1000000000",
+        ),
+        (
+            "/loki/api/v1/query_range",
+            "query=%7Bapp%3D%22api%22%7D&start=0&end=1000000000",
+        ),
+        (
+            "/api/prom/query",
+            "query=%7Bapp%3D%22api%22%7D&time=1000000000",
+        ),
+    ] {
+        let body = "query=%7Bapp%3D";
+        let loki_response =
+            loki_post_query_precedence_response(&http, &loki_base, path, raw_query, body).await;
+        let crabka_response =
+            crabka_post_query_precedence_response(querier.clone(), path, raw_query, body).await;
+        assert!(crabka_response == loki_response, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5098,6 +5143,64 @@ async fn crabka_query_error(app: axum::Router, query: &str) -> Value {
     let status = response.status().as_u16();
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
+async fn loki_post_query_precedence_response(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    raw_query: &str,
+    body: &str,
+) -> Value {
+    let response = http
+        .post(format!("{base}{path}?{raw_query}"))
+        .header("X-Scope-OrgID", "tenant-a")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.to_string())
+        .send()
+        .await
+        .expect("post Loki query precedence request");
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .expect("Loki query precedence response body");
+    stable_query_or_error_response(status, &body)
+}
+
+async fn crabka_post_query_precedence_response(
+    app: axum::Router,
+    path: &str,
+    raw_query: &str,
+    body: &str,
+) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("{path}?{raw_query}"))
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_query_or_error_response(status, std::str::from_utf8(&body).unwrap())
+}
+
+fn stable_query_or_error_response(status: u16, body: &str) -> Value {
+    if status == StatusCode::OK.as_u16() {
+        let body: Value = serde_json::from_str(body).expect("Loki query success JSON response");
+        json!({
+            "httpStatus": status,
+            "body": stable_loki_result(&body),
+        })
+    } else {
+        stable_loki_error(status, body)
+    }
 }
 
 async fn loki_tail_ws_error(base: &str, query: Option<&str>) -> Value {
