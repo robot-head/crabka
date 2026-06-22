@@ -1790,6 +1790,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "exhaustive per-intrinsic matcher test"
+    )]
     async fn intrinsic_matchers_match_each_intrinsic() {
         // String intrinsics.
         assert!(
