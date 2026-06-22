@@ -1512,7 +1512,8 @@ Timestamp-only JSON push values now match Loki by appending an empty log line
 instead of rejecting the value shape, and extra JSON push value fields after the
 first structured metadata object are ignored like Loki. Non-array JSON push
 values now also return Loki's raw `Unknown value type` decoder response, and
-non-object JSON stream entries return Loki's raw object decoder response. The
+non-array `streams` fields and non-object JSON stream entries return Loki's raw
+stream decoder responses. The
 configured OTLP HTTP ingest path now shares the same timestamp windows before
 WAL append and matches Loki's `400` protobuf status-message body for future
 OTLP timestamps. Configured distributors now also perform a broker-backed tenant
