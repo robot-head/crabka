@@ -3415,6 +3415,39 @@ async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let query = r#"{app="api"}"#;
+    let body = format!(
+        "query={}&start=0&end=2595601000000000",
+        percent_encode_component(query)
+    );
+
+    let loki_error = loki_index_stats_post_body_precedence_error(&http, &loki_base, &body).await;
+    let crabka_error = crabka_index_stats_post_body_precedence_error(querier, &body).await;
+
+    assert!(crabka_error == loki_error);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_missing_query_errors() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5435,6 +5468,46 @@ async fn crabka_index_query_error(
                 .uri(uri)
                 .header("X-Scope-OrgID", "tenant-a")
                 .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_loki_error(status, std::str::from_utf8(&body).unwrap())
+}
+
+async fn loki_index_stats_post_body_precedence_error(
+    http: &reqwest::Client,
+    base: &str,
+    body: &str,
+) -> Value {
+    let response = http
+        .post(format!("{base}/loki/api/v1/index/stats"))
+        .query(&[("start", "not-a-number")])
+        .header("X-Scope-OrgID", "tenant-a")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.to_owned())
+        .send()
+        .await
+        .expect("post Loki index stats with conflicting query/body params");
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .expect("Loki index stats POST precedence error response body");
+    stable_loki_error(status, &body)
+}
+
+async fn crabka_index_stats_post_body_precedence_error(app: axum::Router, body: &str) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/index/stats?start=not-a-number")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_owned()))
                 .unwrap(),
         )
         .await
