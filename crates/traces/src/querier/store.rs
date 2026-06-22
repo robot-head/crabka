@@ -146,6 +146,12 @@ impl CrabkaSpanStore {
         {
             batches.extend(live.span_batches(tenant, live_start, end_ns).await?);
         }
+        // Bytes this scan inspected: the decoded size of the cold+live data read,
+        // before filtering (surfaced as the Tempo search `metrics.inspectedBytes`).
+        let inspected_bytes = batches
+            .iter()
+            .map(|b| u64::try_from(b.get_array_memory_size()).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add);
         let batches = recompute_scan_nested_sets(batches)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
         let mut expansion_matchers = matchers.to_vec();
@@ -166,6 +172,7 @@ impl CrabkaSpanStore {
         Ok(ScanResult {
             ctx,
             span_table: "spans".into(),
+            inspected_bytes,
         })
     }
 

@@ -27,6 +27,10 @@ pub(crate) struct PlannerContext {
 pub(crate) struct PlannedSpanset {
     pub ctx: SessionContext,
     pub plan: LogicalPlan,
+    /// Bytes inspected by the primary span scan (threaded to
+    /// `SearchResponse::inspected_bytes`). Nested structural-join tables re-scan
+    /// the same blocks, so only the primary scan is counted.
+    pub inspected_bytes: u64,
 }
 
 pub(crate) async fn plan_query<S: SpanStore>(
@@ -55,6 +59,7 @@ async fn plan_spanset_sql<S: SpanStore>(
     let scan = store
         .scan_with_options(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns, &scan_options)
         .await?;
+    let inspected_bytes = scan.inspected_bytes;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
     let spanset_sql = spanset_to_sql(root, &selector::ident(&scan.span_table), &nested_tables)?;
     let sql = pipeline_to_sql(&spanset_sql, pipeline)?;
@@ -63,6 +68,7 @@ async fn plan_spanset_sql<S: SpanStore>(
     Ok(PlannedSpanset {
         ctx: scan.ctx,
         plan,
+        inspected_bytes,
     })
 }
 

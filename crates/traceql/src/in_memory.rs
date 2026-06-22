@@ -361,12 +361,14 @@ impl InMemorySpanStore {
 
         let batch = RecordBatch::try_new(schema.clone(), columns)
             .map_err(|e| TraceqlError::Store(e.to_string()))?;
+        let inspected_bytes = u64::try_from(batch.get_array_memory_size()).unwrap_or(u64::MAX);
         let ctx = SessionContext::new();
         let table = MemTable::try_new(schema, vec![vec![batch]])?;
         ctx.register_table("spans", Arc::new(table))?;
         Ok(ScanResult {
             ctx,
             span_table: "spans".into(),
+            inspected_bytes,
         })
     }
 }

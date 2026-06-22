@@ -50,6 +50,10 @@ pub struct SpanMatcher {
 pub struct ScanResult {
     pub ctx: SessionContext,
     pub span_table: String,
+    /// Approximate decoded bytes of the scanned data registered into `ctx` (the
+    /// data this scan inspected, before query filtering). Threaded up to
+    /// `SearchResponse::inspected_bytes`.
+    pub inspected_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -150,6 +154,7 @@ mod tests {
             Ok(ScanResult {
                 ctx: SessionContext::new(),
                 span_table: "spans".into(),
+                inspected_bytes: 0,
             })
         }
 

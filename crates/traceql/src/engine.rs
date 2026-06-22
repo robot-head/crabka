@@ -191,7 +191,13 @@ impl<S: SpanStore> TraceqlEngine<S> {
         } else {
             options.spss
         };
-        assemble_search_response(&batches, search_limit, effective_spss, q.hints.most_recent)
+        assemble_search_response(
+            &batches,
+            search_limit,
+            effective_spss,
+            q.hints.most_recent,
+            planned.inspected_bytes,
+        )
     }
 
     pub async fn query_range(
@@ -1281,6 +1287,7 @@ pub(crate) fn assemble_search_response(
     limit: usize,
     spss: usize,
     most_recent: bool,
+    inspected_bytes: u64,
 ) -> Result<SearchResponse> {
     let mut traces: BTreeMap<[u8; 16], TraceAcc> = BTreeMap::new();
     for batch in batches {
@@ -1364,6 +1371,7 @@ pub(crate) fn assemble_search_response(
     Ok(SearchResponse {
         traces: out,
         inspected_traces,
+        inspected_bytes,
     })
 }
 
@@ -1755,11 +1763,14 @@ mod tests {
         ) -> Result<ScanResult> {
             let schema = self.batch.schema();
             let ctx = SessionContext::new();
+            let inspected_bytes =
+                u64::try_from(self.batch.get_array_memory_size()).unwrap_or(u64::MAX);
             let table = MemTable::try_new(schema, vec![vec![self.batch.clone()]])?;
             ctx.register_table("spans", Arc::new(table))?;
             Ok(ScanResult {
                 ctx,
                 span_table: "spans".into(),
+                inspected_bytes,
             })
         }
 
@@ -1872,6 +1883,18 @@ mod tests {
         assert!(r.traces[0].root_service_name == "a");
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_reports_inspected_bytes() {
+        // The scan's decoded data size is threaded up to inspected_bytes (non-zero
+        // for a non-empty store) for the Tempo search `metrics.inspectedBytes`.
+        let e = engine();
+        let r = e
+            .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        assert!(r.inspected_bytes > 0);
     }
 
     #[tokio::test]

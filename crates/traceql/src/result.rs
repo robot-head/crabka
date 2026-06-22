@@ -71,6 +71,10 @@ pub struct TraceResult {
 pub struct SearchResponse {
     pub traces: Vec<TraceResult>,
     pub inspected_traces: usize,
+    /// Approximate bytes of span data the query inspected (the decoded size of
+    /// the scanned cold+live batches, before filtering). Surfaced as the Tempo
+    /// search `metrics.inspectedBytes`.
+    pub inspected_bytes: u64,
 }
 
 /// Full span set for one trace.
@@ -179,10 +183,12 @@ mod tests {
                 }],
             }],
             inspected_traces: 1,
+            inspected_bytes: 4096,
         };
         assert!(resp.traces[0].span_sets[0].matched == 3);
         assert!(resp.traces[0].trace_id == [0xAB; 16]);
         assert!(resp.inspected_traces == 1);
+        assert!(resp.inspected_bytes == 4096);
     }
 
     #[test]

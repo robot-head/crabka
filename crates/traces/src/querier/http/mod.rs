@@ -907,6 +907,7 @@ fn decode_trace_id(trace_id: &str) -> Result<[u8; 16], hex::FromHexError> {
 
 fn search_json(resp: SearchResponse) -> Value {
     let inspected_traces = resp.inspected_traces;
+    let inspected_bytes = resp.inspected_bytes;
     // Spans this response scanned/returned: the distinct matched spans across
     // every returned trace's spanSets. The frontend folds this per-job sum into
     // the merged `metrics.inspectedSpans`.
@@ -933,15 +934,14 @@ fn search_json(resp: SearchResponse) -> Value {
             })
         }).collect::<Vec<_>>(),
         // Per-response job accounting the frontend folds (`metrics.add`): this
-        // search ran as one completed job. `inspectedBytes` stays 0 — a real
-        // scanned-bytes figure would require scan-layer instrumentation in the
-        // engine that is out of scope here (follow-up).
+        // search ran as one completed job. `inspectedBytes` is the decoded size of
+        // the cold+live data the scan inspected (threaded up from the SpanStore).
         "metrics": {
             "completedJobs": 1,
             "totalBlocks": 0,
             "inspectedTraces": inspected_traces,
             "inspectedSpans": inspected_spans,
-            "inspectedBytes": 0,
+            "inspectedBytes": inspected_bytes,
         },
     })
 }
@@ -2904,8 +2904,8 @@ overrides:
             get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
         assert!(status == StatusCode::OK);
         assert!(
-            body == json!({
-                "traces": [{
+            body["traces"]
+                == json!([{
                     "traceID": "09090909090909090909090909090909",
                     "rootServiceName": "svc-a",
                     "rootTraceName": "root-a",
@@ -2920,16 +2920,16 @@ overrides:
                         }],
                         "matched": 1
                     }]
-                }],
-                "metrics": {
-                    "completedJobs": 1,
-                    "totalBlocks": 0,
-                    "inspectedTraces": 1,
-                    "inspectedSpans": 1,
-                    "inspectedBytes": 0
-                }
-            })
+                }])
         );
+        let metrics = &body["metrics"];
+        assert!(metrics["completedJobs"] == 1);
+        assert!(metrics["totalBlocks"] == 0);
+        assert!(metrics["inspectedTraces"] == 1);
+        assert!(metrics["inspectedSpans"] == 1);
+        // inspectedBytes = decoded size of the scanned data: non-zero, but not
+        // pinned to a brittle exact byte count.
+        assert!(metrics["inspectedBytes"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -2945,6 +2945,7 @@ overrides:
         assert!(metrics["completedJobs"].as_u64().unwrap() >= 1);
         assert!(metrics["inspectedTraces"].as_u64().unwrap() >= 1);
         assert!(metrics["inspectedSpans"].as_u64().unwrap() >= 1);
+        assert!(metrics["inspectedBytes"].as_u64().unwrap() >= 1);
     }
 
     #[tokio::test]
