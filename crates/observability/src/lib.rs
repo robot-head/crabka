@@ -11029,14 +11029,22 @@ fn format_scalar_vector_expression(query: &str) -> Option<String> {
         .chars()
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
-    let scalar = query.strip_prefix("vector(")?.strip_suffix(')')?;
-    if scalar.starts_with(['+', '-']) {
-        return None;
+    if let Some(scalar) = query
+        .strip_prefix("vector(")
+        .and_then(|query| query.strip_suffix(')'))
+    {
+        if scalar.starts_with(['+', '-']) {
+            return None;
+        }
+        return Some(format!(
+            "vector({})",
+            parse_scalar_sample(scalar)?.format_fixed_six()
+        ));
     }
-    Some(format!(
-        "vector({})",
-        parse_scalar_sample(scalar)?.format_fixed_six()
-    ))
+    match scalar_vector_expression_result(&query)? {
+        ScalarVectorExpressionResult::Scalar { sample } => Some(sample),
+        ScalarVectorExpressionResult::Vector { .. } => None,
+    }
 }
 
 fn format_stream_query(query: &StreamQuery) -> String {

@@ -6775,6 +6775,31 @@ async fn format_query_endpoint_accepts_vector_function_expression() {
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_scalar_expression_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=%281%2B2%29%2A3")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": "9"
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_accepts_metric_binary_arithmetic_query() {
     let state = fixture();
     let app = loki_router(state);
