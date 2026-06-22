@@ -1,5 +1,8 @@
+use arrow::array::{Array, Int64Array, StringArray};
 use assert2::assert;
-use crabka_blockstore::{SCOL_TRACE_ID, span_block_schema};
+use crabka_blockstore::{
+    SCOL_ROOT_SPAN_NAME, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, span_block_schema,
+};
 use crabka_traceql::{AttrValue as TraceqlAttrValue, ScopedTag, TagScope, TypedValue};
 use crabka_traces::{
     AttrValue, EventRecord, KeyValue, LinkRecord, LiveStore, Span, SpanKind, SpanRecord,
@@ -289,6 +292,41 @@ async fn live_source_batches_filter_by_time_range() {
     assert!(batches.len() == 1);
     assert!(batches[0].num_rows() == 1);
     assert!(store.block_builder_frontier_ns("tenant-a") == 200);
+}
+
+#[tokio::test]
+async fn live_source_window_keeps_trace_level_columns_global() {
+    // Root span starts at t=10 (outside the query window); a later child span
+    // at t=200 falls inside the window. A window that clips the trace must not
+    // make the trace-level columns reflect only the in-window subset.
+    let mut store = LiveStore::new(i64::MAX);
+    store.ingest(record("tenant-a", span([1; 16], 1, 10)));
+    let mut child = span([1; 16], 2, 200);
+    child.parent_span_id = Some([1; 8]);
+    store.ingest(record("tenant-a", child));
+
+    // Window [150, 300] includes only the child span.
+    let batches = store.span_batches("tenant-a", 150, 300).await.unwrap();
+    assert!(batches.len() == 1);
+    assert!(batches[0].num_rows() == 1);
+
+    let trace_start = batches[0]
+        .column_by_name(SCOL_TRACE_START_NANO)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let root_name = batches[0]
+        .column_by_name(SCOL_ROOT_SPAN_NAME)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    // Trace-global start is the root span's t=10, NOT the in-window child's t=200.
+    assert!(trace_start.value(0) == 10);
+    // Root span name is the actual root ("span-1"), NOT the in-window child.
+    assert!(root_name.value(0) == "span-1");
 }
 
 #[test]

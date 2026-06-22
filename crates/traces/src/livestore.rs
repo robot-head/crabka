@@ -13,7 +13,9 @@ use tokio_util::sync::CancellationToken;
 use crate::error::TracesError;
 use crate::querier::live::{LiveSource, Result as LiveResult};
 use crate::span::{
-    AttrValue, EventRecord, KeyValue, LinkRecord, Span, batch::span_batch, nested_set,
+    AttrValue, EventRecord, KeyValue, LinkRecord, Span,
+    batch::{span_batch, span_batch_for_window},
+    nested_set,
 };
 use crate::wal::SpanRecord;
 
@@ -149,7 +151,9 @@ pub async fn run(
             ingest_wal_payloads(&mut guard, payloads)?;
         }
 
-        let _ = consumer.commit_sync().await;
+        if let Err(err) = consumer.commit_sync().await {
+            tracing::warn!(error = %err, "live-store offset commit failed");
+        }
     }
     Ok(())
 }
@@ -172,8 +176,12 @@ impl LiveSource for LiveStore {
                     .collect::<Vec<_>>();
                 if !in_range.is_empty() {
                     order_spans(&mut in_range);
+                    // Rows come from the in-window subset, but trace-level
+                    // columns (root service/name, start, duration) must reflect
+                    // the FULL trace so a window that clips the trace does not
+                    // skew them. `spans` is the complete per-trace span set.
                     batches.push(
-                        span_batch(&in_range)
+                        span_batch_for_window(&in_range, spans, &[])
                             .map_err(|err| crabka_traceql::TraceqlError::Store(err.to_string()))?,
                     );
                 }

@@ -1,5 +1,7 @@
 //! Build span block `RecordBatch` values from internal spans.
 
+use std::collections::HashMap;
+
 use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     AttrValue as BlockAttrValue, NestedSet as BlockNestedSet, PromotedSpanAttr, SpanAttr,
@@ -19,13 +21,36 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
 
 /// Build one span-block `RecordBatch` from spans of one trace with configured
 /// attributes duplicated into dedicated columns.
+///
+/// `spans` must be the complete per-trace span set: the trace-level columns
+/// (root service/name, start, duration) are computed over exactly these spans.
 pub fn span_batch_with_promoted_attrs(
     spans: &[Span],
     promoted_attrs: &[PromotedSpanAttr],
 ) -> Result<RecordBatch, TracesError> {
-    let nested = assign_nested_set(spans);
+    span_batch_for_window(spans, spans, promoted_attrs)
+}
+
+/// Build one span-block `RecordBatch` whose rows are `row_spans` but whose
+/// trace-level columns are computed over `trace_spans`.
+///
+/// Use this when a query window clips a trace: `row_spans` is the in-window
+/// subset, while `trace_spans` is the trace's full span set so that
+/// `root_service_name` / `root_span_name` / `trace_start_unix_nano` /
+/// `trace_duration_nanos` reflect the whole trace rather than only the window.
+/// Pass the same slice for both to materialize a complete trace.
+pub fn span_batch_for_window(
+    row_spans: &[Span],
+    trace_spans: &[Span],
+    promoted_attrs: &[PromotedSpanAttr],
+) -> Result<RecordBatch, TracesError> {
+    // Nested-set intervals and child counts describe the rows themselves, so
+    // they are computed over `row_spans`. Trace-level columns describe the
+    // whole trace, so they come from `trace_spans`.
+    let nested = assign_nested_set(row_spans);
     let child_counts = child_counts(&nested);
-    let (root_service_name, root_span_name, trace_start, trace_duration) = root_info(spans);
+    let (root_service_name, root_span_name, trace_start, trace_duration) = root_info(trace_spans);
+    let spans = row_spans;
     let rows = spans
         .iter()
         .zip(nested)
@@ -63,20 +88,27 @@ pub fn span_batch_with_promoted_attrs(
 }
 
 fn child_counts(nested: &[crate::span::nested_set::NestedSet]) -> Vec<i32> {
+    // Single O(n) pass: tally how many nodes name each `parent_id`, then each
+    // node's child count is the tally for its own `left` interval.
+    let mut counts: HashMap<i32, i32> = HashMap::with_capacity(nested.len());
+    for node in nested {
+        let count = counts.entry(node.parent_id).or_insert(0);
+        *count = count.saturating_add(1);
+    }
     nested
         .iter()
-        .map(|node| {
-            i32::try_from(
-                nested
-                    .iter()
-                    .filter(|other| other.parent_id == node.left)
-                    .count(),
-            )
-            .unwrap_or(i32::MAX)
-        })
+        .map(|node| counts.get(&node.left).copied().unwrap_or(0))
         .collect()
 }
 
+/// Compute the trace-level columns (root service/name, trace start, trace
+/// duration) for one trace.
+///
+/// CONTRACT: `spans` must be the COMPLETE per-trace span set. Passing a
+/// time-windowed or otherwise filtered subset yields trace-level values that
+/// reflect only the subset, not the trace. Callers that materialize rows from a
+/// clipped window must use [`span_batch_for_window`] and pass the full trace's
+/// spans here.
 fn root_info(spans: &[Span]) -> (String, String, i64, i64) {
     let root = spans
         .iter()
@@ -114,6 +146,14 @@ fn span_attrs(span: &Span) -> Vec<SpanAttr> {
         );
     }
     for attr in &span.span_attrs {
+        // Reserve the `__resource.` namespace for true resource attributes. A
+        // client span attribute keyed under this prefix would otherwise be
+        // indistinguishable downstream from a resource-scoped attribute,
+        // letting a client spoof `resource.`-scoped values (TraceQL scope
+        // bypass / tenant data-integrity). Drop such span attributes.
+        if attr.key.starts_with(RESOURCE_ATTR_PREFIX) {
+            continue;
+        }
         push_span_attr(&mut attrs, attr.key.clone(), &attr.value);
     }
     attrs
@@ -350,6 +390,82 @@ mod tests {
             .unwrap();
         assert!(method_values.value(0) == "GET");
         assert!(method_values.value(1) == "POST");
+    }
+
+    fn attr_keys_of_row(batch: &RecordBatch, row: usize) -> Vec<String> {
+        let keys = col::<ListArray>(batch, SCOL_ATTR_KEYS);
+        let keys_row = keys.value(row);
+        let keys = keys_row.as_any().downcast_ref::<StringArray>().unwrap();
+        (0..keys.len())
+            .map(|idx| keys.value(idx).to_string())
+            .collect()
+    }
+
+    #[test]
+    fn child_counts_match_tree_shape() {
+        use crabka_blockstore::SCOL_CHILD_COUNT;
+
+        // span 1 is root with two children (2, 3); span 2 has one child (4).
+        let spans = vec![
+            span(1, None, "api"),
+            span(2, Some(1), "api"),
+            span(3, Some(1), "api"),
+            span(4, Some(2), "api"),
+        ];
+        let batch = span_batch(&spans).unwrap();
+        let counts = col::<Int32Array>(&batch, SCOL_CHILD_COUNT);
+        // Rows are index-aligned with input order.
+        assert!(counts.value(0) == 2); // root: children 2 and 3
+        assert!(counts.value(1) == 1); // span 2: child 4
+        assert!(counts.value(2) == 0); // span 3: leaf
+        assert!(counts.value(3) == 0); // span 4: leaf
+    }
+
+    #[test]
+    fn span_attr_cannot_spoof_resource_scope() {
+        let mut s = span(1, None, "api");
+        // A real resource attr legitimately gets the `__resource.` prefix downstream.
+        s.resource_attrs.push(KeyValue {
+            key: "deployment.environment".into(),
+            value: AttrValue::Str("prod".into()),
+        });
+        // A client span attr keyed to look like a resource attr must NOT be encoded
+        // into the resource namespace (TraceQL `resource.` scope bypass / spoof).
+        s.span_attrs.push(KeyValue {
+            key: format!("{RESOURCE_ATTR_PREFIX}service.name"),
+            value: AttrValue::Str("evil".into()),
+        });
+
+        let batch = span_batch(&[s]).unwrap();
+        let keys = attr_keys_of_row(&batch, 0);
+
+        // The real resource attr is present under the resource namespace.
+        assert!(keys.contains(&format!("{RESOURCE_ATTR_PREFIX}deployment.environment")));
+        // The legitimate resource service.name is present exactly once.
+        let resource_service_key = format!("{RESOURCE_ATTR_PREFIX}service.name");
+        assert!(
+            keys.iter()
+                .filter(|key| **key == resource_service_key)
+                .count()
+                == 1
+        );
+        // The spoofed span attr (whose value was "evil") did NOT land in the
+        // resource namespace: there is no second `__resource.service.name` entry,
+        // and the resource value remains the true "api".
+        let values = col::<ListArray>(&batch, SCOL_ATTR_VALUE);
+        let row_values = values.value(0);
+        let row_values = row_values.as_any().downcast_ref::<ListArray>().unwrap();
+        let resource_service_idx = keys
+            .iter()
+            .position(|key| *key == resource_service_key)
+            .unwrap();
+        let service_values = row_values.value(resource_service_idx);
+        let service_values = service_values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(service_values.len() == 1);
+        assert!(service_values.value(0) == "api");
     }
 
     #[test]

@@ -572,19 +572,26 @@ fn validate_shared(spans: &[Span], limits: &Limits) -> Result<(), TracesError> {
 }
 
 fn check_shared_attrs(limits: &Limits, attrs: &[KeyValue]) -> Result<(), TracesError> {
-    let flattened = attrs.iter().map(shared_attr_pair).collect::<Vec<_>>();
+    let flattened = attrs.iter().map(shared_attr_measured).collect::<Vec<_>>();
     IngestEnforcer::check_attributes(limits, &flattened)
         .map_err(|err| limit_error_to_traces_error(&err))
 }
 
-fn shared_attr_pair(attr: &KeyValue) -> (String, String) {
-    let value = match &attr.value {
-        AttrValue::Str(value) => value.clone(),
-        AttrValue::Bytes(_) | AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => {
-            String::new()
-        }
+/// Pair an attribute key with the TRUE encoded byte length of its value.
+///
+/// Measuring the real byte length (rather than stringifying) ensures the
+/// `max_attribute_bytes` cap sees the actual size of `Bytes`/`Int`/`Double`
+/// values, which a `String` conversion would mis-report (e.g. a large byte
+/// blob would otherwise read as length 0 and bypass the limit).
+fn shared_attr_measured(attr: &KeyValue) -> (String, u64) {
+    let value_bytes = match &attr.value {
+        AttrValue::Str(value) => value.len(),
+        AttrValue::Bytes(value) => value.len(),
+        AttrValue::Int(value) => value.to_le_bytes().len(),
+        AttrValue::Double(value) => value.to_le_bytes().len(),
+        AttrValue::Bool(_) => 1,
     };
-    (attr.key.clone(), value)
+    (attr.key.clone(), value_bytes as u64)
 }
 
 fn limit_error_to_traces_error(err: &LimitError) -> TracesError {
@@ -1497,5 +1504,29 @@ overrides:
         out.push(T_STOP);
         out.push(T_STOP);
         out
+    }
+
+    #[test]
+    fn oversized_bytes_attr_is_rejected_by_attribute_size_cap() {
+        let limits = crate::limits::Limits {
+            max_attribute_bytes: 4,
+            ..crate::limits::Limits::default()
+        };
+        // A `Bytes` value of 8 bytes exceeds the 4-byte cap. The old stringless
+        // path measured it as length 0 and let it through.
+        let attrs = vec![KeyValue {
+            key: "blob".into(),
+            value: AttrValue::Bytes(vec![0u8; 8]),
+        }];
+
+        let err = check_shared_attrs(&limits, &attrs).unwrap_err();
+        assert!(matches!(err, TracesError::Limit(_)));
+
+        // A small `Bytes` value within the cap is accepted.
+        let small = vec![KeyValue {
+            key: "b".into(),
+            value: AttrValue::Bytes(vec![0u8; 2]),
+        }];
+        assert!(check_shared_attrs(&limits, &small).is_ok());
     }
 }
