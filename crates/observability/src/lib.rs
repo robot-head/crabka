@@ -48,15 +48,14 @@ use crabka_logql::{
     ComparisonOp, FieldFilter, FieldFilterExpression, FieldFilterLogicOp, FieldValue,
     LabelFormatValue, LabelSelectionMatcher, LabelSelectionSet, LineFilterOp, LogfmtParserConfig,
     MatchOp, MetricBinaryArithmetic, MetricBinaryComparison, MetricBinarySet, MetricBinarySetOp,
-    MetricLabelJoin, MetricLabelReplace, MetricQuery, MetricScalarArithmetic,
-    MetricScalarArithmeticOp, MetricScalarComparison, MetricVectorGroupModifier,
-    MetricVectorMatching, ParseError, ParserStage, PipelineStage, PlanError, Quantile,
-    RangeAggregation, StreamPlan, StreamQuery, UNWRAP_SAMPLE_VALUE_LABEL, UnwrapConversion,
-    VectorAggregation, VectorAggregationOp, VectorGrouping, parse_metric_binary_arithmetic_query,
-    parse_metric_binary_comparison_query, parse_metric_binary_set_query,
-    parse_metric_label_join_query, parse_metric_label_replace_query, parse_metric_query,
-    parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query, parse_query,
-    plan_stream_query,
+    MetricLabelJoin, MetricQuery, MetricScalarArithmetic, MetricScalarArithmeticOp,
+    MetricScalarComparison, MetricVectorGroupModifier, MetricVectorMatching, ParseError,
+    ParserStage, PipelineStage, PlanError, Quantile, RangeAggregation, StreamPlan, StreamQuery,
+    UNWRAP_SAMPLE_VALUE_LABEL, UnwrapConversion, VectorAggregation, VectorAggregationOp,
+    VectorGrouping, parse_metric_binary_arithmetic_query, parse_metric_binary_comparison_query,
+    parse_metric_binary_set_query, parse_metric_label_join_query, parse_metric_label_replace_query,
+    parse_metric_query, parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query,
+    parse_query, plan_stream_query,
 };
 use datafusion::arrow::array::builder::{MapBuilder, StringBuilder};
 use datafusion::arrow::array::{
@@ -7727,7 +7726,35 @@ async fn execute_http_query_for_tenant(
             label_replace.query.clone(),
         )
         .await?;
-        apply_label_replace_to_loki_result(&mut value, &label_replace, &params.query)?;
+        apply_label_replace_to_loki_result(
+            &mut value,
+            &label_replace.destination_label,
+            &label_replace.replacement,
+            &label_replace.source_label,
+            &label_replace.pattern,
+            &params.query,
+        )?;
+        return Ok(value);
+    }
+    if let Some(label_replace) = parse_label_replace_expression(&params.query) {
+        let mut value = execute_http_metric_expression_query(
+            state,
+            tenant,
+            time_range,
+            params.step,
+            kind,
+            &label_replace.query,
+            &params.query,
+        )
+        .await?;
+        apply_label_replace_to_loki_result(
+            &mut value,
+            &label_replace.destination_label,
+            &label_replace.replacement,
+            &label_replace.source_label,
+            &label_replace.pattern,
+            &params.query,
+        )?;
         return Ok(value);
     }
     if let Ok(label_join) = parse_metric_label_join_query(&params.query) {
@@ -7828,6 +7855,37 @@ async fn execute_http_query_for_tenant(
     };
 
     Ok(add_loki_query_stats(value))
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LabelReplaceExpression {
+    query: String,
+    destination_label: String,
+    replacement: String,
+    source_label: String,
+    pattern: String,
+}
+
+fn parse_label_replace_expression(query: &str) -> Option<LabelReplaceExpression> {
+    let arguments = split_logql_function_arguments(query, "label_replace")?;
+    let [
+        inner_query,
+        destination_label,
+        replacement,
+        source_label,
+        pattern,
+    ] = arguments.as_slice()
+    else {
+        return None;
+    };
+
+    Some(LabelReplaceExpression {
+        query: inner_query.to_string(),
+        destination_label: parse_logql_string_argument(destination_label)?,
+        replacement: parse_logql_string_argument(replacement)?,
+        source_label: parse_logql_string_argument(source_label)?,
+        pattern: parse_logql_string_argument(pattern)?,
+    })
 }
 
 fn loki_instant_scalar_or_vector_response(
@@ -8043,10 +8101,13 @@ fn could_be_scalar_vector_expression(query: &str) -> bool {
 
 fn apply_label_replace_to_loki_result(
     value: &mut Value,
-    label_replace: &MetricLabelReplace,
+    destination_label: &str,
+    replacement: &str,
+    source_label: &str,
+    pattern: &str,
     query: &str,
 ) -> Result<(), HttpQueryError> {
-    let regex = Regex::new(&label_replace.pattern).map_err(|error| HttpQueryError::LokiParse {
+    let regex = Regex::new(pattern).map_err(|error| HttpQueryError::LokiParse {
         query: query.to_string(),
         source: ParseError::Syntax {
             message: error.to_string(),
@@ -8065,16 +8126,13 @@ fn apply_label_replace_to_loki_result(
             continue;
         };
         let source_value = metric
-            .get(&label_replace.source_label)
+            .get(source_label)
             .and_then(Value::as_str)
             .unwrap_or("");
         if let Some(captures) = regex.captures(source_value) {
             let mut destination_value = String::new();
-            captures.expand(&label_replace.replacement, &mut destination_value);
-            metric.insert(
-                label_replace.destination_label.clone(),
-                json!(destination_value),
-            );
+            captures.expand(replacement, &mut destination_value);
+            metric.insert(destination_label.to_string(), json!(destination_value));
         }
     }
     Ok(())
@@ -8905,6 +8963,50 @@ async fn execute_http_metric_query(
     Ok(add_loki_query_stats_for_metric_plan(
         response, &plan, &query,
     ))
+}
+
+async fn execute_http_metric_expression_query(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    query: &str,
+    full_query: &str,
+) -> Result<Value, HttpQueryError> {
+    if let Ok(arithmetic) = parse_metric_binary_arithmetic_query(query) {
+        return execute_http_metric_binary_arithmetic_query(
+            state, tenant, time_range, step, kind, arithmetic,
+        )
+        .await;
+    }
+    if let Ok(comparison) = parse_metric_binary_comparison_query(query) {
+        return execute_http_metric_binary_comparison_query(
+            state, tenant, time_range, step, kind, comparison,
+        )
+        .await;
+    }
+    if let Ok(set) = parse_metric_binary_set_query(query) {
+        return execute_http_metric_binary_set_query(state, tenant, time_range, step, kind, set)
+            .await;
+    }
+    if let Ok(arithmetic) = parse_metric_scalar_arithmetic_query(query) {
+        return execute_http_metric_scalar_arithmetic_query(
+            state, tenant, time_range, step, kind, arithmetic, full_query,
+        )
+        .await;
+    }
+    if let Ok(comparison) = parse_metric_scalar_comparison_query(query) {
+        return execute_http_metric_scalar_comparison_query(
+            state, tenant, time_range, step, kind, comparison, full_query,
+        )
+        .await;
+    }
+    let query = parse_metric_query(query).map_err(|source| HttpQueryError::LokiParse {
+        query: full_query.to_string(),
+        source,
+    })?;
+    execute_http_metric_query(state, tenant, time_range, step, kind, query).await
 }
 
 fn metric_query_uses_approx_topk(query: &MetricQuery) -> bool {
