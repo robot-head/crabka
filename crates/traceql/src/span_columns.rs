@@ -163,6 +163,43 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
         }
     }
 
+    // Spans caught in a parent cycle are excluded from `roots` (neither absent
+    // nor self-parented), so the root-seeded DFS never reaches them and leaves
+    // them at {left:0,right:0}, which would collide with real roots. Sweep for
+    // any still-unassigned span and seed it as an additional root.
+    for start in 0..spans.len() {
+        if out[start].left != 0 {
+            continue;
+        }
+        stack.push(Frame::Enter {
+            idx: start,
+            parent_left: 0,
+        });
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter { idx, parent_left } => {
+                    let left = counter;
+                    counter += 1;
+                    out[idx].left = left;
+                    out[idx].parent_id = parent_left;
+                    stack.push(Frame::Exit { idx });
+                    for &child in children[idx].iter().rev() {
+                        if out[child].left == 0 {
+                            stack.push(Frame::Enter {
+                                idx: child,
+                                parent_left: left,
+                            });
+                        }
+                    }
+                }
+                Frame::Exit { idx } => {
+                    out[idx].right = counter;
+                    counter += 1;
+                }
+            }
+        }
+    }
+
     out
 }
 
@@ -273,5 +310,40 @@ mod tests {
         assert!(ns[0].parent_id == 0);
         assert!(ns[0].left == 1);
         assert!(ns[0].right == 2);
+    }
+
+    #[test]
+    fn cyclic_parents_still_get_valid_intervals() {
+        // A.parent = B and B.parent = A: neither is a root, so the DFS seeded
+        // only from roots would never visit them and leave {left:0,right:0},
+        // colliding with real roots. Every node must still get left < right.
+        let spans = vec![span(1, Some(2)), span(2, Some(1))];
+        let ns = assign_nested_set(&spans);
+        for entry in &ns {
+            assert!(entry.left > 0);
+            assert!(entry.left < entry.right);
+        }
+        // The two intervals must be distinct (no collision at 0).
+        assert!(ns[0].left != ns[1].left);
+    }
+
+    #[test]
+    fn normal_forest_unchanged_by_cycle_sweep() {
+        let spans = vec![
+            span(1, None),
+            span(2, Some(1)),
+            span(3, Some(1)),
+            span(4, Some(3)),
+        ];
+        let ns = assign_nested_set(&spans);
+        // Pre-existing well-formed assignment is preserved.
+        assert!(ns[idx(&spans, 1)].left == 1);
+        assert!(ns[idx(&spans, 1)].parent_id == 0);
+        let root = ns[idx(&spans, 1)];
+        let child = ns[idx(&spans, 4)];
+        assert!(root.left < child.left && child.right < root.right);
+        for entry in &ns {
+            assert!(entry.left < entry.right);
+        }
     }
 }

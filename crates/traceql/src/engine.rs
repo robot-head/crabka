@@ -740,12 +740,22 @@ fn assemble_metrics_response(
             }
             let idx = usize::try_from((ts - start_ns) / step_ns)
                 .map_err(|e| TraceqlError::Exec(e.to_string()))?;
+            let value = match metric.value.as_ref() {
+                // A metric with a value field (avg/min/max/sum/histogram/...)
+                // only observes spans where that attribute is present. A row
+                // whose value field is NULL means the attribute is absent, so
+                // the span is skipped entirely rather than folded as 0 — it
+                // must not drag min toward 0, bias avg, or add a 0 observation
+                // to a histogram bucket.
+                Some(field) => match metric_numeric_value(batch, row, field)? {
+                    Some(value) => Some(value),
+                    None => continue,
+                },
+                // Value-less metrics (count_over_time / rate) observe every
+                // matching span regardless of any value field.
+                None => None,
+            };
             let labels = metric_labels(batch, row, &metric.by)?;
-            let value = metric
-                .value
-                .as_ref()
-                .map(|field| metric_numeric_value(batch, row, field))
-                .transpose()?;
             let exemplar = metric_exemplar(batch, row, ts, value.unwrap_or(1.0))?;
             let series_buckets = buckets
                 .entry(labels)
@@ -759,7 +769,7 @@ fn assemble_metrics_response(
         buckets.insert(Vec::new(), vec![MetricBucket::default(); bucket_count]);
     }
 
-    let step_seconds = f64_from_i64(step_ns)? / 1_000_000_000.0;
+    let step_seconds = f64_from_i64(step_ns) / 1_000_000_000.0;
     let series = buckets
         .into_iter()
         .map(|(labels, buckets)| {
@@ -1185,39 +1195,50 @@ fn metric_label_value(batch: &RecordBatch, column: &str, row: usize) -> Result<S
     }
 }
 
-fn metric_numeric_value(batch: &RecordBatch, row: usize, field: &Field) -> Result<f64> {
+/// Extracts the numeric value of a metric fold field for one row.
+///
+/// Returns `Ok(None)` when the row's value field is NULL (the target attribute
+/// is absent for that span), so callers can skip the span instead of folding a
+/// spurious `0.0` into sum/min/max/avg/histogram.
+fn metric_numeric_value(batch: &RecordBatch, row: usize, field: &Field) -> Result<Option<f64>> {
     let column = metric_field_column(field)?;
     let array = batch
         .column_by_name(&column)
         .ok_or_else(|| TraceqlError::Exec(format!("missing column {column}")))?;
     if array.is_null(row) {
-        return Ok(0.0);
+        return Ok(None);
     }
-    match array.data_type() {
+    let value = match array.data_type() {
         DataType::Int64 => f64_from_i64(
             array
                 .as_primitive::<arrow::datatypes::Int64Type>()
                 .value(row),
         ),
-        DataType::Int32 => f64_from_i64(i64::from(
+        DataType::Int32 => f64::from(
             array
                 .as_primitive::<arrow::datatypes::Int32Type>()
                 .value(row),
-        )),
-        DataType::Float64 => Ok(array
+        ),
+        DataType::Float64 => array
             .as_primitive::<arrow::datatypes::Float64Type>()
-            .value(row)),
-        other => Err(TraceqlError::Unsupported(format!(
-            "metrics fold field {field:?} has non-numeric type {other:?}"
-        ))),
-    }
+            .value(row),
+        other => {
+            return Err(TraceqlError::Unsupported(format!(
+                "metrics fold field {field:?} has non-numeric type {other:?}"
+            )));
+        }
+    };
+    Ok(Some(value))
 }
 
-fn f64_from_i64(value: i64) -> Result<f64> {
-    value
-        .to_string()
-        .parse()
-        .map_err(|e: std::num::ParseFloatError| TraceqlError::Exec(e.to_string()))
+/// Converts an `i64` to the nearest `f64` without a per-row heap allocation.
+///
+/// The cast is round-to-nearest, identical to the previous
+/// `to_string().parse()` path for every input; precision loss beyond 2^53 is
+/// inherent to `f64` and unavoidable for either approach.
+#[allow(clippy::cast_precision_loss)]
+fn f64_from_i64(value: i64) -> f64 {
+    value as f64
 }
 
 fn f64_from_u64(value: u64) -> Result<f64> {
@@ -2390,10 +2411,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_selector_matches_nested_set_parent_alias() {
+    async fn search_selector_matches_nested_set_parent_intrinsic() {
         let e = engine();
         let r = e
-            .search("t", "{ span:Parent = 1 }", 0, 100_000, 20)
+            .search("t", "{ span:nestedSetParent = 1 }", 0, 100_000, 20)
             .await
             .unwrap();
 
@@ -3138,7 +3159,7 @@ mod tests {
         let mut got = e
             .query_range(
                 "t",
-                "{ .svc = \"api\" } | count_over_time() | by(span:Parent)",
+                "{ .svc = \"api\" } | count_over_time() | by(span:nestedSetParent)",
                 0,
                 60_000,
                 60_000,
@@ -3149,9 +3170,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("Parent".into(), "0".into())]);
+        assert!(got[0].labels == vec![("nestedSetParent".into(), "0".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("Parent".into(), "1".into())]);
+        assert!(got[1].labels == vec![("nestedSetParent".into(), "1".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -3999,5 +4020,121 @@ mod tests {
 
         assert!(got.series.len() == 1);
         assert!(got.series[0].exemplars.is_empty());
+    }
+
+    #[test]
+    fn f64_from_i64_matches_decimal_string_conversion() {
+        // The direct conversion must be numerically identical to the previous
+        // `to_string().parse()` path for representative i64 values, including a
+        // large magnitude where float rounding matters.
+        for value in [
+            0_i64,
+            1,
+            -1,
+            42,
+            i64::MAX,
+            i64::MIN,
+            9_007_199_254_740_993, // 2^53 + 1, not exactly representable in f64
+        ] {
+            let direct = f64_from_i64(value);
+            let via_string: f64 = value.to_string().parse().unwrap();
+            assert!(direct.to_bits() == via_string.to_bits());
+        }
+    }
+
+    fn sp_with_code(id: u8, start: i64, code: Option<i64>) -> InputSpan {
+        let mut attrs = vec![("svc".into(), AttrValue::Str("api".into()))];
+        if let Some(code) = code {
+            attrs.push(("code".into(), AttrValue::Int(code)));
+        }
+        InputSpan {
+            attrs,
+            ..sp_at(1, id, None, "api", start)
+        }
+    }
+
+    #[tokio::test]
+    async fn absent_metric_attribute_does_not_pollute_min_and_avg() {
+        // Spans whose target attribute is ABSENT must not contribute a 0 to
+        // min/avg/max over the value field.
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_with_code(1, 0, Some(10)),
+                sp_with_code(2, 10_000, Some(30)),
+                sp_with_code(3, 20_000, None),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let min = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | min_over_time(.code)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        // min over the present values {10, 30} = 10, not dragged to 0.
+        assert!(min.series[0].points == vec![(0, 10.0), (60_000, 0.0)]);
+
+        let avg = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | avg_over_time(.code)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        // avg over {10, 30} = 20, not (10+30+0)/3 = 13.33.
+        assert!(avg.series[0].points == vec![(0, 20.0), (60_000, 0.0)]);
+
+        let max = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | max_over_time(.code)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(max.series[0].points == vec![(0, 30.0), (60_000, 0.0)]);
+    }
+
+    #[tokio::test]
+    async fn count_over_time_counts_spans_regardless_of_value_field() {
+        // count_over_time has no value field, so absent attributes still count.
+        let mut s = InMemorySpanStore::new();
+        s.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![
+                sp_with_code(1, 0, Some(10)),
+                sp_with_code(2, 10_000, None),
+                sp_with_code(3, 20_000, None),
+            ],
+        );
+        let e = TraceqlEngine::new(Arc::new(s), EngineOpts::default());
+
+        let count = e
+            .query_range(
+                "t",
+                "{ .svc = \"api\" } | count_over_time()",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        assert!(count.series[0].points == vec![(0, 3.0), (60_000, 0.0)]);
     }
 }

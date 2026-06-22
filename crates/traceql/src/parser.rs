@@ -570,7 +570,7 @@ fn intrinsic(scope: &str, key: &str) -> Result<Intrinsic> {
         ("instrumentation", "version") => Ok(Intrinsic::InstrumentationVersion),
         ("span", "nestedSetLeft") => Ok(Intrinsic::NestedSetLeft),
         ("span", "nestedSetRight") => Ok(Intrinsic::NestedSetRight),
-        ("span", "nestedSetParent" | "Parent") => Ok(Intrinsic::NestedSetParent),
+        ("span", "nestedSetParent") => Ok(Intrinsic::NestedSetParent),
         _ => Err(TraceqlError::Parse(format!(
             "unknown intrinsic {scope}:{key}"
         ))),
@@ -871,6 +871,27 @@ mod tests {
         assert!(lhs.scope == Scope::Intrinsic(Intrinsic::Duration));
         assert!(*op == ComparisonOp::Gt);
         assert!(*rhs == Value::Duration(100_000_000));
+    }
+
+    #[test]
+    fn span_nested_set_parent_intrinsic_resolves() {
+        let q = parse("{ span:nestedSetParent > 0 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+            panic!()
+        };
+        assert!(lhs.scope == Scope::Intrinsic(Intrinsic::NestedSetParent));
+    }
+
+    #[test]
+    fn span_parent_alias_is_not_a_valid_intrinsic() {
+        // `span:Parent` was a bogus alias for nestedSetParent inconsistent with
+        // Tempo's naming and with the other nested-set intrinsics; it must not
+        // resolve.
+        let err = parse("{ span:Parent > 0 }");
+        assert!(matches!(err, Err(TraceqlError::Parse(_))));
     }
 
     #[test]

@@ -28,7 +28,6 @@ const INTRINSIC_TAGS: &[&str] = &[
     "span:id",
     "span:kind",
     "span:name",
-    "span:Parent",
     "span:parentID",
     "span:nestedSetLeft",
     "span:nestedSetParent",
@@ -956,7 +955,7 @@ fn intrinsic_matches(
         "span:nestedSetRight" => nested_sets
             .get(idx)
             .is_some_and(|nested| int_matches(i64::from(nested.right), matcher.op, &matcher.value)),
-        "span:nestedSetParent" | "span:Parent" => nested_sets.get(idx).is_some_and(|nested| {
+        "span:nestedSetParent" => nested_sets.get(idx).is_some_and(|nested| {
             int_matches(i64::from(nested.parent_id), matcher.op, &matcher.value)
         }),
         "instrumentation:name" => {
@@ -1212,7 +1211,7 @@ fn collect_span_intrinsic_values(
                 values.insert(("int".to_string(), nested.left.to_string()));
             }
         }
-        "span:nestedSetParent" | "span:Parent" => {
+        "span:nestedSetParent" => {
             if let Some(nested) = nested {
                 values.insert(("int".to_string(), nested.parent_id.to_string()));
             }
@@ -1562,7 +1561,6 @@ mod tests {
                     "span:id",
                     "span:kind",
                     "span:name",
-                    "span:Parent",
                     "span:parentID",
                     "span:nestedSetLeft",
                     "span:nestedSetParent",

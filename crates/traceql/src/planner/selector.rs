@@ -566,7 +566,12 @@ fn value_sql(value: &Value) -> Result<String> {
     match value {
         Value::Str(v) => Ok(string_lit(v)),
         Value::Int(v) | Value::Duration(v) => Ok(v.to_string()),
-        Value::Float(v) => Ok(v.to_string()),
+        Value::Float(v) => {
+            if !v.is_finite() {
+                return Err(TraceqlError::Plan("comparison value is not finite".into()));
+            }
+            Ok(v.to_string())
+        }
         Value::Bool(v) => Ok(v.to_string()),
         Value::Nil => Err(TraceqlError::Plan(
             "nil only supports equality comparisons".into(),
@@ -727,5 +732,23 @@ mod tests {
         let ms = field_expr_to_matchers(&selector("{ span:duration > 100ms }"));
         assert!(ms[0].scope == MatchScope::Intrinsic);
         assert!(ms[0].value == MatchValue::Int(100_000_000));
+    }
+
+    #[test]
+    fn non_finite_folded_float_comparison_errors_cleanly() {
+        // A non-finite folded float (e.g. from overflowing float multiplication)
+        // must be rejected by the SQL emitter rather than interpolated as a
+        // literal `inf`/`NaN`, which DataFusion cannot parse.
+        let field = Field {
+            scope: Scope::Both,
+            key: "x".into(),
+        };
+        for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let err = comparison_to_sql(&field, ComparisonOp::Gt, &Value::Float(bad));
+            assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        }
+        // Finite floats still produce SQL.
+        let ok = comparison_to_sql(&field, ComparisonOp::Gt, &Value::Float(1.5));
+        assert!(ok.is_ok());
     }
 }
