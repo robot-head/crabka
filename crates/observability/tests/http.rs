@@ -398,6 +398,95 @@ async fn loki_push_endpoint_rejects_non_array_json_streams_like_loki() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_missing_json_streams_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        text_body(response).await == "error at least one valid stream is required for ingestion\n"
+    );
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
+async fn loki_push_endpoint_rejects_empty_json_streams_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        text_body(response).await == "error at least one valid stream is required for ingestion\n"
+    );
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
+async fn loki_push_endpoint_accepts_missing_json_values_like_loki() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "streams": [
+                            {
+                                "stream": {
+                                    "app": "api"
+                                }
+                            }
+                        ]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert!(text_body(response).await.is_empty());
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_returns_server_error_when_wal_append_fails() {
     let app = distributor_router(FailingWalSink);
 
