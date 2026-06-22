@@ -7716,6 +7716,18 @@ async fn execute_http_query_for_tenant(
         };
         return Ok(add_loki_query_stats(value));
     }
+    if let Some(sort) = parse_sort_vector_expression(&params.query) {
+        return execute_http_sort_vector_expression(
+            state,
+            tenant,
+            time_range,
+            params.step,
+            kind,
+            sort,
+            &params.query,
+        )
+        .await;
+    }
     if let Ok(label_replace) = parse_metric_label_replace_query(&params.query) {
         let mut value = execute_http_metric_query(
             state,
@@ -7890,6 +7902,11 @@ struct LabelReplaceExpression {
     pattern: String,
 }
 
+struct SortVectorExpression {
+    query: String,
+    descending: bool,
+}
+
 enum LabelReplaceMetricBinaryExpression {
     Arithmetic {
         left: String,
@@ -7932,6 +7949,23 @@ fn parse_label_replace_expression(query: &str) -> Option<LabelReplaceExpression>
         source_label: parse_logql_string_argument(source_label)?,
         pattern: parse_logql_string_argument(pattern)?,
     })
+}
+
+fn parse_sort_vector_expression(query: &str) -> Option<SortVectorExpression> {
+    for (function_name, descending) in [("sort", false), ("sort_desc", true)] {
+        let Some(arguments) = split_logql_function_arguments(query, function_name) else {
+            continue;
+        };
+        let [inner_query] = arguments.as_slice() else {
+            return None;
+        };
+        return Some(SortVectorExpression {
+            query: inner_query.to_string(),
+            descending,
+        });
+    }
+
+    None
 }
 
 fn strip_outer_parenthesized_expression(query: &str) -> Option<&str> {
@@ -9221,6 +9255,12 @@ async fn execute_http_metric_expression_query(
     query: &str,
     full_query: &str,
 ) -> Result<Value, HttpQueryError> {
+    if let Some(sort) = parse_sort_vector_expression(query) {
+        return Box::pin(execute_http_sort_vector_expression(
+            state, tenant, time_range, step, kind, sort, full_query,
+        ))
+        .await;
+    }
     if split_logql_function_arguments(query, "label_join").is_none()
         && let Some(result) = scalar_vector_expression_result(query)
     {
@@ -9431,6 +9471,64 @@ async fn execute_http_metric_binary_operand(
         source,
     })?;
     execute_http_metric_query(state, tenant, time_range, step, kind, query).await
+}
+
+async fn execute_http_sort_vector_expression(
+    state: &QuerierState,
+    tenant: &str,
+    time_range: TimeRange,
+    step: Option<i64>,
+    kind: QueryKind,
+    sort: SortVectorExpression,
+    query_text: &str,
+) -> Result<Value, HttpQueryError> {
+    let mut value = Box::pin(execute_http_metric_expression_query(
+        state,
+        tenant,
+        time_range,
+        step,
+        kind,
+        &sort.query,
+        query_text,
+    ))
+    .await?;
+    sort_loki_vector_result(&mut value, sort.descending);
+    Ok(value)
+}
+
+fn sort_loki_vector_result(value: &mut Value, descending: bool) {
+    if value.pointer("/data/resultType").and_then(Value::as_str) != Some("vector") {
+        return;
+    }
+    let Some(results) = value
+        .pointer_mut("/data/result")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    results.sort_by(|left, right| {
+        let ordering = match (
+            loki_vector_sample_value(left),
+            loki_vector_sample_value(right),
+        ) {
+            (Some(left), Some(right)) => left.cmp_value(right),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        if descending {
+            ordering.reverse()
+        } else {
+            ordering
+        }
+    });
+}
+
+fn loki_vector_sample_value(sample: &Value) -> Option<MetricValue> {
+    sample
+        .pointer("/value/1")
+        .and_then(Value::as_str)
+        .and_then(parse_metric_sample_value)
 }
 
 fn metric_query_uses_approx_topk(query: &MetricQuery) -> bool {

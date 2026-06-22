@@ -2965,9 +2965,24 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)")"#;
     let loki_result = loki_query_result(&http, &loki_base, query, 4_000_000_000).await;
-    let crabka_result = crabka_query_result(querier, query, 4_000_000_000).await;
+    let crabka_result = crabka_query_result(querier.clone(), query, 4_000_000_000).await;
 
     assert!(crabka_result == loki_result);
+
+    let sort_query = r#"sort(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
+    let loki_sort_result = loki_query_result(&http, &loki_base, sort_query, 4_000_000_000).await;
+    let crabka_sort_result = crabka_query_result(querier.clone(), sort_query, 4_000_000_000).await;
+
+    assert!(crabka_sort_result == loki_sort_result);
+
+    let sort_desc_query =
+        r#"sort_desc(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
+    let loki_sort_desc_result =
+        loki_query_result(&http, &loki_base, sort_desc_query, 4_000_000_000).await;
+    let crabka_sort_desc_result =
+        crabka_query_result(querier, sort_desc_query, 4_000_000_000).await;
+
+    assert!(crabka_sort_desc_result == loki_sort_desc_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

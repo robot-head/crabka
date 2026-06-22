@@ -15274,6 +15274,80 @@ async fn query_endpoint_accepts_label_replace_vector_function() {
 }
 
 #[tokio::test]
+async fn query_endpoint_accepts_sort_label_replace_vector_function() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=sort%28label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29%29&time=4000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {
+                                "service": "api-"
+                            },
+                            "value": [4000000000i64, "1"]
+                        }
+                    ],
+                    "stats": expected_loki_stats()
+                }
+            })
+    );
+}
+
+#[tokio::test]
+async fn query_endpoint_accepts_sort_desc_label_replace_vector_function() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/query?query=sort_desc%28label_replace%28vector%281%29%2C%20%22service%22%2C%20%22api-%241%22%2C%20%22missing%22%2C%20%22%28.%2A%29%22%29%29&time=4000000000")
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": {
+                    "resultType": "vector",
+                    "result": [
+                        {
+                            "metric": {
+                                "service": "api-"
+                            },
+                            "value": [4000000000i64, "1"]
+                        }
+                    ],
+                    "stats": expected_loki_stats()
+                }
+            })
+    );
+}
+
+#[tokio::test]
 async fn query_endpoint_accepts_label_join_vector_function() {
     let state = fixture();
     let app = loki_router(state);
