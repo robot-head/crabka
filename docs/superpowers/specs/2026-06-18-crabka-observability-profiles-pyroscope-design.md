@@ -632,4 +632,3 @@ layer.
 - **`SelectHeatmap` fidelity** — heatmap shape/semantics are less load-bearing for the Grafana
   minimum surface; confirm the exact response shape against the pinned Pyroscope tag before
   investing in slice 3.
-</invoke>
