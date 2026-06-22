@@ -2875,6 +2875,42 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
     assert!(crabka_vector_metric_set_result == loki_vector_metric_set_result);
 
+    let vector_metric_set_and_query = r#"vector(1) and on() count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
+    let loki_vector_metric_set_and_result =
+        loki_query_result(&http, &loki_base, vector_metric_set_and_query, time_ns).await;
+    let crabka_vector_metric_set_and_result =
+        crabka_query_result(querier.clone(), vector_metric_set_and_query, time_ns).await;
+
+    assert!(crabka_vector_metric_set_and_result == loki_vector_metric_set_and_result);
+
+    let vector_metric_set_unless_query = r#"vector(1) unless on(app) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
+    let loki_vector_metric_set_unless_result =
+        loki_query_result(&http, &loki_base, vector_metric_set_unless_query, time_ns).await;
+    let crabka_vector_metric_set_unless_result =
+        crabka_query_result(querier.clone(), vector_metric_set_unless_query, time_ns).await;
+
+    assert!(crabka_vector_metric_set_unless_result == loki_vector_metric_set_unless_result);
+
+    let vector_metric_group_right_comparison_query = r#"vector(2) > bool on() group_right(app, env) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
+    let loki_vector_metric_group_right_comparison_result = loki_query_result(
+        &http,
+        &loki_base,
+        vector_metric_group_right_comparison_query,
+        time_ns,
+    )
+    .await;
+    let crabka_vector_metric_group_right_comparison_result = crabka_query_result(
+        querier.clone(),
+        vector_metric_group_right_comparison_query,
+        time_ns,
+    )
+    .await;
+
+    assert!(
+        crabka_vector_metric_group_right_comparison_result
+            == loki_vector_metric_group_right_comparison_result
+    );
+
     let label_replace_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]) / count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)")"#;
     let loki_label_replace_result =
         loki_query_result(&http, &loki_base, label_replace_query, time_ns).await;
@@ -3017,6 +3053,13 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
         crabka_query_result(querier.clone(), arithmetic_query, 4_000_000_000).await;
 
     assert!(crabka_arithmetic_result == loki_arithmetic_result);
+
+    let set_query =
+        r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") or vector(2)"#;
+    let loki_set_result = loki_query_result(&http, &loki_base, set_query, 4_000_000_000).await;
+    let crabka_set_result = crabka_query_result(querier.clone(), set_query, 4_000_000_000).await;
+
+    assert!(crabka_set_result == loki_set_result);
 
     let sort_query = r#"sort(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
     let loki_sort_result = loki_query_result(&http, &loki_base, sort_query, 4_000_000_000).await;
