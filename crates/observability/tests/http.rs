@@ -12208,6 +12208,60 @@ async fn labels_endpoint_returns_tenant_label_names() {
 }
 
 #[tokio::test]
+async fn empty_metadata_endpoints_return_loki_sparse_success_shapes() {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let app = loki_router(QuerierState::new(
+        dir,
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    for path in [
+        "/loki/api/v1/labels",
+        "/loki/api/v1/label",
+        "/loki/api/v1/label/app/values",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(json_body(response).await == json!({ "status": "success" }));
+    }
+
+    for path in [
+        "/api/prom/label",
+        "/api/prom/label/app/values",
+        "/loki/api/v1/detected_labels?limit=10",
+        "/loki/api/v1/detected_fields?query=%7Bapp%3D%22api%22%7D&limit=10",
+        "/loki/api/v1/detected_field/status/values?query=%7Bapp%3D%22api%22%7D&limit=10",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("X-Scope-OrgID", "tenant-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK);
+        assert!(json_body(response).await == json!({}));
+    }
+}
+
+#[tokio::test]
 async fn metadata_endpoints_hide_loki_detected_level_enrichment() {
     let dir = tempfile::tempdir().unwrap().keep();
     let mut label_index = LabelIndex::default();

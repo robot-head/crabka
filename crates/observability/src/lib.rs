@@ -9995,6 +9995,9 @@ async fn execute_detected_fields_query(
             })
         })
         .collect::<Vec<_>>();
+    if fields.is_empty() {
+        return Ok(json!({}));
+    }
 
     Ok(json!({
         "fields": fields,
@@ -10059,6 +10062,9 @@ async fn execute_detected_field_values_query(
         .get(name)
         .map(|stats| stats.values.iter().take(limit).cloned().collect::<Vec<_>>())
         .unwrap_or_default();
+    if values.is_empty() {
+        return Ok(json!({}));
+    }
 
     Ok(json!({
         "values": values,
@@ -11047,9 +11053,12 @@ async fn execute_label_names_query(
     headers: &HeaderMap,
     params: &SeriesParams,
 ) -> Result<Response, HttpQueryError> {
-    Ok(loki_success(
-        label_names_data(state, headers, params).await?,
-    ))
+    let data = label_names_data(state, headers, params).await?;
+    Ok(if data.is_empty() {
+        loki_sparse_success()
+    } else {
+        loki_success(data)
+    })
 }
 
 async fn execute_api_prom_label_names_query(
@@ -11057,12 +11066,17 @@ async fn execute_api_prom_label_names_query(
     headers: &HeaderMap,
     params: &SeriesParams,
 ) -> Result<Response, HttpQueryError> {
-    Ok(json_response(
-        StatusCode::OK,
-        &json!({
-            "values": label_names_data(state, headers, params).await?,
-        }),
-    ))
+    let values = label_names_data(state, headers, params).await?;
+    Ok(if values.is_empty() {
+        json_response(StatusCode::OK, &json!({}))
+    } else {
+        json_response(
+            StatusCode::OK,
+            &json!({
+                "values": values,
+            }),
+        )
+    })
 }
 
 async fn label_names_data(
@@ -11088,9 +11102,12 @@ async fn execute_label_values_query(
     name: &str,
     params: &SeriesParams,
 ) -> Result<Response, HttpQueryError> {
-    Ok(loki_success(
-        label_values_data(state, headers, name, params).await?,
-    ))
+    let data = label_values_data(state, headers, name, params).await?;
+    Ok(if data.is_empty() {
+        loki_sparse_success()
+    } else {
+        loki_success(data)
+    })
 }
 
 async fn label_values_data(
@@ -14596,6 +14613,10 @@ fn loki_parquet_batch_response(batch: &RecordBatch) -> Result<Response, HttpQuer
 
 fn loki_success(data: impl serde::Serialize) -> Response {
     json_response(StatusCode::OK, &loki_success_value(data))
+}
+
+fn loki_sparse_success() -> Response {
+    json_response(StatusCode::OK, &json!({ "status": "success" }))
 }
 
 fn loki_success_value(data: impl serde::Serialize) -> Value {

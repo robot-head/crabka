@@ -1323,6 +1323,45 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    for path in [
+        "/loki/api/v1/labels",
+        "/loki/api/v1/label",
+        "/loki/api/v1/label/app/values",
+        "/api/prom/label",
+        "/api/prom/label/app/values",
+        "/loki/api/v1/detected_labels?limit=10",
+        "/loki/api/v1/detected_fields?query=%7Bapp%3D%22api%22%7D&limit=10",
+        "/loki/api/v1/detected_field/status/values?query=%7Bapp%3D%22api%22%7D&limit=10",
+    ] {
+        let loki_result = loki_json_path_result(&http, &loki_base, path).await;
+        let crabka_result = crabka_json_path_result(querier.clone(), path).await;
+
+        assert!(crabka_result == loki_result, "{path}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_return_same_detected_fields_results() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -6834,6 +6873,33 @@ async fn crabka_metadata_post_result(
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     stable_metadata_result(&serde_json::from_slice(&body).unwrap())
+}
+
+async fn loki_json_path_result(http: &reqwest::Client, base: &str, path: &str) -> Value {
+    http.get(format!("{base}{path}"))
+        .header("X-Scope-OrgID", "tenant-a")
+        .send()
+        .await
+        .expect("query Loki JSON path")
+        .json()
+        .await
+        .expect("Loki JSON path response")
+}
+
+async fn crabka_json_path_result(app: axum::Router, path: &str) -> Value {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(path)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK, "{path}");
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    serde_json::from_slice(&body).unwrap()
 }
 
 async fn loki_api_prom_metadata_result(
