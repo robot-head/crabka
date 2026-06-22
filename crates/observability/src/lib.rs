@@ -82,8 +82,7 @@ use opentelemetry_proto::tonic::logs::v1::LogRecord as ProtoLogRecord;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use prost::Message as _;
 use regex::Regex;
-use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use snap::raw::Decoder as SnappyDecoder;
 use thiserror::Error;
@@ -2653,169 +2652,6 @@ struct LokiPushStream {
     values: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct LokiJsonStructuredMetadataDuplicateProbe {
-    #[serde(default)]
-    streams: Vec<LokiJsonStructuredMetadataDuplicateProbeStream>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LokiJsonStructuredMetadataDuplicateProbeStream {
-    #[serde(default)]
-    values: Option<Vec<LokiJsonStructuredMetadataValueDuplicateProbe>>,
-}
-
-#[derive(Debug)]
-struct LokiJsonStructuredMetadataValueDuplicateProbe;
-
-#[derive(Debug)]
-struct LokiJsonMaybeDuplicateCheckedObject;
-
-impl<'de> Deserialize<'de> for LokiJsonStructuredMetadataValueDuplicateProbe {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_seq(LokiJsonStructuredMetadataValueVisitor)
-    }
-}
-
-struct LokiJsonStructuredMetadataValueVisitor;
-
-impl<'de> Visitor<'de> for LokiJsonStructuredMetadataValueVisitor {
-    type Value = LokiJsonStructuredMetadataValueDuplicateProbe;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("a Loki push value array")
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let _ = seq.next_element::<IgnoredAny>()?;
-        let _ = seq.next_element::<IgnoredAny>()?;
-        let _ = seq.next_element::<LokiJsonMaybeDuplicateCheckedObject>()?;
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(LokiJsonStructuredMetadataValueDuplicateProbe)
-    }
-}
-
-impl<'de> Deserialize<'de> for LokiJsonMaybeDuplicateCheckedObject {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_any(LokiJsonMaybeDuplicateCheckedObjectVisitor)
-    }
-}
-
-struct LokiJsonDuplicateCheckedObjectVisitor;
-
-impl<'de> Visitor<'de> for LokiJsonDuplicateCheckedObjectVisitor {
-    type Value = ();
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("an object without duplicate keys")
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut seen = BTreeSet::new();
-        while let Some(name) = map.next_key::<String>()? {
-            if !seen.insert(name) {
-                return Err(de::Error::custom("duplicate key"));
-            }
-            map.next_value::<IgnoredAny>()?;
-        }
-        Ok(())
-    }
-}
-
-struct LokiJsonMaybeDuplicateCheckedObjectVisitor;
-
-impl<'de> Visitor<'de> for LokiJsonMaybeDuplicateCheckedObjectVisitor {
-    type Value = LokiJsonMaybeDuplicateCheckedObject;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("any JSON value")
-    }
-
-    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        while seq.next_element::<IgnoredAny>()?.is_some() {}
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-
-    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        LokiJsonDuplicateCheckedObjectVisitor.visit_map(map)?;
-        Ok(LokiJsonMaybeDuplicateCheckedObject)
-    }
-}
-
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct LokiProtoPushRequest {
     #[prost(message, repeated, tag = "1")]
@@ -3090,7 +2926,6 @@ fn normalize_loki_http_push(
         let payload = validate_loki_json_push_stream_objects(payload, &body)?;
         validate_loki_json_push_value_arrays(&payload, &body)?;
         validate_loki_json_push_timestamp_types(&payload, &body)?;
-        validate_loki_json_push_duplicate_keys(&body)?;
         validate_loki_json_structured_metadata_value_types(&payload, &body)?;
         normalize_loki_push(
             headers,
@@ -3194,21 +3029,6 @@ fn validate_loki_json_push_timestamp_types(
                     loki_json_timestamp_value_parse_error(body, timestamp, value.get(1)),
                 ));
             }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_loki_json_push_duplicate_keys(body: &[u8]) -> Result<(), DistributorError> {
-    let metadata_probe: LokiJsonStructuredMetadataDuplicateProbe =
-        serde_json::from_slice(body).map_err(|_| DistributorError::InvalidStructuredMetadata)?;
-    for stream in metadata_probe.streams {
-        let Some(values) = stream.values else {
-            continue;
-        };
-        for value in values {
-            let _ = value;
         }
     }
 
