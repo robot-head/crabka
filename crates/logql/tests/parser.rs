@@ -1991,6 +1991,47 @@ fn parses_scalar_metric_arithmetic_query() {
 }
 
 #[test]
+fn parses_parenthesized_metric_expression_operands() {
+    let metric_scalar =
+        parse_metric_scalar_arithmetic_query(r#"(count_over_time({app="api"}[30s])) * 2"#).unwrap();
+    check!(metric_scalar.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
+    check!(metric_scalar.query.aggregation == RangeAggregation::CountOverTime);
+
+    let scalar_metric =
+        parse_metric_scalar_comparison_query(r#"2 > bool ((count_over_time({app="api"}[30s])))"#)
+            .unwrap();
+    check!(scalar_metric.scalar_on_left);
+    check!(scalar_metric.query.range_ns == 30_000_000_000);
+
+    let binary = parse_metric_binary_arithmetic_query(
+        r#"(count_over_time({app="api"}[30s])) / (count_over_time({app="worker"}[15s]))"#,
+    )
+    .unwrap();
+    check!(binary.left.range_ns == 30_000_000_000);
+    check!(binary.right.range_ns == 15_000_000_000);
+
+    let set = parse_metric_binary_set_query(
+        r#"(count_over_time({app="api"}[30s])) or (count_over_time({app="worker"}[15s]))"#,
+    )
+    .unwrap();
+    check!(set.op == crabka_logql::MetricBinarySetOp::Or);
+    check!(set.left.range_ns == 30_000_000_000);
+    check!(set.right.range_ns == 15_000_000_000);
+
+    let label_replace = parse_metric_label_replace_query(
+        r#"label_replace((count_over_time({app="api"}[30s])), "service", "$1", "app", "(.*)")"#,
+    )
+    .unwrap();
+    check!(label_replace.query.range_ns == 30_000_000_000);
+
+    let label_join = parse_metric_label_join_query(
+        r#"label_join((count_over_time({app="api"}[30s])), "service", "-", "app")"#,
+    )
+    .unwrap();
+    check!(label_join.query.range_ns == 30_000_000_000);
+}
+
+#[test]
 fn parses_metric_binary_arithmetic_query() {
     let query = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error" [30s])"#,
