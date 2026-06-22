@@ -10,7 +10,7 @@
 //! the tiers by the presence of a `block=` param, not by a tier header.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use assert2::assert;
@@ -552,11 +552,17 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
 // --- metrics: query_range / instant sharding -------------------------------
 
 #[tokio::test]
-async fn shards_metrics_query_range_across_live_frontier() {
+async fn metrics_query_range_is_a_single_unsharded_job() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
-        .route("/api/metrics/query_range", get(sharded_metrics_response))
-        .with_state(());
+        .route("/api/metrics/query_range", get(record_metrics))
+        .with_state(seen.clone());
     let upstream = spawn(app).await;
+    // A catalog with a cold block + the live tier: a *search* would shard here,
+    // but metrics must NOT — sharding double-counts cold blocks (the
+    // no-restriction job already scans cold-before-frontier + live) and is plain
+    // wrong for non-additive aggregates, so metrics is one unrestricted job over
+    // the full hot+cold union.
     let router = build_router(&upstream, two_shard_cfg(), single_block_catalog());
 
     let response = router
@@ -575,22 +581,16 @@ async fn shards_metrics_query_range_across_live_frontier() {
     assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
+    // Returned verbatim — no cross-shard summing.
+    assert!(json["series"][0]["points"] == json!([["1000000000", 1.0], ["2000000000", 2.0]]));
 
-    assert!(json["series"].as_array().unwrap().len() == 1);
-    assert!(
-        json["series"][0]["points"]
-            == json!([
-                ["1000000000", 1.0],
-                ["1999999999", 2.0],
-                ["2000000000", 3.0],
-                ["3000000000", 4.0],
-            ])
-    );
-    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 2);
+    let log = seen.lock().unwrap();
+    assert!(log.len() == 1); // exactly one job, not Live + per-block
+    assert!(!log[0].contains("block=")); // unrestricted -> full hot+cold union
 }
 
 #[tokio::test]
-async fn limits_merged_metric_exemplars_across_shards() {
+async fn metrics_query_limits_exemplars() {
     let app = Router::new()
         .route("/api/metrics/query_range", get(sharded_metrics_response))
         .with_state(());
@@ -617,41 +617,11 @@ async fn limits_merged_metric_exemplars_across_shards() {
 }
 
 #[tokio::test]
-async fn dispatches_metric_shards_concurrently() {
-    let barrier = Arc::new(Barrier::new(2));
+async fn metrics_instant_query_is_a_single_unsharded_job() {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let app = Router::new()
-        .route("/api/metrics/query_range", get(concurrent_metrics_response))
-        .with_state(barrier);
-    let upstream = spawn(app).await;
-    let router = build_router(&upstream, two_shard_cfg(), single_block_catalog());
-
-    let response = timeout(
-        Duration::from_secs(2),
-        router.oneshot(
-            axum::http::Request::builder()
-                .uri(
-                    "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3&step=1",
-                )
-                .header("x-scope-orgid", "tenant-a")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        ),
-    )
-    .await
-    .expect("sharded query_range should not serialize shard requests")
-    .unwrap();
-
-    assert!(response.status().is_success());
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["series"][0]["points"].as_array().unwrap().len() == 2);
-}
-
-#[tokio::test]
-async fn shards_instant_metrics_query_across_live_frontier() {
-    let app = Router::new()
-        .route("/api/metrics/query", get(sharded_metrics_response))
-        .with_state(());
+        .route("/api/metrics/query", get(record_metrics))
+        .with_state(seen.clone());
     let upstream = spawn(app).await;
     let router = build_router(&upstream, two_shard_cfg(), single_block_catalog());
 
@@ -671,48 +641,11 @@ async fn shards_instant_metrics_query_across_live_frontier() {
     assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["series"].as_array().unwrap().len() == 1);
-    assert!(
-        json["series"][0]["points"]
-            == json!([
-                ["1000000000", 1.0],
-                ["1999999999", 2.0],
-                ["2000000000", 3.0],
-                ["3000000000", 4.0],
-            ])
-    );
-    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 2);
-}
+    assert!(json["series"][0]["points"] == json!([["1000000000", 1.0], ["2000000000", 2.0]]));
 
-#[tokio::test]
-async fn dispatches_instant_metric_shards_concurrently() {
-    let barrier = Arc::new(Barrier::new(2));
-    let app = Router::new()
-        .route("/api/metrics/query", get(concurrent_metrics_response))
-        .with_state(barrier);
-    let upstream = spawn(app).await;
-    let router = build_router(&upstream, two_shard_cfg(), single_block_catalog());
-
-    let response = timeout(
-        Duration::from_secs(2),
-        router.oneshot(
-            axum::http::Request::builder()
-                .uri(
-                    "/api/metrics/query?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=1&end=3",
-                )
-                .header("x-scope-orgid", "tenant-a")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        ),
-    )
-    .await
-    .expect("sharded instant metrics should not serialize shard requests")
-    .unwrap();
-
-    assert!(response.status().is_success());
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["series"][0]["points"].as_array().unwrap().len() == 2);
+    let log = seen.lock().unwrap();
+    assert!(log.len() == 1);
+    assert!(!log[0].contains("block="));
 }
 
 // --- v2 tag discovery / values sharding ------------------------------------
@@ -1128,17 +1061,17 @@ async fn sharded_metrics_response(State(()): State<()>, uri: Uri) -> axum::Json<
     }))
 }
 
-async fn concurrent_metrics_response(
-    State(barrier): State<Arc<Barrier>>,
+async fn record_metrics(
+    State(seen): State<Arc<Mutex<Vec<String>>>>,
     uri: Uri,
 ) -> axum::Json<Value> {
-    let backend = is_backend_shard(uri.query().unwrap_or_default());
-    barrier.wait().await;
-    let timestamp = if backend { "1000000000" } else { "2000000000" };
+    seen.lock()
+        .unwrap()
+        .push(uri.query().unwrap_or_default().to_string());
     axum::Json(json!({
         "series": [{
             "labels": { "svc": "api" },
-            "points": [[timestamp, 1.0]],
+            "points": [["1000000000", 1.0], ["2000000000", 2.0]],
             "exemplars": [],
         }]
     }))

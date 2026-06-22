@@ -286,9 +286,16 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         Ok((values, metrics))
     }
 
-    /// Run a `TraceQL`-metrics query (`/api/metrics/query_range` or `query`)
-    /// through the pipeline: plan time-tier shards (no row-group split, matching
-    /// the legacy metrics path), fan, merge series, limit exemplars.
+    /// Run a `TraceQL`-metrics query (`/api/metrics/query_range` or `query`) as a
+    /// **single unsharded job** against one querier.
+    ///
+    /// Metrics are deliberately NOT sharded across blocks. The per-shard *reduced*
+    /// results are not safely mergeable: summing them double-counts every cold
+    /// block (the no-restriction "live" job already scans cold-before-frontier +
+    /// live, which overlaps the per-block jobs), and summing is plain wrong for
+    /// the non-additive aggregates (`min`/`max`/`avg`/`quantile_over_time`). A
+    /// single unrestricted job lets one querier compute the full hot+cold union
+    /// correctly for every aggregate; only exemplar limiting is applied here.
     #[allow(
         clippy::too_many_arguments,
         reason = "the metrics query surface (tenant/query/window/step/instant/exemplar-limit) is one cohesive request; grouping into a params struct would only relocate the fields"
@@ -303,35 +310,20 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
         instant: bool,
         exemplar_limit: Option<usize>,
     ) -> Result<MetricsResponseJson, BackendError> {
-        let blocks = self
-            .catalog
-            .blocks(tenant, start_ns, end_ns)
-            .await
-            .unwrap_or_default();
-        // Metrics never splits a block into row-group jobs (legacy
-        // `planned_metric_shards`): plan with target_bytes_per_job = 0.
-        let plan = job::plan_search_jobs(&blocks, end_ns, self.cfg.hot_frontier_ns, 0);
-
-        let backend = Arc::clone(&self.backend);
-        let tenant_s = tenant.to_string();
-        let query_s = query.to_string();
-        let results = queue::run_jobs(plan.jobs, self.cfg.max_concurrency, move |shard| {
-            let backend = Arc::clone(&backend);
-            let req = MetricsJobRequest {
-                tenant: tenant_s.clone(),
-                query: query_s.clone(),
-                start_ns,
-                end_ns,
-                step_ns,
-                instant,
-                shard,
-            };
-            async move { backend.metrics_job(&req).await.map(|p| p.response) }
-        })
-        .await;
-        let partials: Vec<MetricsResponseJson> = results.into_iter().collect::<Result<_, _>>()?;
-
-        Ok(metrics_merge::merge_metrics(partials, exemplar_limit))
+        let req = MetricsJobRequest {
+            tenant: tenant.to_string(),
+            query: query.to_string(),
+            start_ns,
+            end_ns,
+            step_ns,
+            instant,
+            // `JobShard::Live` sends no scan restriction, so the querier scans its
+            // full hot+cold union — the whole result in one job.
+            shard: JobShard::Live,
+        };
+        let mut series = self.backend.metrics_job(&req).await?.response.series;
+        metrics_merge::limit_exemplars(&mut series, exemplar_limit);
+        Ok(MetricsResponseJson { series })
     }
 }
 

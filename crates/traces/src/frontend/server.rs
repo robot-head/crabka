@@ -408,11 +408,95 @@ fn required_step(uri: &Uri) -> Result<i64, String> {
     let Some(value) = query_param(uri, "step") else {
         return Err("missing query parameter step".to_string());
     };
-    let step = parse_seconds_to_ns(&value).ok_or("invalid step")?;
+    let step = parse_step_to_ns(&value).ok_or("invalid step")?;
     if step <= 0 {
         return Err("step must be positive".to_string());
     }
     Ok(step)
+}
+
+/// `step` may be bare epoch-seconds OR a Go-duration like `30s`/`5m`/`100ms`
+/// (Grafana's Tempo datasource sends the duration form). Mirrors the querier's
+/// `parse_step_to_ns` so the frontend accepts exactly what the querier accepts —
+/// without it the frontend would `400` a query the querier handles.
+fn parse_step_to_ns(value: &str) -> Option<i64> {
+    parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
+}
+
+/// Parse a Go-style duration (`1h`, `5m`, `30s`, `100ms`, `1m30s`, fractional
+/// like `1.5s`) to nanoseconds. Kept in sync with the querier's parser.
+fn parse_go_duration_ns(value: &str) -> Result<u64, String> {
+    if value.is_empty() {
+        return Err("empty duration".into());
+    }
+    let mut total = 0_u128;
+    let mut rest = value;
+    while !rest.is_empty() {
+        let number_len = rest
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_digit() || *c == '.')
+            .map(|(idx, c)| idx + c.len_utf8())
+            .last()
+            .ok_or_else(|| format!("expected number in {value:?}"))?;
+        let (number, tail) = rest.split_at(number_len);
+        let unit_len = tail
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_alphabetic() || *c == 'µ')
+            .map(|(idx, c)| idx + c.len_utf8())
+            .last()
+            .ok_or_else(|| format!("expected unit after {number:?}"))?;
+        let (unit, next) = tail.split_at(unit_len);
+        let multiplier: u128 = match unit {
+            "ns" => 1,
+            "us" | "µs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            _ => return Err(format!("unsupported unit {unit:?}")),
+        };
+        total = total
+            .checked_add(parse_duration_component_ns(number, multiplier)?)
+            .ok_or_else(|| "duration out of range".to_string())?;
+        rest = next;
+    }
+    u64::try_from(total).map_err(|_| "duration out of range".into())
+}
+
+fn parse_duration_component_ns(number: &str, multiplier: u128) -> Result<u128, String> {
+    let (whole, fraction) = number.split_once('.').map_or((number, ""), |parts| parts);
+    if whole.is_empty() && fraction.is_empty() {
+        return Err(format!("invalid number {number:?}"));
+    }
+    if fraction.contains('.') {
+        return Err(format!("invalid number {number:?}"));
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse::<u128>()
+            .map_err(|_| format!("invalid number {number:?}"))?
+    };
+    let whole_ns = whole
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration out of range".to_string())?;
+    if fraction.is_empty() {
+        return Ok(whole_ns);
+    }
+    let fraction_value = fraction
+        .parse::<u128>()
+        .map_err(|_| format!("invalid number {number:?}"))?;
+    let scale = (0..fraction.len())
+        .try_fold(1_u128, |acc, _| acc.checked_mul(10))
+        .ok_or_else(|| "duration out of range".to_string())?;
+    let fraction_ns = fraction_value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "duration out of range".to_string())?
+        / scale;
+    whole_ns
+        .checked_add(fraction_ns)
+        .ok_or_else(|| "duration out of range".to_string())
 }
 
 fn parse_seconds_to_ns(value: &str) -> Option<i64> {
@@ -471,5 +555,27 @@ fn scope_name(scope: crabka_traceql::TagScope) -> &'static str {
         crabka_traceql::TagScope::Event => "event",
         crabka_traceql::TagScope::Link => "link",
         crabka_traceql::TagScope::Instrumentation => "instrumentation",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    #[test]
+    fn step_accepts_seconds_and_go_durations() {
+        // Bare epoch-seconds (what the frontend already accepted).
+        assert!(parse_step_to_ns("30") == Some(30_000_000_000));
+        // Go-duration forms Grafana's Tempo datasource actually sends.
+        assert!(parse_step_to_ns("30s") == Some(30_000_000_000));
+        assert!(parse_step_to_ns("5m") == Some(300_000_000_000));
+        assert!(parse_step_to_ns("1h") == Some(3_600_000_000_000));
+        assert!(parse_step_to_ns("100ms") == Some(100_000_000));
+        assert!(parse_step_to_ns("1m30s") == Some(90_000_000_000));
+        // Garbage is still rejected.
+        assert!(parse_step_to_ns("nonsense").is_none());
+        assert!(parse_step_to_ns("30q").is_none());
     }
 }
