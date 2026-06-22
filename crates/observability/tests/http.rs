@@ -2333,6 +2333,65 @@ async fn loki_push_endpoint_accepts_invalid_protobuf_structured_metadata_name() 
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_accepts_empty_protobuf_structured_metadata_name() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+    let payload = LokiProtoPushRequest {
+        streams: vec![LokiProtoStream {
+            labels: r#"{app="api"}"#.to_string(),
+            entries: vec![LokiProtoEntry {
+                timestamp: Some(LokiProtoTimestamp {
+                    seconds: 0,
+                    nanos: 19,
+                }),
+                line: "api error".to_string(),
+                structured_metadata: vec![LokiProtoLabelPair {
+                    name: String::new(),
+                    value: "metadata".to_string(),
+                }],
+                parsed: vec![],
+            }],
+            hash: 0,
+        }],
+    };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::NO_CONTENT);
+    let records = sink.records();
+    assert!(records.len() == 1);
+    assert!(records[0].tenant == "tenant-a");
+    assert!(
+        records[0].labels
+            == labels([
+                ("app", "api"),
+                ("detected_level", "error"),
+                ("service_name", "api"),
+            ])
+    );
+    assert!(records[0].timestamp_ns == 19);
+    assert!(records[0].line == "api error");
+    assert!(
+        records[0].structured_metadata
+            == BTreeMap::from([("".to_string(), "metadata".to_string())])
+    );
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_invalid_timestamp_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
