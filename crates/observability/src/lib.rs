@@ -11047,6 +11047,9 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
     if let Some(error) = scalar_vector_plain_parse_error(query) {
         return Err(HttpQueryError::LokiFormatPlainParse(error));
     }
+    if let Some(error) = label_join_format_query_error(query) {
+        return Err(HttpQueryError::LokiFormatPlainParse(error));
+    }
 
     match parse_query(query) {
         Ok(query) => Ok(format_stream_query(&query)),
@@ -11086,6 +11089,13 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
             }
         }
     }
+}
+
+fn label_join_format_query_error(query: &str) -> Option<String> {
+    query
+        .trim_start()
+        .starts_with("label_join")
+        .then(|| "parse error at line 1, col 1: syntax error: unexpected IDENTIFIER".to_string())
 }
 
 fn format_metric_vector_arithmetic_expression(query: &str) -> Option<String> {
