@@ -273,12 +273,16 @@ fn record_active_series(
 }
 
 pub fn router(state: Arc<DistributorState>) -> Router {
+    // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
+    // `ConnectContext`); plain `.build()` omits it, so proto Connect clients (Alloy's
+    // `pyroscope.write`, OTLP exporters) would receive `application/json` responses and reject
+    // them. See the matching fix in the querier router.
     let push = pb::push::v1::pusher_service_connect::PusherServiceBuilder::<()>::new()
         .push(push_handler)
-        .build();
+        .build_connect();
     let otlp = pb::otlp_profiles::profiles_service_connect::ProfilesServiceBuilder::<()>::new()
         .export(export_handler)
-        .build();
+        .build_connect();
 
     Router::new()
         .route("/ingest", post(ingest_handler))

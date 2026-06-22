@@ -99,6 +99,36 @@ async fn connect_get_state_over_http_json() {
         "missing snapshotAtMs / snapshot_at_ms: {body}"
     );
 
+    // 7. Connect proto content-type regression: a connect-go client (the canonical
+    // Connect clients) posts `application/proto` and requires the 200 response to echo it.
+    // An all-default GetStateRequest encodes to an empty body. Before the `.build_connect()`
+    // fix the router replied `application/json` here, so proto clients rejected it with
+    // `invalid content-type: "application/json"; expecting "application/proto"`.
+    let proto_resp = client
+        .post(format!(
+            "http://{rebal_addr}/crabka.rebalancer.v1.Rebalancer/GetState"
+        ))
+        .header("Content-Type", "application/proto")
+        .body(Vec::<u8>::new())
+        .send()
+        .await
+        .expect("Connect proto POST");
+    let proto_status = proto_resp.status();
+    let proto_ct = proto_resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        proto_status.is_success(),
+        "proto GetState got {proto_status} (ct `{proto_ct}`)"
+    );
+    assert!(
+        proto_ct.starts_with("application/proto"),
+        "proto GetState response must echo application/proto, got `{proto_ct}`"
+    );
+
     let _ = child.kill().await;
     broker.shutdown().await;
     // Leak the tempdir rather than let `Drop` fight with the broker's

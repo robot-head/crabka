@@ -1070,7 +1070,11 @@ where
         .diff(diff_handler::<S>)
         .get_profile_stats(get_profile_stats_handler::<S>)
         .analyze_query(analyze_query_handler::<S>)
-        .build();
+        // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
+        // `ConnectContext`); plain `.build()` omits it, which makes every Connect response
+        // fall back to `application/json` regardless of the request's content-type and breaks
+        // proto clients like Grafana's built-in Pyroscope datasource (a connect-go client).
+        .build_connect();
 
     Router::new()
         .route("/pyroscope/render", get(render_handler::<S>))

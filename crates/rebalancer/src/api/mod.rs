@@ -95,7 +95,12 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
         .execute_proposal(handlers::execute_proposal)
         .cancel_execution(handlers::cancel_execution)
         .get_anomalies(handlers::get_anomalies)
-        .build()
+        // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
+        // `ConnectContext`); plain `.build()` omits it, so every Connect response falls back
+        // to `application/json` regardless of the request's content-type, which breaks proto
+        // connect-go clients (`invalid content-type: "application/json"; expecting
+        // "application/proto"`).
+        .build_connect()
         .layer(axum::Extension(state))
 }
 

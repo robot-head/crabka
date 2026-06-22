@@ -286,3 +286,45 @@ async fn streaming_wrappers_and_router_build() {
 
     broker.shutdown().await;
 }
+
+/// Connect proto content-type regression: a connect-go client posts a unary
+/// `application/proto` request and requires the 200 response to echo it. An
+/// all-default `SendRequest` (no records) encodes to an empty body and the
+/// `Send` handler returns 200 without producing. Before the `.build_connect()`
+/// fix the router replied `application/json`, which proto clients reject with
+/// `invalid content-type: "application/json"; expecting "application/proto"`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_echoes_proto_content_type() {
+    use axum::body::Body;
+    use axum::http::header::CONTENT_TYPE;
+    use axum::http::{Method, Request};
+    use tower::ServiceExt as _;
+
+    let (broker, bootstrap, _dir) = boot().await;
+    let state = state_for(&bootstrap).await;
+    let app = crabka_grpc_gateway::router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/crabka.gateway.v1.Gateway/Send")
+                .header(CONTENT_TYPE, "application/proto")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    check!(status.is_success());
+    check!(content_type.starts_with("application/proto"));
+
+    broker.shutdown().await;
+}
