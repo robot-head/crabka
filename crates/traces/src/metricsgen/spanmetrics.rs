@@ -119,21 +119,34 @@ impl SpanMetricsRegistry {
         }
     }
 
+    /// Emit the registry's RED series for this collection interval.
+    ///
+    /// Counters (`calls_total`/`size_total`) and the latency histogram are
+    /// **cumulative**: the registry accumulates across intervals and emits the
+    /// running total each time (Tempo's persistent-registry semantics), so the
+    /// `_total` series are monotonic and the consuming PromQL/Mimir `rate()` /
+    /// `increase()` work. Previously `drain` reset the accumulator every interval,
+    /// emitting per-interval deltas under `_total` names — which `PromQL` reads as a
+    /// counter reset on (almost) every scrape, corrupting the headline RED rates.
+    /// Only the per-sample **exemplars** are drained each interval (they carry
+    /// their own timestamp and must not be re-emitted). The accumulator resets
+    /// only on process restart (the registry is rebuilt from WAL offsets), which
+    /// `PromQL` treats as a normal counter reset.
     #[must_use]
     pub fn drain(&mut self, timestamp_ms: i64) -> Vec<Series> {
-        let entries = std::mem::take(&mut self.entries);
-        let services = std::mem::take(&mut self.services);
-        let mut series = Vec::with_capacity(entries.len() * 3 + services.len());
+        let mut series = Vec::with_capacity(self.entries.len() * 3 + self.services.len());
 
-        for ((service, span_name, span_kind, status_code, status_message), entry) in entries {
+        for ((service, span_name, span_kind, status_code, status_message), entry) in
+            &mut self.entries
+        {
             let mut labels = vec![
-                ("service".to_string(), service),
-                ("span_name".to_string(), span_name),
-                ("span_kind".to_string(), span_kind),
-                ("status_code".to_string(), status_code),
+                ("service".to_string(), service.clone()),
+                ("span_name".to_string(), span_name.clone()),
+                ("span_kind".to_string(), span_kind.clone()),
+                ("status_code".to_string(), status_code.clone()),
             ];
             if let Some(status_message) = status_message {
-                labels.push(("status_message".to_string(), status_message));
+                labels.push(("status_message".to_string(), status_message.clone()));
             }
             let labels = sorted_labels(labels);
             series.push(Series {
@@ -160,15 +173,15 @@ impl SpanMetricsRegistry {
                     sum,
                     count,
                 },
-                exemplars: entry.exemplars,
+                exemplars: std::mem::take(&mut entry.exemplars),
                 timestamp_ms,
             });
         }
 
         if self.enable_target_info {
-            series.extend(services.into_iter().map(|service| Series {
+            series.extend(self.services.iter().map(|service| Series {
                 name: "traces_target_info".to_string(),
-                labels: sorted_labels(vec![("service".to_string(), service)]),
+                labels: sorted_labels(vec![("service".to_string(), service.clone())]),
                 sample: SeriesSample::Gauge(1.0),
                 exemplars: Vec::new(),
                 timestamp_ms,
@@ -461,17 +474,47 @@ mod tests {
     }
 
     #[test]
-    fn drain_resets_accumulator() {
+    fn drain_emits_cumulative_counters() {
         let mut reg = SpanMetricsRegistry::new(&MetricsGenConfig::default());
-        reg.record_span(&span(
-            "api",
-            "GET /x",
-            SpanKind::Server,
-            StatusCode::Ok,
-            5_000_000,
-            1,
+        let mk = || {
+            span(
+                "api",
+                "GET /x",
+                SpanKind::Server,
+                StatusCode::Ok,
+                5_000_000,
+                1,
+            )
+        };
+
+        reg.record_span(&mk());
+        let first = reg.drain(1_000);
+        assert!(matches!(
+            find(&first, "traces_spanmetrics_calls_total", "GET /x").sample,
+            SeriesSample::Counter(c) if (c - 1.0).abs() < 1e-9
         ));
-        let _ = reg.drain(1_000);
-        assert!(reg.drain(2_000).is_empty());
+
+        // Next interval, one more call: the `_total` counter is CUMULATIVE
+        // (monotonic), not a per-interval delta — it must read 2, not reset to 1.
+        reg.record_span(&mk());
+        let second = reg.drain(2_000);
+        assert!(matches!(
+            find(&second, "traces_spanmetrics_calls_total", "GET /x").sample,
+            SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9
+        ));
+
+        // An interval with no new spans still emits the running total (so PromQL
+        // never sees a spurious counter reset), and the latency histogram count
+        // stays cumulative too.
+        let third = reg.drain(3_000);
+        assert!(!third.is_empty());
+        assert!(matches!(
+            find(&third, "traces_spanmetrics_calls_total", "GET /x").sample,
+            SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9
+        ));
+        assert!(matches!(
+            find(&third, "traces_spanmetrics_latency", "GET /x").sample,
+            SeriesSample::ClassicHistogram { count, .. } if (count - 2.0).abs() < 1e-9
+        ));
     }
 }

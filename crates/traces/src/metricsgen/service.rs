@@ -107,15 +107,14 @@ where
     }
 
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
-        if !self
-            .pending_payloads
-            .lock()
-            .expect("metrics generator pending payload mutex poisoned")
-            .is_empty()
-        {
-            return Ok(0);
-        }
-
+        // NOTE: do not gate polling on `pending_payloads`. Awaiting `source.poll`
+        // is what keeps the Kafka WAL consumer alive and draining; an early
+        // `return Ok(0)` here resolved the run loop's `select!` poll arm
+        // synchronously (no `.await`), busy-spinning the CPU AND halting Kafka
+        // consumption entirely while a flush was outstanding (sink down) — growing
+        // consumer-group lag until the session timed out and the group rebalanced.
+        // A pending payload was already snapshotted by `collect`/`drain`, so
+        // processing newly polled spans only feeds the *next* collection.
         let spans = self.source.poll(max).await?;
         let count = spans.len();
         if count > 0 {
@@ -303,6 +302,25 @@ mod tests {
                 .any(|s| s.name == "traces_service_graph_request_total")
         );
         assert!(svc.source.commits() == 1);
+    }
+
+    #[tokio::test]
+    async fn poll_keeps_consuming_while_a_flush_is_pending() {
+        let svc = service();
+        svc.source
+            .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0; 8])]);
+        svc.poll_once(100).await.unwrap();
+        // A failed write leaves a payload pending (sink down).
+        svc.sink.fail_next();
+        assert!(svc.collect_once().await.is_err());
+
+        // With a payload pending, polling MUST still consume spans. Previously
+        // poll_once short-circuited to Ok(0) without awaiting, busy-spinning the
+        // run loop and halting Kafka consumption until the sink recovered.
+        svc.source
+            .push_batch(vec![span("B", SpanKind::Server, [0xC; 8], [0; 8])]);
+        let processed = svc.poll_once(100).await.unwrap();
+        assert!(processed == 1);
     }
 
     #[tokio::test]
