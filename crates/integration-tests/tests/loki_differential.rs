@@ -1009,6 +1009,12 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
         r#"min by (env) (bytes_over_time({app="api"} |= "vector differential" [3s]))"#,
         r#"max by (env) (bytes_over_time({app="api"} |= "vector differential" [3s]))"#,
         r#"avg without (pod) (bytes_over_time({app="api",env="prod"} |= "vector differential" [3s]))"#,
+        r#"stddev by (env) (count_over_time({app="api"} |= "vector differential error" [3s]))"#,
+        r#"stdvar without (pod) (count_over_time({app="api"} |= "vector differential error" [3s]))"#,
+        r#"topk by (env) (2, count_over_time({app="api"} |= "vector differential error" [3s]))"#,
+        r#"bottomk(2, count_over_time({app="api"} |= "vector differential error" [3s])) without (pod)"#,
+        r#"sort(count_over_time({app="api"} |= "vector differential error" [3s]))"#,
+        r#"sort_desc(count_over_time({app="api"} |= "vector differential error" [3s]))"#,
     ] {
         let loki_result =
             loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s")
@@ -3033,7 +3039,11 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         LabelIndex::default(),
         BlockIndex::default(),
     ));
-    for query in [r#"{app="#, "abs(vector(-1.2))"] {
+    for query in [
+        r#"{app="#,
+        "abs(vector(-1.2))",
+        r#"count_values by (env) ("hits", count_over_time({app="api"}[1s]))"#,
+    ] {
         let loki_error = loki_query_error(&http, &loki_base, query).await;
         let crabka_error = crabka_query_error(querier.clone(), query).await;
 
@@ -4804,7 +4814,7 @@ async fn loki_query_range_result_with_step(
 ) -> Value {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let body: Value = http
+        let response = http
             .get(format!("{base}/loki/api/v1/query_range"))
             .query(&[
                 ("query", query.to_string()),
@@ -4814,10 +4824,12 @@ async fn loki_query_range_result_with_step(
             ])
             .send()
             .await
-            .expect("query Loki")
-            .json()
-            .await
-            .expect("Loki JSON response");
+            .expect("query Loki");
+        let status = response.status();
+        let body_text = response.text().await.expect("Loki response body");
+        let body: Value = serde_json::from_str(&body_text).unwrap_or_else(|error| {
+            panic!("Loki JSON response: status={status}, body={body_text:?}, error={error}")
+        });
         if !body["data"]["result"]
             .as_array()
             .unwrap_or(&Vec::new())
