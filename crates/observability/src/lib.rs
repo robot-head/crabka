@@ -11053,6 +11053,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
         Err(stream_error) => {
             if let Some(formatted) = format_scalar_vector_expression(query) {
                 Ok(formatted)
+            } else if let Some(formatted) = format_metric_vector_arithmetic_expression(query) {
+                Ok(formatted)
             } else if parse_metric_query(query).is_ok()
                 || parse_metric_label_join_query(query).is_ok()
                 || parse_metric_label_replace_query(query).is_ok()
@@ -11073,6 +11075,109 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
             }
         }
     }
+}
+
+fn format_metric_vector_arithmetic_expression(query: &str) -> Option<String> {
+    let (left_text, operator, right_text) = split_metric_vector_arithmetic_query(query)?;
+    let left = format_simple_metric_query(&parse_metric_query(left_text.trim()).ok()?)?;
+    let right = format_vector_function_text(right_text.trim())?;
+    Some(format!("({left} {operator} {right})"))
+}
+
+fn split_metric_vector_arithmetic_query(query: &str) -> Option<(&str, &'static str, &str)> {
+    let mut parens = 0_i32;
+    let mut brackets = 0_i32;
+    let mut braces = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in query.char_indices() {
+        if let Some(quote_ch) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote_ch {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '`' => quote = Some(ch),
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '+' | '-' | '*' | '/' | '%' | '^' if parens == 0 && brackets == 0 && braces == 0 => {
+                let right = query[index + ch.len_utf8()..].trim_start();
+                if !right.starts_with("vector") {
+                    continue;
+                }
+                return Some((
+                    &query[..index],
+                    match ch {
+                        '+' => "+",
+                        '-' => "-",
+                        '*' => "*",
+                        '/' => "/",
+                        '%' => "%",
+                        '^' => "^",
+                        _ => unreachable!(),
+                    },
+                    right,
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn format_simple_metric_query(query: &MetricQuery) -> Option<String> {
+    if query.vector_aggregation.is_some()
+        || query.range_grouping.is_some()
+        || query.offset_ns != 0
+        || query.range_ns % 1_000_000_000 != 0
+    {
+        return None;
+    }
+    Some(format!(
+        "{}({}[{}s])",
+        format_range_aggregation_name(&query.aggregation)?,
+        format_stream_query(&query.stream),
+        query.range_ns / 1_000_000_000
+    ))
+}
+
+fn format_range_aggregation_name(aggregation: &RangeAggregation) -> Option<&'static str> {
+    match aggregation {
+        RangeAggregation::CountOverTime => Some("count_over_time"),
+        RangeAggregation::Rate => Some("rate"),
+        RangeAggregation::RateCounter => Some("rate_counter"),
+        RangeAggregation::BytesRate => Some("bytes_rate"),
+        RangeAggregation::BytesOverTime => Some("bytes_over_time"),
+        RangeAggregation::AbsentOverTime => Some("absent_over_time"),
+        RangeAggregation::PresentOverTime => Some("present_over_time"),
+        RangeAggregation::SumOverTime => Some("sum_over_time"),
+        RangeAggregation::AvgOverTime => Some("avg_over_time"),
+        RangeAggregation::StdvarOverTime => Some("stdvar_over_time"),
+        RangeAggregation::StddevOverTime => Some("stddev_over_time"),
+        RangeAggregation::MinOverTime => Some("min_over_time"),
+        RangeAggregation::MaxOverTime => Some("max_over_time"),
+        RangeAggregation::FirstOverTime => Some("first_over_time"),
+        RangeAggregation::LastOverTime => Some("last_over_time"),
+        RangeAggregation::QuantileOverTime(_) => None,
+    }
+}
+
+fn format_vector_function_text(query: &str) -> Option<String> {
+    let query = query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let (formatted, end) = parse_formatted_vector_function(&query, 0)?;
+    (end == query.len()).then_some(formatted)
 }
 
 fn format_scalar_vector_expression(query: &str) -> Option<String> {

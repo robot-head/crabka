@@ -6825,6 +6825,31 @@ async fn format_query_endpoint_formats_vector_arithmetic_expression_like_loki() 
 }
 
 #[tokio::test]
+async fn format_query_endpoint_formats_metric_vector_arithmetic_expression_like_loki() {
+    let state = fixture();
+    let app = loki_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/loki/api/v1/format_query?query=count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2Bvector%281%29")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::OK);
+    assert!(
+        json_body(response).await
+            == json!({
+                "status": "success",
+                "data": r#"(count_over_time({app="api"}[30s]) + vector(1.000000))"#
+            })
+    );
+}
+
+#[tokio::test]
 async fn format_query_endpoint_formats_vector_matching_modifier_like_loki() {
     let state = fixture();
     let app = loki_router(state);
