@@ -2637,6 +2637,11 @@ impl LogsService for OtlpGrpcLogsService {
 
 #[derive(Debug, Deserialize)]
 struct LokiPushRequest {
+    streams: Vec<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LokiTypedPushRequest {
     streams: Vec<LokiPushStream>,
 }
 
@@ -3069,6 +3074,7 @@ fn normalize_loki_http_push(
     if is_loki_json_content_type(headers)? {
         let payload =
             serde_json::from_slice(&body).map_err(|_| DistributorError::InvalidPushPayload)?;
+        let payload = validate_loki_json_push_stream_objects(payload, &body)?;
         validate_loki_json_push_value_arrays(&payload, &body)?;
         validate_loki_json_push_duplicate_keys(&body)?;
         validate_loki_json_structured_metadata_value_types(&payload, &body)?;
@@ -3093,8 +3099,27 @@ fn normalize_loki_http_push(
     }
 }
 
+fn validate_loki_json_push_stream_objects(
+    payload: LokiPushRequest,
+    body: &[u8],
+) -> Result<LokiTypedPushRequest, DistributorError> {
+    let mut streams = Vec::with_capacity(payload.streams.len());
+    for stream in payload.streams {
+        if !stream.is_object() {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_stream_parse_error(body, &stream),
+            ));
+        }
+        let stream =
+            serde_json::from_value(stream).map_err(|_| DistributorError::InvalidPushPayload)?;
+        streams.push(stream);
+    }
+
+    Ok(LokiTypedPushRequest { streams })
+}
+
 fn validate_loki_json_push_value_arrays(
-    payload: &LokiPushRequest,
+    payload: &LokiTypedPushRequest,
     body: &[u8],
 ) -> Result<(), DistributorError> {
     for stream in &payload.streams {
@@ -3134,8 +3159,20 @@ fn loki_json_push_value_parse_error(body: &[u8], value: &Value) -> String {
     )
 }
 
+fn loki_json_push_stream_parse_error(body: &[u8], value: &Value) -> String {
+    let body = String::from_utf8_lossy(body);
+    let value_text = value.to_string();
+    let value_start = body.find(&value_text).unwrap_or(body.len());
+    let context = loki_decode_error_context(&body, value_start.saturating_add(4));
+    let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(12));
+
+    format!(
+        "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like object, but can't find closing '}}' symbol, error found in #10 byte of ...|{context}|..., bigger context ...|{bigger_context}|...\n"
+    )
+}
+
 fn validate_loki_json_structured_metadata_value_types(
-    payload: &LokiPushRequest,
+    payload: &LokiTypedPushRequest,
     body: &[u8],
 ) -> Result<(), DistributorError> {
     for stream in &payload.streams {
@@ -3315,7 +3352,7 @@ fn is_loki_json_content_type(headers: &HeaderMap) -> Result<bool, DistributorErr
 
 fn normalize_loki_push(
     headers: &HeaderMap,
-    payload: LokiPushRequest,
+    payload: LokiTypedPushRequest,
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
