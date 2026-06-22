@@ -2843,6 +2843,19 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
 
     assert!(crabka_label_replace_result == loki_label_replace_result);
 
+    let parenthesized_label_replace_query = r#"(label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)"))"#;
+    let loki_parenthesized_label_replace_result = loki_query_result(
+        &http,
+        &loki_base,
+        parenthesized_label_replace_query,
+        time_ns,
+    )
+    .await;
+    let crabka_parenthesized_label_replace_result =
+        crabka_query_result(querier.clone(), parenthesized_label_replace_query, time_ns).await;
+
+    assert!(crabka_parenthesized_label_replace_result == loki_parenthesized_label_replace_result);
+
     let label_replace_operand_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)") / label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)")"#;
     let loki_label_replace_operand_result =
         loki_query_result(&http, &loki_base, label_replace_operand_query, time_ns).await;
