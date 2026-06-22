@@ -2858,6 +2858,36 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_loki_and_crabka_return_same_label_replace_vector_function_result() {
+    let image = GenericImage::new("grafana/loki", "3.4.2")
+        .with_exposed_port(LOKI_PORT.tcp())
+        .with_wait_for(WaitFor::seconds(2));
+    let loki = image.start().await.expect("start Loki container");
+    let loki_base = format!(
+        "http://127.0.0.1:{}",
+        loki.get_host_port_ipv4(LOKI_PORT)
+            .await
+            .expect("Loki mapped port")
+    );
+    let http = reqwest::Client::new();
+    wait_for_loki_ready(&http, &loki_base).await;
+
+    let dir = TempDir::new().expect("querier root");
+    let querier = loki_router(QuerierState::new(
+        dir.path(),
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+
+    let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)")"#;
+    let loki_result =
+        loki_scalar_or_vector_query_result(&http, &loki_base, query, 4_000_000_000).await;
+    let crabka_result = crabka_scalar_or_vector_query_result(querier, query, 4_000_000_000).await;
+
+    assert!(crabka_result == loki_result);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
     let image = GenericImage::new("grafana/loki", "3.4.2")
         .with_exposed_port(LOKI_PORT.tcp())
@@ -5555,6 +5585,43 @@ async fn loki_query_result(http: &reqwest::Client, base: &str, query: &str, time
     }
 }
 
+async fn loki_scalar_or_vector_query_result(
+    http: &reqwest::Client,
+    base: &str,
+    query: &str,
+    time_ns: i64,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = http
+            .get(format!("{base}/loki/api/v1/query"))
+            .query(&[("query", query.to_string()), ("time", time_ns.to_string())])
+            .send()
+            .await
+            .expect("query Loki scalar or vector");
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .expect("Loki scalar or vector response body");
+        let body: Value = serde_json::from_str(&body_text).unwrap_or_else(|error| {
+            panic!("Loki JSON response: status={status}, body={body_text:?}, error={error}")
+        });
+        if !body["data"]["result"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .is_empty()
+        {
+            return stable_scalar_or_vector_result(&body);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Loki never returned the scalar or vector differential row: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn loki_api_prom_query_result(
     http: &reqwest::Client,
     base: &str,
@@ -5764,6 +5831,30 @@ async fn crabka_query_result(app: axum::Router, query: &str, time_ns: i64) -> Va
     assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     stable_loki_result(&serde_json::from_slice(&body).unwrap())
+}
+
+async fn crabka_scalar_or_vector_query_result(
+    app: axum::Router,
+    query: &str,
+    time_ns: i64,
+) -> Value {
+    let uri = format!(
+        "/loki/api/v1/query?query={}&time={time_ns}",
+        percent_encode_component(query)
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("X-Scope-OrgID", "tenant-a")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(response.status() == StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    stable_scalar_or_vector_result(&serde_json::from_slice(&body).unwrap())
 }
 
 async fn loki_raw_query_result(http: &reqwest::Client, base: &str, raw_query: &str) -> Value {
