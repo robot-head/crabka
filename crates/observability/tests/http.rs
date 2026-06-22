@@ -2336,6 +2336,35 @@ async fn loki_push_endpoint_rejects_invalid_protobuf_without_wal_append() {
 }
 
 #[tokio::test]
+async fn loki_push_endpoint_rejects_empty_protobuf_push_like_loki_without_wal_append() {
+    let sink = InMemoryWalSink::default();
+    let app = distributor_router(sink.clone());
+    let payload = LokiProtoPushRequest { streams: vec![] };
+    let payload = SnappyEncoder::new()
+        .compress_vec(&payload.encode_to_vec())
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/loki/api/v1/push")
+                .header("X-Scope-OrgID", "tenant-a")
+                .header("content-type", "application/x-protobuf")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        text_body(response).await == "error at least one valid stream is required for ingestion\n"
+    );
+    assert!(sink.records().is_empty());
+}
+
+#[tokio::test]
 async fn loki_push_endpoint_rejects_duplicate_protobuf_labels_without_wal_append() {
     let sink = InMemoryWalSink::default();
     let app = distributor_router(sink.clone());
