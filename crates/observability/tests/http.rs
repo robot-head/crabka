@@ -13455,7 +13455,7 @@ async fn query_endpoint_accepts_grafana_loki_health_vector_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13490,7 +13490,7 @@ async fn query_endpoint_accepts_vector_function_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "1.5"]
+                            "value": [4000000000i64, "1.5"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13555,7 +13555,7 @@ async fn query_endpoint_accepts_scientific_vector_function_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "-0.25"]
+                            "value": [4000000000i64, "-0.25"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13590,7 +13590,7 @@ async fn query_endpoint_accepts_vector_arithmetic_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13625,7 +13625,7 @@ async fn query_endpoint_accepts_vector_power_and_modulo_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "9"]
+                            "value": [4000000000i64, "9"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13660,7 +13660,7 @@ async fn query_endpoint_accepts_parenthesized_vector_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "9"]
+                            "value": [4000000000i64, "9"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13695,7 +13695,7 @@ async fn query_endpoint_accepts_vector_literal_arithmetic_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "6"]
+                            "value": [4000000000i64, "6"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13730,7 +13730,7 @@ async fn query_endpoint_accepts_vector_and_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13765,7 +13765,7 @@ async fn query_endpoint_accepts_vector_or_expression() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13830,7 +13830,7 @@ async fn query_endpoint_accepts_vector_arithmetic_on_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13865,7 +13865,7 @@ async fn query_endpoint_accepts_vector_bool_comparison_ignoring_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "0"]
+                            "value": [4000000000i64, "0"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13900,7 +13900,7 @@ async fn query_endpoint_accepts_vector_group_left_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "2"]
+                            "value": [4000000000i64, "2"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13935,7 +13935,7 @@ async fn query_endpoint_accepts_vector_group_right_modifier() {
                     "result": [
                         {
                             "metric": {},
-                            "value": [4, "1"]
+                            "value": [4000000000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -13972,7 +13972,7 @@ async fn query_endpoint_accepts_label_replace_vector_function() {
                             "metric": {
                                 "service": "api-"
                             },
-                            "value": [4, "1"]
+                            "value": [4000000000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()
@@ -14009,7 +14009,7 @@ async fn query_endpoint_accepts_label_join_vector_function() {
                             "metric": {
                                 "joined": "/"
                             },
-                            "value": [4, "1"]
+                            "value": [4000000000i64, "1"]
                         }
                     ],
                     "stats": expected_loki_stats()

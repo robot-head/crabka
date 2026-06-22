@@ -7839,6 +7839,7 @@ fn loki_instant_scalar_or_vector_response(
             "result": [timestamp, sample]
         })),
         ScalarVectorExpressionResult::Vector { sample, metric } => {
+            let timestamp = json!(timestamp_ns);
             let result = sample.map_or_else(Vec::new, |sample| {
                 vec![json!({
                     "metric": metric,
@@ -15845,6 +15846,34 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instant_synthetic_vector_uses_raw_loki_timestamp() {
+        let response = loki_instant_scalar_or_vector_response(
+            4_000_000_000,
+            ScalarVectorExpressionResult::Vector {
+                sample: Some("1".to_string()),
+                metric: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(
+            response["data"]["result"][0]["value"][0],
+            json!(4_000_000_000i64)
+        );
+    }
+
+    #[test]
+    fn instant_scalar_expression_keeps_loki_seconds_timestamp() {
+        let response = loki_instant_scalar_or_vector_response(
+            4_000_000_000,
+            ScalarVectorExpressionResult::Scalar {
+                sample: "2".to_string(),
+            },
+        );
+
+        assert_eq!(response["data"]["result"][0], json!(4));
+    }
 
     #[test]
     fn formats_loki_numeric_json_timestamp_error_context() {
