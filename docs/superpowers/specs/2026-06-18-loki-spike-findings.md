@@ -1510,7 +1510,8 @@ generic Loki error envelope, covering timestamp strings that fail numeric
 parsing, non-string log-line values, and non-object structured metadata fields.
 Timestamp-only JSON push values now match Loki by appending an empty log line
 instead of rejecting the value shape, and extra JSON push value fields after the
-first structured metadata object are ignored like Loki. The
+first structured metadata object are ignored like Loki. Non-array JSON push
+values now also return Loki's raw `Unknown value type` decoder response. The
 configured OTLP HTTP ingest path now shares the same timestamp windows before
 WAL append and matches Loki's `400` protobuf status-message body for future
 OTLP timestamps. Configured distributors now also perform a broker-backed tenant
