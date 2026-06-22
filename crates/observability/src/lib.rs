@@ -7914,8 +7914,14 @@ fn scalar_vector_expression_result(query: &str) -> Option<ScalarVectorExpression
 }
 
 fn reject_signed_vector_function_literal(query: &str) -> Result<(), HttpQueryError> {
+    signed_vector_function_literal_error(query)
+        .map(HttpQueryError::LokiPlainParse)
+        .map_or(Ok(()), Err)
+}
+
+fn signed_vector_function_literal_error(query: &str) -> Option<String> {
     if !could_be_scalar_vector_expression(query) {
-        return Ok(());
+        return None;
     }
 
     let mut in_string = false;
@@ -7952,14 +7958,14 @@ fn reject_signed_vector_function_literal(query: &str) -> Result<(), HttpQueryErr
             }
             if let Some(sign @ ('+' | '-')) = query[sign_index..].chars().next() {
                 let column = query[..sign_index].chars().count() + 1;
-                return Err(HttpQueryError::LokiPlainParse(format!(
+                return Some(format!(
                     "parse error at line 1, col {column}: syntax error: unexpected {sign}, expecting NUMBER"
-                )));
+                ));
             }
         }
         index += ch.len_utf8();
     }
-    Ok(())
+    None
 }
 
 fn could_be_scalar_vector_expression(query: &str) -> bool {
@@ -8657,6 +8663,10 @@ impl ScalarSample {
             decimals.pop();
         }
         format!("{sign}{whole}.{decimals}")
+    }
+
+    fn format_fixed_six(self) -> String {
+        format!("{:.6}", self.numerator as f64 / self.denominator as f64)
     }
 }
 
@@ -10983,6 +10993,10 @@ fn parse_format_query_param(raw_query: Option<&str>) -> Result<String, HttpQuery
 }
 
 fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
+    if let Some(error) = signed_vector_function_literal_error(query) {
+        return Err(HttpQueryError::LokiFormatPlainParse(error));
+    }
+
     match parse_query(query) {
         Ok(query) => Ok(format_stream_query(&query)),
         Err(stream_error) => {
@@ -10994,8 +11008,11 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 || parse_metric_binary_set_query(query).is_ok()
                 || parse_metric_scalar_arithmetic_query(query).is_ok()
                 || parse_metric_scalar_comparison_query(query).is_ok()
-                || scalar_vector_expression_result(query).is_some()
             {
+                Ok(query.trim().to_string())
+            } else if let Some(formatted) = format_scalar_vector_expression(query) {
+                Ok(formatted)
+            } else if scalar_vector_expression_result(query).is_some() {
                 Ok(query.trim().to_string())
             } else {
                 Err(HttpQueryError::LokiFormatParse {
@@ -11005,6 +11022,21 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
             }
         }
     }
+}
+
+fn format_scalar_vector_expression(query: &str) -> Option<String> {
+    let query = query
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let scalar = query.strip_prefix("vector(")?.strip_suffix(')')?;
+    if scalar.starts_with(['+', '-']) {
+        return None;
+    }
+    Some(format!(
+        "vector({})",
+        parse_scalar_sample(scalar)?.format_fixed_six()
+    ))
 }
 
 fn format_stream_query(query: &StreamQuery) -> String {
@@ -15809,6 +15841,8 @@ enum HttpQueryError {
     CountValuesQuery,
     #[error("{0}")]
     LokiPlainParse(String),
+    #[error("{0}")]
+    LokiFormatPlainParse(String),
     #[error(transparent)]
     QueryAuthorization(#[from] QueryAuthorizationError),
     #[error("{source}")]
@@ -15883,6 +15917,9 @@ impl IntoResponse for HttpQueryError {
                     StatusCode::BAD_REQUEST,
                     &loki_parse_error_text(query, source),
                 );
+            }
+            Self::LokiFormatPlainParse(error) => {
+                return loki_format_query_invalid_response(StatusCode::BAD_REQUEST, error);
             }
             Self::LokiFormatMissingQuery => {
                 return loki_format_query_invalid_response(
