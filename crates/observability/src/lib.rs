@@ -11163,11 +11163,21 @@ fn format_label_replace_metric_binary_expression(
     if !left_is_label_replace && !right_is_label_replace {
         return None;
     }
-    Some(format!("  {left}\n{operator}\n  {right}"))
+    Some(format!(
+        "{}\n{operator}\n{}",
+        indent_logql_lines(&left, "  "),
+        indent_logql_lines(&right, "  "),
+    ))
 }
 
 fn format_label_replace_metric_binary_operand(query: &str) -> Option<(String, bool)> {
     if let Some(formatted) = format_metric_label_replace_query(query) {
+        return Some((formatted, true));
+    }
+    if let Some(formatted) = format_label_replace_metric_scalar_expression(query) {
+        return Some((formatted, true));
+    }
+    if let Some(formatted) = format_label_replace_metric_vector_expression(query) {
         return Some((formatted, true));
     }
     if let Some(formatted) = format_vector_function_text(query) {

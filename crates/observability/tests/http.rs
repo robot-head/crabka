@@ -6987,6 +6987,14 @@ async fn format_query_endpoint_formats_metric_vector_arithmetic_expression_like_
             "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%2Bvector%282%29",
             "  label_replace(count_over_time({app=\"api\"}[30s]),\"service\",\"$1-api\",\"app\",\"(.*)\")\n+\n  vector(2.000000)",
         ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%20vector%281%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%2Bvector%282%29",
+            "  label_replace(\n    (count_over_time({app=\"api\"}[30s]) + vector(1.000000)),\n    \"service\",\n    \"$1-api\",\n    \"app\",\n    \"(.*)\"\n  )\n+\n  vector(2.000000)",
+        ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%201.25e-1%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%2Bvector%282%29",
+            "  label_replace((count_over_time({app=\"api\"}[30s]) + 0.125),\"service\",\"$1-api\",\"app\",\"(.*)\")\n+\n  vector(2.000000)",
+        ),
     ] {
         let response = app
             .clone()
@@ -7098,6 +7106,10 @@ async fn format_query_endpoint_formats_metric_vector_set_modifier_like_loki() {
         (
             "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20or%20vector%282%29",
             "  label_replace(count_over_time({app=\"api\"}[30s]),\"service\",\"$1-api\",\"app\",\"(.*)\")\nor\n  vector(2.000000)",
+        ),
+        (
+            "label_replace%28count_over_time%28%7Bapp%3D%22api%22%7D%5B30s%5D%29%20%2B%20vector%281%29%2C%20%22service%22%2C%20%22%241-api%22%2C%20%22app%22%2C%20%22%28.%2A%29%22%29%20or%20vector%282%29",
+            "  label_replace(\n    (count_over_time({app=\"api\"}[30s]) + vector(1.000000)),\n    \"service\",\n    \"$1-api\",\n    \"app\",\n    \"(.*)\"\n  )\nor\n  vector(2.000000)",
         ),
     ] {
         let response = app
