@@ -3665,7 +3665,6 @@ fn loki_proto_timestamp_ns(
         .checked_mul(1_000_000_000)
         .and_then(|seconds_ns| seconds_ns.checked_add(i64::from(timestamp.nanos)))
         .ok_or(DistributorError::InvalidTimestamp)
-        .and_then(validate_ingest_timestamp_ns)
 }
 
 fn loki_missing_proto_timestamp_error(
