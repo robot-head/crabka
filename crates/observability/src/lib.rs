@@ -14714,10 +14714,7 @@ fn parse_loki_tail_delay_for_query_param(value: &str) -> Result<i64, HttpQueryEr
 
 fn validate_loki_tail_delay_for(delay_for: i64) -> Result<(), HttpQueryError> {
     if !(0..=LOKI_MAX_TAIL_DELAY_NS).contains(&delay_for) {
-        return Err(HttpQueryError::InvalidQueryParameter {
-            name: "delay_for",
-            value: delay_for.to_string(),
-        });
+        return Err(HttpQueryError::TailDelayForTooLarge);
     }
 
     Ok(())
@@ -18413,6 +18410,8 @@ enum HttpQueryError {
     InvalidStep,
     #[error("invalid query parameter `{name}` value `{value}`")]
     InvalidQueryParameter { name: &'static str, value: String },
+    #[error("delay_for can't be greater than 5")]
+    TailDelayForTooLarge,
     #[error("cannot parse \"{value}\" to a valid duration")]
     InvalidDurationQueryParameter { value: String },
     #[error("interval must be >= 0")]
@@ -18492,6 +18491,7 @@ impl IntoResponse for HttpQueryError {
             | Self::LimitNotPositive
             | Self::InvalidStep
             | Self::InvalidQueryParameter { .. }
+            | Self::TailDelayForTooLarge
             | Self::InvalidDurationQueryParameter { .. }
             | Self::InvalidInterval
             | Self::InvalidVolumeAggregation
@@ -18553,6 +18553,7 @@ impl IntoResponse for HttpQueryError {
                 | Self::InvalidLimit(_)
                 | Self::LimitNotPositive
                 | Self::InvalidStep
+                | Self::TailDelayForTooLarge
                 | Self::InvalidDurationQueryParameter { .. }
                 | Self::InvalidInterval
                 | Self::InvalidVolumeAggregation
