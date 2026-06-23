@@ -30,8 +30,8 @@ Every task implicitly includes these:
 
 | Batch | Tasks | Parallel? | Rationale |
 |---|---|---|---|
-| **A — Foundations** | 1, 2, 3, 4 | Yes (disjoint files) | publish flags, telemetry profiling module, uniform S3 in 3 bins, logs binary |
-| **B — App + self-instrumentation** | 5, 6, 7 | Yes (disjoint crates) | demo app; broker profiling; service-binary profiling/telemetry |
+| **A — Foundations** | 1, 2, 3 | Yes (disjoint files) | publish flags, telemetry profiling module, uniform S3 in the backends |
+| **B — App + self-instrumentation** | 4, 5, 6, 7 | Yes (disjoint crates) | instrument logs binary; demo app; broker profiling; other service binaries |
 | **C — Fixture & containers** | 8, then 9/10/11, then 12 | Partial | image first; compose/alloy/grafana; smoke last |
 
 Dispatch each batch's tasks concurrently (one message, multiple agents), review, then proceed. Within Batch C, Task 8 (image) precedes 9–11, and Task 12 (smoke) is last.
@@ -107,8 +107,8 @@ prost = { workspace = true }
 pprof = { version = "0.14", default-features = false, features = ["prost-codec"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["net", "rt", "time", "macros"] }
-# heap-profiling only:
-tikv-jemalloc-ctl = { version = "0.6", optional = true }
+# heap-profiling only (jemalloc_pprof provides the PROF_CTL global it needs;
+# the jemalloc allocator itself is supplied by each binary, not this lib):
 jemalloc_pprof = { version = "0.7", optional = true }
 ```
 
@@ -116,7 +116,7 @@ Add a `[features]` table:
 
 ```toml
 [features]
-heap-profiling = ["dep:jemalloc_pprof", "dep:tikv-jemalloc-ctl"]
+heap-profiling = ["dep:jemalloc_pprof"]
 ```
 
 - [ ] **Step 2: Write the failing test**
@@ -354,7 +354,7 @@ Expected: builds. Then `crabka-profiles --target querier --object-store-url memo
 
 - [ ] **Step 3: Metrics ingest/compactor — URL parsing**
 
-In `crates/metrics/src/bin/crabka-metrics.rs`, locate where the Distributor and Compactor arms construct their object store (look for `LocalFileSystem` / a `--object-store-dir` or similar arg). Add/rename the arg to `--object-store-url` (default `file://./.crabka-metrics-blocks`) and build via the same `build_object_store` helper (add it to this file too):
+In `crates/metrics/src/bin/crabka-metrics.rs`, only the **Compactor** arm constructs an object store (the Distributor writes to the WAL/Kafka, not the object store — verified at `crabka-metrics.rs:220` vs `:269`). Rename the arg `object_store_dir: PathBuf` → `object_store_url: String` (default `file://./.crabka-metrics-blocks`), and in the Compactor arm replace `LocalFileSystem::new_with_prefix(&cli.object_store_dir)` with the same `build_object_store` helper (add it to this file too):
 
 ```rust
 fn build_object_store(
@@ -423,48 +423,69 @@ git commit -m "feat(observability): uniform --object-store-url (S3/MinIO) across
 
 ---
 
-### Task 4: `crabka-logs` binary
+## Batch B — App + self-instrumentation
+
+Dispatch Tasks 4–7 concurrently (disjoint crates), review, then proceed to Batch C.
+
+### Task 4: Instrument the existing `crabka-observability` logs binary
 
 **Files:**
-- Create: `crates/observability/src/bin/crabka-logs.rs`
-- Modify: `crates/observability/Cargo.toml` (add `[[bin]]`, dev/runtime deps if needed)
+- Modify: `crates/observability/src/main.rs` (the EXISTING logs binary)
+- Modify: `crates/observability/Cargo.toml` (add `crabka-telemetry` dep + `heap-profiling` feature + optional jemalloc)
 
 **Interfaces:**
-- Consumes: `crabka_observability::{ServiceConfig, Role, ServiceDependencies, build_service_router, QuerierIndexSource}` (`crates/observability/src/lib.rs`).
-- Produces: a `crabka-logs` binary with `ServiceConfig`'s derived clap args (incl. `--target {distributor,compactor,querier}`, `--listen-addr`, `--object-store-url`, `--wal-bootstrap-server`, `--wal-topic`, ...), serving the Loki API on the configured port (default `127.0.0.1:3100`).
+- Consumes: `crabka_observability::{ServiceConfig, build_service_dependencies, serve_service}` (already used by `src/main.rs`); `crabka_telemetry::{init, OtlpConfig}`, `crabka_telemetry::profiling::serve_admin_from_env`.
+- Produces: the existing `crabka-observability` binary (the logs service) now emits OTLP traces + JSON logs and exposes `/debug/pprof/*` on `:9404`. S3/MinIO is handled **inside** `build_service_dependencies` (it reads `config.object_store_url` via `parse_url_opts`), so no object-store wiring is needed here. Compose invokes it as `crabka-observability --target {distributor,compactor,querier} ...`.
 
-`ServiceConfig` already `#[derive(Parser)]` with `#[command(name = "crabka-observability")]` and all fields as `#[arg(...)]` (`crates/observability/src/lib.rs:114`). So the binary just parses it, builds the object store, builds the router, and serves.
+> **The logs service binary already exists** (verified) — `crates/observability/src/main.rs`:
+> ```rust
+> use clap::Parser;
+> use crabka_observability::{ServiceConfig, build_service_dependencies, serve_service};
+> #[tokio::main]
+> async fn main() -> Result<(), Box<dyn std::error::Error>> {
+>     let config = ServiceConfig::parse();
+>     let dependencies = build_service_dependencies(&config).await?;
+>     serve_service(config, dependencies, None).await?;
+>     Ok(())
+> }
+> ```
+> `ServiceConfig` derives `clap::Parser` with `--target {distributor,compactor,querier}`, `--listen-addr` (default `127.0.0.1:3100`), `--object-store-url`, `--wal-bootstrap-server`, `--wal-topic`, `--index-prefix`, etc. The binary name is `crabka-observability`. **This task instruments it; it does NOT create a new binary.** (Depends on Task 2's profiling module — hence Batch B.)
 
-- [ ] **Step 1: Declare the binary in `crates/observability/Cargo.toml`**
-
-Add:
+- [ ] **Step 1: Add deps + feature to `crates/observability/Cargo.toml`**
 
 ```toml
-[[bin]]
-name = "crabka-logs"
-path = "src/bin/crabka-logs.rs"
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+
+[dependencies]
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+tikv-jemallocator = { version = "0.6", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 ```
 
-(`crabka-observability` is already `publish = false`; `axum`, `clap`, `object_store`, `tokio`, `url` are already dependencies per its `Cargo.toml`.)
+(`axum`, `clap`, `object_store`, `tokio`, `url` are already dependencies; `crabka-observability` is already `publish = false`.)
 
-- [ ] **Step 2: Write the binary**
+- [ ] **Step 2: Instrument `crates/observability/src/main.rs`**
 
-Create `crates/observability/src/bin/crabka-logs.rs`:
+Replace the file with:
 
 ```rust
-//! `crabka-logs` — role-selectable Loki-compatible logs service.
-//!
-//! Thin entrypoint over `crabka_observability::build_service_router`. The full
-//! CLI surface is `ServiceConfig`'s derived clap args (`--target`,
-//! `--listen-addr`, `--object-store-url`, `--wal-bootstrap-server`, ...).
+//! `crabka-observability` — role-selectable Loki-compatible logs service,
+//! self-instrumented (OTLP traces + JSON logs + CPU/heap pprof).
 
-use std::sync::Arc;
+#[cfg(feature = "heap-profiling")]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use clap::Parser as _;
-use crabka_observability::{ServiceConfig, ServiceDependencies, build_service_router};
+#[cfg(feature = "heap-profiling")]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
+use clap::Parser;
+use crabka_observability::{ServiceConfig, build_service_dependencies, serve_service};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
@@ -476,72 +497,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "info",
         "crabka-logs",
     )?;
-
     // CPU/heap profiling admin server (Alloy pyroscope.scrape target).
     crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
     let config = ServiceConfig::parse();
-
-    // Build the S3/file object store from the configured URL, if any.
-    let object_store: Option<Arc<dyn object_store::ObjectStore>> = match &config.object_store_url {
-        Some(raw) => {
-            let url = url::Url::parse(raw)?;
-            let (store, _prefix) = object_store::parse_url_opts(&url, std::env::vars())?;
-            Some(Arc::from(store))
-        }
-        None => None,
-    };
-
-    let router = build_service_router(
-        &config,
-        ServiceDependencies::default(),
-        object_store.as_deref(),
-    )
-    .await?;
-
-    let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
-    let bound = listener.local_addr()?;
-    tracing::info!(%bound, target = ?config.target, "crabka-logs listening");
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    let dependencies = build_service_dependencies(&config).await?;
+    serve_service(config, dependencies, None).await?;
 
     telemetry.shutdown();
     Ok(())
 }
 ```
 
-Add `crabka-telemetry = { version = "0.3.8", path = "../telemetry" }` to `crates/observability/Cargo.toml` `[dependencies]` (needed for telemetry + profiling).
+> The `None` third arg to `serve_service` is the object-store override slot; the S3 store is built inside `build_service_dependencies` from `config.object_store_url` (`build_configured_object_store`, `crates/observability/src/lib.rs:1667`, uses `parse_url_opts` for non-`file` schemes), so MinIO works with no extra wiring. `serve_service` blocks until shutdown; `telemetry.shutdown()` runs on graceful exit.
 
-> **Note:** if `ServiceConfig` does not expose `listen_addr`/`object_store_url`/`target` as `pub`, they are already `pub` per `crates/observability/src/lib.rs:114-170`. The compactor role typically has no HTTP server — `build_service_router` still returns a status router for it (see `loki_differential.rs` `compactor_router_for_status`), so serving it is harmless.
+- [ ] **Step 3: Verify build (both modes) + `--help`**
 
-- [ ] **Step 3: Verify build and `--help`**
+Run: `cargo build -p crabka-observability` then `cargo build -p crabka-observability --features heap-profiling`
+Run: `cargo run -p crabka-observability -- --help`
+Expected: both build; help lists `--target`, `--listen-addr`, `--object-store-url`, `--wal-bootstrap-server`, etc.
 
-Run: `cargo build -p crabka-observability --bin crabka-logs`
-Expected: builds.
+- [ ] **Step 4: Smoke-run the querier + profiling endpoint**
 
-Run: `cargo run -p crabka-observability --bin crabka-logs -- --help`
-Expected: help text listing `--target`, `--listen-addr`, `--object-store-url`, `--wal-bootstrap-server`, etc.
-
-- [ ] **Step 4: Smoke-run the querier (no broker needed for status)**
-
-Run: `cargo run -p crabka-observability --bin crabka-logs -- --target querier --listen-addr 127.0.0.1:3100 &` then `curl -s -H "X-Scope-OrgID: demo" http://127.0.0.1:3100/loki/api/v1/labels`; then `kill %1`.
-Expected: a JSON response (e.g. `{"status":"success","data":[]}`) — confirms the Loki router serves.
+Run: `cargo run -p crabka-observability -- --target querier --listen-addr 127.0.0.1:3100 &` ; `sleep 2` ; `curl -s -H "X-Scope-OrgID: demo" http://127.0.0.1:3100/loki/api/v1/labels` ; `curl -s "http://127.0.0.1:9404/debug/pprof/profile?seconds=1" -o /tmp/logs-cpu.pb && wc -c /tmp/logs-cpu.pb` ; `kill %1` ; `rm -f /tmp/logs-cpu.pb`
+Expected: Loki labels JSON + a non-empty pprof blob.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cargo +nightly fmt -p crabka-observability
 git add crates/observability/
-git commit -m "feat(observability): add crabka-logs role-selectable binary"
+git commit -m "feat(observability): self-instrument the crabka-observability logs binary (OTLP + pprof)"
 ```
 
 ---
-
-## Batch B — Demo app + self-instrumentation wiring
 
 ### Task 5: Orders-analytics demo app (`crates/observability-demo-app`)
 
@@ -730,15 +719,24 @@ mod tests {
                 0,
             );
         }
-        let out = driver.read_output::<StringSerde, crabka_client_streams::I64Serde>("order-counts");
-        // The last emitted count for "books" must be 2.
-        let books_last = out.iter().rev().find(|r| r.key.as_deref() == Some("books"));
-        assert_eq!(books_last.map(|r| r.value), Some(2));
+        // read_output pops ONE deserialized record per call:
+        //   fn read_output<KS, VS>(&mut self, topic, produced: impl Into<Produced<KS,VS>>)
+        //       -> Option<(Option<KS::Target>, VS::Target)>
+        // Type params are inferred from the `produced` arg — pass the serdes, not turbofish.
+        let mut books_count: i64 = 0;
+        while let Some((key, value)) =
+            driver.read_output("order-counts", (StringSerde, crabka_client_streams::I64Serde))
+        {
+            if key.as_deref() == Some("books") {
+                books_count = value; // keep the latest emitted count for "books"
+            }
+        }
+        assert_eq!(books_count, 2, "two 'books' orders → count 2");
     }
 }
 ```
 
-> Confirm the exact `read_output` return shape and `I64Serde` path during implementation (`crates/client-streams/src/test_driver.rs:425`). If `read_output` returns `Vec<ProduceRecord>` of raw bytes rather than typed records, deserialize with `StringSerde`/`I64Serde` or assert on the raw output length instead. Adjust the assertion to the real signature; keep the test meaningful (books count == 2).
+> `read_output`'s real signature (`crates/client-streams/src/test_driver.rs:425`): `pub fn read_output<KS, VS>(&mut self, topic: &str, produced: impl Into<Produced<KS, VS>>) -> Option<(Option<KS::Target>, VS::Target)>`. It returns one record per call (loop until `None`); type params are inferred from the serde tuple, so do NOT write a turbofish. `crabka_client_streams::I64Serde` is the value serde for `count`'s `i64` output.
 
 - [ ] **Step 4: Run the test to verify it fails**
 
@@ -911,12 +909,15 @@ async fn run_stream(cli: &Cli) -> Result<(), Box<dyn std::error::Error + Send + 
 }
 
 async fn run_consume(cli: &Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // `Consumer` uses a `bon` builder; `subscribe` is a builder PARAMETER
+    // (Vec<String>), and the finisher is `.build().await` (no separate
+    // `.subscribe()` call). See crates/client-consumer/src/consumer.rs:206.
     let consumer = crabka_client_consumer::Consumer::builder()
         .bootstrap(cli.bootstrap.clone())
         .group_id("orders-analytics-consumer")
+        .subscribe([cli.output_topic.clone()])
         .build()
         .await?;
-    consumer.subscribe(&[cli.output_topic.clone()]).await?;
     loop {
         let records = consumer.poll(Duration::from_millis(500)).await?;
         for record in records {
@@ -1046,14 +1047,15 @@ git commit -m "feat(broker): expose CPU/heap pprof on the :9404 admin server"
 - Modify: `crates/metrics-service/src/main.rs`, `crates/metrics-service/Cargo.toml`
 - Modify: `crates/traces/src/bin/crabka-traces.rs`, `crates/traces/Cargo.toml`
 - Modify: `crates/profiles/src/bin/crabka-profiles.rs`, `crates/profiles/Cargo.toml`
-- Modify: `crates/observability/src/bin/crabka-logs.rs` (already inits telemetry+admin in Task 4 — add jemalloc feature only)
 - Modify: `crates/schema-registry/src/bin/schema-registry.rs`, `crates/schema-registry/Cargo.toml` (profiling admin only)
+
+(The logs binary `crabka-observability` is instrumented in Task 4, not here.)
 
 **Interfaces:**
 - Consumes: `crabka_telemetry::{init, OtlpConfig}`, `crabka_telemetry::profiling::serve_admin_from_env`.
 - Produces: each service binary emits OTLP traces + JSON logs (via telemetry) and exposes `/debug/pprof/*` on an admin port (default `0.0.0.0:9404`), so Alloy collects traces/logs/profiles from every Crabka service.
 
-Apply the SAME three changes to each binary `main` (metrics-service, crabka-metrics, crabka-traces, crabka-profiles). The `crabka-logs` binary already does (a) and (b) from Task 4 — add only (c). `schema-registry` gets only (b) (it keeps its existing logfmt logging; add the profiling admin server).
+Apply the SAME three changes to each binary `main` (metrics-service, crabka-metrics, crabka-traces, crabka-profiles). `schema-registry` gets only (b) (it keeps its existing logfmt logging; add the profiling admin server).
 
 **(a) Cargo.toml — add the feature + deps** (each crate; skip telemetry dep where already present):
 
@@ -1104,23 +1106,26 @@ crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
 Use the matching service name per binary (`crabka-metrics`, `crabka-traces`, `crabka-profiles`). Keep `_telemetry` alive for the process lifetime (bind it in `main`, not a helper).
 
-- [ ] **Step 1: metrics-service** — apply (a)(b)(c). Build: `cargo build -p crabka-metrics-service` and `--features heap-profiling`.
-- [ ] **Step 2: crabka-metrics** — apply (a)(b)(c) (telemetry dep may be absent — add it). Build: `cargo build -p crabka-metrics` and `--features heap-profiling`.
-- [ ] **Step 3: crabka-traces** — apply (a)(b)(c). Build: `cargo build -p crabka-traces` and `--features heap-profiling`.
-- [ ] **Step 4: crabka-profiles** — apply (a)(b)(c). Build: `cargo build -p crabka-profiles` and `--features heap-profiling`.
-- [ ] **Step 5: crabka-logs** — apply (a)(b) only (telemetry+admin already in Task 4). Build: `cargo build -p crabka-observability --bin crabka-logs --features heap-profiling`.
-- [ ] **Step 6: schema-registry** — apply (a)(b) and add `crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;` to its `main` after the existing logfmt setup (do NOT remove its logfmt logging). Add `crabka-telemetry` dep. Build: `cargo build -p crabka-schema-registry` and `--features heap-profiling`.
+> **`crabka-metrics` and `crabka-metrics-service` already need a telemetry dep** — add `crabka-telemetry = { version = "0.3.8", path = "../telemetry" }` to all four crates' `[dependencies]` (none currently depend on it; verified).
+>
+> **`crabka-traces` `main` returns `ExitCode`, not `Result`** (`crates/traces/src/bin/crabka-traces.rs:154`), so `init(...)?` / `serve_admin_from_env(...).await?` cannot go in `main`. Put change (c) at the top of `async fn run(cli: Cli)` (which returns `Result`) instead — bind `let _telemetry = crabka_telemetry::init(...)?;` and `crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;` there, before the `match cli.target`. The jemalloc allocator + `malloc_conf` (b) still go at file top.
 
-- [ ] **Step 7: Workspace clippy gate**
+- [ ] **Step 1: metrics-service** — apply (a)(b)(c) in `main`. Build: `cargo build -p crabka-metrics-service` and `--features heap-profiling`.
+- [ ] **Step 2: crabka-metrics** — apply (a)(b)(c) in `main` (add telemetry dep). Build: `cargo build -p crabka-metrics` and `--features heap-profiling`.
+- [ ] **Step 3: crabka-traces** — apply (a) + (b) at file top, and (c) at the top of `run()` (NOT `main`, which returns `ExitCode`). Build: `cargo build -p crabka-traces` and `--features heap-profiling`.
+- [ ] **Step 4: crabka-profiles** — apply (a)(b)(c) in `main`. Build: `cargo build -p crabka-profiles` and `--features heap-profiling`.
+- [ ] **Step 5: schema-registry** — apply (a)(b) and add `crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;` to its `main` after the existing logfmt setup (do NOT remove its logfmt logging). Add `crabka-telemetry` dep. Build: `cargo build -p crabka-schema-registry` and `--features heap-profiling`.
+
+- [ ] **Step 6: Workspace clippy gate**
 
 Run: `cargo clippy --workspace --all-targets`
 Expected: no errors. Fix any unused-import/dead-code warnings introduced by the swaps.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-cargo +nightly fmt -p crabka-metrics -p crabka-metrics-service -p crabka-traces -p crabka-profiles -p crabka-observability -p crabka-schema-registry
-git add crates/metrics/ crates/metrics-service/ crates/traces/ crates/profiles/ crates/observability/ crates/schema-registry/
+cargo +nightly fmt -p crabka-metrics -p crabka-metrics-service -p crabka-traces -p crabka-profiles -p crabka-schema-registry
+git add crates/metrics/ crates/metrics-service/ crates/traces/ crates/profiles/ crates/schema-registry/
 git commit -m "feat(observability): self-instrument service binaries (OTLP traces/logs + pprof admin)"
 ```
 
@@ -1137,7 +1142,7 @@ All files live under `demo/observability/` (new). Author Task 8 first; 9/10/11 c
 - Create: `demo/observability/.dockerignore`
 
 **Interfaces:**
-- Produces: an image tag `crabka-demo:latest` containing `crabka-broker`, `crabka-metrics`, `crabka-metrics-service`, `crabka-traces`, `crabka-logs`, `crabka-profiles`, `crabka-schema-registry`, and `observability-demo-app`, all built `--release --features heap-profiling`, with debug symbols retained.
+- Produces: an image tag `crabka-demo:latest` containing `crabka-broker`, `crabka-metrics`, `crabka-metrics-service`, `crabka-traces`, `crabka-observability` (the logs binary), `crabka-profiles`, `crabka-schema-registry`, and `observability-demo-app`, all built `--release --features heap-profiling`, with debug symbols retained.
 
 - [ ] **Step 1: Write `demo/observability/.dockerignore`**
 
@@ -1171,13 +1176,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       -p crabka-broker \
       -p crabka-metrics -p crabka-metrics-service \
       -p crabka-traces \
-      -p crabka-observability --bin crabka-logs \
+      -p crabka-observability \
       -p crabka-profiles \
       -p crabka-schema-registry \
       -p observability-demo-app && \
     mkdir -p /out && \
     for b in crabka-broker crabka-metrics crabka-metrics-service crabka-traces \
-             crabka-logs crabka-profiles crabka-schema-registry observability-demo-app; do \
+             crabka-observability crabka-profiles crabka-schema-registry observability-demo-app; do \
       cp "target/release/$b" /out/; \
     done
 
@@ -1282,27 +1287,31 @@ services:
 
   # ---- METRICS (Prometheus/Mimir) ----
   metrics-distributor:
+    # crabka-metrics uses --bootstrap (not --wal-bootstrap); the distributor
+    # writes to the WAL (Kafka), not the object store, so no --object-store-url.
     <<: *crabka-image
-    command: ["crabka-metrics", "--target=distributor", "--listen=0.0.0.0:4041", "--object-store-url=s3://crabka-blocks/metrics", "--wal-bootstrap=broker:9092"]
-    environment: { <<: [*s3-env, *otlp-env] }
+    command: ["crabka-metrics", "--target=distributor", "--listen=0.0.0.0:4041", "--bootstrap=broker:9092"]
+    environment: { <<: *otlp-env }
     depends_on:
       broker: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
 
   metrics-compactor:
     <<: *crabka-image
-    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-blocks/metrics", "--wal-bootstrap=broker:9092"]
+    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-blocks/metrics", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       minio-setup: { condition: service_completed_successfully }
       broker: { condition: service_healthy }
 
   metrics-querier:
+    # crabka-metrics-service uses --wal-bootstrap (its own flag name).
     <<: *crabka-image
-    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-blocks/metrics", "--manifest-prefix=metrics"]
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-blocks/metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["9090:9090"]
     depends_on:
       minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
 
   # ---- TRACES (Tempo) ----
   traces-distributor:
@@ -1324,13 +1333,14 @@ services:
     <<: *crabka-image
     command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-blocks/traces"]
     environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["3200:3200"]
     depends_on:
       minio-setup: { condition: service_completed_successfully }
 
-  # ---- LOGS (Loki) ----
+  # ---- LOGS (Loki) — binary is `crabka-observability` (the logs service) ----
   logs-distributor:
     <<: *crabka-image
-    command: ["crabka-logs", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs"]
+    command: ["crabka-observability", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
@@ -1338,7 +1348,7 @@ services:
 
   logs-compactor:
     <<: *crabka-image
-    command: ["crabka-logs", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
@@ -1346,8 +1356,9 @@ services:
 
   logs-querier:
     <<: *crabka-image
-    command: ["crabka-logs", "--target=querier", "--listen-addr=0.0.0.0:3100", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["3100:3100"]
     depends_on:
       minio-setup: { condition: service_completed_successfully }
 
@@ -1371,6 +1382,7 @@ services:
     <<: *crabka-image
     command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-blocks/profiles"]
     environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["4040:4040"]
     depends_on:
       minio-setup: { condition: service_completed_successfully }
 
@@ -1439,7 +1451,7 @@ volumes:
   minio-data:
 ```
 
-> **Confirm during implementation:** the metrics ingest remote-write path Alloy targets (Task 10) and the `crabka-metrics` distributor's actual listen flag name (`--listen` vs `--listen-addr`) and the metrics WAL flag (`--wal-bootstrap` vs `--bootstrap`) by reading `crates/metrics/src/bin/crabka-metrics.rs`. Likewise confirm `crabka-metrics-service` querier serves on the `--listen` port for the Prometheus API (`9090` here). Adjust the `command:` arrays to the real flags.
+> **Flags verified against the binaries:** `crabka-metrics` uses `--bootstrap` + `--listen` (the distributor writes to the WAL only — no `--object-store-url`; the compactor takes `--object-store-url`); `crabka-metrics-service` uses `--listen` + `--wal-bootstrap` + `--object-store-url` + `--manifest-prefix` and serves the Prometheus API on its `--listen` port (`9090` here); the logs binary is `crabka-observability` with `--listen-addr`/`--wal-bootstrap-server`/`--object-store-url`/`--index-prefix`; `crabka-traces`/`crabka-profiles` take `--bootstrap` + `--listen` + `--object-store-url`. The metrics remote-write path (`/api/v1/push`, Task 10) is registered by the distributor (`crates/metrics/src/distributor/mod.rs:418`, which also serves `/api/v1/write`).
 
 - [ ] **Step 2: Validate compose syntax**
 
@@ -1792,7 +1804,7 @@ curl -s -H 'X-Scope-OrgID: demo' 'http://localhost:4040/querier.v1.QuerierServic
 - `minio/bootstrap.sh` — creates the `crabka-blocks` bucket
 ````
 
-(Publish the querier host ports needed by the smoke check: add `ports` to `metrics-querier` `["9090:9090"]`, `traces-querier` `["3200:3200"]`, `logs-querier` `["3100:3100"]`, `profiles-querier` `["4040:4040"]` in `docker-compose.yml` — update Task 9's file accordingly.)
+(The querier host ports the smoke check needs — `metrics-querier:9090`, `traces-querier:3200`, `logs-querier:3100`, `profiles-querier:4040` — are already published in the Task 9 `docker-compose.yml`.)
 
 - [ ] **Step 3: Bring the stack up**
 
@@ -1822,7 +1834,7 @@ git commit -m "feat(demo): MinIO bootstrap, README, and querier host ports; smok
 
 - [ ] Every Crabka process exposes `/debug/pprof/profile` (+`/heap` in the demo image) on `:9404`, and Alloy `pyroscope.scrape` collects them.
 - [ ] All four backends point at `s3://crabka-blocks/<signal>` and start without local-FS fallbacks.
-- [ ] `crabka-logs` serves the Loki API; `metrics-querier` serves the Prometheus API on `:9090`; `traces-querier` Tempo on `:3200`; `profiles-querier` Pyroscope on `:4040`.
+- [ ] `crabka-observability` (logs) serves the Loki API on `:3100`; `metrics-querier` serves the Prometheus API on `:9090`; `traces-querier` Tempo on `:3200`; `profiles-querier` Pyroscope on `:4040`.
 - [ ] The demo app produces proto orders (registry-framed), the stream app aggregates, the consumer reads — visible as traces with spans across `demo-produce`/`demo-stream`/`demo-consume`.
 - [ ] `cargo clippy --workspace --all-targets` is clean; `cargo build --release --features heap-profiling` succeeds for every binary in the image.
 - [ ] No crate that should be private is publishable: demo app + metrics/metrics-service/promql/logql/observability-spike are `publish = false`.
