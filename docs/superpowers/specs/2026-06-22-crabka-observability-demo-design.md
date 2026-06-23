@@ -43,8 +43,12 @@ backends, and a self-observed subject.
   fixture needs schema/format choices, pick one.
 - **Crabka self-profiles are CPU + heap only.** No off-CPU/lock/async profiling
   for Crabka's own processes in v1.
-- **No new query-language or backend features.** This is glue, packaging, a logs
-  entrypoint, an in-process profiler, and a demo app — not backend work.
+- **No new query-language or backend features**, with one small exception: to
+  make the object store **uniform** across all four backends (§4.3), `crabka-profiles`
+  and the metrics binaries gain `--object-store-url` S3 support via
+  `object_store::parse_url_opts(&url, std::env::vars())` — the exact pattern
+  `crabka-observability` already uses. This is a localized object-store wiring
+  change, not query/format work.
 
 ## 3. Architecture
 
@@ -132,15 +136,24 @@ QueryFrontend,Ruler}` (`crates/metrics/src/bin/crabka-metrics.rs`); traces
 > default and required WAL/object-store flags. Both binaries ship in the shared
 > image, so this is a `command:` decision, not a packaging one.
 
-### 4.3 MinIO (shared object store)
+### 4.3 MinIO (shared object store) — uniform across all four backends
 
-- One MinIO container; one bucket (e.g. `crabka-blocks`) with a per-signal prefix
-  (`metrics/`, `traces/`, `logs/`, `profiles/`).
-- Each backend points `--object-store-url` at MinIO (S3). A small bootstrap
-  step creates the bucket on startup.
-- Chosen over shared local-FS volumes: it is the real S3 path the backends
-  support, and avoids cross-container filesystem-sharing fragility between the
-  block-builder (writer) and querier (reader).
+- One MinIO container; one bucket (`crabka-blocks`) with a per-signal prefix
+  (`s3://crabka-blocks/metrics`, `/traces`, `/logs`, `/profiles`). A small
+  bootstrap step creates the bucket on startup.
+- Each backend points `--object-store-url s3://crabka-blocks/<signal>` at MinIO.
+  S3 endpoint + credentials come from env consumed by the `object_store` crate:
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL`,
+  `AWS_ALLOW_HTTP=true`, `AWS_REGION` (placeholder `us-east-1` for MinIO).
+- **Uniformity is a deliberate choice and required a small code change.** Today
+  only `crabka-traces` and `crabka-observability` (logs) accept an object-store
+  URL; `crabka-profiles` and `crabka-metrics`/`crabka-metrics-service` are
+  local-FS-only (`LocalFileSystem::new_with_prefix`). The plan adds
+  `--object-store-url` + `object_store::parse_url_opts(&url, std::env::vars())`
+  to profiles and the metrics binaries (mirroring observability), and switches
+  `crabka-traces` to `parse_url_opts` so the MinIO endpoint/credential env is
+  applied consistently. This avoids cross-container filesystem-sharing fragility
+  and is the real S3 path a production deployment would use.
 
 ### 4.4 Grafana Alloy (the single collector)
 
@@ -215,14 +228,18 @@ protobuf example uses, so the demo dogfoods Crabka's schema-registry too.
 
 ### 4.7 Schema registry
 
-- One `crabka-schema-registry` container (Confluent-compatible HTTP API, default
-  `:8081`), backed by `crabka-broker` — another Crabka component in the loop.
+- One `crabka-schema-registry` container (Confluent-compatible HTTP API on
+  `:8081`, run with `--bootstrap-servers broker:9092 --schemas-topic-rf 1` for the
+  single-node cluster), backed by `crabka-broker` — another Crabka component in
+  the loop.
 - The demo app's producer and Streams consumer both resolve proto schemas
   against it (`StreamsApp::builder().schema_registry("http://schema-registry:8081")`).
-- Self-instrumented like every other Crabka process where its binary supports it:
-  OTLP traces + JSON logs via `crabka-telemetry`, and the profiler admin server
-  (§5.2). The plan confirms exactly which signals the schema-registry binary
-  already emits and wires the rest.
+- Self-instrumentation reality (verified): the binary already emits **structured
+  JSON logs** via `crabka-logfmt` to stdout (so Alloy ships its logs for free) but
+  does **not** depend on `crabka-telemetry` and exposes no `/metrics`. The plan
+  adds the profiler admin server (§5.2) for its profiles signal; wiring its
+  traces/metrics is optional and out of the critical path (logs alone are enough
+  to show it in Grafana).
 
 ## 5. Self-instrumentation: one pattern everywhere
 
