@@ -14,7 +14,7 @@
 //! what lets the [`sim`] module (behind the `sim` feature) drive an interactive
 //! consensus simulation in the browser playground.
 
-#![doc(html_root_url = "https://docs.rs/crabka-kraft-core/0.3.7")]
+#![doc(html_root_url = "https://docs.rs/crabka-kraft-core/0.3.8")]
 #![allow(dead_code, unused_imports)]
 
 pub mod action;

@@ -1,0 +1,40 @@
+[package]
+name = "observability-demo-app"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Instrumented orders-analytics Kafka-Streams demo app for the Crabka observability demo"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "observability-demo-app"
+path = "src/main.rs"
+
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling"]
+
+[dependencies]
+crabka-client-streams = { version = "0.3.8", path = "../client-streams" }
+crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
+crabka-schema-serde = { version = "0.3.8", path = "../schema-serde", features = ["protobuf"] }
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+prost = { workspace = true }
+prost-reflect = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
+tracing = { workspace = true }
+
+[build-dependencies]
+protox = { workspace = true }
+prost-build = { workspace = true }
+prost-reflect = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }

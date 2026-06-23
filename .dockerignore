@@ -1,0 +1,9 @@
+# Keep `docker build` contexts rooted at the repo (e.g. the demo image,
+# demo/observability/Dockerfile) small: none of these are needed inside a
+# build. Only applies to Docker build contexts — melange/apko `--source-dir`
+# builds are unaffected.
+.git
+.github
+.claude
+target
+**/target

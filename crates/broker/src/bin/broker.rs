@@ -1,5 +1,13 @@
 //! `crabka-broker` — single-node Kafka-compatible broker daemon.
 
+// Heap profiling: install jemalloc as the global allocator and enable the
+// prof:true malloc_conf so jemalloc_pprof can dump heap profiles at runtime.
+// Gated on both `unix` (tikv-jemallocator is Unix-only) and the
+// `heap-profiling` feature so `cargo build` on Windows compiles cleanly.
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 

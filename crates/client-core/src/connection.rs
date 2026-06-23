@@ -389,12 +389,27 @@ impl Connection {
     }
 }
 
-/// Spawn the combined I/O task on a single `Framed` socket.
+/// Spawn independent reader and writer tasks over the split socket.
 ///
-/// One task owns the entire `Framed` and `select!`s between incoming
-/// frames (from the broker) and outgoing dispatch items (from callers).
-/// A no-op second handle preserves the `(reader, writer)` API shape
-/// expected by `ConnectionInner`.
+/// The socket is split into a read half and a write half, each driven by its
+/// own task, rather than multiplexing both directions through one `select!`
+/// over a single shared `Framed`. A combined task has to `await` the
+/// `framed.send(...)` flush *inside* a `select!` arm, during which the read
+/// arm is not polled — so for a request/response connection where the broker
+/// stays silent until it receives the next request, a write that does not
+/// complete in one poll wedges the whole connection: the frame sits buffered,
+/// no inbound traffic ever re-drives the loop, and the caller's request never
+/// reaches the wire. (This is what made `crabka-client-consumer`'s group
+/// rejoin hang under the jemalloc heap-profiling allocator, whose per-alloc
+/// sampling latency widened that window enough to trip it deterministically.)
+/// Independent halves make an inbound frame always pollable while an outbound
+/// write is in flight, and vice versa.
+///
+/// Liveness on teardown: either task exiting (EOF, I/O error, dropped
+/// `Connection`, or `close()`) cancels the shared `shutdown` token so the
+/// other task also stops, and the reader fails every outstanding request with
+/// `Disconnected` — so a write-half failure surfaces to callers promptly
+/// instead of stalling them until the request timeout.
 fn spawn_io_tasks(
     stream: Box<dyn ClientDuplex>,
     mut writer_rx: mpsc::Receiver<DispatchItem>,
@@ -402,20 +417,41 @@ fn spawn_io_tasks(
     pending: Pending,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
+    use tokio_util::codec::{FramedRead, FramedWrite};
 
-    let mut framed = crate::transport::frame_generic(stream);
-    let pending_for_drain = Arc::clone(&pending);
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut framed_read = FramedRead::new(read_half, crate::transport::codec());
+    let mut framed_write = FramedWrite::new(write_half, crate::transport::codec());
 
-    let combined = tokio::spawn(async move {
+    // WRITER: drains the dispatch channel, flushing each frame in receive
+    // order. Owns only the write half, so a not-yet-writable socket can never
+    // block the reader.
+    let writer_shutdown = shutdown.clone();
+    let writer = tokio::spawn(async move {
         loop {
             tokio::select! {
-                () = shutdown.cancelled() => break,
-                Some(item) = writer_rx.recv() => {
-                    if framed.send(item.bytes).await.is_err() {
+                () = writer_shutdown.cancelled() => break,
+                item = writer_rx.recv() => {
+                    let Some(item) = item else { break; };
+                    if framed_write.send(item.bytes).await.is_err() {
                         break;
                     }
                 }
-                maybe_frame = framed.next() => {
+            }
+        }
+        // A write-side failure (or all senders dropped) must wake the reader
+        // so it drains pending callers to `Disconnected` rather than letting
+        // them wait out the request timeout.
+        writer_shutdown.cancel();
+    });
+
+    // READER: pulls frames and fulfils the matching pending oneshot. Owns only
+    // the read half.
+    let reader = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                maybe_frame = framed_read.next() => {
                     let Some(frame) = maybe_frame else { break; };
                     let Ok(frame) = frame else { break; };
                     if frame.len() < 4 { continue; }
@@ -427,17 +463,17 @@ fn spawn_io_tasks(
                 }
             }
         }
-        // Drain pending: every outstanding request fails with Disconnected.
-        let keys: Vec<i32> = pending_for_drain.iter().map(|e| *e.key()).collect();
+        // Stop the writer too, then fail every outstanding request.
+        shutdown.cancel();
+        let keys: Vec<i32> = pending.iter().map(|e| *e.key()).collect();
         for k in keys {
-            if let Some((_, tx)) = pending_for_drain.remove(&k) {
+            if let Some((_, tx)) = pending.remove(&k) {
                 let _ = tx.send(Err(ClientError::Disconnected));
             }
         }
     });
 
-    let noop = tokio::spawn(async {});
-    (combined, noop)
+    (reader, writer)
 }
 
 /// Build an encoded `RequestHeader` into a `BytesMut`.
@@ -614,6 +650,77 @@ mod secured_tests {
             .await
             .expect("secured connect completes");
         conn.close();
+        server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod io_task_tests {
+    use std::time::Instant;
+
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    // The split reader/writer tasks must keep their teardown contract: a
+    // server that closes the connection mid-request has to surface to the
+    // caller promptly as `Disconnected`, NOT stall until the request timeout.
+    // The reader's EOF cancels the shared shutdown (stopping the writer) and
+    // drains every outstanding request — so a write-half failure can't strand
+    // a caller for the full timeout. (Regression guard for the io-task split.)
+    #[tokio::test]
+    async fn server_close_mid_request_yields_prompt_disconnected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // Answer the `from_stream` ApiVersions handshake.
+            let len = s.read_u32().await.unwrap();
+            let mut req = vec![0u8; len as usize];
+            s.read_exact(&mut req).await.unwrap();
+            let corr = i32::from_be_bytes([req[4], req[5], req[6], req[7]]);
+            let mut body = BytesMut::new();
+            ApiVersionsResponse::default().encode(&mut body, 0).unwrap();
+            let mut frame = BytesMut::new();
+            frame.put_i32(corr);
+            frame.put_slice(&body);
+            s.write_u32(u32::try_from(frame.len()).unwrap())
+                .await
+                .unwrap();
+            s.write_all(&frame).await.unwrap();
+            s.flush().await.unwrap();
+            // Read the next request fully (so its pending entry is registered),
+            // then drop the socket without replying.
+            let len2 = s.read_u32().await.unwrap();
+            let mut req2 = vec![0u8; len2 as usize];
+            s.read_exact(&mut req2).await.unwrap();
+            // `s` drops here -> the connection closes with no response.
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let opts = ConnectionOptions {
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let conn = Connection::from_stream(Box::new(stream), opts)
+            .await
+            .expect("plaintext from_stream completes");
+
+        let started = Instant::now();
+        // Hand-framed Metadata request; the server reads it then closes.
+        let result = conn.raw_request(3, 0, Bytes::new()).await;
+        assert!(
+            matches!(result, Err(ClientError::Disconnected)),
+            "server close mid-request must yield Disconnected, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "drain must be prompt (reader EOF), not a request-timeout stall"
+        );
         server.await.unwrap();
     }
 }

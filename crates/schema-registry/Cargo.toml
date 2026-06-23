@@ -16,6 +16,9 @@ categories = ["web-programming::http-server", "encoding"]
 [lints]
 workspace = true
 
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+
 [[bin]]
 name = "crabka-schema-registry"
 path = "src/bin/schema-registry.rs"
@@ -37,6 +40,7 @@ crabka-security = { version = "0.3.8", path = "../security" }
 crabka-authz = { version = "0.3.8", path = "../authz" }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 bcrypt = "0.19"
@@ -64,6 +68,9 @@ apache-avro = { workspace = true }
 protox-parse = "0.9"
 prost-reflect = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }

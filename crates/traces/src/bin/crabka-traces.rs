@@ -1,12 +1,18 @@
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use clap::{ArgAction, Parser, ValueEnum};
 use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
+use crabka_telemetry::OtlpConfig;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
 use crabka_traces::{
     LiveStore, TRACES_WAL_TOPIC, blockbuilder,
@@ -22,7 +28,7 @@ use crabka_traces::{
         self as trace_querier,
         http::HttpConfig,
         live::{LiveSource, LiveTier, RemoteLiveSource},
-        store::CrabkaSpanStore,
+        store::{CrabkaSpanStore, SharedTraceIndex},
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
@@ -163,6 +169,19 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _telemetry = crabka_telemetry::init(
+        OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "crabka-traces",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-traces",
+        ),
+        "crabka_traces=info,info",
+        "info",
+        "crabka-traces",
+    )?;
+    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+
     let shutdown = CancellationToken::new();
     let shutdown_task = shutdown.clone();
     tokio::spawn(async move {
@@ -308,7 +327,8 @@ async fn run_querier(
     let live_store = cli
         .querier_live_store
         .then(|| Arc::new(RwLock::new(LiveStore::new(cli.retention_ns))));
-    let router = build_querier_router_with_live(&cli, live_store.clone()).await?;
+    let (router, store, trace_index_key, trace_index) =
+        build_querier_router_with_live(&cli, live_store.clone()).await?;
     if let Some(live_store) = live_store {
         let consumer =
             wal_consumer(cli.bootstrap.clone(), "crabka-traces-querier-live-store").await?;
@@ -319,6 +339,26 @@ async fn run_querier(
             }
         });
     }
+    // Periodically reload the TraceIndex so newly-compacted blocks become visible
+    // without restarting the querier.
+    let refresh_shutdown = shutdown.clone();
+    let refresh_store = Arc::clone(&store);
+    let refresh_index = Arc::clone(&trace_index);
+    let refresh_interval = cli.block_builder_window_secs.max(1);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = refresh_shutdown.cancelled() => break,
+                _ = tick.tick() => {
+                    if let Ok(idx) = TraceIndex::load(&refresh_store, &trace_index_key).await {
+                        refresh_index.store(Arc::new(idx));
+                    }
+                }
+            }
+        }
+    });
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(%bound, "traces querier listening");
@@ -334,21 +374,27 @@ async fn run_querier(
 async fn build_querier_router(
     cli: &Cli,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
-    build_querier_router_with_live(cli, None).await
+    let (router, ..) = build_querier_router_with_live(cli, None).await?;
+    Ok(router)
 }
 
 async fn build_querier_router_with_live(
     cli: &Cli,
     live_store: Option<Arc<RwLock<LiveStore>>>,
-) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<
+    (axum::Router, Arc<dyn ObjectStore>, String, SharedTraceIndex),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     let configured = build_object_store(cli)?;
     let trace_index_key = configured.object_key(&cli.trace_index_key);
-    let trace_index = Arc::new(
-        TraceIndex::load(&configured.store, &trace_index_key)
-            .await
-            .unwrap_or_else(|_| TraceIndex::new()),
-    );
-    let blocks = Arc::new(BlockStore::new(configured.store, configured.root));
+    let initial = TraceIndex::load(&configured.store, &trace_index_key)
+        .await
+        .unwrap_or_else(|_| TraceIndex::new());
+    let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
+    let blocks = Arc::new(BlockStore::new(
+        Arc::clone(&configured.store),
+        configured.root,
+    ));
     let live = if let Some(store) = live_store {
         Some(LiveTier::new(Arc::new(IndexedLiveSource::new(
             store,
@@ -362,22 +408,23 @@ async fn build_querier_router_with_live(
     } else {
         None
     };
-    let store = Arc::new(CrabkaSpanStore::new(blocks, trace_index, live));
+    let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::clone(&trace_index), live));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
-    Ok(trace_querier::http::router_with_config(
+    let router = trace_querier::http::router_with_config(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
             ..HttpConfig::default()
         },
-    ))
+    );
+    Ok((router, configured.store, trace_index_key, trace_index))
 }
 
 fn build_live_store_router(
     cli: &Cli,
     live_store: Arc<RwLock<LiveStore>>,
 ) -> Result<axum::Router, Box<dyn std::error::Error + Send + Sync>> {
-    let trace_index = Arc::new(TraceIndex::new());
+    let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(TraceIndex::new()));
     let blocks = Arc::new(BlockStore::new(
         Arc::new(object_store::memory::InMemory::new()),
         Url::parse("memory:///")?,
@@ -477,11 +524,11 @@ fn engine_opts_from_cli(cli: &Cli) -> EngineOpts {
 
 struct IndexedLiveSource {
     store: Arc<RwLock<LiveStore>>,
-    trace_index: Arc<TraceIndex>,
+    trace_index: SharedTraceIndex,
 }
 
 impl IndexedLiveSource {
-    fn new(store: Arc<RwLock<LiveStore>>, trace_index: Arc<TraceIndex>) -> Self {
+    fn new(store: Arc<RwLock<LiveStore>>, trace_index: SharedTraceIndex) -> Self {
         Self { store, trace_index }
     }
 }
@@ -530,7 +577,8 @@ impl LiveSource for IndexedLiveSource {
     }
 
     fn block_builder_frontier_ns(&self, tenant: &str) -> i64 {
-        self.trace_index
+        let trace_index = self.trace_index.load();
+        trace_index
             .trace_blocks(tenant)
             .iter()
             .map(|block| block.max_ts.saturating_add(1))
@@ -660,7 +708,7 @@ fn build_object_store(
     cli: &Cli,
 ) -> Result<ConfiguredObjectStore, Box<dyn std::error::Error + Send + Sync>> {
     let root = Url::parse(&cli.object_store_url)?;
-    let (store, prefix) = object_store::parse_url(&root)?;
+    let (store, prefix) = object_store::parse_url_opts(&root, std::env::vars())?;
     let configured = ConfiguredObjectStore {
         store: Arc::from(store),
         root,
@@ -1022,7 +1070,7 @@ mod tests {
         );
         let source = trace_querier::live::RemoteLiveSource::new(
             Url::parse(&format!("http://{addr}")).unwrap(),
-            Arc::new(index),
+            Arc::new(ArcSwap::from_pointee(index)),
         );
 
         let batches = source.span_batches("tenant-a", 1_000, 2_000).await.unwrap();
@@ -1054,7 +1102,7 @@ mod tests {
         });
         let source = trace_querier::live::RemoteLiveSource::new(
             Url::parse(&format!("http://{addr}")).unwrap(),
-            Arc::new(TraceIndex::new()),
+            Arc::new(ArcSwap::from_pointee(TraceIndex::new())),
         );
 
         let trace = source
@@ -1086,7 +1134,7 @@ mod tests {
         });
         let source = trace_querier::live::RemoteLiveSource::new(
             Url::parse(&format!("http://{addr}")).unwrap(),
-            Arc::new(TraceIndex::new()),
+            Arc::new(ArcSwap::from_pointee(TraceIndex::new())),
         );
 
         let tags = source
@@ -1183,7 +1231,7 @@ mod tests {
         );
         let source = IndexedLiveSource::new(
             Arc::new(RwLock::new(LiveStore::new(i64::MAX))),
-            Arc::new(index),
+            Arc::new(ArcSwap::from_pointee(index)),
         );
 
         assert!(source.block_builder_frontier_ns("tenant-a") == 751);

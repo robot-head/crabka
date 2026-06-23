@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use super::store::SharedTraceIndex;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use crabka_blockstore::TraceIndex;
 use crabka_traceql::{
     AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TraceqlError,
     TypedValue,
@@ -81,13 +81,13 @@ fn decode_span_batches(bytes: &[u8]) -> Result<Vec<RecordBatch>> {
 
 pub struct RemoteLiveSource {
     base_url: Url,
-    trace_index: Arc<TraceIndex>,
+    trace_index: SharedTraceIndex,
     http: reqwest::Client,
 }
 
 impl RemoteLiveSource {
     #[must_use]
-    pub fn new(base_url: Url, trace_index: Arc<TraceIndex>) -> Self {
+    pub fn new(base_url: Url, trace_index: SharedTraceIndex) -> Self {
         Self {
             base_url,
             trace_index,
@@ -208,7 +208,8 @@ impl LiveSource for RemoteLiveSource {
     }
 
     fn block_builder_frontier_ns(&self, tenant: &str) -> i64 {
-        self.trace_index
+        let trace_index = self.trace_index.load();
+        trace_index
             .trace_blocks(tenant)
             .iter()
             .map(|block| block.max_ts.saturating_add(1))

@@ -16,6 +16,9 @@ readme = "../../README.md"
 keywords = ["observability", "loki", "logs", "crabka"]
 categories = ["command-line-utilities"]
 
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["http2", "json", "query", "ws"] }
@@ -26,6 +29,7 @@ crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
 crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-logql = { version = "0.3.8", path = "../logql" }
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 datafusion.workspace = true
 flate2 = { workspace = true }
 object_store.workspace = true
@@ -42,6 +46,9 @@ time = { version = "0.3", default-features = false, features = ["parsing"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 tonic.workspace = true
 url = "2"
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }

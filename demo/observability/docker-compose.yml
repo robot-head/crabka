@@ -1,0 +1,284 @@
+name: crabka-observability-demo
+
+x-s3-env: &s3-env
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_ENDPOINT_URL: http://minio:9000
+  AWS_ALLOW_HTTP: "true"
+  AWS_REGION: us-east-1
+
+x-otlp-env: &otlp-env
+  CRABKA_OTLP_ENDPOINT: http://alloy:4317
+  CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
+  # Activate jemalloc heap profiling (the image is built --features
+  # heap-profiling). Default sample rate (~every 512 KiB) — NOT lg_prof_sample:0,
+  # which backtraces every allocation and is pathologically slow. Continuous
+  # sampling here is what previously deadlocked crabka-client-consumer's group
+  # rejoin; that lost-wakeup is fixed in client-core (independent reader/writer
+  # io tasks), so consumers run fine under prof now.
+  MALLOC_CONF: "prof:true,prof_active:true"
+
+# Every Crabka service runs the same all-in-one demo image. By default this
+# PULLS the prebuilt image from GHCR (published by the publish-demo-image
+# workflow) so `docker compose up` needs no local build. To run from source
+# instead, build + tag it under the same name from the repo root:
+#   docker build -f demo/observability/Dockerfile -t ghcr.io/robot-head/crabka-demo:latest .
+# then `docker compose up -d` (Compose uses the local image when present).
+x-crabka-image: &crabka-image
+  image: ghcr.io/robot-head/crabka-demo:latest
+  restart: unless-stopped
+
+services:
+  # One-shot: format the broker's KRaft storage (writes meta.properties.json)
+  # before the broker starts. Idempotent — skips if already formatted. The
+  # controller listener is advertised-host:9093 (broker.rs derives it from
+  # --advertised-listener with port 9093).
+  broker-format:
+    image: crabka-demo:latest
+    restart: "no"
+    entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093"]
+    volumes: ["broker-data:/data"]
+
+  broker:
+    <<: *crabka-image
+    command: ["crabka-broker", "--listen-addr=0.0.0.0:9092", "--advertised-listener=broker:9092", "--log-dir=/data", "--process-roles=controller,broker"]
+    environment:
+      <<: *otlp-env
+      CRABKA_METRICS_LISTEN_ADDR: 0.0.0.0:9404
+    ports: ["9092:9092", "9404:9404"]
+    volumes: ["broker-data:/data"]
+    depends_on:
+      broker-format:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9404/metrics"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio-data:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+    volumes: ["./minio/bootstrap.sh:/bootstrap.sh:ro"]
+
+  # One-shot: pre-create the WAL topics (the broker does not auto-create on
+  # produce — producing to a missing topic returns NOT_LEADER_OR_FOLLOWER) plus
+  # the demo's order topics, so distributors can write and block-builders /
+  # compactors can consume.
+  topic-setup:
+    image: apache/kafka:3.9.0
+    restart: "no"
+    depends_on:
+      broker: { condition: service_healthy }
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        for t in __crabka_metrics_wal __crabka_traces_wal __crabka_profiles_wal
+        __crabka_observability_logs_wal orders order-counts; do
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --create
+        --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1 || exit 1;
+        done; echo "topics ready"
+
+  schema-registry:
+    <<: *crabka-image
+    command: ["crabka-schema-registry", "--bootstrap-servers=broker:9092", "--listen-addr=0.0.0.0:8081", "--schemas-topic-rf=1"]
+    environment: { <<: *otlp-env }
+    depends_on:
+      broker: { condition: service_healthy }
+    ports: ["8081:8081"]
+
+  # ---- METRICS (Prometheus/Mimir) ----
+  metrics-distributor:
+    # crabka-metrics uses --bootstrap (not --wal-bootstrap); the distributor
+    # writes to the WAL (Kafka), not the object store, so no --object-store-url.
+    <<: *crabka-image
+    command: ["crabka-metrics", "--target=distributor", "--listen=0.0.0.0:4041", "--bootstrap=broker:9092"]
+    environment: { <<: *otlp-env }
+    depends_on:
+      broker: { condition: service_healthy }
+
+  metrics-compactor:
+    <<: *crabka-image
+    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
+
+  metrics-querier:
+    # crabka-metrics-service uses --wal-bootstrap (its own flag name).
+    <<: *crabka-image
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["9090:9090"]
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
+
+  # ---- TRACES (Tempo) ----
+  traces-distributor:
+    <<: *crabka-image
+    command: ["crabka-traces", "--target=distributor", "--bootstrap=broker:9092", "--listen=0.0.0.0:3200", "--grpc-listen=0.0.0.0:4317", "--otlp-http-listen=0.0.0.0:4318"]
+    environment: { <<: *otlp-env }
+    depends_on:
+      broker: { condition: service_healthy }
+
+  traces-block-builder:
+    <<: *crabka-image
+    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
+
+  traces-querier:
+    <<: *crabka-image
+    command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-traces"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["3200:3200"]
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+
+  # ---- LOGS (Loki) — binary is `crabka-observability` (the logs service) ----
+  logs-distributor:
+    <<: *crabka-image
+    command: ["crabka-observability", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    depends_on:
+      broker: { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+
+  logs-compactor:
+    <<: *crabka-image
+    command: ["crabka-observability", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    depends_on:
+      broker: { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+
+  logs-querier:
+    # --wal-group-id MUST differ from the compactor's default
+    # (`crabka-observability-compactor`): both subscribe() to the single-partition
+    # logs WAL, so a shared group id makes them fight over the one partition and
+    # the querier's consumer spins on REBALANCE_IN_PROGRESS(27). A distinct group
+    # lets each independently tail the WAL.
+    # --querier-index-source=tenant-object-store-manifest reads the index the
+    # compactor wrote to S3 (default `local-manifest` reads the querier's empty
+    # local disk -> no labels/series). With no --tenant, the tenant is resolved
+    # per-request from X-Scope-OrgID.
+    <<: *crabka-image
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-manifest", "--wal-group-id=crabka-observability-querier"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["3100:3100"]
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+
+  # ---- PROFILES (Pyroscope) ----
+  profiles-distributor:
+    <<: *crabka-image
+    command: ["crabka-profiles", "--target=distributor", "--listen=0.0.0.0:4040", "--bootstrap=broker:9092"]
+    environment: { <<: *otlp-env }
+    depends_on:
+      broker: { condition: service_healthy }
+
+  profiles-block-builder:
+    <<: *crabka-image
+    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
+
+  profiles-querier:
+    # --bootstrap is REQUIRED: the querier's hot WAL-tail consumer reads recent
+    # (not-yet-compacted) profiles straight from the WAL. Without it the tail
+    # falls back to 127.0.0.1:9092, can't reach the broker, and dies -> the hot
+    # store stays empty and the cold store only has whatever index existed at
+    # startup, so the querier returns no profiles.
+    <<: *crabka-image
+    command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles", "--bootstrap=broker:9092"]
+    environment: { <<: [*s3-env, *otlp-env] }
+    ports: ["4040:4040"]
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+
+  # ---- COLLECTOR + GRAFANA ----
+  alloy:
+    image: grafana/alloy:v1.5.1
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
+    volumes:
+      - "./alloy/config.alloy:/etc/alloy/config.alloy:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    ports: ["12345:12345"]
+    depends_on:
+      broker: { condition: service_healthy }
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_FEATURE_TOGGLES_ENABLE: "flameGraph traceqlEditor"
+    ports: ["3000:3000"]
+    volumes:
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
+    depends_on:
+      - metrics-querier
+      - traces-querier
+      - logs-querier
+      - profiles-querier
+
+  # ---- DEMO APP ----
+  demo-produce:
+    <<: *crabka-image
+    command: ["observability-demo-app", "--role=produce"]
+    environment:
+      <<: *otlp-env
+      CRABKA_DEMO_BOOTSTRAP: broker:9092
+      CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+      CRABKA_DEMO_ORDERS_PER_SEC: "50"
+    depends_on:
+      broker: { condition: service_healthy }
+      schema-registry: { condition: service_started }
+
+  demo-stream:
+    <<: *crabka-image
+    command: ["observability-demo-app", "--role=stream"]
+    environment:
+      <<: *otlp-env
+      CRABKA_DEMO_BOOTSTRAP: broker:9092
+      CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+    depends_on:
+      broker: { condition: service_healthy }
+      schema-registry: { condition: service_started }
+
+  demo-consume:
+    <<: *crabka-image
+    command: ["observability-demo-app", "--role=consume"]
+    environment:
+      <<: *otlp-env
+      CRABKA_DEMO_BOOTSTRAP: broker:9092
+      CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+    depends_on:
+      broker: { condition: service_healthy }
+
+volumes:
+  broker-data:
+  minio-data:

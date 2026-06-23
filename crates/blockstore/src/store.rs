@@ -144,10 +144,24 @@ impl BlockStore {
             return Ok((ctx, TABLE_NAME.to_string()));
         }
 
-        let paths: Vec<String> = keys
+        // Compose each block's location with `Url::join` (the same way
+        // `register_scan_table` does) — a raw `format!("{base}{key}")` concat
+        // omits the path separator, so a base like `s3://crabka-traces` + key
+        // `traces/…` becomes `s3://crabka-tracestraces/…` (the prefix merges
+        // into the bucket authority) and DataFusion can't resolve the store.
+        let paths = keys
             .iter()
-            .map(|key| format!("{}{}", self.base, key.trim_start_matches('/')))
-            .collect();
+            .map(|key| {
+                self.base
+                    .join(key.trim_start_matches('/'))
+                    .map(|url| url.to_string())
+                    .map_err(|error| {
+                        BlockStoreError::InvalidBlock(format!(
+                            "invalid block object key `{key}`: {error}"
+                        ))
+                    })
+            })
+            .collect::<std::result::Result<Vec<String>, _>>()?;
         let df = ctx
             .read_parquet(paths, ParquetReadOptions::default())
             .await?;

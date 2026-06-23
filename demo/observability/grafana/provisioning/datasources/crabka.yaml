@@ -1,0 +1,44 @@
+apiVersion: 1
+datasources:
+  - name: Crabka Metrics
+    uid: crabka-prom
+    type: prometheus
+    access: proxy
+    url: http://metrics-querier:9090
+    isDefault: true
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: demo
+    editable: false
+  - name: Crabka Traces
+    uid: crabka-tempo
+    type: tempo
+    access: proxy
+    url: http://traces-querier:3200
+    jsonData:
+      httpMethod: GET
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: demo
+    editable: false
+  - name: Crabka Logs
+    uid: crabka-loki
+    type: loki
+    access: proxy
+    url: http://logs-querier:3100
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: demo
+    editable: false
+  - name: Crabka Profiles
+    uid: crabka-pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    url: http://profiles-querier:4040
+    jsonData:
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: demo
+    editable: false

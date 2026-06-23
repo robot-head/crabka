@@ -1,0 +1,33 @@
+{
+  "uid": "crabka-self",
+  "title": "Crabka observes Crabka",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Broker — scraped series count",
+      "datasource": { "type": "prometheus", "uid": "crabka-prom" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [ { "refId": "A", "expr": "count({job=\"broker\"})" } ]
+    },
+    {
+      "id": 2, "type": "logs", "title": "Crabka logs",
+      "datasource": { "type": "loki", "uid": "crabka-loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [ { "refId": "A", "expr": "{service_name=~\".+\"}" } ]
+    },
+    {
+      "id": 3, "type": "traces", "title": "Recent traces",
+      "datasource": { "type": "tempo", "uid": "crabka-tempo" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{}" } ]
+    },
+    {
+      "id": 4, "type": "flamegraph", "title": "Broker CPU profile",
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "crabka-pyroscope" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [ { "refId": "A", "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds", "labelSelector": "{service_name=\"broker\"}" } ]
+    }
+  ]
+}

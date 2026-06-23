@@ -2026,8 +2026,14 @@ mod tests {
     use tower::ServiceExt;
     use url::Url;
 
+    use arc_swap::ArcSwap;
+
     use super::*;
-    use crate::querier::store::CrabkaSpanStore;
+    use crate::querier::store::{CrabkaSpanStore, SharedTraceIndex};
+
+    fn shared_index(index: TraceIndex) -> SharedTraceIndex {
+        Arc::new(ArcSwap::from_pointee(index))
+    }
 
     fn span(trace: u8, span: u8, parent: Option<u8>, svc: &str) -> InputSpan {
         span_at(trace, span, parent, svc, 1_000 + i64::from(span))
@@ -2236,7 +2242,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(trace_index), None);
+        let store = CrabkaSpanStore::new(blocks, shared_index(trace_index), None);
         router(Arc::new(TraceqlEngine::new(
             Arc::new(store),
             EngineOpts::default(),
@@ -3677,7 +3683,7 @@ overrides:
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(trace_index), None);
+        let store = CrabkaSpanStore::new(blocks, shared_index(trace_index), None);
         let app = router(Arc::new(TraceqlEngine::new(
             Arc::new(store),
             EngineOpts::default(),

@@ -1,0 +1,7 @@
+.git
+target
+.claude
+**/target
+docs
+website
+bench

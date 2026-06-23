@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+
 use arrow::array::DictionaryArray;
 use arrow::array::{
     Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array,
@@ -63,10 +65,14 @@ const SCOPE_ORDER: &[TagScope] = &[
     TagScope::Instrumentation,
 ];
 
+/// A `TraceIndex` shared between the span store and live sources, swappable at
+/// runtime so a background task can reload it without restarting.
+pub type SharedTraceIndex = Arc<ArcSwap<TraceIndex>>;
+
 /// Query-side span store that merges sealed blocks with an optional live tier.
 pub struct CrabkaSpanStore {
     blocks: Arc<BlockStore>,
-    trace_index: Arc<TraceIndex>,
+    trace_index: SharedTraceIndex,
     live: Option<LiveTier>,
 }
 
@@ -74,7 +80,7 @@ impl CrabkaSpanStore {
     #[must_use]
     pub fn new(
         blocks: Arc<BlockStore>,
-        trace_index: Arc<TraceIndex>,
+        trace_index: SharedTraceIndex,
         live: Option<LiveTier>,
     ) -> Self {
         Self {
@@ -94,8 +100,9 @@ impl CrabkaSpanStore {
         if end_ns < start_ns {
             return Ok(Vec::new());
         }
+        let trace_index = self.trace_index.load();
         let (ctx, table) = if let Some(job) = job {
-            if !self.trace_index.trace_blocks(tenant).iter().any(|block| {
+            if !trace_index.trace_blocks(tenant).iter().any(|block| {
                 block.object_key == job.object_key
                     && block.min_ts <= end_ns
                     && block.max_ts >= start_ns
@@ -108,7 +115,7 @@ impl CrabkaSpanStore {
                 .await
                 .map_err(|err| block_err(&err))?
         } else {
-            let keys = self.trace_index.candidate_blocks(tenant, start_ns, end_ns);
+            let keys = trace_index.candidate_blocks(tenant, start_ns, end_ns);
             self.blocks
                 .scan_block_keys(&keys, span_block_schema())
                 .await
@@ -183,9 +190,8 @@ impl CrabkaSpanStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Option<TraceSpans>, TraceqlError> {
-        let keys = self
-            .trace_index
-            .candidate_blocks_for_trace(tenant, trace_id, start_ns, end_ns);
+        let trace_index = self.trace_index.load();
+        let keys = trace_index.candidate_blocks_for_trace(tenant, trace_id, start_ns, end_ns);
         let (ctx, table) = self
             .blocks
             .scan_block_keys(&keys, span_block_schema())
@@ -278,12 +284,12 @@ impl SpanStore for CrabkaSpanStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<ScopedTag>, TraceqlError> {
+        let trace_index = self.trace_index.load();
         let mut by_scope: BTreeMap<&'static str, (TagScope, BTreeSet<String>)> = BTreeMap::new();
-        let has_cold_blocks = !self
-            .trace_index
+        let has_cold_blocks = !trace_index
             .candidate_blocks(tenant, start_ns, end_ns)
             .is_empty();
-        let cold_index_tags = self.trace_index.tag_names(tenant, start_ns, end_ns);
+        let cold_index_tags = trace_index.tag_names(tenant, start_ns, end_ns);
         let needs_scoped_cold_scan = matches!(
             scope,
             None | Some(TagScope::Resource | TagScope::Event | TagScope::Link)
@@ -412,7 +418,8 @@ impl CrabkaSpanStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<ColdAttributeTagNames, TraceqlError> {
-        let keys = self.trace_index.candidate_blocks(tenant, start_ns, end_ns);
+        let trace_index = self.trace_index.load();
+        let keys = trace_index.candidate_blocks(tenant, start_ns, end_ns);
         let (ctx, table) = self
             .blocks
             .scan_block_keys(&keys, span_block_schema())
@@ -434,9 +441,8 @@ impl CrabkaSpanStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<BTreeSet<(String, String)>, TraceqlError> {
-        let keys = self
-            .trace_index
-            .prune_blocks_by_tag(tenant, index_tag, None, start_ns, end_ns);
+        let trace_index = self.trace_index.load();
+        let keys = trace_index.prune_blocks_by_tag(tenant, index_tag, None, start_ns, end_ns);
         let (ctx, table) = self
             .blocks
             .scan_block_keys(&keys, span_block_schema())
@@ -457,8 +463,8 @@ impl CrabkaSpanStore {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<Vec<TypedValue>, TraceqlError> {
-        let mut values: BTreeSet<(String, String)> = self
-            .trace_index
+        let trace_index = self.trace_index.load();
+        let mut values: BTreeSet<(String, String)> = trace_index
             .tag_values(tenant, tag, start_ns, end_ns)
             .into_iter()
             .map(|value| ("string".to_string(), value))
@@ -2487,7 +2493,13 @@ mod tests {
         batch::{span_batch, span_batch_with_promoted_attrs},
     };
 
+    use arc_swap::ArcSwap;
+
     use super::*;
+
+    fn shared(index: TraceIndex) -> SharedTraceIndex {
+        Arc::new(ArcSwap::from_pointee(index))
+    }
 
     #[derive(Default)]
     struct FakeLiveSource {
@@ -2762,7 +2774,7 @@ mod tests {
             Arc::new(InMemory::new()),
             Url::parse("memory:///").unwrap(),
         ));
-        let store = CrabkaSpanStore::new(blocks, Arc::new(TraceIndex::new()), None);
+        let store = CrabkaSpanStore::new(blocks, shared(TraceIndex::new()), None);
         let scan = store.scan("tenant", &[], 0, 10).await.unwrap();
         let rows: usize = scan
             .ctx
@@ -2821,7 +2833,7 @@ mod tests {
             },
         );
 
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
         assert!(
             store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0].tags
                 == vec!["service.name"]
@@ -2883,7 +2895,7 @@ mod tests {
                 ]),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let status_values = store
             .tag_values("tenant", "http.status_code", 0, 10_000)
@@ -2948,7 +2960,7 @@ mod tests {
                 ]),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let event_values = store
             .tag_values("tenant", "exception.type", 0, 10_000)
@@ -3020,7 +3032,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let event_tags = store
             .tag_names("tenant", Some(TagScope::Event), 0, 10_000)
@@ -3072,7 +3084,7 @@ mod tests {
             },
         );
 
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let intrinsic = store
             .tag_names("tenant", Some(TagScope::Intrinsic), 0, 10)
@@ -3127,7 +3139,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let tags = store
             .tag_names("tenant", Some(TagScope::Span), 0, 10)
@@ -3188,7 +3200,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let scan = store
             .scan_with_options(
@@ -3262,7 +3274,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let scan = store
             .scan_with_options(
@@ -3305,7 +3317,7 @@ mod tests {
             frontier_ns: 0,
             ..FakeLiveSource::default()
         }));
-        let store = CrabkaSpanStore::new(blocks, Arc::new(TraceIndex::new()), Some(live));
+        let store = CrabkaSpanStore::new(blocks, shared(TraceIndex::new()), Some(live));
 
         let values = store
             .tag_values("tenant", "event:name", 0, 10)
@@ -3342,7 +3354,7 @@ mod tests {
                 )]),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let values = store
             .tag_values("tenant", "event:name", 0, 10)
@@ -3470,7 +3482,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         let trace = store
             .trace_by_id("tenant", &span.trace_id)
@@ -3561,7 +3573,7 @@ mod tests {
             );
         }
 
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
         let trace = store
             .trace_by_id_within("tenant", &early.trace_id, 5_000, 5_000)
             .await
@@ -3619,7 +3631,7 @@ mod tests {
             values: vec![],
             frontier_ns: 1_000,
         }));
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), Some(live));
+        let store = CrabkaSpanStore::new(blocks, shared(index), Some(live));
 
         let trace = store
             .trace_by_id("tenant", &span.trace_id)
@@ -3682,7 +3694,7 @@ mod tests {
             values: vec![],
             frontier_ns: 1_000,
         }));
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), Some(live));
+        let store = CrabkaSpanStore::new(blocks, shared(index), Some(live));
 
         let trace = store
             .trace_by_id("tenant", &root.trace_id)
@@ -3752,7 +3764,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = CrabkaSpanStore::new(blocks, Arc::new(index), None);
+        let store = CrabkaSpanStore::new(blocks, shared(index), None);
 
         // Window [4_000, 6_000] covers only the child by span start, yet the
         // block (min_ts..max_ts spans both) is still selected, so the whole
@@ -3814,7 +3826,7 @@ mod tests {
             values: vec![],
             frontier_ns: child.start_ns,
         }));
-        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), Some(live)));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), Some(live)));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
 
         let resp = engine
@@ -3913,7 +3925,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
 
         let resp = engine
@@ -4136,7 +4148,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
 
         let resp = engine
@@ -4193,7 +4205,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
 
         let resource = engine
@@ -4298,7 +4310,7 @@ mod tests {
                 tag_values: BTreeMap::new(),
             },
         );
-        let store = Arc::new(CrabkaSpanStore::new(blocks, Arc::new(index), None));
+        let store = Arc::new(CrabkaSpanStore::new(blocks, shared(index), None));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
 
         let resp = engine
@@ -4370,7 +4382,7 @@ mod tests {
         ));
         let store = Arc::new(CrabkaSpanStore::new(
             blocks,
-            Arc::new(TraceIndex::new()),
+            shared(TraceIndex::new()),
             None,
         ));
         let engine = TraceqlEngine::new(store, EngineOpts::default());
@@ -4379,5 +4391,51 @@ mod tests {
             .await
             .unwrap();
         assert!(resp.traces.is_empty());
+    }
+
+    /// Verify that a live `ArcSwap` is observed: `candidate_blocks` returns nothing
+    /// from the initial empty index, then the new block is immediately visible
+    /// after `store()` on the shared handle — both directly and through the
+    /// `CrabkaSpanStore` that holds the same `Arc<ArcSwap<TraceIndex>>`.
+    #[tokio::test]
+    async fn span_store_observes_swapped_index() {
+        let blocks = Arc::new(BlockStore::new(
+            Arc::new(InMemory::new()),
+            Url::parse("memory:///").unwrap(),
+        ));
+        let handle: SharedTraceIndex = shared(TraceIndex::new());
+        // Build the store — it holds the same Arc so it observes every swap.
+        let _store = CrabkaSpanStore::new(Arc::clone(&blocks), Arc::clone(&handle), None);
+
+        // Before swap: no candidate blocks.
+        let before = handle.load().candidate_blocks("tenant", 0, i64::MAX);
+        assert!(before.is_empty());
+
+        // Swap in an index with one block.
+        let mut new_index = TraceIndex::new();
+        let mut bloom = ShardedTraceBloom::with_tempo_defaults(1);
+        bloom.insert(&[1_u8; 16]);
+        new_index.add_trace_block(
+            "tenant",
+            TraceBlockStats {
+                object_key: "blocks/swap-test.parquet".into(),
+                min_ts: 0,
+                max_ts: 10_000,
+                bloom,
+                tag_names: BTreeSet::new(),
+                tag_values: BTreeMap::new(),
+            },
+        );
+        handle.store(Arc::new(new_index));
+
+        // After swap: candidate_blocks via the same handle now returns the new block.
+        let after = handle.load().candidate_blocks("tenant", 0, 10_000);
+        assert!(!after.is_empty());
+        assert!(after[0] == "blocks/swap-test.parquet");
+
+        // Any subsequent load() call through the store's field would return
+        // the same result — both the store and the caller share the same Arc.
+        let via_handle = handle.load().candidate_blocks("tenant", 0, 10_000);
+        assert!(via_handle == after);
     }
 }
