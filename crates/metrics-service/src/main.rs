@@ -21,7 +21,6 @@ use crabka_promql::{
     EngineOpts, PrometheusApiState, QueryFrontendOptions, RulerShard, WalHead, prometheus_router,
 };
 use object_store::ObjectStore;
-use object_store::local::LocalFileSystem;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -29,8 +28,8 @@ struct Cli {
     target: Target,
     #[arg(long, default_value = "127.0.0.1:4041")]
     listen: SocketAddr,
-    #[arg(long, default_value = ".crabka-metrics-blocks")]
-    object_store_dir: PathBuf,
+    #[arg(long, default_value = "file://./.crabka-metrics-blocks")]
+    object_store_url: String,
     #[arg(long, default_value = "metrics")]
     manifest_prefix: String,
     #[arg(long)]
@@ -91,12 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&cli.object_store_dir)?;
-    let store: Arc<dyn ObjectStore> =
-        Arc::new(LocalFileSystem::new_with_prefix(&cli.object_store_dir)?);
+    let object_store_url = url::Url::parse(&cli.object_store_url)?;
+    let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
+    let store: Arc<dyn ObjectStore> = Arc::from(store);
     let metric_store = crabka_metrics_service::RefreshingMetricBlockStore::new(
         Arc::clone(&store),
-        url::Url::parse("file:///").expect("valid file object store URL"),
+        object_store_url.clone(),
         &cli.manifest_prefix,
         WalHead::new(),
     );
@@ -127,12 +126,12 @@ async fn run_query_frontend(cli: Cli) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&cli.object_store_dir)?;
-    let store: Arc<dyn ObjectStore> =
-        Arc::new(LocalFileSystem::new_with_prefix(&cli.object_store_dir)?);
+    let object_store_url = url::Url::parse(&cli.object_store_url)?;
+    let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
+    let store: Arc<dyn ObjectStore> = Arc::from(store);
     let metric_store = crabka_metrics_service::RefreshingMetricBlockStore::new(
         store,
-        url::Url::parse("file:///").expect("valid file object store URL"),
+        object_store_url.clone(),
         &cli.manifest_prefix,
         WalHead::new(),
     );
@@ -225,9 +224,9 @@ async fn run_ruler(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_querier(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&cli.object_store_dir)?;
-    let store: Arc<dyn ObjectStore> =
-        Arc::new(LocalFileSystem::new_with_prefix(&cli.object_store_dir)?);
+    let object_store_url = url::Url::parse(&cli.object_store_url)?;
+    let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
+    let store: Arc<dyn ObjectStore> = Arc::from(store);
     let head = WalHead::new();
     let shutdown = Shutdown::new();
     spawn_ctrl_c_listener(shutdown.clone());
@@ -266,7 +265,7 @@ async fn run_querier(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let metric_store = crabka_metrics_service::RefreshingMetricBlockStore::new(
         store,
-        url::Url::parse("file:///").expect("valid file object store URL"),
+        object_store_url.clone(),
         &cli.manifest_prefix,
         head,
     );
@@ -432,14 +431,14 @@ mod tests {
             "crabka-metrics-service",
             "--target",
             "querier",
-            "--object-store-dir",
-            "/tmp/crabka-metrics",
+            "--object-store-url",
+            "file:///tmp/crabka-metrics",
             "--manifest-prefix",
             "metrics/tenant-a",
         ])
         .unwrap();
 
-        assert!(cli.object_store_dir == std::path::PathBuf::from("/tmp/crabka-metrics"));
+        assert!(cli.object_store_url == "file:///tmp/crabka-metrics");
         assert!(cli.manifest_prefix == "metrics/tenant-a");
     }
 

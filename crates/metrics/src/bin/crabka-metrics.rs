@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -17,7 +16,6 @@ use crabka_metrics::distributor::{
 };
 use crabka_metrics::{MetricsCompactorConfig, run_compactor_consumer_loop};
 use object_store::ObjectStore;
-use object_store::local::LocalFileSystem;
 use serde_json::json;
 use tokio::net::TcpListener;
 
@@ -29,8 +27,8 @@ struct Cli {
     listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
-    #[arg(long, default_value = ".crabka-metrics-blocks")]
-    object_store_dir: PathBuf,
+    #[arg(long, default_value = "file://./.crabka-metrics-blocks")]
+    object_store_url: String,
     #[arg(long, default_value = "crabka-metrics-compactor")]
     compactor_group_id: String,
     #[arg(long, default_value = "crabka-metrics-compactor")]
@@ -65,6 +63,12 @@ fn runnable_targets() -> &'static [Target] {
         Target::QueryFrontend,
         Target::Ruler,
     ]
+}
+
+fn build_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, Box<dyn std::error::Error>> {
+    let parsed = url::Url::parse(url)?;
+    let (store, _prefix) = object_store::parse_url_opts(&parsed, std::env::vars())?;
+    Ok(Arc::from(store))
 }
 
 #[tokio::main]
@@ -265,9 +269,7 @@ async fn run_distributor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(&cli.object_store_dir)?;
-    let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
-    let store: Arc<dyn ObjectStore> = Arc::new(store);
+    let store = build_object_store(&cli.object_store_url)?;
     let mut config = MetricsCompactorConfig::new(cli.bootstrap);
     config.group_id = cli.compactor_group_id;
     config.client_id = cli.compactor_client_id;

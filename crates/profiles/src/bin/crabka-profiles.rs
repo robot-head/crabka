@@ -23,7 +23,7 @@ use crabka_profiles::limits::OverridesProvider;
 use crabka_profiles::query::{QuerierState, serve as serve_querier};
 use crabka_profiles::query_frontend::FrontendConfig;
 use object_store::ObjectStore;
-use object_store::local::LocalFileSystem;
+use object_store::path::Path as ObjectPath;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -33,8 +33,8 @@ struct Cli {
     listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
-    #[arg(long, default_value = ".crabka-profiles-blocks")]
-    object_store_dir: std::path::PathBuf,
+    #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
+    object_store_url: String,
     #[arg(long, default_value_t = 15 * 60 * 1000)]
     query_frontend_shard_ms: i64,
     #[arg(long)]
@@ -63,6 +63,34 @@ enum Target {
     QueryFrontend,
     Compactor,
     Symbolizer,
+}
+
+struct ConfiguredObjectStore {
+    store: std::sync::Arc<dyn ObjectStore>,
+    prefix: ObjectPath,
+}
+
+impl ConfiguredObjectStore {
+    fn object_key(&self, key: &str) -> String {
+        let prefix = self.prefix.as_ref().trim_matches('/');
+        let key = key.trim_start_matches('/');
+        if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}/{key}")
+        }
+    }
+}
+
+fn build_object_store(
+    url: &str,
+) -> Result<ConfiguredObjectStore, Box<dyn std::error::Error + Send + Sync>> {
+    let parsed = url::Url::parse(url)?;
+    let (store, prefix) = object_store::parse_url_opts(&parsed, std::env::vars())?;
+    Ok(ConfiguredObjectStore {
+        store: std::sync::Arc::from(store),
+        prefix,
+    })
 }
 
 #[tokio::main]
@@ -100,11 +128,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         }
         Target::BlockBuilder => {
-            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
-            let store: Arc<dyn ObjectStore> = Arc::new(store);
+            let configured = build_object_store(&cli.object_store_url)
+                .map_err(|e| format!("object store: {e}"))?;
             crabka_profiles::blockbuilder::run_with_config(BlockBuilderConfig::new(
                 cli.bootstrap,
-                store,
+                configured.store,
             ))
             .await?;
         }
@@ -112,13 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let overrides = load_profiles_limits_overrides_config(
                 cli.profiles_limits_overrides_config.as_deref(),
             )?;
-            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
-            let store: Arc<dyn ObjectStore> = Arc::new(store);
-            let index = ProfileIndex::load(&store, "index/profiles.json")
+            let configured = build_object_store(&cli.object_store_url)
+                .map_err(|e| format!("object store: {e}"))?;
+            let index_key = configured.object_key("index/profiles.json");
+            let index = ProfileIndex::load(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
-                store,
+                configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
             )?);
@@ -137,13 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let overrides = load_profiles_limits_overrides_config(
                 cli.profiles_limits_overrides_config.as_deref(),
             )?;
-            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
-            let store: Arc<dyn ObjectStore> = Arc::new(store);
-            let index = ProfileIndex::load(&store, "index/profiles.json")
+            let configured = build_object_store(&cli.object_store_url)
+                .map_err(|e| format!("object store: {e}"))?;
+            let index_key = configured.object_key("index/profiles.json");
+            let index = ProfileIndex::load(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
-                store,
+                configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
             )?);
@@ -172,22 +202,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             crabka_profiles::symbolizer::run(cli.debuginfod_urls).await?;
         }
         Target::Compactor => {
-            let store = LocalFileSystem::new_with_prefix(&cli.object_store_dir)?;
-            let store: Arc<dyn ObjectStore> = Arc::new(store);
-            let mut index = ProfileIndex::load(&store, "index/profiles.json")
+            let configured = build_object_store(&cli.object_store_url)
+                .map_err(|e| format!("object store: {e}"))?;
+            let index_key = configured.object_key("index/profiles.json");
+            let mut index = ProfileIndex::load(&configured.store, &index_key)
                 .await
                 .unwrap_or_else(|_| ProfileIndex::new());
             let downsample = cli
                 .compactor_downsample_resolution_ns
                 .map(|resolution_ns| DownsamplePolicy { resolution_ns });
             let metas = compact_once_with_policy(
-                &store,
+                &configured.store,
                 &mut index,
                 cli.compactor_max_blocks_per_job,
                 downsample,
             )
             .await?;
-            index.save(&store, "index/profiles.json").await?;
+            index.save(&configured.store, &index_key).await?;
             tracing::info!(
                 compacted_blocks = metas.len(),
                 downsample_resolution_ns = ?cli.compactor_downsample_resolution_ns,
