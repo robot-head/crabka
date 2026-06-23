@@ -203,12 +203,24 @@ fn primed_position(committed_epoch: i32) -> crate::position::PartitionPosition {
     }
 }
 
+/// Per-attempt timeout for `Consumer::start`.  Must exceed the default
+/// `rebalance_timeout` (60 s) so a legitimately slow group-join isn't
+/// cut short, while still bounding a true cold-boot hang.
+const CONSUMER_START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Wall-clock deadline across all retry attempts in `Consumer::start`.
+const CONSUMER_START_DEADLINE: Duration = Duration::from_mins(5);
+
 #[bon::bon]
 impl Consumer {
-    /// Build a [`Consumer`] subscribed to the given topics: resolve bootstrap,
-    /// `JoinGroup` (twice), compute the assignment if we're the elected
-    /// leader, `SyncGroup`, prime offsets, then spawn the coordinator task
-    /// that owns the heartbeat + rebalance loop.
+    /// Build a [`Consumer`] subscribed to the given topics.
+    ///
+    /// Validates configuration eagerly (fail-fast before any network I/O),
+    /// then calls [`Self::start_once`] with a per-attempt timeout.  If an
+    /// attempt stalls (lost-wakeup during cold-boot group-join contention) or
+    /// returns a transient error, the timed-out future is dropped — cancelling
+    /// its in-flight connections — and a fresh attempt is started.  A genuine
+    /// misconfiguration or persistent error surfaces immediately.
     #[builder(start_fn = builder, finish_fn = build)]
     #[allow(clippy::too_many_lines)]
     pub async fn start(
@@ -230,6 +242,7 @@ impl Consumer {
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
+        // Fail fast on misconfig — before any retry loop.
         if subscribe.is_empty() {
             return Err(ConsumerError::NotSubscribed);
         }
@@ -237,6 +250,90 @@ impl Consumer {
             return Err(ConsumerError::RebalanceFailed("group_id required".into()));
         }
 
+        let started = tokio::time::Instant::now();
+        let mut backoff = Duration::from_millis(500);
+        loop {
+            match tokio::time::timeout(
+                CONSUMER_START_ATTEMPT_TIMEOUT,
+                Self::start_once(
+                    bootstrap.clone(),
+                    client_id.clone(),
+                    group_id.clone(),
+                    session_timeout,
+                    rebalance_timeout,
+                    heartbeat_interval,
+                    subscribe.clone(),
+                    auto_offset_reset,
+                    isolation_level,
+                    assignor,
+                    request_timeout,
+                    client_rack.clone(),
+                    security.clone(),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(consumer)) => return Ok(consumer),
+                Ok(Err(error)) => {
+                    if started.elapsed() < CONSUMER_START_DEADLINE
+                        && is_retriable_consumer_start_error(&error)
+                    {
+                        tracing::warn!(
+                            group = %group_id,
+                            %error,
+                            "consumer startup failed transiently; retrying with a fresh connection"
+                        );
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(_elapsed) => {
+                    if started.elapsed() >= CONSUMER_START_DEADLINE {
+                        return Err(ConsumerError::Client(
+                            crabka_client_core::ClientError::Timeout(
+                                CONSUMER_START_ATTEMPT_TIMEOUT,
+                            ),
+                        ));
+                    }
+                    tracing::warn!(
+                        group = %group_id,
+                        timeout = ?CONSUMER_START_ATTEMPT_TIMEOUT,
+                        "consumer startup exceeded attempt timeout \
+                         (likely a cold-boot group-join stall); \
+                         retrying with a fresh connection"
+                    );
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = std::cmp::min(backoff * 2, Duration::from_secs(5));
+        }
+    }
+
+    /// Single attempt to build a [`Consumer`]: resolve bootstrap, `JoinGroup`
+    /// (twice), compute assignment if elected leader, `SyncGroup`, prime
+    /// offsets, then spawn the coordinator task.
+    ///
+    /// Called by [`Self::start`] under a per-attempt timeout.  Dropping the
+    /// returned future at any point before the final `tokio::spawn` cancels
+    /// all in-flight connections cleanly.  The coordinator task is only spawned
+    /// at the very end of this function (no `.await` follows it), so a
+    /// timed-out attempt can never orphan a coordinator task.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    async fn start_once(
+        bootstrap: String,
+        client_id: String,
+        group_id: String,
+        session_timeout: std::time::Duration,
+        rebalance_timeout: std::time::Duration,
+        heartbeat_interval: std::time::Duration,
+        subscribe: Vec<String>,
+        auto_offset_reset: AutoOffsetReset,
+        isolation_level: IsolationLevel,
+        assignor: Assignor,
+        request_timeout: std::time::Duration,
+        client_rack: Option<String>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+    ) -> Result<Self, ConsumerError> {
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
@@ -500,6 +597,9 @@ impl Consumer {
             auto_offset_reset,
             client_rack: client_rack.clone(),
         };
+        // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
+        // follows it.  Dropping a timed-out `start_once` future before this
+        // point cancels all in-flight connections without spawning anything.
         let coord_handle = tokio::spawn(crate::coordinator::run(state, shutdown.clone()));
 
         Ok(Consumer {
@@ -523,6 +623,31 @@ impl Consumer {
             auto_offset_reset,
         })
     }
+}
+
+/// Returns `true` for transient startup errors where dropping the half-built
+/// consumer and retrying a fresh build is expected to succeed.
+///
+/// Returns `false` for permanent misconfig or decode errors so those surface
+/// immediately without pointless retries.
+fn is_retriable_consumer_start_error(error: &ConsumerError) -> bool {
+    // Retry only conditions that a fresh attempt a moment later is likely to
+    // clear: transient group-protocol codes (the group is mid-rebalance or the
+    // coordinator is warming up / relocating), and a connection dropped
+    // mid-join. The lost-wakeup *hang* the retry loop exists to survive is NOT
+    // an error here — it never returns; it is caught by the per-attempt
+    // timeout. We deliberately do NOT retry `Connect`/`Timeout`: an unreachable
+    // or non-responding broker is a genuine fault that must surface promptly
+    // (and is the broker's `depends_on: healthy` to prevent at cold boot), not
+    // be masked by a long retry storm.
+    matches!(
+        error,
+        // 14 COORDINATOR_LOAD_IN_PROGRESS, 15 COORDINATOR_NOT_AVAILABLE,
+        // 16 NOT_COORDINATOR, 22 ILLEGAL_GENERATION, 25 UNKNOWN_MEMBER_ID,
+        // 27 REBALANCE_IN_PROGRESS, 79 MEMBER_ID_REQUIRED.
+        ConsumerError::Server(14 | 15 | 16 | 22 | 25 | 27 | 79)
+            | ConsumerError::Client(crabka_client_core::ClientError::Disconnected)
+    )
 }
 
 impl Consumer {
@@ -815,6 +940,64 @@ mod security_arg_tests {
         consumer.close().await.unwrap();
 
         assert!(shutdown.is_cancelled());
+    }
+
+    // --- is_retriable_consumer_start_error ---
+
+    #[test]
+    fn retriable_error_classification() {
+        use crabka_client_core::ClientError;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        // Transient group-protocol server codes.
+        let transient_codes: &[i16] = &[14, 15, 16, 22, 25, 27, 79];
+        for &code in transient_codes {
+            assert!(
+                is_retriable_consumer_start_error(&ConsumerError::Server(code)),
+                "expected Server({code}) to be retriable"
+            );
+        }
+
+        // Non-transient server code (e.g. INVALID_REQUEST = 42).
+        assert!(
+            !is_retriable_consumer_start_error(&ConsumerError::Server(42)),
+            "Server(42) should NOT be retriable"
+        );
+
+        // A connection dropped mid-join is transient — retry a fresh attempt.
+        assert!(is_retriable_consumer_start_error(&ConsumerError::Client(
+            ClientError::Disconnected
+        )));
+        // Connect/Timeout are NOT retried: an unreachable or non-responding
+        // broker is a genuine fault that must surface promptly (the lost-wakeup
+        // hang the retry loop survives never returns Timeout — it is caught by
+        // the per-attempt timeout, not classified here).
+        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
+            ClientError::Timeout(Duration::from_secs(1))
+        )));
+        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
+            ClientError::Connect {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092),
+                source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+            }
+        )));
+
+        // Permanent misconfig errors — must NOT be retriable.
+        assert!(!is_retriable_consumer_start_error(
+            &ConsumerError::NotSubscribed
+        ));
+        assert!(!is_retriable_consumer_start_error(
+            &ConsumerError::RebalanceFailed("group_id required".into())
+        ));
+        assert!(!is_retriable_consumer_start_error(&ConsumerError::Client(
+            ClientError::IncompatibleVersion {
+                api_key: 0,
+                broker_min: 0,
+                broker_max: 5,
+                client_min: 7,
+                client_max: 10,
+            }
+        )));
     }
 
     #[tokio::test]

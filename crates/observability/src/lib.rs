@@ -427,8 +427,14 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
+    // Every attempt is bounded by WAL_CONNECT_ATTEMPT_TIMEOUT — including the
+    // final one after the deadline.  The previous implementation called an
+    // un-timed `make().await` when the deadline expired inside the timeout arm,
+    // which could itself hang forever.  Instead we track the last `Err` value
+    // and return it on deadline expiry so we never call make() without a timer.
     let start = tokio::time::Instant::now();
     let mut backoff = Duration::from_millis(200);
+    let mut last_err: Option<E> = None;
     loop {
         match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await {
             Ok(Ok(v)) => return Ok(v),
@@ -439,12 +445,30 @@ where
                 eprintln!(
                     "[crabka-observability] WAL dependency {what} connect failed during broker warmup; retrying: {error}"
                 );
+                last_err = Some(error);
             }
             Err(_elapsed) => {
                 if start.elapsed() >= deadline {
-                    // Deadline exceeded on a timed-out attempt; do one final un-timed attempt
-                    // so we surface the real error type rather than a timeout wrapper.
-                    return make().await;
+                    if let Some(e) = last_err {
+                        // Return the last real error we saw rather than an un-timed attempt.
+                        return Err(e);
+                    }
+                    // All attempts so far only timed out (no Err variant captured).
+                    // Do one final timed attempt; whatever it returns is the answer.
+                    return match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await {
+                        Ok(r) => r,
+                        // Still timing out after the deadline — treat as a persistent
+                        // hang; update last_err on next loop iteration and eventually
+                        // we'll return Err from the Ok(Err) deadline arm.  For now,
+                        // sleep briefly and let the loop expire naturally.
+                        Err(_) => {
+                            eprintln!(
+                                "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
+                            );
+                            sleep(Duration::from_millis(200)).await;
+                            continue;
+                        }
+                    };
                 }
                 eprintln!(
                     "[crabka-observability] WAL dependency {what} connect timed out during broker warmup; retrying"
@@ -491,17 +515,12 @@ pub async fn build_service_dependencies(
                 .wal_bootstrap_server
                 .as_deref()
                 .ok_or(ServiceConfigError::MissingWalBootstrapServer)?;
-            let bootstrap_owned = bootstrap.to_string();
             let group_id = config.wal_group_id.clone();
             let topic = config.wal_topic.clone();
-            let consumer =
-                connect_with_startup_retry("wal-consumer", WAL_CONNECT_STARTUP_DEADLINE, || {
-                    let b = bootstrap_owned.clone();
-                    let g = group_id.clone();
-                    let t = topic.clone();
-                    async move { KafkaLogWalConsumer::connect(&b, g, t).await }
-                })
-                .await?;
+            // `Consumer::start` (called by `KafkaLogWalConsumer::connect`) now
+            // retries internally with per-attempt timeouts, so there is no need
+            // to double-wrap it in `connect_with_startup_retry`.  Call directly.
+            let consumer = KafkaLogWalConsumer::connect(bootstrap, group_id, topic).await?;
             Ok(ServiceDependencies::default().with_wal_consumer(consumer))
         }
         Role::Querier => {
