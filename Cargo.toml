@@ -106,7 +106,7 @@ tracing = "0.1"
 # operator-readable subset.
 regex = "1"
 memmap2 = "0.9"
-testcontainers = "0.27"
+testcontainers = { version = "0.27", features = ["host-port-exposure"] }
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
@@ -186,6 +186,7 @@ protoc-fetcher = "0.1"
 pbjson = "0.9"
 prometheus-client = "0.25"
 tower = "0.5"
+tokio-tungstenite = "0.29"
 futures = "0.3"
 postgres-types = "0.2"
 tokio-postgres = "0.7"
@@ -204,6 +205,7 @@ lru = "0.18"
 apache-avro = "0.21"
 prost-reflect = "0.16"
 jsonschema = { version = "0.46", default-features = false }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
 # credentials, integrity-only Wrap tokens, multi-SPN acceptor keys). Branched

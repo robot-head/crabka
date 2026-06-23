@@ -371,7 +371,8 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::{LabelMatcher, Labels, MatchOp};
+    use crate::labels::Labels;
+    use crate::matcher::{LabelMatcher, MatchOp};
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         Labels::from_pairs(pairs.iter().copied())

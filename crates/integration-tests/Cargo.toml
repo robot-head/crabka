@@ -9,23 +9,33 @@ publish = false
 
 [dev-dependencies]
 assert2 = { workspace = true }
+axum = { workspace = true, features = ["json"] }
 bon = { workspace = true }
 bytes = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.7", features = ["test-helpers"] }
 crabka-raft = { path = "../raft", version = "0.3.7" }
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
 crabka-client-core = { path = "../client-core", version = "0.3.7" }
+crabka-observability = { path = "../observability", version = "0.3.7" }
 crabka-protocol = { path = "../protocol", version = "0.3.7", default-features = false }
 crabka-security = { path = "../security", version = "0.3.7" }
 crabka-log = { path = "../log", version = "0.3.7" }
 serde_json = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tempfile = { workspace = true }
+testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true }
+flate2 = { workspace = true }
 proptest = { workspace = true }
+prost = { workspace = true }
+snap = { workspace = true }
 uuid = { workspace = true }

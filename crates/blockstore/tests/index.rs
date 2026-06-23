@@ -1,0 +1,88 @@
+use std::collections::BTreeSet;
+
+use assert2::assert;
+use crabka_blockstore::{
+    BlockDescriptor, BlockKey, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
+    LogMatchOp as MatchOp, TimeRange, labels, series_fingerprint,
+};
+
+#[test]
+fn series_fingerprint_is_stable_across_label_ordering() {
+    let left = labels([("env", "prod"), ("app", "api")]);
+    let right = labels([("app", "api"), ("env", "prod")]);
+
+    assert!(series_fingerprint(&left) == series_fingerprint(&right));
+}
+
+#[test]
+fn label_index_is_tenant_scoped_and_applies_all_matcher_ops() {
+    let mut index = LabelIndex::default();
+    let api_prod = index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let api_dev = index.insert_series("tenant-a", labels([("app", "api"), ("env", "dev")]));
+    let worker_prod = index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    index.insert_series("tenant-b", labels([("app", "api"), ("env", "prod")]));
+
+    let matched = index.match_series(
+        "tenant-a",
+        &[
+            LabelPredicate::new("app", MatchOp::RegexEqual, "api|worker").unwrap(),
+            LabelPredicate::new("env", MatchOp::NotEqual, "dev").unwrap(),
+            LabelPredicate::new("app", MatchOp::RegexNotEqual, "admin").unwrap(),
+        ],
+    );
+
+    assert!(matched == BTreeSet::from([api_prod, worker_prod]));
+    assert!(!matched.contains(&api_dev));
+}
+
+#[test]
+fn label_metadata_is_tenant_scoped() {
+    let mut index = LabelIndex::default();
+    index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    index.insert_series(
+        "tenant-b",
+        labels([("service", "billing"), ("env", "prod")]),
+    );
+
+    assert!(index.label_names("tenant-a") == BTreeSet::from(["app".into(), "env".into()]));
+    assert!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert!(index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()]));
+    assert!(index.label_values("tenant-b", "app").is_empty());
+}
+
+#[test]
+fn block_index_prunes_by_tenant_time_and_fingerprint() {
+    let mut series = LabelIndex::default();
+    let api = series.insert_series("tenant-a", labels([("app", "api")]));
+    let worker = series.insert_series("tenant-a", labels([("app", "worker")]));
+    let other_tenant_api = series.insert_series("tenant-b", labels([("app", "api")]));
+
+    let mut blocks = BlockIndex::default();
+    blocks.insert(BlockDescriptor::new(
+        BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(100, 199).unwrap()),
+        BTreeSet::from([api]),
+    ));
+    blocks.insert(BlockDescriptor::new(
+        BlockKey::new("tenant-a", 0, 21, 30, TimeRange::new(300, 399).unwrap()),
+        BTreeSet::from([worker]),
+    ));
+    blocks.insert(BlockDescriptor::new(
+        BlockKey::new("tenant-b", 1, 10, 20, TimeRange::new(100, 199).unwrap()),
+        BTreeSet::from([other_tenant_api]),
+    ));
+
+    let matched = blocks.match_blocks("tenant-a", TimeRange::new(150, 350).unwrap(), &[api]);
+
+    assert!(matched.len() == 1);
+    assert!(
+        matched[0].key.object_key()
+            == "tenant=tenant-a/partition=0/offsets=10-20/time=100-199.parquet"
+    );
+}
+
+#[test]
+fn deterministic_block_keys_encode_compactor_idempotency_fields() {
+    let key = BlockKey::new("tenant-a", 2, 42, 99, TimeRange::new(1_000, 2_000).unwrap());
+
+    assert!(key.object_key() == "tenant=tenant-a/partition=2/offsets=42-99/time=1000-2000.parquet");
+}

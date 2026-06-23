@@ -14,6 +14,7 @@ mod bloom;
 mod error;
 mod index;
 mod labels;
+mod log_blockstore;
 mod matcher;
 mod nested_set;
 mod profile_block;
@@ -38,6 +39,25 @@ pub use matcher::{
     LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,
 };
 pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
+// Logs-path block store. Types that share a name with the canonical
+// (traces/shared) abstractions above are re-exported under `Log*` names.
+pub use log_blockstore::{
+    BlockDescriptor, BlockIndex as LogBlockIndex, BlockKey, BlockStoreError as LogBlockStoreError,
+    LabelIndex, LabelPredicate, Labels as LogLabels, LogBlockTableProvider, LogRow,
+    MatchOp as LogMatchOp, SeriesFingerprint as LogSeriesFingerprint, StructuredMetadata,
+    TimeRange, block_path, labels, log_block_object_path, log_index_manifest_object_path,
+    log_index_manifest_path, log_tenant_index_manifest_object_path,
+    log_tenant_index_shard_catalog_object_path, log_tenant_index_shard_manifest_object_path,
+    read_log_block, read_log_block_from_object_store, read_log_index_manifest,
+    read_log_index_manifest_from_object_store, read_tenant_log_index_manifest_from_object_store,
+    read_tenant_log_index_shard_from_object_store,
+    read_tenant_log_index_shard_ranges_from_object_store,
+    read_tenant_log_index_shards_from_object_store, register_log_blocks,
+    register_log_blocks_from_object_store, series_fingerprint, write_log_block,
+    write_log_block_to_object_store, write_log_index_manifest,
+    write_log_index_manifest_to_object_store, write_tenant_log_index_manifest_to_object_store,
+    write_tenant_log_index_shard_to_object_store, write_tenant_log_index_shards_to_object_store,
+};
 pub use profile_block::{ProfileSampleRow, encode_profile_samples};
 pub use profile_index::{LABEL_PROFILE_TYPE, MAX_PROFILE_INDEX_SNAPSHOT_BYTES, ProfileIndex};
 pub use profile_schema::{

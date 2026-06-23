@@ -1,0 +1,99 @@
+[package]
+name = "crabka-observability"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+# Depends on the git-pinned `datafusion` (no crates.io release), so this crate
+# cannot be published to crates.io; matches crabka-blockstore / crabka-profiles.
+publish = false
+description = "Role-selectable observability service for Crabka's Loki-compatible logs path"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-observability"
+readme = "../../README.md"
+keywords = ["observability", "loki", "logs", "crabka"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["http2", "json", "query", "ws"] }
+base64 = { workspace = true }
+clap = { workspace = true }
+crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
+crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
+crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
+crabka-logql = { version = "0.3.7", path = "../logql" }
+datafusion.workspace = true
+flate2 = { workspace = true }
+object_store.workspace = true
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "logs"] }
+parquet.workspace = true
+prost.workspace = true
+regex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_yaml.workspace = true
+snap.workspace = true
+thiserror = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["parsing"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tonic.workspace = true
+url = "2"
+
+[dev-dependencies]
+assert2 = { workspace = true }
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio-tungstenite = { workspace = true }
+tower = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Accumulated pedantic/style lint debt in this WIP crate. `codex/loki-support` is
+# pushed to directly (CI only gates PRs), so this was never caught. Scoped here
+# rather than workspace-wide, which would also change protocol codegen
+# normalization (drift). Clean up and restore `[lints] workspace = true` later.
+bool_to_int_with_if = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+collapsible_if = "allow"
+doc_markdown = "allow"
+double_must_use = "allow"
+duration_suboptimal_units = "allow"
+format_push_string = "allow"
+if_same_then_else = "allow"
+implicit_clone = "allow"
+items_after_statements = "allow"
+manual_pattern_char_comparison = "allow"
+manual_string_new = "allow"
+manual_strip = "allow"
+map_unwrap_or = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+needless_borrow = "allow"
+needless_continue = "allow"
+needless_pass_by_value = "allow"
+needless_raw_string_hashes = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+uninlined_format_args = "allow"
+unnecessary_sort_by = "allow"
+unnecessary_wraps = "allow"
+unnested_or_patterns = "allow"
+unreadable_literal = "allow"

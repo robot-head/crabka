@@ -1,0 +1,73 @@
+[package]
+name = "crabka-logql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Small LogQL parser and planner front-end for Crabka observability"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-logql"
+readme = "../../README.md"
+keywords = ["logql", "loki", "observability", "crabka"]
+categories = ["parser-implementations"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Accumulated pedantic/style lint debt in this WIP crate. `codex/loki-support` is
+# pushed to directly (CI only gates PRs), so this was never caught. Scoped here
+# rather than workspace-wide, which would also change protocol codegen
+# normalization (drift). Clean up and restore `[lints] workspace = true` later.
+bool_to_int_with_if = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+collapsible_if = "allow"
+doc_markdown = "allow"
+double_must_use = "allow"
+duration_suboptimal_units = "allow"
+format_push_string = "allow"
+if_same_then_else = "allow"
+implicit_clone = "allow"
+items_after_statements = "allow"
+manual_pattern_char_comparison = "allow"
+manual_string_new = "allow"
+manual_strip = "allow"
+map_unwrap_or = "allow"
+match_same_arms = "allow"
+match_wildcard_for_single_variants = "allow"
+needless_borrow = "allow"
+needless_continue = "allow"
+needless_pass_by_value = "allow"
+needless_raw_string_hashes = "allow"
+redundant_closure_for_method_calls = "allow"
+similar_names = "allow"
+single_match_else = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+uninlined_format_args = "allow"
+unnecessary_sort_by = "allow"
+unnecessary_wraps = "allow"
+unnested_or_patterns = "allow"
+unreadable_literal = "allow"
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+chrono-tz = { version = "0.10.4", default-features = false }
+crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
+regex = { workspace = true }
+serde_json.workspace = true
+thiserror = { workspace = true }
+time = { version = "0.3", default-features = false }
+
+[dev-dependencies]
+assert2 = { workspace = true }
