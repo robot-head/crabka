@@ -194,8 +194,13 @@ services:
       broker: { condition: service_healthy }
 
   profiles-querier:
+    # --bootstrap is REQUIRED: the querier's hot WAL-tail consumer reads recent
+    # (not-yet-compacted) profiles straight from the WAL. Without it the tail
+    # falls back to 127.0.0.1:9092, can't reach the broker, and dies -> the hot
+    # store stays empty and the cold store only has whatever index existed at
+    # startup, so the querier returns no profiles.
     <<: *crabka-image
-    command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles"]
+    command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["4040:4040"]
     depends_on:

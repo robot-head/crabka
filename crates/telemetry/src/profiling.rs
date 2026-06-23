@@ -6,6 +6,12 @@
 //! `pyroscope.scrape` pulls both. The same admin server can carry extra routes
 //! (e.g. `/metrics`).
 //!
+//! Bodies are gzipped `Profile` protobufs — the standard pprof file format
+//! (what Go's net/http/pprof serves). Alloy's `pyroscope.scrape` forwards the
+//! scraped bytes verbatim as the push API's `raw_profile`, and the ingester
+//! gunzips them; returning a bare (uncompressed) protobuf makes that gunzip
+//! fail with "invalid gzip header".
+//!
 //! CPU profiling uses POSIX signals and is therefore gated to Unix; a 503 stub
 //! is returned on non-Unix targets so the crate compiles on all platforms.
 
@@ -57,13 +63,30 @@ async fn cpu_profile(Query(q): Query<CpuQuery>) -> axum::response::Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("pprof: {e}")).into_response();
         }
     };
-    let body = profile.encode_to_vec();
+    let body = gzip(&profile.encode_to_vec());
     (
         StatusCode::OK,
         [("content-type", "application/octet-stream")],
         body,
     )
         .into_response()
+}
+
+/// Gzip a buffer — the pprof file format is a gzipped `Profile` protobuf.
+#[cfg(unix)]
+fn gzip(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let mut encoder = flate2::write::GzEncoder::new(
+        Vec::with_capacity(raw.len() / 2),
+        flate2::Compression::fast(),
+    );
+    encoder
+        .write_all(raw)
+        .expect("gzip of in-memory buffer is infallible");
+    encoder
+        .finish()
+        .expect("gzip finish of in-memory buffer is infallible")
 }
 
 /// Stub for non-Unix targets: CPU profiling is unavailable.

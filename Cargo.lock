@@ -3277,6 +3277,7 @@ dependencies = [
  "assert2",
  "axum",
  "crabka-logfmt",
+ "flate2",
  "jemalloc_pprof",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -7314,7 +7315,6 @@ dependencies = [
  "prost-build 0.14.4",
  "prost-reflect",
  "protox",
- "tikv-jemallocator",
  "tokio",
  "tracing",
 ]

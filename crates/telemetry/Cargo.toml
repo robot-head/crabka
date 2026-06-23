@@ -39,6 +39,10 @@ tokio = { workspace = true, features = ["net", "rt", "time", "macros"] }
 # both only compile on Unix.
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15", default-features = false, features = ["prost-codec"] }
+# The standard pprof wire format is a gzipped `Profile` protobuf (this is what
+# Go's net/http/pprof serves and what Pyroscope's push API expects in
+# `raw_profile`). We gzip the encoded profile before returning it.
+flate2 = { workspace = true }
 # heap-profiling only: jemalloc_pprof provides PROF_CTL; the global allocator
 # is supplied by each binary binary, not this lib.
 jemalloc_pprof = { version = "0.9", optional = true }
