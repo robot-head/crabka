@@ -53,8 +53,16 @@ impl Labels {
         self.0.is_empty()
     }
 
-    /// FNV-1a 64-bit hash over canonical `name=value\n` entries. `BTreeMap`
-    /// keeps names sorted, so the hash is independent of insertion order.
+    /// FNV-1a 64-bit hash over canonical length-prefixed `name`/`value` entries.
+    ///
+    /// Each name and value is preceded by its byte length (`u64` little-endian)
+    /// so the encoding is injective: a name or value containing `=` or a newline
+    /// cannot be re-parsed across the field boundary, which a bare `name=value\n`
+    /// separator encoding would allow (e.g. `a=b\nc` vs `a` with value `b\nc`).
+    /// Profile labels are user-controlled, so this collision is reachable; the
+    /// length prefix closes it. `BTreeMap` keeps names sorted, so the hash is
+    /// independent of insertion order. Greenfield, so no persisted fingerprints
+    /// depend on the old encoding.
     #[must_use]
     pub fn fingerprint(&self) -> SeriesFingerprint {
         const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -62,10 +70,17 @@ impl Labels {
 
         let mut hash = OFFSET;
         for (name, value) in &self.0 {
-            hash_bytes(&mut hash, name.as_bytes(), PRIME);
-            hash_bytes(&mut hash, b"=", PRIME);
-            hash_bytes(&mut hash, value.as_bytes(), PRIME);
-            hash_bytes(&mut hash, b"\n", PRIME);
+            for byte in (name.len() as u64)
+                .to_le_bytes()
+                .iter()
+                .copied()
+                .chain(name.as_bytes().iter().copied())
+                .chain((value.len() as u64).to_le_bytes().iter().copied())
+                .chain(value.as_bytes().iter().copied())
+            {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(PRIME);
+            }
         }
         hash
     }
@@ -74,13 +89,6 @@ impl Labels {
 impl FromIterator<(String, String)> for Labels {
     fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-fn hash_bytes(hash: &mut u64, bytes: &[u8], prime: u64) {
-    for &b in bytes {
-        *hash ^= u64::from(b);
-        *hash = hash.wrapping_mul(prime);
     }
 }
 
@@ -110,38 +118,38 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_matches_reference_fnv1a() {
-        // Pin the exact FNV-1a 64-bit hash so swapping the `^=` in `hash_bytes`
-        // for `|=` (which would change every byte mix) makes this fail.
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-
+    fn fingerprint_is_injective_across_delimiter_ambiguity() {
+        // A bare `name=value\n` encoding flattens both of these label sets to the
+        // same byte string `a=b=c\n`, colliding two distinct series. The length
+        // prefix makes the encoding injective, so the fingerprints must differ.
         let mut a = Labels::new();
-        a.insert("app", "api");
+        a.insert("a", "b=c");
+        let mut b = Labels::new();
+        b.insert("a=b", "c");
+        assert!(a.fingerprint() != b.fingerprint());
 
-        // Reference: hash each canonical `name=value\n` byte with FNV-1a.
-        let mut want = OFFSET;
-        for &b in b"app=api\n" {
-            want ^= u64::from(b);
-            want = want.wrapping_mul(PRIME);
-        }
-        assert!(a.fingerprint() == want);
-
-        // The `|=` variant produces a different digest for the same input.
-        let mut or_variant = OFFSET;
-        for &b in b"app=api\n" {
-            or_variant |= u64::from(b);
-            or_variant = or_variant.wrapping_mul(PRIME);
-        }
-        assert!(want != or_variant);
+        // The same ambiguity via an embedded newline (reachable through
+        // user-controlled profile label values).
+        let mut c = Labels::new();
+        c.insert("x", "y");
+        c.insert("z", "");
+        let mut d = Labels::new();
+        d.insert("x", "y\nz=");
+        assert!(c.fingerprint() != d.fingerprint());
     }
 
     #[test]
     fn get_and_iter_round_trip() {
         let mut l = Labels::new();
+        assert!(l.is_empty());
         l.insert("app", "api");
         assert!(l.get("app") == Some("api"));
         assert!(l.get("missing") == None);
         assert!(l.len() == 1);
+        let pairs = l
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(pairs == vec![("app", "api")]);
     }
 }

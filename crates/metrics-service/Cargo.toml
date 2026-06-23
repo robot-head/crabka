@@ -1,0 +1,46 @@
+[package]
+name = "crabka-metrics-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Role-selectable metrics service wiring for Crabka's Prometheus/Mimir-compatible backend"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-metrics-service"
+keywords = ["observability", "prometheus", "mimir", "metrics", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["json"] }
+bytes = { workspace = true }
+clap = { workspace = true }
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
+crabka-metrics = { path = "../metrics", version = "0.3.7" }
+crabka-promql = { path = "../promql", version = "0.3.7" }
+futures = { workspace = true }
+object_store = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+time = { version = "0.3", default-features = false, features = ["formatting"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+url = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+prost = { workspace = true }
+snap = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }

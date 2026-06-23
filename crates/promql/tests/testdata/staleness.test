@@ -1,0 +1,10 @@
+load 1m
+  up{job="api"} 1 stale 2
+
+eval instant at 0m up{job="api"}
+  up{job="api"} 1
+
+eval instant at 1m up{job="api"}
+
+eval instant at 2m up{job="api"}
+  up{job="api"} 2

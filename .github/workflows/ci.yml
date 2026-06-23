@@ -41,6 +41,7 @@ jobs:
       broker_integration: ${{ steps.filter.outputs.broker_integration }}
       doc_examples: ${{ steps.filter.outputs.doc_examples }}
       traces: ${{ steps.filter.outputs.traces }}
+      metrics: ${{ steps.filter.outputs.metrics }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -210,6 +211,15 @@ jobs:
               - 'tools/test-doc-examples.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            metrics:
+              - 'crates/metrics/**'
+              - 'crates/metrics-service/**'
+              - 'crates/promql/**'
+              - 'crates/blockstore/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -936,6 +946,72 @@ jobs:
           flags: operator-integration
           fail_ci_if_error: false
 
+  # PromQL `.test` conformance gate (no Docker): runs the vendored Prometheus
+  # `.test` corpus through the engine and writes a per-file pass/fail report.
+  # Runs on every PR as a gate (a regression flips a `.test` file to failing).
+  # The `target/promql-conformance-report.txt` artifact is uploaded for triage.
+  metrics-conformance:
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: metrics-conformance
+      - uses: taiki-e/install-action@nextest
+      - name: PromQL conformance gate
+        run: cargo nextest run -p crabka-promql --profile ci --test conformance
+      - name: Upload conformance report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: promql-conformance-report
+          path: target/promql-conformance-report.txt
+          if-no-files-found: warn
+
+  # Real-Prometheus byte/semantic differential gate (Docker). The PromQL/metrics
+  # wire-format compat constraint (Prometheus/Mimir exactness, incl. NaN/±Inf and
+  # staleness) is load-bearing, so a regression must NOT merge green. The full
+  # Prometheus + Mimir + Grafana matrix runs nightly in `metrics-differential.yml`
+  # (heavy: three pulled images); here we gate every metrics-touching PR on the
+  # lightest of the three — the real-Prometheus differential corpus (one pulled
+  # image, no `host.docker.internal` datasource dance). All tests in the suite are
+  # `#[ignore = "requires Docker"]`, so `--ignored` opts them in (the default
+  # `cargo test` never touches Docker). Mirrors the metrics-differential nightly
+  # job's runner/setup/caching.
+  metrics-differential-prometheus:
+    needs: changes
+    if: ${{ needs.changes.outputs.metrics == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # The pulled Prometheus image plus the cargo target dir pressure the
+      # ~14 GB free on the default runner; reclaim the unused preinstalled SDKs
+      # like the other Docker-heavy jobs do (leaves Docker images intact for
+      # testcontainers).
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: metrics-differential-prometheus
+      - name: Preload Docker image
+        run: docker pull prom/prometheus:v3.8.0
+      # `--ignored` opts the Docker-gated tests in (they're skipped everywhere
+      # else). Only the Prometheus suite runs here; Mimir + Grafana stay nightly.
+      - name: Prometheus differential suite (Docker, ignored)
+        run: |
+          cargo test -p crabka-metrics-service \
+            --test diff_prometheus \
+            -- --ignored --nocapture
+
   # Incremental mutation testing (https://mutants.rs): generate mutants ONLY for
   # the lines this PR changes (`--in-diff`) and check the suite kills them — a
   # stronger signal than line coverage, since a surviving mutant means a changed
@@ -1050,6 +1126,8 @@ jobs:
       - broker-jvm-acceptance
       - broker-integration
       - operator-integration
+      - metrics-conformance
+      - metrics-differential-prometheus
       - mutants
     if: ${{ always() }}
     runs-on: ubuntu-latest

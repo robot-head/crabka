@@ -24,25 +24,25 @@ pub enum BlockStoreError {
 pub type Result<T> = std::result::Result<T, BlockStoreError>;
 
 impl From<object_store::Error> for BlockStoreError {
-    fn from(e: object_store::Error) -> Self {
-        Self::ObjectStore(e.to_string())
+    fn from(error: object_store::Error) -> Self {
+        Self::ObjectStore(error.to_string())
     }
 }
 
 impl From<parquet::errors::ParquetError> for BlockStoreError {
-    fn from(e: parquet::errors::ParquetError) -> Self {
-        Self::Parquet(e.to_string())
+    fn from(error: parquet::errors::ParquetError) -> Self {
+        Self::Parquet(error.to_string())
     }
 }
 
 impl From<datafusion::error::DataFusionError> for BlockStoreError {
-    fn from(e: datafusion::error::DataFusionError) -> Self {
-        Self::DataFusion(e.to_string())
+    fn from(error: datafusion::error::DataFusionError) -> Self {
+        Self::DataFusion(error.to_string())
     }
 }
 
 impl From<serde_json::Error> for BlockStoreError {
-    fn from(e: serde_json::Error) -> Self {
-        Self::Serde(e.to_string())
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serde(error.to_string())
     }
 }

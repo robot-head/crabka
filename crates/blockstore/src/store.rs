@@ -1,4 +1,4 @@
-//! Query facade over object-store Parquet blocks.
+//! Query facade over object storage, index pruning, and `DataFusion` scans.
 
 use std::sync::Arc;
 
@@ -8,19 +8,29 @@ use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use object_store::ObjectStore;
 use url::Url;
 
-use crate::error::Result;
-use crate::index::SeriesIndex;
+use crate::error::{BlockStoreError, Result};
+use crate::index::Index;
 use crate::matcher::LabelMatcher;
 use crate::reader::read_block_row_groups;
 use crate::writer::BlockWriter;
 
 const TABLE_NAME: &str = "logs";
 
-/// Object store, base URL, and in-memory index facade for block scans.
+/// One named `DataFusion` table registration request over indexed blocks.
+pub struct ScanTableRequest<'a> {
+    pub table_name: &'a str,
+    pub tenant: &'a str,
+    pub matchers: &'a [LabelMatcher],
+    pub min_ts: i64,
+    pub max_ts: i64,
+    pub schema: SchemaRef,
+}
+
+/// Owns the object store, its `DataFusion` URL prefix, and the in-memory index.
 pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,
-    index: SeriesIndex,
+    index: Index,
 }
 
 impl BlockStore {
@@ -29,7 +39,7 @@ impl BlockStore {
         Self {
             store,
             base,
-            index: SeriesIndex::new(),
+            index: Index::new(),
         }
     }
 
@@ -39,8 +49,12 @@ impl BlockStore {
     }
 
     #[must_use]
-    pub fn index(&self) -> &SeriesIndex {
+    pub fn index(&self) -> &Index {
         &self.index
+    }
+
+    pub fn index_mut(&mut self) -> &mut Index {
+        &mut self.index
     }
 
     #[must_use]
@@ -48,8 +62,9 @@ impl BlockStore {
         self.store.clone()
     }
 
-    pub fn index_mut(&mut self) -> &mut SeriesIndex {
-        &mut self.index
+    #[must_use]
+    pub fn empty_like(&self) -> Self {
+        Self::new(self.store.clone(), self.base.clone())
     }
 
     pub async fn scan_context(
@@ -60,27 +75,59 @@ impl BlockStore {
         max_ts: i64,
         schema: SchemaRef,
     ) -> Result<(SessionContext, String)> {
-        let fps = self.index.resolve(tenant, matchers)?;
-        let keys = self.index.candidate_blocks(tenant, &fps, min_ts, max_ts);
-
         let ctx = SessionContext::new();
-        ctx.register_object_store(&self.base, self.store.clone());
+        self.register_scan_table(
+            &ctx,
+            ScanTableRequest {
+                table_name: TABLE_NAME,
+                tenant,
+                matchers,
+                min_ts,
+                max_ts,
+                schema,
+            },
+        )
+        .await?;
+        Ok((ctx, TABLE_NAME.to_string()))
+    }
 
-        if keys.is_empty() {
-            let empty = MemTable::try_new(schema, vec![vec![]])?;
-            ctx.register_table(TABLE_NAME, Arc::new(empty))?;
-            return Ok((ctx, TABLE_NAME.to_string()));
+    pub async fn register_scan_table(
+        &self,
+        ctx: &SessionContext,
+        request: ScanTableRequest<'_>,
+    ) -> Result<bool> {
+        let fingerprints = self.index.resolve(request.tenant, request.matchers)?;
+        let candidates = self.index.candidate_blocks(
+            request.tenant,
+            &fingerprints,
+            request.min_ts,
+            request.max_ts,
+        );
+        ctx.register_object_store(&self.base, self.store.clone());
+        if candidates.is_empty() {
+            let table = MemTable::try_new(request.schema, vec![Vec::new()])?;
+            ctx.register_table(request.table_name, Arc::new(table))?;
+            return Ok(false);
         }
 
-        let paths: Vec<String> = keys
+        let paths = candidates
             .iter()
-            .map(|key| format!("{}{}", self.base, key.trim_start_matches('/')))
-            .collect();
-        let df = ctx
-            .read_parquet(paths, ParquetReadOptions::default())
-            .await?;
-        ctx.register_table(TABLE_NAME, df.into_view())?;
-        Ok((ctx, TABLE_NAME.to_string()))
+            .map(|object_key| {
+                self.base
+                    .join(object_key)
+                    .map(|url| url.to_string())
+                    .map_err(|error| {
+                        BlockStoreError::InvalidBlock(format!(
+                            "invalid block object key `{object_key}`: {error}"
+                        ))
+                    })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let options = ParquetReadOptions::default().schema(request.schema.as_ref());
+        let dataframe = ctx.read_parquet(paths, options).await?;
+        ctx.register_table(request.table_name, dataframe.into_view())?;
+
+        Ok(true)
     }
 
     pub async fn scan_block_keys(

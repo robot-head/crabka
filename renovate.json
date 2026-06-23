@@ -15,6 +15,17 @@
       "description": "wincode 0.5 is incompatible with serde-wincode 0.1.0 which still depends on wincode ^0.4. Hold the auto-bump until serde-wincode publishes a 0.5-compatible release.",
       "matchPackageNames": ["wincode"],
       "enabled": false
+    },
+    {
+      "description": "DataFusion is a deliberate apache/datafusion `main` git pin (tracks arrow 59 / parquet 59 / object_store 0.13 compatibility) that is bumped intentionally, not on every upstream commit. Without a limit, renovate opens a fresh digest PR per DataFusion `main` commit, which constantly conflicts with in-flight branches that carry the `version` pin on the same line. Rate-limit it to a monthly PR for a commit that is at least 30 days old.",
+      "matchPackageNames": ["datafusion", "https://github.com/apache/datafusion"],
+      "minimumReleaseAge": "30 days",
+      "schedule": ["before 4am on the first day of the month"]
+    },
+    {
+      "description": "object_store, parquet and arrow are coupled satellites of the datafusion git pin: that revision requires object_store ^0.13 / parquet 59 / arrow 59, and crabka-blockstore passes their types across the ParquetObjectReader / register_object_store boundary. Bumping any of them on its own splits the dependency graph and fails to compile (the auto-merged object_store 0.14 bump #644 broke main exactly this way). Disable independent auto-bumps; they move only when the datafusion rev is bumped intentionally.",
+      "matchPackageNames": ["object_store", "parquet", "arrow"],
+      "enabled": false
     }
   ]
 }

@@ -42,6 +42,12 @@ pub fn validate_against(schema: &Schema, decl: &crate::block_index::BlockSchema)
                 found.1.data_type()
             )));
         }
+        if !col.nullable && found.1.is_nullable() {
+            return Err(BlockStoreError::InvalidBlock(format!(
+                "`{}` must be non-nullable",
+                col.name
+            )));
+        }
     }
     Ok(())
 }
@@ -73,6 +79,24 @@ mod tests {
         let schema = Schema::new(vec![
             Field::new(COL_FINGERPRINT, DataType::UInt64, false),
             Field::new(COL_TIMESTAMP, DataType::Utf8, false),
+        ]);
+        assert!(validate_block_schema(&schema).is_err());
+    }
+
+    #[test]
+    fn schema_with_nullable_fingerprint_is_rejected() {
+        let schema = Schema::new(vec![
+            Field::new(COL_FINGERPRINT, DataType::UInt64, true),
+            Field::new(COL_TIMESTAMP, DataType::Int64, false),
+        ]);
+        assert!(validate_block_schema(&schema).is_err());
+    }
+
+    #[test]
+    fn schema_with_nullable_timestamp_is_rejected() {
+        let schema = Schema::new(vec![
+            Field::new(COL_FINGERPRINT, DataType::UInt64, false),
+            Field::new(COL_TIMESTAMP, DataType::Int64, true),
         ]);
         assert!(validate_block_schema(&schema).is_err());
     }
