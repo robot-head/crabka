@@ -21,6 +21,16 @@ x-crabka-image: &crabka-image
   restart: unless-stopped
 
 services:
+  # One-shot: format the broker's KRaft storage (writes meta.properties.json)
+  # before the broker starts. Idempotent — skips if already formatted. The
+  # controller listener is advertised-host:9093 (broker.rs derives it from
+  # --advertised-listener with port 9093).
+  broker-format:
+    image: crabka-demo:latest
+    restart: "no"
+    entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093"]
+    volumes: ["broker-data:/data"]
+
   broker:
     <<: *crabka-image
     command: ["crabka-broker", "--listen-addr=0.0.0.0:9092", "--advertised-listener=broker:9092", "--log-dir=/data", "--process-roles=controller,broker"]
@@ -29,6 +39,9 @@ services:
       CRABKA_METRICS_LISTEN_ADDR: 0.0.0.0:9404
     ports: ["9092:9092", "9404:9404"]
     volumes: ["broker-data:/data"]
+    depends_on:
+      broker-format:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:9404/metrics"]
       interval: 5s
@@ -135,7 +148,7 @@ services:
 
   logs-querier:
     <<: *crabka-image
-    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
     depends_on:
