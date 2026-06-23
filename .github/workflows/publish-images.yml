@@ -87,7 +87,7 @@ jobs:
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: Cache melange/cargo build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .melange-cache
           key: melange-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
