@@ -216,8 +216,11 @@ jobs:
           # `--exclude cwiki.apache.org`: the GitHub-hosted runners have no
           # network egress to the Apache wiki, so the canonical Kafka KIP links
           # report a hard "Network unreachable" and cannot be validated here.
-          # (`#` is literal inside a folded scalar, so the exclusion lives in the
-          # args below, not as an inline comment.) KIP-link freshness is tracked
+          # `--exclude (localhost|127.0.0.1)`: the demo READMEs document local
+          # service URLs (Grafana on :3000, the per-signal queriers, etc.) that
+          # are only reachable while the demo stack is running — never in CI.
+          # (`#` is literal inside a folded scalar, so the exclusions live in the
+          # args below, not as inline comments.) KIP-link freshness is tracked
           # separately by docs-freshness.yml.
           args: >-
             --no-progress
@@ -225,6 +228,7 @@ jobs:
             --timeout 20
             --max-retries 1
             --exclude cwiki\.apache\.org
+            --exclude (localhost|127\.0\.0\.1)
             --include-fragments
             --fallback-extensions html
             --root-dir website/public
