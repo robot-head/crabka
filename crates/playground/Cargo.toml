@@ -23,7 +23,7 @@ categories = ["wasm", "simulation"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-crabka-kraft-core = { version = "0.3.7", path = "../kraft-core", features = ["sim"] }
+crabka-kraft-core = { version = "0.3.8", path = "../kraft-core", features = ["sim"] }
 wasm-bindgen = { workspace = true }
 serde_json = { workspace = true }
 console_error_panic_hook = "0.1"

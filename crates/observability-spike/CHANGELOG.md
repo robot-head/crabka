@@ -8,5 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ## [0.3.8] — 2026-06-23
 
-## [0.3.7] — 2026-06-17
+
+### <!-- 0 -->🚀 Features
+
+
+- Loki-compatible logs observability backend (blockstore + LogQL + querier/distributor/compactor) ([#650](https://github.com/robot-head/crabka/pull/650))
 

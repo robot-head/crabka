@@ -21,11 +21,11 @@ name = "crabka-rebalancer"
 path = "src/bin/rebalancer.rs"
 
 [dependencies]
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
 bytes.workspace = true
-crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
-crabka-metadata = { version = "0.3.7", path = "../metadata" }
+crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-metadata = { version = "0.3.8", path = "../metadata" }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true
@@ -54,6 +54,6 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.7", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
 tempfile.workspace = true
 tower.workspace = true

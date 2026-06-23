@@ -21,12 +21,12 @@ name = "crabka-grpc-gateway"
 path = "src/bin/gateway.rs"
 
 [dependencies]
-crabka-authz = { version = "0.3.7", path = "../authz" }
-crabka-telemetry = { version = "0.3.7", path = "../telemetry" }
-crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
-crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
-crabka-metadata = { version = "0.3.7", path = "../metadata" }
+crabka-authz = { version = "0.3.8", path = "../authz" }
+crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-metadata = { version = "0.3.8", path = "../metadata" }
 arc-swap = { workspace = true }
 prometheus-client = { workspace = true }
 connectrpc-axum.workspace = true
@@ -49,8 +49,8 @@ futures-util = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-crabka-security = { version = "0.3.7", path = "../security" }
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
+crabka-security = { version = "0.3.8", path = "../security" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
@@ -76,11 +76,11 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.7", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
 # Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
 # record's `x-crabka-dlq-source` header (the group Consumer drops headers).
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
-crabka-protocol = { version = "0.3.7", path = "../protocol" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-protocol = { version = "0.3.8", path = "../protocol" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 # `UnboundedReceiverStream` to drive the Subscribe control stream in tests/streaming.rs.

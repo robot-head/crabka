@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.8] — 2026-06-23
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Filter subscribe structured records ([#588](https://github.com/robot-head/crabka/pull/588))
+
+- Geo-replication engine (Slice 1) — MirrorMaker-2 equivalent + data residency ([#593](https://github.com/robot-head/crabka/pull/593))
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Echo request Content-Type on Connect responses (build_connect) ([#645](https://github.com/robot-head/crabka/pull/645))
+
+
+### <!-- 10 -->💼 Other
+
+
+- Remove protoc in favor of prost-native codegen ([#629](https://github.com/robot-head/crabka/pull/629))
+
 ## [0.3.7] — 2026-06-17
 
 

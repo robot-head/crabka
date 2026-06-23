@@ -24,12 +24,12 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
-crabka-connect = { version = "0.3.7", path = "../connect" }
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
-crabka-logfmt = { version = "0.3.7", path = "../logfmt" }
+crabka-connect = { version = "0.3.8", path = "../connect" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-security = { workspace = true }
 regex = { workspace = true }
 rustls = { workspace = true }

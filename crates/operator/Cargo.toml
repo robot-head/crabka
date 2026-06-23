@@ -26,9 +26,9 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
-crabka-logfmt = { version = "0.3.7", path = "../logfmt" }
-crabka-metadata = { version = "0.3.7", path = "../metadata" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
+crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-security = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
@@ -56,8 +56,8 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.7", path = "../broker" }
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
+crabka-broker = { version = "0.3.8", path = "../broker" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
 # Path-only (no version): keeps this dev-dependency out of the published
 # manifest so `cargo publish`/release-plz never resolve it against crates.io.
 # crabka-rebalancer publishes a release behind the rest of the workspace, so a

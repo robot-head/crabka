@@ -22,7 +22,7 @@ experimental-functions = []
 
 [dependencies]
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
-crabka-metrics = { path = "../metrics", version = "0.3.7" }
+crabka-metrics = { path = "../metrics", version = "0.3.8" }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 promql-parser = { workspace = true }

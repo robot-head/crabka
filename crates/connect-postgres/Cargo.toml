@@ -17,8 +17,8 @@ categories = ["database", "asynchronous"]
 workspace = true
 
 [dependencies]
-crabka-connect = { path = "../connect", version = "0.3.7" }
-crabka-schema-serde = { path = "../schema-serde", version = "0.3.7", features = ["protobuf"] }
+crabka-connect = { path = "../connect", version = "0.3.8" }
+crabka-schema-serde = { path = "../schema-serde", version = "0.3.8", features = ["protobuf"] }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }

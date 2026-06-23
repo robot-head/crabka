@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.8] — 2026-06-23
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Geo-replication engine (Slice 1) — MirrorMaker-2 equivalent + data residency ([#593](https://github.com/robot-head/crabka/pull/593))
+
+- Loki-compatible logs observability backend (blockstore + LogQL + querier/distributor/compactor) ([#650](https://github.com/robot-head/crabka/pull/650))
+
+
+### <!-- 1 -->🐛 Bug Fixes
+
+
+- Faster broker failover — retry backoff + startupProbe ([#583](https://github.com/robot-head/crabka/pull/583))
+
+
+### <!-- 2 -->🚜 Refactor
+
+
+- Migrate whole-function cargo-mutants exclusions to #[mutants::skip] ([#615](https://github.com/robot-head/crabka/pull/615))
+
 ## [0.3.7] — 2026-06-17
 
 

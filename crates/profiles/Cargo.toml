@@ -47,10 +47,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 url = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-pprof = { path = "../pprof", version = "0.3.7" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
-crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
-crabka-broker = { path = "../broker", version = "0.3.7" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
+crabka-client-admin = { path = "../client-admin", version = "0.3.8" }
+crabka-broker = { path = "../broker", version = "0.3.8" }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true }
@@ -65,5 +65,5 @@ reqwest = { workspace = true, features = ["json"] }
 testcontainers = { workspace = true }
 base64 = { workspace = true }
 flate2 = { workspace = true }
-crabka-client-core = { path = "../client-core", version = "0.3.7" }
+crabka-client-core = { path = "../client-core", version = "0.3.8" }
 crabka-pprof = { path = "../pprof", version = "0.3.7" }
