@@ -57,7 +57,15 @@ jobs:
           context: .
           file: demo/observability/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/crabka-demo:${{ inputs.tag }}
+          # Publish the requested tag AND move `latest`: the demo compose
+          # (demo/observability/docker-compose.yml) pulls `:latest`, so every
+          # versioned publish updates it to keep `docker compose up` working
+          # out of the box while the version tag stays an immutable pin. The
+          # second line is empty when `tag` is already `latest`, so it is never
+          # listed twice (build-push-action ignores blank tag lines).
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/crabka-demo:${{ inputs.tag }}
+            ${{ inputs.tag != 'latest' && format('ghcr.io/{0}/crabka-demo:latest', github.repository_owner) || '' }}
           # Cache the Docker layers across runs (the cargo build dominates, but
           # the apt/base layers and any unchanged stages still benefit).
           cache-from: type=gha
