@@ -161,8 +161,17 @@ services:
       minio-setup: { condition: service_completed_successfully }
 
   logs-querier:
+    # --wal-group-id MUST differ from the compactor's default
+    # (`crabka-observability-compactor`): both subscribe() to the single-partition
+    # logs WAL, so a shared group id makes them fight over the one partition and
+    # the querier's consumer spins on REBALANCE_IN_PROGRESS(27). A distinct group
+    # lets each independently tail the WAL.
+    # --querier-index-source=tenant-object-store-manifest reads the index the
+    # compactor wrote to S3 (default `local-manifest` reads the querier's empty
+    # local disk -> no labels/series). With no --tenant, the tenant is resolved
+    # per-request from X-Scope-OrgID.
     <<: *crabka-image
-    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-manifest", "--wal-group-id=crabka-observability-querier"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
     depends_on:
