@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use super::bucket::ThrottleState;
+use super::ThrottleState;
 
 #[async_trait]
 pub trait ImageWatcher: Send + Sync {

@@ -212,11 +212,19 @@ jobs:
           # releases whose tarball ships the binary in a top-level directory
           # (`install: cannot stat '.../lychee-download/lychee'`). Letting the
           # action pick its own default uses the install path it ships tested.
+          #
+          # `--exclude cwiki.apache.org`: the GitHub-hosted runners have no
+          # network egress to the Apache wiki, so the canonical Kafka KIP links
+          # report a hard "Network unreachable" and cannot be validated here.
+          # (`#` is literal inside a folded scalar, so the exclusion lives in the
+          # args below, not as an inline comment.) KIP-link freshness is tracked
+          # separately by docs-freshness.yml.
           args: >-
             --no-progress
             --format detailed
             --timeout 20
             --max-retries 1
+            --exclude cwiki\.apache\.org
             --include-fragments
             --fallback-extensions html
             --root-dir website/public

@@ -1,0 +1,82 @@
+name: metrics-differential
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC daily (after nightly-differential at 03:00)
+  workflow_dispatch:
+
+# Metrics differential / integration suites against real external systems
+# (Prometheus, Grafana Mimir, Grafana) via testcontainers. Every test in the
+# three suites is `#[ignore = "requires Docker"]`, so the default
+# `cargo test --workspace` never touches Docker; this workflow runs them
+# explicitly with `--ignored`. This is the FULL nightly matrix (all three
+# images): schedule + manual dispatch, mirroring how the repo runs other
+# Docker-heavy suites. The lightest of the three — the real-Prometheus
+# differential corpus — ALSO gates every metrics-touching PR via the
+# `metrics-differential-prometheus` job in `ci.yml`, so a wire-format regression
+# can't merge green; the heavier Mimir + Grafana suites stay nightly here to
+# keep PR latency low. (The PromQL `.test` conformance gate also runs per-PR in
+# `ci.yml` as `metrics-conformance`.)
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege default for GITHUB_TOKEN; the one job that needs more opts up
+# to `issues: write` explicitly below.
+permissions:
+  contents: read
+
+jobs:
+  metrics-differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # `contents: read` to checkout; `issues: write` for the failure-issue step.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      # Three pulled images (Prometheus, Mimir, Grafana) plus the cargo target
+      # dir exhaust the ~14 GB free on the default runner; reclaim the unused
+      # preinstalled SDKs like the other Docker-heavy jobs do (leaves Docker
+      # images intact for testcontainers).
+      - uses: ./.github/actions/free-disk-space
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: metrics-differential
+      - uses: taiki-e/install-action@nextest
+      # The in-process Crabka server binds the host; the Grafana container dials
+      # it back via the advertised `host.docker.internal` datasource URL. On
+      # Linux runners the host has no such resolution, so add it (same trick the
+      # broker-jvm-acceptance job uses).
+      - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
+      - name: Preload Docker images
+        run: |
+          docker pull prom/prometheus:v3.8.0
+          docker pull grafana/mimir:2.16.1
+          docker pull grafana/grafana:11.6.1
+      # The three suites bind in-process Crabka servers to ephemeral ports, so
+      # they're safe to run in one `cargo test` invocation. `--ignored` opts the
+      # Docker-gated tests in (they're skipped everywhere else).
+      - name: Metrics differential + integration suites (Docker, ignored)
+        run: |
+          cargo test -p crabka-metrics-service \
+            --test diff_prometheus \
+            --test diff_mimir \
+            --test grafana_integration \
+            -- --ignored --nocapture
+      - name: Create issue on failure
+        if: ${{ failure() && github.event_name == 'schedule' }}
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `metrics-differential failed on ${context.sha.slice(0,7)}`,
+              body: `See workflow run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['nightly-fail'],
+            });
