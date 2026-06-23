@@ -17,11 +17,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::metrics::SharedRegistry;
 
-/// Build the router. Single route: `/metrics`.
+/// Build the router: `/metrics` (Prometheus) plus `/debug/pprof/{profile,heap}`
+/// (CPU always on Unix; heap when built with `--features heap-profiling`).
 pub fn router(registry: SharedRegistry) -> Router {
     Router::new()
         .route("/metrics", get(metrics))
         .with_state(registry)
+        .merge(crabka_telemetry::profiling::pprof_router())
 }
 
 /// Bind and serve until `shutdown` fires. Returns the bound address so

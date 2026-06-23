@@ -23,6 +23,11 @@ default = []
 # Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
 test-helpers = ["crabka-log/test-helpers"]
 sspi-keytab = ["crabka-security/sspi-keytab", "crabka-client-core/sspi-keytab"]
+# Expose jemalloc heap profiles on `/debug/pprof/heap`. Passes the flag
+# through to crabka-telemetry (which gates the heap route) and activates the
+# jemalloc global allocator in the broker binary. Unix-only at the dep level;
+# the `#[global_allocator]` static is additionally guarded by `cfg(unix)`.
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 
 [[bin]]
@@ -94,6 +99,12 @@ crc32c = { workspace = true }
 # KIP-714: decode OTLP MetricsData protobuf payloads in PushTelemetry handler.
 prost = { workspace = true }
 exponential-backoff = "2.1.0"
+
+# Heap profiling via jemalloc. Unix-only: tikv-jemallocator does not build on
+# Windows. The `heap-profiling` feature activates this dep; the global
+# allocator static in broker.rs is additionally gated by `cfg(unix)`.
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 # Linux kTLS (Increment F): zero-copy `sendfile(2)` fetch over TLS connections.
 # Linux-target-gated so macOS/Windows/BSD builds never compile (or resolve) it
