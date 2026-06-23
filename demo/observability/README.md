@@ -20,9 +20,19 @@ docker compose up --build      # first run builds the crabka-demo image (long)
 
 Then open Grafana at <http://localhost:3000> (anonymous admin).
 
+Data appears a few minutes after startup, as Alloy collects signals and the
+block-builders flush their first blocks. If a panel stays empty after the
+broker is healthy, its querier likely started before its first blocks existed —
+`docker compose restart <signal>-querier` makes it pick them up (the metrics
+and profiles queriers self-refresh; traces/logs index-refresh is being added).
+
 Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 (default `50`; `0` pauses production). Lower it on a constrained host. Plan on
 **≥ 8 GB** of Docker memory (~20 containers).
+
+The service binaries run under the jemalloc allocator with heap profiling
+active (`MALLOC_CONF=prof:true,prof_active:true`), so both CPU and heap
+flamegraphs are available.
 
 ## What you should see
 
@@ -35,15 +45,17 @@ Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 ## Smoke check (all four signals)
 
 ```bash
-# metrics (Prometheus API)
-curl -s -H 'X-Scope-OrgID: demo' 'http://localhost:9090/api/v1/query?query=up' | head -c 200
+# metrics (Prometheus API) — the broker's own request counter
+curl -s -H 'X-Scope-OrgID: demo' \
+  'http://localhost:9090/api/v1/query?query=crabka_broker_api_requests_total' | head -c 200
 # logs (Loki labels)
 curl -s -H 'X-Scope-OrgID: demo' 'http://localhost:3100/loki/api/v1/labels'
-# traces (TraceQL search)
-curl -s -H 'X-Scope-OrgID: demo' 'http://localhost:3200/api/search?q=%7B%7D' | head -c 200
-# profiles (Pyroscope label names)
+# traces (TraceQL search — any service)
+curl -s -H 'X-Scope-OrgID: demo' \
+  'http://localhost:3200/api/search?q=%7B%20.service.name%20!%3D%20%22%22%20%7D' | head -c 200
+# profiles (Pyroscope) — lists process_cpu + memory (heap) types
 curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
-  'http://localhost:4040/querier.v1.QuerierService/LabelNames' -d '{}' | head -c 200
+  'http://localhost:4040/querier.v1.QuerierService/ProfileTypes' -d '{}' | head -c 200
 ```
 
 ## Layout
@@ -52,4 +64,4 @@ curl -s -H 'X-Scope-OrgID: demo' -X POST -H 'content-type: application/json' \
 - `Dockerfile` — single image with every Crabka binary + the demo app
 - `alloy/config.alloy` — Alloy collects all four signals from both sources
 - `grafana/provisioning/` — datasources + starter dashboard
-- `minio/bootstrap.sh` — creates the `crabka-blocks` bucket
+- `minio/bootstrap.sh` — creates one bucket per signal (`crabka-metrics`, `crabka-traces`, `crabka-logs`, `crabka-profiles`)
