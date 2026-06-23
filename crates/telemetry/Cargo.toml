@@ -20,7 +20,7 @@ workspace = true
 # Heap profiling endpoint via jemalloc. Only fully active on Unix where
 # tikv-jemalloc can be built; on non-Unix the feature flag is accepted but
 # the heap route and jemalloc dep are omitted.
-heap-profiling = []
+heap-profiling = ["dep:jemalloc_pprof"]
 
 [dependencies]
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
