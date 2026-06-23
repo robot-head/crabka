@@ -38,6 +38,7 @@ pub mod limits;
 pub mod query;
 pub mod query_frontend;
 pub mod symbolizer;
+pub mod tenant;
 pub mod wal;
 pub mod wire;
 

@@ -6,11 +6,12 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use axum::extract::RawQuery;
+use axum::extract::{DefaultBodyLimit, RawQuery};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Router, routing::post};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
+use connectrpc_axum::{MakeServiceBuilder, MessageLimits};
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
@@ -29,6 +30,25 @@ use crate::wal::{
     WalSymbolSet, partition_key,
 };
 use crate::wire::pb;
+
+/// Maximum decompressed/decoded request body the distributor will accept, in
+/// bytes (16 MiB). This is wired into both the axum `DefaultBodyLimit` for the
+/// raw `/ingest` + OTLP-HTTP doors and the Connect receive limit, and is kept
+/// in lockstep with the per-request `max_decompressed` gunzip cap so a single
+/// request can never balloon past this bound at any stage.
+const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Hard cap on the number of distinct tenants tracked in the per-tenant
+/// `active_series` and `ingestion_buckets` maps. These maps are otherwise
+/// unbounded: a caller minting fresh tenant ids on every request could grow
+/// them without limit (a memory `DoS`). Once the cap is reached we evict an
+/// arbitrary existing tenant before inserting a new one, so total memory stays
+/// bounded. Combined with `X-Scope-OrgID` validation (which rejects malformed
+/// ids) this closes the "mint unlimited tenants" vector. The cap is generous
+/// (a few thousand) so legitimate multi-tenant deployments are unaffected;
+/// evicting a real tenant merely resets its cardinality/rate accounting, which
+/// is self-healing on the next request.
+const MAX_TENANTS: usize = 4096;
 
 #[async_trait::async_trait]
 pub trait WalSink: Send + Sync {
@@ -120,12 +140,24 @@ pub async fn process_raw(
         }
     }
 
-    enforce_max_series(state, tenant, &pending)?;
-    enforce_ingestion_rate(state, tenant, pending.len())?;
+    // Atomically check the max-series limit AND reserve the new fingerprints
+    // under a single lock hold (see `enforce_and_reserve_max_series`). The
+    // returned set lists fingerprints that were newly inserted by this call and
+    // must be rolled back if the subsequent WAL append fails, so a rejected or
+    // failed write never permanently inflates the tenant's series count.
+    let reserved = enforce_and_reserve_max_series(state, tenant, &pending)?;
+    if let Err(err) = enforce_ingestion_rate(state, tenant, pending.len()) {
+        rollback_reserved_series(state, tenant, &reserved);
+        return Err(err);
+    }
+
     for rec in pending {
-        let fingerprint = rec.series_fingerprint();
-        state.sink.append(rec).await?;
-        record_active_series(state, tenant, fingerprint)?;
+        if let Err(err) = state.sink.append(rec).await {
+            // The WAL append failed: undo the series reservation so a transient
+            // produce error doesn't leak into the tenant's max-series budget.
+            rollback_reserved_series(state, tenant, &reserved);
+            return Err(err);
+        }
     }
 
     Ok(())
@@ -182,7 +214,12 @@ fn ingestion_bucket_for_tenant(
     let mut buckets = state
         .ingestion_buckets
         .lock()
-        .map_err(|_| ProfilesError::Invalid("ingestion bucket lock poisoned".to_string()))?;
+        .map_err(|_| ProfilesError::Internal("ingestion bucket lock poisoned".to_string()))?;
+    // Bound per-tenant map growth (see `MAX_TENANTS`): evict an arbitrary
+    // existing tenant before admitting a brand-new one once the cap is hit.
+    if !buckets.contains_key(tenant) && buckets.len() >= MAX_TENANTS {
+        evict_one_tenant(&mut buckets);
+    }
     let bucket = buckets
         .entry(tenant.to_string())
         .or_insert_with(|| Arc::new(TokenBucket::new()))
@@ -227,66 +264,136 @@ fn merge_ingest_limits(
     }
 }
 
-fn enforce_max_series(
+/// Atomically test the per-tenant max-series limit and reserve the new
+/// fingerprints under a single `active_series` lock hold.
+///
+/// The previous implementation cloned the tenant's set, dropped the lock,
+/// tested the limit, and only inserted later under a *separate* lock — a
+/// check-then-act race where two concurrent requests could each pass the test
+/// and jointly exceed `max_series`. Holding the lock across both the test and
+/// the insertion makes the operation atomic.
+///
+/// On success returns the subset of `records`' fingerprints that this call
+/// actually inserted (i.e. were not already present). The caller must pass this
+/// set to [`rollback_reserved_series`] if the subsequent WAL append fails, so a
+/// rejected/failed write never permanently inflates the tenant's series count.
+/// When `max_series` is unlimited (`0`) no reservation is made and an empty set
+/// is returned (cardinality is not tracked, matching prior behaviour).
+fn enforce_and_reserve_max_series(
     state: &DistributorState,
     tenant: &str,
     records: &[ProfileRecord],
-) -> Result<(), ProfilesError> {
+) -> Result<Vec<u64>, ProfilesError> {
     let limit = state.profile_overrides.for_tenant(tenant).max_series;
     if limit == 0 {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    let mut observed = {
-        let active = state
-            .active_series
-            .lock()
-            .map_err(|_| ProfilesError::Invalid("active series lock poisoned".to_string()))?;
-        active.get(tenant).cloned().unwrap_or_default()
-    };
-    for rec in records {
-        observed.insert(rec.series_fingerprint());
-    }
-    if u64::try_from(observed.len()).unwrap_or(u64::MAX) > limit {
-        return Err(crate::limits::LimitError::MaxSeries {
-            limit,
-            observed: u64::try_from(observed.len()).unwrap_or(u64::MAX),
-        }
-        .into());
-    }
-    Ok(())
-}
 
-fn record_active_series(
-    state: &DistributorState,
-    tenant: &str,
-    fingerprint: u64,
-) -> Result<(), ProfilesError> {
     let mut active = state
         .active_series
         .lock()
-        .map_err(|_| ProfilesError::Invalid("active series lock poisoned".to_string()))?;
-    active
-        .entry(tenant.to_string())
-        .or_default()
-        .insert(fingerprint);
-    Ok(())
+        .map_err(|_| ProfilesError::Internal("active series lock poisoned".to_string()))?;
+
+    // Bound per-tenant map growth: evict an arbitrary existing tenant before
+    // admitting a brand-new one once the cap is hit (see `MAX_TENANTS`).
+    if !active.contains_key(tenant) && active.len() >= MAX_TENANTS {
+        evict_one_tenant(&mut active);
+    }
+    let entry = active.entry(tenant.to_string()).or_default();
+
+    // Compute the DISTINCT fingerprints this request would newly add, without
+    // mutating `entry` yet, so a rejection leaves the set untouched (no partial
+    // writes on limit failure). Deduping here means a request that repeats the
+    // same new fingerprint counts it once.
+    let mut to_add: BTreeSet<u64> = BTreeSet::new();
+    for rec in records {
+        let fingerprint = rec.series_fingerprint();
+        if !entry.contains(&fingerprint) {
+            to_add.insert(fingerprint);
+        }
+    }
+    let projected = entry.len() + to_add.len();
+    if u64::try_from(projected).unwrap_or(u64::MAX) > limit {
+        return Err(crate::limits::LimitError::MaxSeries {
+            limit,
+            observed: u64::try_from(projected).unwrap_or(u64::MAX),
+        }
+        .into());
+    }
+
+    // Within budget: reserve the new fingerprints and report exactly which ones
+    // were inserted so the caller can roll them back on a later failure.
+    for fingerprint in &to_add {
+        entry.insert(*fingerprint);
+    }
+    Ok(to_add.into_iter().collect())
+}
+
+/// Undo a max-series reservation made by [`enforce_and_reserve_max_series`].
+///
+/// Only removes fingerprints this request inserted (tracked in `reserved`), so
+/// concurrent requests that legitimately share a series are unaffected. A
+/// poisoned lock here is best-effort: we cannot recover the set, so we log and
+/// move on rather than panic.
+fn rollback_reserved_series(state: &DistributorState, tenant: &str, reserved: &[u64]) {
+    if reserved.is_empty() {
+        return;
+    }
+    let Ok(mut active) = state.active_series.lock() else {
+        tracing::error!(tenant, "active series lock poisoned during rollback");
+        return;
+    };
+    if let Some(entry) = active.get_mut(tenant) {
+        for fingerprint in reserved {
+            entry.remove(fingerprint);
+        }
+        if entry.is_empty() {
+            active.remove(tenant);
+        }
+    }
+}
+
+/// Evict one arbitrary tenant from a per-tenant map to keep its size bounded.
+fn evict_one_tenant<V>(map: &mut HashMap<String, V>) {
+    if let Some(victim) = map.keys().next().cloned() {
+        map.remove(&victim);
+    }
 }
 
 pub fn router(state: Arc<DistributorState>) -> Router {
-    // `build_connect()` applies the `ConnectLayer` (protocol detection + per-request
-    // `ConnectContext`); plain `.build()` omits it, so proto Connect clients (Alloy's
-    // `pyroscope.write`, OTLP exporters) would receive `application/json` responses and reject
-    // them. See the matching fix in the querier router.
-    let push = pb::push::v1::pusher_service_connect::PusherServiceBuilder::<()>::new()
+    // Connect routes are built through `MakeServiceBuilder` (not the convenience
+    // `build_connect()`) so we can attach a receive-size limit while still
+    // applying the same defaults `build_connect()` would: the `ConnectLayer`
+    // (protocol detection + per-request `ConnectContext`, without which proto
+    // Connect clients like Alloy's `pyroscope.write` / OTLP exporters get
+    // `application/json` responses and reject them) plus default gzip
+    // decompression. The `receive_max_bytes` cap rejects oversized Connect
+    // bodies (via `Content-Length`) before decompression, mirroring the raw
+    // doors' body limit. See the matching fix in the querier router.
+    let connect_limits = MessageLimits::new().receive_max_bytes(MAX_REQUEST_BODY_BYTES);
+    let push_router = pb::push::v1::pusher_service_connect::PusherServiceBuilder::<()>::new()
         .push(push_handler)
-        .build_connect();
-    let otlp = pb::otlp_profiles::profiles_service_connect::ProfilesServiceBuilder::<()>::new()
-        .export(export_handler)
-        .build_connect();
+        .build();
+    let push = MakeServiceBuilder::new()
+        .message_limits(connect_limits)
+        .add_router(push_router)
+        .build();
+    let otlp_router =
+        pb::otlp_profiles::profiles_service_connect::ProfilesServiceBuilder::<()>::new()
+            .export(export_handler)
+            .build();
+    let otlp = MakeServiceBuilder::new()
+        .message_limits(connect_limits)
+        .add_router(otlp_router)
+        .build();
 
     Router::new()
         .route("/ingest", post(ingest_handler))
         .route("/v1development/profiles", post(otlp_http_handler))
+        // Cap the raw `/ingest` + OTLP-HTTP request bodies at `MAX_REQUEST_BODY_BYTES`
+        // (16 MiB). This bounds memory before the body is buffered and is kept
+        // consistent with the per-request gunzip cap (`max_decompressed`).
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .merge(push)
         .merge(otlp)
         .layer(Extension(state))
@@ -315,8 +422,8 @@ async fn push_handler(
     headers: HeaderMap,
     req: ConnectRequest<pb::push::v1::PushRequest>,
 ) -> Result<ConnectResponse<pb::push::v1::PushResponse>, ConnectError> {
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let raws = decode_push(&req.0, state.max_decompressed).map_err(connect_error)?;
-    let tenant = tenant_from_headers(&headers);
     process_raw(&state, &tenant, raws)
         .await
         .map_err(connect_error)?;
@@ -328,8 +435,8 @@ async fn export_handler(
     headers: HeaderMap,
     req: ConnectRequest<pb::otlp_profiles::ExportProfilesServiceRequest>,
 ) -> Result<ConnectResponse<pb::otlp_profiles::ExportProfilesServiceResponse>, ConnectError> {
+    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let raws = decode_otlp(&req.0).map_err(connect_error)?;
-    let tenant = tenant_from_headers(&headers);
     process_raw(&state, &tenant, raws)
         .await
         .map_err(connect_error)?;
@@ -345,8 +452,8 @@ async fn otlp_http_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let tenant = tenant_from_headers(&headers);
     let result = async {
+        let tenant = tenant_from_headers(&headers)?;
         let req = pb::otlp_profiles::ExportProfilesServiceRequest::decode(body)
             .map_err(|err| ProfilesError::Decode(format!("OTLP profiles decode: {err}")))?;
         let raws = decode_otlp(&req)?;
@@ -377,8 +484,8 @@ async fn ingest_handler(
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
-    let tenant = tenant_from_headers(&headers);
     let result = async {
+        let tenant = tenant_from_headers(&headers)?;
         let query = parse_ingest_query(query.as_deref().unwrap_or(""))?;
         let content_type = headers
             .get(axum::http::header::CONTENT_TYPE)
@@ -394,24 +501,52 @@ async fn ingest_handler(
     }
 }
 
-fn tenant_from_headers(headers: &HeaderMap) -> String {
-    headers
+/// Resolve and VALIDATE the tenant from the `X-Scope-OrgID` header.
+///
+/// Absent, empty, or non-UTF-8 headers default to `"anonymous"` (via
+/// [`crate::tenant::tenant_from_header`]); a present, non-empty value is
+/// validated against the Mimir/Pyroscope charset and rejected with
+/// [`ProfilesError::Invalid`] (→ 400 / `invalid_argument`) if malformed. This
+/// is what stops a caller from minting path-unsafe or unlimited junk tenant ids
+/// at the ingest door.
+fn tenant_from_headers(headers: &HeaderMap) -> Result<String, ProfilesError> {
+    let value = headers
         .get("x-scope-orgid")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("anonymous")
-        .to_string()
+        .and_then(|value| value.to_str().ok());
+    crate::tenant::tenant_from_header(value)
+}
+
+/// Generic, non-leaky message returned to clients for any server-side (5xx)
+/// fault. The detailed error is logged server-side via `tracing` instead of
+/// being echoed in the response body, so internal details (lock-poisoning,
+/// WAL/produce/block internals) never reach an untrusted caller.
+const INTERNAL_ERROR_MESSAGE: &str = "internal server error";
+
+/// Returns the client-facing message for `err`.
+///
+/// For genuine client-input faults (4xx: bad format, decode/gunzip failures,
+/// invalid requests, oversized payloads) the specific message is safe and
+/// useful, so it is returned verbatim. For any 5xx/internal fault the detailed
+/// error is logged server-side and a generic message is returned. `LimitError`
+/// is handled by its own already-shaped projection at the call sites.
+fn client_facing_message(err: &ProfilesError) -> String {
+    if err.status_code() >= 500 {
+        tracing::error!(error = %err, "profiles distributor internal error");
+        INTERNAL_ERROR_MESSAGE.to_string()
+    } else {
+        err.to_string()
+    }
 }
 
 fn connect_error(err: ProfilesError) -> ConnectError {
-    let code = match &err {
-        ProfilesError::Limit(limit) => limit_connect_code(limit),
-        _ => match err.status_code() {
-            400 | 415 => Code::InvalidArgument,
-            _ => Code::Internal,
-        },
+    if let ProfilesError::Limit(limit) = &err {
+        return ConnectError::new(limit_connect_code(limit), err.to_string());
+    }
+    let code = match err.status_code() {
+        400 | 415 => Code::InvalidArgument,
+        _ => Code::Internal,
     };
-    ConnectError::new(code, err.to_string())
+    ConnectError::new(code, client_facing_message(&err))
 }
 
 fn profiles_error_response(err: ProfilesError) -> Response {
@@ -426,7 +561,10 @@ fn profiles_error_response(err: ProfilesError) -> Response {
             })),
         )
             .into_response(),
-        other => (status, other.to_string()).into_response(),
+        other => {
+            let message = client_facing_message(&other);
+            (status, message).into_response()
+        }
     }
 }
 
@@ -514,7 +652,13 @@ fn extract_symbols(profile: &PprofProfile) -> Result<WalSymbolSet, ProfilesError
                     file_offset: mapping.file_offset,
                     filename: u32_from_i64(mapping.filename, "mapping.filename")?,
                     build_id: u32_from_i64(mapping.build_id, "mapping.build_id")?,
+                    // Carry each pprof symbolization flag through independently;
+                    // they are distinct signals (functions vs filenames vs line
+                    // numbers vs inline frames) and must not be collapsed.
                     has_functions: mapping.has_functions,
+                    has_filenames: mapping.has_filenames,
+                    has_line_numbers: mapping.has_line_numbers,
+                    has_inline_frames: mapping.has_inline_frames,
                 })
             })
             .collect::<Result<Vec<_>, ProfilesError>>()?,
@@ -568,6 +712,19 @@ mod tests {
         async fn append(&self, rec: ProfileRecord) -> Result<(), ProfilesError> {
             self.0.lock().unwrap().push(rec);
             Ok(())
+        }
+    }
+
+    /// A sink whose `append` always fails, to exercise the WAL-failure
+    /// reservation-rollback path.
+    struct FailingSink;
+
+    #[async_trait::async_trait]
+    impl WalSink for FailingSink {
+        async fn append(&self, _rec: ProfileRecord) -> Result<(), ProfilesError> {
+            Err(ProfilesError::Produce(
+                "simulated produce failure".to_string(),
+            ))
         }
     }
 
@@ -1107,5 +1264,329 @@ overrides:
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|message| message.contains("max series exceeded"))
         );
+    }
+
+    // C1: the ingest door must validate the `X-Scope-OrgID` tenant.
+    #[tokio::test]
+    async fn ingest_rejects_path_unsafe_tenant_with_400() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/ingest?name=myapp{{service_name=\"api\"}}&format=groups&units=samples&until=1700000000000"
+            ))
+            .header("content-type", "text/plain")
+            .header("x-scope-orgid", "../escape")
+            .body("main;work 3\n")
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::BAD_REQUEST, "{response:?}");
+        // A rejected tenant must not produce any WAL records.
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    // C1: an absent header still defaults to the anonymous tenant.
+    #[tokio::test]
+    async fn ingest_without_tenant_header_defaults_to_anonymous() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://{bound}/ingest?name=myapp{{service_name=\"api\"}}&format=groups&units=samples&until=1700000000000"
+            ))
+            .header("content-type", "text/plain")
+            .body("main;work 3\n")
+            .send()
+            .await
+            .unwrap();
+
+        assert!(response.status() == StatusCode::OK, "{response:?}");
+        let recs = sink.0.lock().unwrap();
+        assert!(recs.len() == 1);
+        assert!(recs[0].tenant == "anonymous");
+    }
+
+    #[test]
+    fn tenant_from_headers_validates_and_defaults() {
+        use axum::http::HeaderValue;
+
+        let mut headers = HeaderMap::new();
+        assert!(tenant_from_headers(&headers).unwrap() == "anonymous");
+
+        headers.insert("x-scope-orgid", HeaderValue::from_static("tenant-a"));
+        assert!(tenant_from_headers(&headers).unwrap() == "tenant-a");
+
+        headers.insert("x-scope-orgid", HeaderValue::from_static("a/b"));
+        assert!(tenant_from_headers(&headers).is_err());
+    }
+
+    // #3: when the WAL append fails, the max-series reservation is rolled back
+    // so a failed write does not permanently consume the tenant's budget.
+    #[tokio::test]
+    async fn wal_append_failure_rolls_back_max_series_reservation() {
+        let state = Arc::new(DistributorState {
+            sink: Arc::new(FailingSink),
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    max_series: 100
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_2types()],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ProfilesError::Produce(_)), "{err}");
+
+        // The reservation must have been rolled back: no leftover fingerprints.
+        let active = state.active_series.lock().unwrap();
+        assert!(
+            active
+                .get("tenant-a")
+                .map_or(0, std::collections::BTreeSet::len)
+                == 0
+        );
+    }
+
+    // #3: a max-series rejection leaves the tracked set untouched (no partial
+    // reservation), so a subsequent within-budget write still succeeds.
+    #[tokio::test]
+    async fn max_series_rejection_does_not_reserve() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = Arc::new(DistributorState {
+            sink: sink.clone(),
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::from_yaml(
+                r#"
+overrides:
+  tenant-a:
+    max_series: 1
+"#,
+            )
+            .unwrap(),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        // Two distinct series in one request exceed the cap of 1 and are rejected.
+        let err = process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_2types()],
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("max series exceeded"), "{err}");
+
+        // Nothing was reserved, so a single-series write afterwards succeeds.
+        process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::wire::test_fixtures::raw_profile_cpu()],
+        )
+        .await
+        .unwrap();
+        assert!(sink.0.lock().unwrap().len() == 1);
+    }
+
+    // #4: the per-tenant maps are bounded; admitting tenant N+1 past the cap
+    // evicts an existing tenant rather than growing without limit.
+    #[test]
+    fn evict_one_tenant_bounds_map_growth() {
+        let mut map: HashMap<String, usize> = HashMap::new();
+        for idx in 0..MAX_TENANTS {
+            map.insert(format!("tenant-{idx}"), idx);
+        }
+        assert!(map.len() == MAX_TENANTS);
+
+        // Simulate the admission guard: evict before inserting a new tenant.
+        if !map.contains_key("tenant-new") && map.len() >= MAX_TENANTS {
+            evict_one_tenant(&mut map);
+        }
+        map.insert("tenant-new".to_string(), 0);
+
+        assert!(map.len() == MAX_TENANTS);
+        assert!(map.contains_key("tenant-new"));
+    }
+
+    #[tokio::test]
+    async fn ingestion_buckets_map_is_capped() {
+        let sink = Arc::new(RecordingSink::default());
+        // Build an overrides provider that gives EVERY tenant a finite rate, so
+        // each distinct tenant allocates a bucket. We assert the map never grows
+        // past `MAX_TENANTS`.
+        let state = Arc::new(DistributorState {
+            sink,
+            limits: TenantLimitConfig::default(),
+            profile_overrides: OverridesProvider::new(crate::limits::Limits {
+                ingestion_rate_profiles_per_sec: 1000.0,
+                ingestion_burst_profiles: 1000,
+                ..Default::default()
+            }),
+            active_series: Default::default(),
+            ingestion_buckets: Default::default(),
+            relabel: vec![],
+            max_decompressed: 1 << 24,
+        });
+
+        for idx in 0..(MAX_TENANTS + 50) {
+            // `has_tenant_override` is false for the default provider, so the
+            // rate path is skipped; allocate buckets directly to exercise the cap.
+            let _ = ingestion_bucket_for_tenant(&state, &format!("tenant-{idx}"), 10);
+        }
+
+        let buckets = state.ingestion_buckets.lock().unwrap();
+        assert!(buckets.len() <= MAX_TENANTS, "{}", buckets.len());
+    }
+
+    // #7: a 5xx/internal error returns a GENERIC body, not the detailed text.
+    #[tokio::test]
+    async fn internal_error_response_is_generic() {
+        let response = profiles_error_response(ProfilesError::Produce(
+            "kafka broker is on fire".to_string(),
+        ));
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+
+        assert!(status == StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(text == INTERNAL_ERROR_MESSAGE, "leaked detail: {text}");
+        assert!(!text.contains("kafka"), "leaked detail: {text}");
+    }
+
+    // #7: a 4xx client-input error keeps its specific, useful message.
+    #[test]
+    fn client_input_error_keeps_specific_message() {
+        let message = client_facing_message(&ProfilesError::Invalid("bad query param".to_string()));
+        assert!(message.contains("bad query param"), "{message}");
+    }
+
+    // #7: a poisoned lock is now an Internal/500 with a generic message, not a 400.
+    #[test]
+    fn poisoned_lock_maps_to_internal_500() {
+        let err = ProfilesError::Internal("active series lock poisoned".to_string());
+        assert!(err.status_code() == 500);
+
+        let connect = connect_error(ProfilesError::Internal("secret detail".to_string()));
+        assert!(connect.code() == Code::Internal);
+        assert!(
+            connect
+                .message()
+                .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE)
+        );
+    }
+
+    // #11: mapping symbolization flags flow through independently.
+    #[tokio::test]
+    async fn mapping_symbolization_flags_are_populated_independently() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut labels = crabka_blockstore::Labels::new();
+        labels.insert("__name__", "samples");
+        labels.insert("service_name", "api");
+        let profile = PprofProfile::from(crabka_pprof::proto::Profile {
+            sample_type: vec![crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }],
+            sample: vec![crabka_pprof::proto::Sample {
+                location_id: vec![1],
+                value: vec![5],
+                label: Vec::new(),
+            }],
+            location: vec![crabka_pprof::proto::Location {
+                id: 1,
+                mapping_id: 1,
+                line: vec![crabka_pprof::proto::Line {
+                    function_id: 1,
+                    line: 10,
+                    column: 0,
+                }],
+                ..Default::default()
+            }],
+            function: vec![crabka_pprof::proto::Function {
+                id: 1,
+                name: 3,
+                system_name: 3,
+                filename: 4,
+                start_line: 1,
+            }],
+            mapping: vec![crabka_pprof::proto::Mapping {
+                id: 1,
+                memory_start: 0x1000,
+                memory_limit: 0x2000,
+                file_offset: 0,
+                filename: 5,
+                build_id: 0,
+                // Deliberately mixed: functions+line numbers symbolized, but no
+                // filenames and no inline frames. A correct mapping must NOT
+                // collapse these onto `has_functions`.
+                has_functions: true,
+                has_filenames: false,
+                has_line_numbers: true,
+                has_inline_frames: false,
+            }],
+            string_table: vec![
+                String::new(),
+                "samples".to_string(),
+                "count".to_string(),
+                "main".to_string(),
+                "main.go".to_string(),
+                "bin".to_string(),
+            ],
+            period_type: Some(crabka_pprof::proto::ValueType { r#type: 1, unit: 2 }),
+            ..Default::default()
+        });
+
+        process_raw(
+            &state,
+            "tenant-a",
+            vec![crate::ingest::RawProfile {
+                labels,
+                profile,
+                delta: false,
+                sample_timestamps_ns: Vec::new(),
+                sample_span_ids: Vec::new(),
+                sample_trace_ids: Vec::new(),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        let mapping = &recs[0].symbols.mappings[0];
+        assert!(mapping.has_functions);
+        assert!(!mapping.has_filenames);
+        assert!(mapping.has_line_numbers);
+        assert!(!mapping.has_inline_frames);
     }
 }

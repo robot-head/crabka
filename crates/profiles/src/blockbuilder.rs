@@ -368,9 +368,9 @@ fn mapping_rec(mapping: &WalMapping, strings: &[u32]) -> MappingRec {
         filename: remap_ref(mapping.filename, strings),
         build_id: remap_ref(mapping.build_id, strings),
         has_functions: mapping.has_functions,
-        has_filenames: mapping.has_functions,
-        has_line_numbers: mapping.has_functions,
-        has_inline_frames: mapping.has_functions,
+        has_filenames: mapping.has_filenames,
+        has_line_numbers: mapping.has_line_numbers,
+        has_inline_frames: mapping.has_inline_frames,
     }
 }
 
@@ -401,7 +401,7 @@ mod tests {
     use object_store::{ObjectStore, ObjectStoreExt};
 
     use super::*;
-    use crate::wal::{ProfileRecord, WalSample, WalSymbolSet};
+    use crate::wal::{ProfileRecord, WalMapping, WalSample, WalSymbolSet};
 
     fn rec(name: &str, value: i64) -> ProfileRecord {
         ProfileRecord {
@@ -429,6 +429,45 @@ mod tests {
                 mappings: vec![],
             },
         }
+    }
+
+    #[test]
+    fn mapping_rec_maps_each_flag_from_its_own_source_field() {
+        // Each flag distinct so a wrong source assignment (e.g. all from
+        // has_functions) is caught.
+        let mapping = WalMapping {
+            memory_start: 0x1000,
+            memory_limit: 0x2000,
+            file_offset: 0x10,
+            filename: 1,
+            build_id: 2,
+            has_functions: true,
+            has_filenames: false,
+            has_line_numbers: true,
+            has_inline_frames: false,
+        };
+        let strings = [0_u32, 10, 20];
+
+        let rec = mapping_rec(&mapping, &strings);
+
+        assert!(rec.has_functions == true);
+        assert!(rec.has_filenames == false);
+        assert!(rec.has_line_numbers == true);
+        assert!(rec.has_inline_frames == false);
+
+        // And the inverse pattern, to ensure no field is hard-wired.
+        let inverted = WalMapping {
+            has_functions: false,
+            has_filenames: true,
+            has_line_numbers: false,
+            has_inline_frames: true,
+            ..mapping
+        };
+        let rec = mapping_rec(&inverted, &strings);
+        assert!(rec.has_functions == false);
+        assert!(rec.has_filenames == true);
+        assert!(rec.has_line_numbers == false);
+        assert!(rec.has_inline_frames == true);
     }
 
     #[test]

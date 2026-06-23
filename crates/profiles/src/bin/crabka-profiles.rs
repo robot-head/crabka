@@ -47,11 +47,10 @@ struct Cli {
     compactor_max_blocks_per_job: usize,
     #[arg(long)]
     compactor_downsample_resolution_ns: Option<i64>,
-    #[arg(
-        long = "debuginfod-url",
-        value_delimiter = ',',
-        default_value = "https://debuginfod.elfutils.org/"
-    )]
+    /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
+    /// native frames. Empty by default: the symbolizer makes NO outbound
+    /// requests unless an operator explicitly opts in by supplying URLs.
+    #[arg(long = "debuginfod-url", value_delimiter = ',')]
     debuginfod_urls: Vec<String>,
 }
 
@@ -349,6 +348,15 @@ mod tests {
     }
 
     #[test]
+    fn debuginfod_urls_default_is_empty() {
+        // Security default: no outbound debuginfod egress unless the operator
+        // explicitly opts in. The list must be empty when the flag is absent.
+        let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+
+        assert!(cli.debuginfod_urls.is_empty());
+    }
+
+    #[test]
     fn parses_debuginfod_urls() {
         let cli = Cli::try_parse_from([
             "crabka-profiles",
@@ -416,7 +424,11 @@ overrides:
 
         assert!(overrides.for_tenant("tenant-a").max_query_length_secs == 30);
         assert!(overrides.for_tenant("tenant-a").max_flamegraph_nodes_max == 512);
-        assert!(overrides.for_tenant("tenant-b").max_query_length_secs == 0);
+        // An unlisted tenant inherits the process default query-length cap.
+        assert!(
+            overrides.for_tenant("tenant-b").max_query_length_secs
+                == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH_SECS
+        );
     }
 
     #[test]
