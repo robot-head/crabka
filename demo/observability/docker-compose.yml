@@ -10,11 +10,6 @@ x-s3-env: &s3-env
 x-otlp-env: &otlp-env
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
-  # Enable jemalloc heap profiling at runtime (the binaries set jemalloc as the
-  # global allocator under heap-profiling; MALLOC_CONF turns prof on). The
-  # `unprefixed_malloc_on_supported_platforms` feature makes the env var
-  # MALLOC_CONF (not _RJEM_MALLOC_CONF).
-  MALLOC_CONF: prof:true,prof_active:true,lg_prof_sample:19
 
 x-crabka-image: &crabka-image
   image: crabka-demo:latest
@@ -69,6 +64,25 @@ services:
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
     volumes: ["./minio/bootstrap.sh:/bootstrap.sh:ro"]
 
+  # One-shot: pre-create the WAL topics (the broker does not auto-create on
+  # produce — producing to a missing topic returns NOT_LEADER_OR_FOLLOWER) plus
+  # the demo's order topics, so distributors can write and block-builders /
+  # compactors can consume.
+  topic-setup:
+    image: apache/kafka:3.9.0
+    restart: "no"
+    depends_on:
+      broker: { condition: service_healthy }
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        for t in __crabka_metrics_wal __crabka_traces_wal __crabka_profiles_wal
+        __crabka_observability_logs_wal orders order-counts; do
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --create
+        --if-not-exists --topic "$$t" --partitions 1 --replication-factor 1 || exit 1;
+        done; echo "topics ready"
+
   schema-registry:
     <<: *crabka-image
     command: ["crabka-schema-registry", "--bootstrap-servers=broker:9092", "--listen-addr=0.0.0.0:8081", "--schemas-topic-rf=1"]
@@ -89,7 +103,7 @@ services:
 
   metrics-compactor:
     <<: *crabka-image
-    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-blocks/metrics", "--bootstrap=broker:9092"]
+    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       minio-setup: { condition: service_completed_successfully }
@@ -98,7 +112,7 @@ services:
   metrics-querier:
     # crabka-metrics-service uses --wal-bootstrap (its own flag name).
     <<: *crabka-image
-    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-blocks/metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["9090:9090"]
     depends_on:
@@ -115,7 +129,7 @@ services:
 
   traces-block-builder:
     <<: *crabka-image
-    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-blocks/traces"]
+    command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       minio-setup: { condition: service_completed_successfully }
@@ -123,7 +137,7 @@ services:
 
   traces-querier:
     <<: *crabka-image
-    command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-blocks/traces"]
+    command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-traces"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3200:3200"]
     depends_on:
@@ -132,7 +146,7 @@ services:
   # ---- LOGS (Loki) — binary is `crabka-observability` (the logs service) ----
   logs-distributor:
     <<: *crabka-image
-    command: ["crabka-observability", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs"]
+    command: ["crabka-observability", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
@@ -140,7 +154,7 @@ services:
 
   logs-compactor:
     <<: *crabka-image
-    command: ["crabka-observability", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       broker: { condition: service_healthy }
@@ -148,7 +162,7 @@ services:
 
   logs-querier:
     <<: *crabka-image
-    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-blocks/logs", "--index-prefix=logs"]
+    command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
     depends_on:
@@ -164,7 +178,7 @@ services:
 
   profiles-block-builder:
     <<: *crabka-image
-    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-blocks/profiles"]
+    command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
       minio-setup: { condition: service_completed_successfully }
@@ -172,7 +186,7 @@ services:
 
   profiles-querier:
     <<: *crabka-image
-    command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-blocks/profiles"]
+    command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["4040:4040"]
     depends_on:
