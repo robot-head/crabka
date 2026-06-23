@@ -1,0 +1,56 @@
+[package]
+name = "crabka-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Prometheus/Grafana-Mimir-equivalent metrics backend for Crabka (data layer)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-metrics"
+readme = "README.md"
+keywords = ["observability", "prometheus", "mimir", "metrics", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+arrow = { workspace = true }
+axum = { workspace = true, features = ["json"] }
+bytes = { workspace = true }
+clap = { workspace = true }
+crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
+crabka-throttle = { path = "../throttle", version = "0.3.7" }
+dashmap = { workspace = true }
+object_store = { workspace = true }
+opentelemetry-proto = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wincode = { workspace = true }
+serde_yaml = { workspace = true }
+snap = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+wincode = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protoc-fetcher = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-broker = { path = "../broker", version = "0.3.7" }
+crabka-client-admin = { path = "../client-admin", version = "0.3.7" }
+proptest = { workspace = true }
+reqwest = { workspace = true }
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }

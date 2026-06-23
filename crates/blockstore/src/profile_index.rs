@@ -1,8 +1,8 @@
 //! Profiles block index.
 //!
-//! `ProfileIndex` embeds `SeriesIndex` for label postings and matcher
-//! resolution, then layers the profile-type lookup and stacktrace-partition map
-//! required by Pyroscope-compatible profiles queries.
+//! `ProfileIndex` embeds [`Index`] for label postings and matcher resolution,
+//! then layers the profile-type lookup and stacktrace-partition map required by
+//! Pyroscope-compatible profiles queries.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -13,13 +13,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMeta;
 use crate::block_index::BlockIndex;
-use crate::error::Result;
-use crate::index::SeriesIndex;
+use crate::error::{BlockStoreError, Result};
+use crate::index::Index;
 use crate::labels::{Labels, SeriesFingerprint};
 use crate::matcher::LabelMatcher;
 
 /// Reserved label carrying the 5-part profile type string.
 pub const LABEL_PROFILE_TYPE: &str = "__profile_type__";
+
+/// Maximum byte size of a profile-index snapshot object accepted by
+/// [`ProfileIndex::load`].
+///
+/// Like [`crate::Index::load`], a profile-index snapshot is fully buffered in
+/// memory before `serde_json` parsing; a corrupt or maliciously oversized
+/// object from shared storage could otherwise OOM the process. The object is
+/// `head()`ed first and rejected above this cap, mirroring the profiles gunzip
+/// `max_decompressed` pattern. Defaults to 256 MiB.
+pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Default, Serialize, Deserialize)]
 struct TenantProfileExtras {
@@ -29,7 +39,7 @@ struct TenantProfileExtras {
 /// Profile-specific index state over the reusable series postings index.
 #[derive(Default, Serialize, Deserialize)]
 pub struct ProfileIndex {
-    series: SeriesIndex,
+    series: Index,
     extras: BTreeMap<String, TenantProfileExtras>,
     block_partitions: BTreeMap<String, Vec<u64>>,
 }
@@ -306,12 +316,12 @@ impl ProfileIndex {
         matchers: &[LabelMatcher],
         label_names: &[String],
     ) -> Result<Vec<Vec<(String, String)>>> {
-        self.series.series(tenant, matchers, label_names)
+        self.series.series_projected(tenant, matchers, label_names)
     }
 
     #[must_use]
     pub fn all_blocks(&self) -> Vec<BlockMeta> {
-        self.series.all_blocks()
+        self.series.all_blocks_unscoped()
     }
 
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
@@ -321,7 +331,23 @@ impl ProfileIndex {
     }
 
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        let bytes = store.get(&Path::from(key)).await?.bytes().await?;
+        Self::load_with_cap(store, key, MAX_PROFILE_INDEX_SNAPSHOT_BYTES).await
+    }
+
+    async fn load_with_cap(
+        store: &Arc<dyn ObjectStore>,
+        key: &str,
+        max_bytes: usize,
+    ) -> Result<Self> {
+        let path = Path::from(key);
+        let meta = store.head(&path).await?;
+        if meta.size > max_bytes as u64 {
+            return Err(BlockStoreError::InvalidBlock(format!(
+                "profile index snapshot `{key}` is {} bytes, exceeds cap of {max_bytes} bytes",
+                meta.size
+            )));
+        }
+        let bytes = store.get(&path).await?.bytes().await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
@@ -477,5 +503,36 @@ mod tests {
             .unwrap();
         assert!(loaded.profile_types("t").len() == 2);
         assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn load_rejects_over_cap_snapshot() {
+        use object_store::memory::InMemory;
+
+        let index = seed();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        index.save(&store, "index/profiles.json").await.unwrap();
+
+        // A tiny cap stands in for the production cap so the test need not
+        // materialize an over-cap object; the real snapshot is well above 1 byte.
+        let size = store
+            .head(&Path::from("index/profiles.json"))
+            .await
+            .unwrap()
+            .size;
+        assert!(size > 1);
+
+        let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", 1).await;
+        assert!(got.is_err());
+
+        // A cap at/above the real size still loads.
+        let loaded = ProfileIndex::load_with_cap(
+            &store,
+            "index/profiles.json",
+            usize::try_from(size).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(loaded.profile_types("t").len() == 2);
     }
 }

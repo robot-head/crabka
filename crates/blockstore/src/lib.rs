@@ -1,9 +1,10 @@
 //! Signal-agnostic columnar block store for Crabka observability.
 //!
-//! A block is a tenant-scoped, time-bounded Parquet file on object storage with
-//! mandatory identity/time columns plus arbitrary signal payload columns. An
-//! index prunes a query to candidate blocks before any scan; `DataFusion` handles
-//! intra-block row-group pruning and pushdown.
+//! A *block* is a tenant-scoped, time-bounded Parquet file on object storage
+//! with mandatory identity/time columns (`series_fingerprint`, `timestamp`)
+//! plus arbitrary signal payload columns. An `Index` prunes a query to candidate
+//! blocks before any scan; `DataFusion` handles intra-block row-group pruning and
+//! pushdown.
 
 #![forbid(unsafe_code)]
 
@@ -31,17 +32,21 @@ pub use block::{
 pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_schema};
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
-pub use index::SeriesIndex;
+pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
 pub use labels::{Labels, SeriesFingerprint};
-pub use matcher::{LabelMatcher, MatchOp};
+pub use matcher::{
+    LabelMatcher, MatchOp, QUERY_SHARD_LABEL, QueryShardSelector, parse_query_shard_selector,
+};
 pub use nested_set::{NestedSet, SpanNode, assign_nested_set};
 pub use profile_block::{ProfileSampleRow, encode_profile_samples};
-pub use profile_index::{LABEL_PROFILE_TYPE, ProfileIndex};
+pub use profile_index::{LABEL_PROFILE_TYPE, MAX_PROFILE_INDEX_SNAPSHOT_BYTES, ProfileIndex};
 pub use profile_schema::{
     PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION,
     PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_decl, profile_samples_schema,
 };
-pub use reader::{RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata};
+pub use reader::{
+    MAX_BLOCK_BYTES, RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata,
+};
 pub use span_block::{
     AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows,
     encode_span_rows_with_promoted_attrs,
@@ -56,6 +61,6 @@ pub use span_schema::{
     SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, SpanKind, StatusCode,
     span_block_decl, span_block_schema, span_block_schema_with_promoted_attrs,
 };
-pub use store::BlockStore;
+pub use store::{BlockStore, ScanTableRequest};
 pub use trace_index::{TraceBlockStats, TraceIndex};
 pub use writer::{BlockWriter, SummaryColumns};

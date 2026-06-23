@@ -1,7 +1,6 @@
 //! KIP-73 throttled replication — value types and parser.
 
-mod bucket;
-pub use bucket::{ThrottleState, TokenBucket};
+pub use crabka_throttle::{ThrottleState, TokenBucket};
 
 mod refresh;
 pub use refresh::{ImageWatcher, run};

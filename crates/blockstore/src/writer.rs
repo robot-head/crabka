@@ -1,5 +1,6 @@
 //! Writes columnar blocks to object storage as Parquet.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, UInt64Array};
@@ -49,6 +50,8 @@ impl BlockWriter {
     }
 
     /// Write `batches` as a single Parquet block at `object_key`.
+    ///
+    /// Returns [`BlockMeta`] computed from the mandatory block columns.
     pub async fn write_block(
         &self,
         tenant: &str,
@@ -68,6 +71,8 @@ impl BlockWriter {
     }
 
     /// Write a block validated against a signal-specific schema declaration.
+    ///
+    /// Returns [`BlockMeta`] computed from the declared summary columns.
     pub async fn write_block_with_decl(
         &self,
         tenant: &str,
@@ -78,6 +83,7 @@ impl BlockWriter {
         summary: SummaryColumns,
     ) -> Result<BlockMeta> {
         validate_against(&schema, decl)?;
+        validate_batch_schemas(&schema, batches)?;
 
         let (min_ts, max_ts, row_count, fingerprints) = summarize(batches, &summary)?;
 
@@ -100,12 +106,21 @@ impl BlockWriter {
     }
 }
 
+fn validate_batch_schemas(schema: &SchemaRef, batches: &[RecordBatch]) -> Result<()> {
+    for (index, batch) in batches.iter().enumerate() {
+        if batch.schema().as_ref() != schema.as_ref() {
+            return Err(BlockStoreError::InvalidBlock(format!(
+                "batch {index} schema does not match writer schema"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn summarize(
     batches: &[RecordBatch],
     summary: &SummaryColumns,
 ) -> Result<(i64, i64, usize, Vec<SeriesFingerprint>)> {
-    use std::collections::BTreeSet;
-
     let mut min_ts = i64::MAX;
     let mut max_ts = i64::MIN;
     let mut row_count = 0_usize;
@@ -266,5 +281,32 @@ mod tests {
 
         let err = writer.write_block("t", "k.parquet", schema, &[batch]).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn write_block_rejects_batch_schema_mismatch() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let writer = BlockWriter::new(store);
+        let schema = log_schema();
+        let batch_schema = Arc::new(Schema::new(vec![
+            Field::new(crate::COL_TIMESTAMP, DataType::Int64, false),
+            Field::new(crate::COL_FINGERPRINT, DataType::UInt64, false),
+            Field::new("line", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            batch_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![100_i64])),
+                Arc::new(UInt64Array::from(vec![10_u64])),
+                Arc::new(StringArray::from(vec!["x"])),
+            ],
+        )
+        .unwrap();
+
+        let err = writer.write_block("t", "k.parquet", schema, &[batch]).await;
+
+        assert!(
+            matches!(err, Err(BlockStoreError::InvalidBlock(message)) if message.contains("schema"))
+        );
     }
 }

@@ -1,0 +1,10 @@
+load 1m
+  up{job="api"} 0+1x4
+  up{job="worker"} 10+10x4
+
+eval range from 0m to 4m step 1m up
+  up{job="api"} 0 1 2 3 4
+  up{job="worker"} 10 20 30 40 50
+
+eval range from 1m to 3m step 1m up{job="api"}
+  up{job="api"} 1 2 3
