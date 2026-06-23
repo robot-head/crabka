@@ -10,6 +10,13 @@ x-s3-env: &s3-env
 x-otlp-env: &otlp-env
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
+  # Activate jemalloc heap profiling (the image is built --features
+  # heap-profiling). Default sample rate (~every 512 KiB) — NOT lg_prof_sample:0,
+  # which backtraces every allocation and is pathologically slow. Continuous
+  # sampling here is what previously deadlocked crabka-client-consumer's group
+  # rejoin; that lost-wakeup is fixed in client-core (independent reader/writer
+  # io tasks), so consumers run fine under prof now.
+  MALLOC_CONF: "prof:true,prof_active:true"
 
 x-crabka-image: &crabka-image
   image: crabka-demo:latest

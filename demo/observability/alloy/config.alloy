@@ -79,17 +79,19 @@ pyroscope.scrape "crabka" {
     { __address__ = "demo-stream:9404",          service_name = "demo-stream" },
   ]
   profiling_config {
-    // CPU only. Crabka serves exactly one pprof endpoint (/debug/pprof/profile);
-    // the other profile types are default-enabled in pyroscope.scrape and would
-    // hit endpoints crabka does not expose (memory/goroutine/block/mutex), 404ing
-    // every cycle. Heap/memory specifically needs jemalloc, which is deliberately
-    // not built into the demo image (it breaks crabka-client-consumer's group
-    // join). Disable everything except process_cpu.
+    // Crabka serves CPU at /debug/pprof/profile and jemalloc heap at
+    // /debug/pprof/heap (the image is built --features heap-profiling). Point the
+    // memory profile at the heap endpoint (its default path is
+    // /debug/pprof/memory). goroutine/block/mutex are Go-only — crabka does not
+    // expose them, so leave them off to avoid 404 scrape noise.
     profile.process_cpu { enabled = true }
-    profile.memory      { enabled = false }
-    profile.goroutine   { enabled = false }
-    profile.block       { enabled = false }
-    profile.mutex       { enabled = false }
+    profile.memory {
+      enabled = true
+      path    = "/debug/pprof/heap"
+    }
+    profile.goroutine { enabled = false }
+    profile.block     { enabled = false }
+    profile.mutex     { enabled = false }
   }
   forward_to = [pyroscope.write.crabka.receiver]
 }
