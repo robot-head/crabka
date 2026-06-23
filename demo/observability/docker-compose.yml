@@ -10,6 +10,11 @@ x-s3-env: &s3-env
 x-otlp-env: &otlp-env
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
+  # Enable jemalloc heap profiling at runtime (the binaries set jemalloc as the
+  # global allocator under heap-profiling; MALLOC_CONF turns prof on). The
+  # `unprefixed_malloc_on_supported_platforms` feature makes the env var
+  # MALLOC_CONF (not _RJEM_MALLOC_CONF).
+  MALLOC_CONF: prof:true,prof_active:true,lg_prof_sample:19
 
 x-crabka-image: &crabka-image
   image: crabka-demo:latest
