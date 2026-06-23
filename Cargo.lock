@@ -7314,8 +7314,6 @@ dependencies = [
  "prost-build 0.14.4",
  "prost-reflect",
  "protox",
- "serde",
- "serde_json",
  "tikv-jemallocator",
  "tokio",
  "tracing",
