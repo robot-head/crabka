@@ -237,12 +237,23 @@ pub struct ServiceDependencies {
     hot_tail: Option<HotTailDependency>,
     compaction_frontier: Option<SharedCompactionFrontier>,
     delete_requests: Option<SharedLogDeleteRequests>,
+    /// Querier-only: params for the hot-tail WAL consumer that is connected
+    /// asynchronously after HTTP serving begins (FIX B2).
+    deferred_wal_consumer_connect: Option<DeferredWalConsumerConnect>,
 }
 
 #[derive(Clone)]
 struct HotTailDependency {
     source: Arc<dyn LogHotTail>,
     frontier: CompactionFrontierSource,
+}
+
+/// Parameters needed to connect a [`KafkaLogWalConsumer`] in the background.
+#[derive(Clone)]
+struct DeferredWalConsumerConnect {
+    bootstrap: String,
+    group_id: String,
+    topic: String,
 }
 
 #[derive(Clone, Default)]
@@ -360,6 +371,21 @@ impl ServiceDependencies {
         });
         self
     }
+
+    #[must_use]
+    fn with_deferred_wal_consumer_connect(
+        mut self,
+        bootstrap: String,
+        group_id: String,
+        topic: String,
+    ) -> Self {
+        self.deferred_wal_consumer_connect = Some(DeferredWalConsumerConnect {
+            bootstrap,
+            group_id,
+            topic,
+        });
+        self
+    }
 }
 
 #[must_use]
@@ -388,6 +414,48 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
     Ok(ServiceStatus { role: target })
 }
 
+const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_secs(120);
+const WAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+
+async fn connect_with_startup_retry<T, E, F, Fut>(
+    what: &str,
+    deadline: Duration,
+    mut make: F,
+) -> Result<T, E>
+where
+    E: std::fmt::Display,
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let start = tokio::time::Instant::now();
+    let mut backoff = Duration::from_millis(200);
+    loop {
+        match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await {
+            Ok(Ok(v)) => return Ok(v),
+            Ok(Err(error)) => {
+                if start.elapsed() >= deadline {
+                    return Err(error);
+                }
+                eprintln!(
+                    "[crabka-observability] WAL dependency {what} connect failed during broker warmup; retrying: {error}"
+                );
+            }
+            Err(_elapsed) => {
+                if start.elapsed() >= deadline {
+                    // Deadline exceeded on a timed-out attempt; do one final un-timed attempt
+                    // so we surface the real error type rather than a timeout wrapper.
+                    return make().await;
+                }
+                eprintln!(
+                    "[crabka-observability] WAL dependency {what} connect timed out during broker warmup; retrying"
+                );
+            }
+        }
+        sleep(backoff).await;
+        backoff = std::cmp::min(backoff * 2, Duration::from_secs(2));
+    }
+}
+
 pub async fn build_service_dependencies(
     config: &ServiceConfig,
 ) -> Result<ServiceDependencies, ServiceRuntimeError> {
@@ -397,9 +465,23 @@ pub async fn build_service_dependencies(
                 .wal_bootstrap_server
                 .as_deref()
                 .ok_or(ServiceConfigError::MissingWalBootstrapServer)?;
-            let sink = KafkaLogWalSink::connect(bootstrap, config.wal_topic.clone()).await?;
+            let bootstrap_owned = bootstrap.to_string();
+            let topic = config.wal_topic.clone();
+            let sink = connect_with_startup_retry("wal-sink", WAL_CONNECT_STARTUP_DEADLINE, || {
+                let b = bootstrap_owned.clone();
+                let t = topic.clone();
+                async move { KafkaLogWalSink::connect(&b, t).await }
+            })
+            .await?;
+            let bootstrap_owned2 = bootstrap.to_string();
+            let topic2 = config.wal_topic.clone();
             let limiter =
-                BrokerBackedIngestLimiter::connect(bootstrap, config.wal_topic.clone()).await?;
+                connect_with_startup_retry("ingest-limiter", WAL_CONNECT_STARTUP_DEADLINE, || {
+                    let b = bootstrap_owned2.clone();
+                    let t = topic2.clone();
+                    async move { BrokerBackedIngestLimiter::connect(&b, t).await }
+                })
+                .await?;
             Ok(ServiceDependencies::default()
                 .with_wal_sink(sink)
                 .with_ingest_limiter(limiter))
@@ -409,30 +491,36 @@ pub async fn build_service_dependencies(
                 .wal_bootstrap_server
                 .as_deref()
                 .ok_or(ServiceConfigError::MissingWalBootstrapServer)?;
-            let consumer = KafkaLogWalConsumer::connect(
-                bootstrap,
-                config.wal_group_id.clone(),
-                config.wal_topic.clone(),
-            )
-            .await?;
+            let bootstrap_owned = bootstrap.to_string();
+            let group_id = config.wal_group_id.clone();
+            let topic = config.wal_topic.clone();
+            let consumer =
+                connect_with_startup_retry("wal-consumer", WAL_CONNECT_STARTUP_DEADLINE, || {
+                    let b = bootstrap_owned.clone();
+                    let g = group_id.clone();
+                    let t = topic.clone();
+                    async move { KafkaLogWalConsumer::connect(&b, g, t).await }
+                })
+                .await?;
             Ok(ServiceDependencies::default().with_wal_consumer(consumer))
         }
         Role::Querier => {
+            // Validate configuration eagerly so misconfiguration fails fast (the
+            // `querier_dependencies_require_wal_bootstrap_server` test relies on this).
             let bootstrap = config
                 .wal_bootstrap_server
                 .as_deref()
                 .ok_or(ServiceConfigError::MissingWalBootstrapServer)?;
-            let consumer = KafkaLogWalConsumer::connect(
-                bootstrap,
-                config.wal_group_id.clone(),
-                config.wal_topic.clone(),
+            // The actual Kafka connects happen asynchronously inside build_service_router so
+            // that the querier's HTTP port binds immediately (FIX B2). Store the params for
+            // later use.
+            Ok(
+                ServiceDependencies::default().with_deferred_wal_consumer_connect(
+                    bootstrap.to_string(),
+                    config.wal_group_id.clone(),
+                    config.wal_topic.clone(),
+                ),
             )
-            .await?;
-            let authorizer =
-                BrokerBackedQueryAuthorizer::connect(bootstrap, config.wal_topic.clone()).await?;
-            Ok(ServiceDependencies::default()
-                .with_wal_consumer(consumer)
-                .with_query_authorizer(authorizer))
         }
     }
 }
@@ -1823,6 +1911,36 @@ impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
     }
 }
 
+/// A [`LogQueryAuthorizer`] whose underlying implementation can be swapped after construction.
+///
+/// Used by the querier to start with a permissive allow-all policy while the real
+/// [`BrokerBackedQueryAuthorizer`] connects asynchronously in the background (FIX B2).
+struct SwappableQueryAuthorizer {
+    inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
+}
+
+impl SwappableQueryAuthorizer {
+    /// Create a new swappable authorizer starting with `AllowAllQueryAuthorizer`.
+    fn new() -> (Self, Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>) {
+        let inner: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>> =
+            Arc::new(tokio::sync::RwLock::new(Arc::new(AllowAllQueryAuthorizer)));
+        (
+            Self {
+                inner: inner.clone(),
+            },
+            inner,
+        )
+    }
+}
+
+#[async_trait]
+impl LogQueryAuthorizer for SwappableQueryAuthorizer {
+    async fn check(&self, tenant: &str) -> Result<(), QueryAuthorizationError> {
+        let authorizer = self.inner.read().await.clone();
+        authorizer.check(tenant).await
+    }
+}
+
 const PRODUCER_BYTE_RATE_QUOTA_KEY: &str = "producer_byte_rate";
 
 struct BrokerBackedIngestLimiter {
@@ -2268,6 +2386,73 @@ fn spawn_log_hot_tail_poller(
                 sleep(Duration::from_millis(50)).await;
             }
         }
+    });
+}
+
+/// Spawn a background task that retries `KafkaLogWalConsumer::connect` until it succeeds,
+/// then runs the hot-tail poll loop.  On a cold boot the Kafka broker may not be ready yet;
+/// retrying here lets the querier serve its HTTP port immediately (FIX B2).
+fn spawn_wal_hot_tail_connect_and_poll(
+    bootstrap: String,
+    group_id: String,
+    topic: String,
+    hot_tail: BufferedLogHotTail,
+) {
+    tokio::spawn(async move {
+        let consumer = loop {
+            match KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()).await {
+                Ok(c) => break c,
+                Err(error) => {
+                    eprintln!(
+                        "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
+                    );
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+        let consumer = Arc::new(tokio::sync::Mutex::new(
+            Box::new(consumer) as Box<dyn LogWalConsumer>
+        ));
+        loop {
+            let result = {
+                let mut c = consumer.lock().await;
+                poll_log_hot_tail_once(c.as_mut(), &hot_tail, Duration::from_millis(50)).await
+            };
+            let should_back_off = match result {
+                Ok(decoded) => decoded == 0,
+                Err(_) => true,
+            };
+            if should_back_off {
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+    });
+}
+
+/// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
+/// then swaps the provided `slot` from AllowAll to the real broker-backed authorizer (FIX B2).
+fn spawn_query_authorizer_connect(
+    bootstrap: String,
+    topic: String,
+    slot: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
+) {
+    tokio::spawn(async move {
+        let authorizer = loop {
+            match BrokerBackedQueryAuthorizer::connect(&bootstrap, topic.clone()).await {
+                Ok(a) => break a,
+                Err(error) => {
+                    eprintln!(
+                        "[crabka-observability] querier authorizer connect failed; retrying: {error}"
+                    );
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        };
+        let mut guard = slot.write().await;
+        *guard = Arc::new(authorizer);
+        eprintln!(
+            "[crabka-observability] querier query authorizer promoted to broker-backed ACL checks"
+        );
     });
 }
 
@@ -4517,25 +4702,45 @@ impl QuerierState {
 
         match dynamic_index {
             DynamicIndexSource::TenantObjectStoreManifest { store, prefix } => {
-                let (label_index, block_index) = read_tenant_log_index_manifest_from_object_store(
-                    store.as_ref(),
-                    prefix,
-                    tenant,
-                )
-                .await?;
+                let (label_index, block_index) =
+                    match read_tenant_log_index_manifest_from_object_store(
+                        store.as_ref(),
+                        prefix,
+                        tenant,
+                    )
+                    .await
+                    {
+                        Ok(indexes) => indexes,
+                        Err(BlockStoreError::ObjectStore(object_store::Error::NotFound {
+                            ..
+                        })) => {
+                            return Ok(self.clone());
+                        }
+                        Err(error) => return Err(error),
+                    };
                 let mut state = self.clone();
                 state.label_index = label_index;
                 state.block_index = block_index;
                 Ok(state)
             }
             DynamicIndexSource::TenantObjectStoreShards { store, prefix } => {
-                let (label_index, block_index) = read_tenant_log_index_shards_from_object_store(
-                    store.as_ref(),
-                    prefix,
-                    tenant,
-                    query_range,
-                )
-                .await?;
+                let (label_index, block_index) =
+                    match read_tenant_log_index_shards_from_object_store(
+                        store.as_ref(),
+                        prefix,
+                        tenant,
+                        query_range,
+                    )
+                    .await
+                    {
+                        Ok(indexes) => indexes,
+                        Err(BlockStoreError::ObjectStore(object_store::Error::NotFound {
+                            ..
+                        })) => {
+                            return Ok(self.clone());
+                        }
+                        Err(error) => return Err(error),
+                    };
                 let mut state = self.clone();
                 state.label_index = label_index;
                 state.block_index = block_index;
@@ -4818,8 +5023,51 @@ pub async fn build_service_router(
             if let Some(hot_tail) = dependencies.hot_tail {
                 state = state.with_hot_tail_source(hot_tail.source, hot_tail.frontier);
             } else if let Some(wal_consumer) = dependencies.wal_consumer {
+                // Pre-connected consumer supplied directly (e.g. by tests).
                 let hot_tail = BufferedLogHotTail::default();
                 spawn_log_hot_tail_poller(wal_consumer, hot_tail.clone());
+                let frontier = if let Some(configured_store) = configured_store.as_ref()
+                    && let Some(prefix) =
+                        querier_object_store_prefix(config, Some(&configured_store.prefix))?
+                {
+                    Some(
+                        shared_compaction_frontier_from_object_store(
+                            configured_store.store.as_ref(),
+                            &prefix,
+                        )
+                        .await?,
+                    )
+                } else if let Some(store) = object_store
+                    && let Some(prefix) = querier_object_store_prefix(config, None)?
+                {
+                    Some(shared_compaction_frontier_from_object_store(store, &prefix).await?)
+                } else {
+                    None
+                };
+                if let Some(frontier) = frontier {
+                    state = state.with_hot_tail_shared_frontier(hot_tail, frontier);
+                } else {
+                    state = state.with_hot_tail(hot_tail, i64::MIN);
+                }
+            } else if let Some(deferred) = dependencies.deferred_wal_consumer_connect {
+                // Deferred connect: the consumer and authorizer connect asynchronously so the
+                // querier's HTTP port binds without waiting for the broker to be ready (FIX B2).
+                let hot_tail = BufferedLogHotTail::default();
+
+                // Spawn the consumer connect + poll loop in a background task.
+                spawn_wal_hot_tail_connect_and_poll(
+                    deferred.bootstrap.clone(),
+                    deferred.group_id,
+                    deferred.topic.clone(),
+                    hot_tail.clone(),
+                );
+
+                // Install a swappable authorizer that starts as AllowAll and gets promoted
+                // to BrokerBackedQueryAuthorizer once connected in the background.
+                let (swappable, slot) = SwappableQueryAuthorizer::new();
+                spawn_query_authorizer_connect(deferred.bootstrap, deferred.topic, slot);
+                state = state.with_query_authorizer(swappable);
+
                 let frontier = if let Some(configured_store) = configured_store.as_ref()
                     && let Some(prefix) =
                         querier_object_store_prefix(config, Some(&configured_store.prefix))?
@@ -18578,5 +18826,112 @@ mod tests {
             loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
             "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
         );
+    }
+
+    // --- FIX B1 tests ---
+
+    /// A TenantObjectStoreManifest source backed by an empty in-memory store (no manifest present)
+    /// must return Ok with an empty (self-clone) index rather than propagating NotFound as an error.
+    #[tokio::test]
+    async fn querier_state_with_request_tenant_index_tolerates_absent_manifest() {
+        use object_store::memory::InMemory;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let prefix = ObjectPath::default();
+
+        let state = QuerierState::new(".", LabelIndex::default(), BlockIndex::default())
+            .with_dynamic_tenant_object_store_manifest(store, prefix);
+
+        let query_range = TimeRange::new(0, 1).unwrap();
+        let result = state
+            .with_request_tenant_index("test-tenant", query_range)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok on absent cold index manifest, got: {:?}",
+            result.err()
+        );
+        let returned = result.unwrap();
+        assert!(
+            returned.block_index.blocks().is_empty(),
+            "expected empty block index when no manifest exists"
+        );
+    }
+
+    /// Same check for the TenantObjectStoreShards variant.
+    #[tokio::test]
+    async fn querier_state_with_request_tenant_index_tolerates_absent_shards() {
+        use object_store::memory::InMemory;
+
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let prefix = ObjectPath::default();
+
+        let state = QuerierState::new(".", LabelIndex::default(), BlockIndex::default())
+            .with_dynamic_tenant_object_store_shards(store, prefix);
+
+        let query_range = TimeRange::new(0, 1).unwrap();
+        let result = state
+            .with_request_tenant_index("test-tenant", query_range)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok on absent cold index shards, got: {:?}",
+            result.err()
+        );
+    }
+
+    // --- FIX B3 tests ---
+
+    /// connect_with_startup_retry returns Ok immediately when the closure succeeds on the first try.
+    #[tokio::test]
+    async fn connect_with_startup_retry_succeeds_on_first_try() {
+        let result: Result<u32, String> =
+            connect_with_startup_retry("test", Duration::from_secs(5), || async {
+                Ok::<u32, String>(42)
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    /// connect_with_startup_retry retries on failure and returns Ok when a later attempt succeeds.
+    #[tokio::test]
+    async fn connect_with_startup_retry_retries_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering as AO};
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter2 = counter.clone();
+
+        let result: Result<u32, String> =
+            connect_with_startup_retry("test", Duration::from_secs(10), move || {
+                let c = counter2.clone();
+                async move {
+                    let n = c.fetch_add(1, AO::SeqCst);
+                    if n < 2 {
+                        Err(format!("not ready yet (attempt {})", n))
+                    } else {
+                        Ok(99u32)
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 99);
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    }
+
+    /// connect_with_startup_retry returns the error after the deadline is exceeded.
+    #[tokio::test]
+    async fn connect_with_startup_retry_gives_up_after_deadline() {
+        let result: Result<u32, String> = connect_with_startup_retry(
+            "test",
+            Duration::from_millis(50), // very short deadline
+            || async { Err::<u32, String>("always fails".to_string()) },
+        )
+        .await;
+
+        assert!(result.is_err(), "expected Err after deadline");
+        assert_eq!(result.unwrap_err(), "always fails");
     }
 }

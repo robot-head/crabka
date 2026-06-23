@@ -23,6 +23,7 @@ workspace = true
 heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [dependencies]
+arc-swap = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-broker = { path = "../broker", version = "0.3.8" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
