@@ -24,8 +24,18 @@ Then open Grafana at <http://localhost:3000> (anonymous admin).
 
 Data appears a few minutes after startup, as Alloy collects signals and the
 block-builders flush their first blocks (give it ~3–5 min on a cold start). The
-queriers refresh their indexes and the WAL consumers self-heal a slow cold-boot
-group-join, so no manual restarts are needed.
+queriers refresh their indexes automatically.
+
+> **Known cold-boot caveat.** Under continuous jemalloc heap profiling, a WAL
+> block-builder (most often `logs-compactor` or `profiles-block-builder`) can
+> intermittently stall at its consumer group-join on a cold boot — a tokio
+> runtime-level lost wakeup that also freezes the in-process timers, so it can't
+> self-recover. If a signal's panel is still empty after ~5 minutes, restart
+> that service: `docker compose restart logs-compactor` /
+> `docker compose restart profiles-block-builder` (a fresh process almost always
+> clears it; a bad-luck boot may need a second try). This is a tracked
+> follow-up; it does not affect metrics/traces, and the data path itself is
+> correct once the consumer joins.
 
 Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 (default `50`; `0` pauses production). Lower it on a constrained host. Plan on
