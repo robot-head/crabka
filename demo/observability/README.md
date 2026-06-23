@@ -13,18 +13,19 @@ the broker (WAL) and a shared MinIO bucket (blocks).
 
 ## Run
 
+By default this **pulls the prebuilt image** from GHCR — no local build needed:
+
 ```bash
 cd demo/observability
-docker compose up --build      # first run builds the crabka-demo image (long)
+docker compose up -d
 ```
 
 Then open Grafana at <http://localhost:3000> (anonymous admin).
 
 Data appears a few minutes after startup, as Alloy collects signals and the
-block-builders flush their first blocks. If a panel stays empty after the
-broker is healthy, its querier likely started before its first blocks existed —
-`docker compose restart <signal>-querier` makes it pick them up (the metrics
-and profiles queriers self-refresh; traces/logs index-refresh is being added).
+block-builders flush their first blocks (give it ~3–5 min on a cold start). The
+queriers refresh their indexes and the WAL consumers self-heal a slow cold-boot
+group-join, so no manual restarts are needed.
 
 Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 (default `50`; `0` pauses production). Lower it on a constrained host. Plan on
@@ -33,6 +34,20 @@ Tune the load with `CRABKA_DEMO_ORDERS_PER_SEC` on the `demo-produce` service
 The service binaries run under the jemalloc allocator with heap profiling
 active (`MALLOC_CONF=prof:true,prof_active:true`), so both CPU and heap
 flamegraphs are available.
+
+### Rebuild from source
+
+To build the image locally instead of pulling it (e.g. to try local changes),
+build + tag it under the same name from the **repo root**, then start as usual
+— Compose uses the local image when present:
+
+```bash
+docker build -f demo/observability/Dockerfile -t ghcr.io/robot-head/crabka-demo:latest .
+cd demo/observability && docker compose up -d
+```
+
+Maintainers publish the prebuilt image with the **publish-demo-image** GitHub
+Actions workflow (Actions → *publish-demo-image* → *Run workflow* → image tag).
 
 ## What you should see
 

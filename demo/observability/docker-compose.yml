@@ -18,8 +18,14 @@ x-otlp-env: &otlp-env
   # io tasks), so consumers run fine under prof now.
   MALLOC_CONF: "prof:true,prof_active:true"
 
+# Every Crabka service runs the same all-in-one demo image. By default this
+# PULLS the prebuilt image from GHCR (published by the publish-demo-image
+# workflow) so `docker compose up` needs no local build. To run from source
+# instead, build + tag it under the same name from the repo root:
+#   docker build -f demo/observability/Dockerfile -t ghcr.io/robot-head/crabka-demo:latest .
+# then `docker compose up -d` (Compose uses the local image when present).
 x-crabka-image: &crabka-image
-  image: crabka-demo:latest
+  image: ghcr.io/robot-head/crabka-demo:latest
   restart: unless-stopped
 
 services:
