@@ -5,6 +5,15 @@ All notable changes to `crabka-protocol` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] — 2026-06-23
+
+
+### <!-- 4 -->⚡ Performance
+
+
+- Profiling-driven optimizations (codec decode, broker group-commit, streams changelog) ([#630](https://github.com/robot-head/crabka/pull/630))
+
+
 ## [0.3.7] — 2026-06-17
 
 

@@ -16,8 +16,8 @@ publish = false
 unsafe_op_in_unsafe_fn = "warn"
 
 [dependencies]
-crabka-log = { version = "0.3.7", path = "../log" }
-crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
+crabka-log = { version = "0.3.8", path = "../log" }
+crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 bytes = { workspace = true }
 memmap2 = { workspace = true }
 

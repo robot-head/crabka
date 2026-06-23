@@ -30,7 +30,7 @@ sim = ["dep:serde"]
 # core a clean leaf is what lets it compile to `wasm32-unknown-unknown` for the
 # browser playground.
 [dependencies]
-crabka-voters = { version = "0.3.7", path = "../voters" }
+crabka-voters = { version = "0.3.8", path = "../voters" }
 bytes = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }

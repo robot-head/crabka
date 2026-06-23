@@ -38,8 +38,8 @@ zstd   = ["crabka-compression/zstd"]
 bytes = { workspace = true }
 thiserror = { workspace = true }
 crc32fast = { workspace = true }
-crabka-compression = { version = "0.3.7", path = "../compression", default-features = false }
-crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
+crabka-compression = { version = "0.3.8", path = "../compression", default-features = false }
+crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 
 [dev-dependencies]
 assert2 = { workspace = true }

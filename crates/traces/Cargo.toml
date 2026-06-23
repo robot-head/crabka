@@ -21,9 +21,9 @@ workspace = true
 
 [dependencies]
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
-crabka-broker = { path = "../broker", version = "0.3.7" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.7" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.7" }
+crabka-broker = { path = "../broker", version = "0.3.8" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
 crabka-traceql = { path = "../traceql", version = "0.3.7" }
 arrow = { workspace = true }
 async-trait = { workspace = true }
@@ -58,8 +58,8 @@ wincode = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-client-core = { path = "../client-core", version = "0.3.7" }
-crabka-protocol = { path = "../protocol", version = "0.3.7" }
+crabka-client-core = { path = "../client-core", version = "0.3.8" }
+crabka-protocol = { path = "../protocol", version = "0.3.8" }
 http-body-util = "0.1"
 parquet = { workspace = true }
 tempfile = { workspace = true }

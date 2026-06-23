@@ -17,11 +17,11 @@ categories = ["database-implementations", "encoding"]
 workspace = true
 
 [dependencies]
-crabka-remote-storage = { version = "0.3.7", path = "../remote-storage" }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
-crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
-crabka-protocol = { version = "0.3.7", path = "../protocol" }
+crabka-remote-storage = { version = "0.3.8", path = "../remote-storage" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-protocol = { version = "0.3.8", path = "../protocol" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -33,6 +33,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-security = { version = "0.3.7", path = "../security" }
+crabka-security = { version = "0.3.8", path = "../security" }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }

@@ -24,11 +24,11 @@ workspace = true
 scenarios = ["crabka-kraft-core/sim"]
 
 [dependencies]
-crabka-kraft-core = { version = "0.3.7", path = "../kraft-core" }
-crabka-metadata = { version = "0.3.7", path = "../metadata" }
-crabka-log = { version = "0.3.7", path = "../log" }
-crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
+crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
+crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-log = { version = "0.3.8", path = "../log" }
+crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }

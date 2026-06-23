@@ -29,14 +29,14 @@ name = "crabka-schema-compat-check"
 path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
-crabka-client-core = { version = "0.3.7", path = "../client-core" }
-crabka-client-admin = { version = "0.3.7", path = "../client-admin" }
-crabka-client-producer = { version = "0.3.7", path = "../client-producer" }
-crabka-protocol = { version = "0.3.7", path = "../protocol", default-features = false }
-crabka-security = { version = "0.3.7", path = "../security" }
-crabka-authz = { version = "0.3.7", path = "../authz" }
-crabka-logfmt = { version = "0.3.7", path = "../logfmt" }
-crabka-metadata = { version = "0.3.7", path = "../metadata" }
+crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
+crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-security = { version = "0.3.8", path = "../security" }
+crabka-authz = { version = "0.3.8", path = "../authz" }
+crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
+crabka-metadata = { version = "0.3.8", path = "../metadata" }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 bcrypt = "0.19"
@@ -67,8 +67,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3.7", path = "../broker", features = ["test-helpers"] }
-crabka-client-consumer = { version = "0.3.7", path = "../client-consumer" }
+crabka-broker = { version = "0.3.8", path = "../broker", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
 ring = { workspace = true }
 tempfile.workspace = true
 testcontainers.workspace = true

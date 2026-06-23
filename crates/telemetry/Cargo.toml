@@ -17,7 +17,7 @@ categories = ["development-tools::debugging"]
 workspace = true
 
 [dependencies]
-crabka-logfmt = { version = "0.3.7", path = "../logfmt" }
+crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
