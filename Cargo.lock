@@ -3322,6 +3322,7 @@ dependencies = [
 name = "crabka-traces"
 version = "0.3.8"
 dependencies = [
+ "arc-swap",
  "arrow",
  "assert2",
  "async-trait",
