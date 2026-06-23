@@ -176,13 +176,17 @@ Config lives at `demo/observability/alloy/config.alloy`.
 
 ### 4.6 Orders-analytics demo app (`crates/observability-demo-app`)
 
-A purpose-built Rust workload, idiomatic to Crabka, modeled on the existing
-`crates/client-streams/examples/*_pipeline.rs` examples and the `order`/`orders`
-proto domain (`crates/client-streams/examples/proto/order.proto`):
+A purpose-built Rust workload, idiomatic to Crabka, modeled closely on
+`crates/client-streams/examples/protobuf_pipeline.rs` and the `order` proto
+domain (`crates/client-streams/examples/proto/order.proto`). Values are
+**Protobuf** `Order` messages encoded with `SchemaSerde<Order, ProtobufSerde<Order>>`
+and registered against a **Crabka schema registry** (§4.7) — the same path the
+protobuf example uses, so the demo dogfoods Crabka's schema-registry too.
 
-- **Producer task** generates a synthetic stream of `Order` events
-  (varied keys/categories/amounts, occasional malformed/anomalous records to
-  produce error spans and warn logs) → input topic on `crabka-broker`.
+- **Producer task** generates a synthetic stream of proto `Order` events
+  (varied category/amount, occasional anomalous records to produce error spans and
+  warn logs), framed in the Confluent wire format via the schema registry, keyed
+  by category → input topic on `crabka-broker`.
 - **Tuning — order volume.** The producer's target emit rate is configurable via
   `CRABKA_DEMO_ORDERS_PER_SEC` (env var, default `50`), settable in
   `docker-compose.yml` without a rebuild. This is the demo's primary load lever:
@@ -192,11 +196,14 @@ proto domain (`crates/client-streams/examples/proto/order.proto`):
   pauses production (useful for inspecting a quiescent pipeline). The producer
   paces to the target rate rather than emitting a fixed total, so the dashboards
   stay live indefinitely.
-- **Streams topology** built with `crabka_client_streams::StreamsBuilder`:
-  a windowed aggregation (e.g. revenue/count per category over tumbling windows)
-  plus a `KTable` enrichment join, producing to an output topic. This exercises
-  state stores, changelog restore, windowing, and serialization — generating
-  meaningful CPU and heap profiles and per-record trace spans.
+- **Streams topology** built via `StreamsApp` + `StreamsBuilder`
+  (`app.streams_builder()`): consume proto `Order` from the input topic,
+  `group_by_key` (category) → `count`/aggregate into a state store → `to_stream`
+  → output topic. This exercises proto deserialize, the state store + changelog,
+  and serialization — generating meaningful CPU/heap profiles and per-record
+  trace spans. (Topology uses only the verified DSL surface; tumbling-window
+  aggregation is an optional enhancement if the `windowed_by`/`TimeWindows`
+  constructors are confirmed during implementation.)
 - **Consumer task** reads the aggregated output (drives end-to-end traces and
   consumer-lag metrics).
 - **Instrumentation reuses Crabka's own libraries** (the same pattern as the
@@ -205,6 +212,17 @@ proto domain (`crates/client-streams/examples/proto/order.proto`):
 - May run as 1–3 containers (producer / streams-processor / consumer) or a single
   multi-task process; the plan picks based on how cleanly the three roles
   separate. Default target: a single image, multiple `command:` roles.
+
+### 4.7 Schema registry
+
+- One `crabka-schema-registry` container (Confluent-compatible HTTP API, default
+  `:8081`), backed by `crabka-broker` — another Crabka component in the loop.
+- The demo app's producer and Streams consumer both resolve proto schemas
+  against it (`StreamsApp::builder().schema_registry("http://schema-registry:8081")`).
+- Self-instrumented like every other Crabka process where its binary supports it:
+  OTLP traces + JSON logs via `crabka-telemetry`, and the profiler admin server
+  (§5.2). The plan confirms exactly which signals the schema-registry binary
+  already emits and wires the rest.
 
 ## 5. Self-instrumentation: one pattern everywhere
 
@@ -331,8 +349,13 @@ demo/observability/
     bootstrap.sh              # create the crabka-blocks bucket
 crates/observability-demo-app/
   Cargo.toml
-  src/...                     # orders-analytics streams pipeline on client-streams
+  build.rs                    # prost/protox proto codegen (Order)
+  proto/order.proto          # proto Order domain
+  src/...                     # producer + StreamsApp pipeline + consumer, instrumented
 ```
+
+(The stack also runs a `crabka-schema-registry` container, §4.7 — no new repo
+files; it ships in the same image.)
 
 ## 8. How it runs (manual)
 
@@ -356,7 +379,7 @@ crates/observability-demo-app/
 - **Profile readability** — verify in-process `pprof`/`jemalloc_pprof` output
   symbolizes against a non-stripped release image; confirm Alloy `pyroscope.scrape`
   accepts the pprof endpoints (godeltaprof vs raw pprof format).
-- **Resource footprint** — ~17–18 containers; document a minimum Docker memory
+- **Resource footprint** — ~18–19 containers (incl. schema-registry); document a minimum Docker memory
   (likely ≥ 6–8 GB) in the README; offer a trimmed profile if needed. Note that
   `CRABKA_DEMO_ORDERS_PER_SEC` (§4.6) is the first knob to turn down on a
   constrained host.
