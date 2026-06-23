@@ -1,10 +1,6 @@
 //! Instrumented orders-analytics demo. Three roles, all on crabka-broker +
 //! the schema registry, emitting metrics/logs/traces/profiles via crabka libs.
 
-#[cfg(all(unix, feature = "heap-profiling"))]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 use std::sync::Arc;
 use std::time::Duration;
 

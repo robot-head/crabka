@@ -16,7 +16,7 @@ name = "observability-demo-app"
 path = "src/main.rs"
 
 [features]
-heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+heap-profiling = ["crabka-telemetry/heap-profiling"]
 
 [dependencies]
 crabka-client-streams = { version = "0.3.8", path = "../client-streams" }
@@ -30,9 +30,6 @@ prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal"] }
 tracing = { workspace = true }
-
-[target.'cfg(unix)'.dependencies]
-tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [build-dependencies]
 protox = { workspace = true }
