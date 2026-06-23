@@ -2234,6 +2234,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-metrics",
  "tokio-rustls",
@@ -2707,6 +2708,7 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-telemetry",
  "crabka-throttle",
  "dashmap",
  "object_store",
@@ -2723,6 +2725,7 @@ dependencies = [
  "snap",
  "tempfile",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tonic",
  "tower",
@@ -2746,6 +2749,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-metrics",
  "crabka-promql",
+ "crabka-telemetry",
  "futures",
  "object_store",
  "prost 0.14.4",
@@ -2755,6 +2759,7 @@ dependencies = [
  "snap",
  "testcontainers",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "time",
  "tokio",
  "tower",
@@ -2777,6 +2782,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-producer",
  "crabka-logql",
+ "crabka-telemetry",
  "datafusion",
  "flate2",
  "futures-util",
@@ -2791,6 +2797,7 @@ dependencies = [
  "snap",
  "tempfile",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "time",
  "tokio",
  "tokio-tungstenite",
@@ -2916,6 +2923,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-pprof",
+ "crabka-telemetry",
  "datafusion",
  "flate2",
  "futures",
@@ -2936,6 +2944,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tower",
  "tracing",
@@ -3179,6 +3188,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
+ "crabka-telemetry",
  "hex",
  "hyper",
  "hyper-util",
@@ -3195,6 +3205,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3323,6 +3334,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-protocol",
+ "crabka-telemetry",
  "crabka-traceql",
  "dashmap",
  "datafusion",
@@ -3346,6 +3358,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-util",
  "tonic",
@@ -7283,6 +7296,29 @@ dependencies = [
  "walkdir",
  "wasm-bindgen-futures",
  "web-time",
+]
+
+[[package]]
+name = "observability-demo-app"
+version = "0.3.8"
+dependencies = [
+ "assert2",
+ "bytes",
+ "clap",
+ "crabka-client-consumer",
+ "crabka-client-producer",
+ "crabka-client-streams",
+ "crabka-schema-serde",
+ "crabka-telemetry",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-reflect",
+ "protox",
+ "serde",
+ "serde_json",
+ "tikv-jemallocator",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -11596,6 +11632,16 @@ checksum = "1a2825c78386b4ae0314074867860ba9577875de945f05992c38815cbec327f0"
 dependencies = [
  "cc",
  "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "249f09e49ab1609436f34c776e84231bead18d6a955f119f939bdc1d847561bd"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

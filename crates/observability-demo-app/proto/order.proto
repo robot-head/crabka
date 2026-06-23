@@ -1,0 +1,10 @@
+syntax = "proto3";
+package demo;
+
+message Order {
+  string order_id = 1;
+  string category = 2;
+  double amount = 3;
+  string currency = 4;
+  int64  ts_ms = 5;
+}
