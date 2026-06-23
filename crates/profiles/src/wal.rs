@@ -39,6 +39,11 @@ pub struct WalLocation {
 }
 
 /// A mapping. `has_functions == false` marks an unsymbolized mapping.
+///
+/// The four `has_*` booleans mirror the pprof `Mapping` message fields
+/// one-to-one; they are an exact wire shape, not a state machine that would
+/// benefit from being collapsed into an enum.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalMapping {
     pub memory_start: u64,
@@ -47,6 +52,9 @@ pub struct WalMapping {
     pub filename: u32,
     pub build_id: u32,
     pub has_functions: bool,
+    pub has_filenames: bool,
+    pub has_line_numbers: bool,
+    pub has_inline_frames: bool,
 }
 
 /// The profile's symbol tables, index-encoded in pprof shape.
@@ -128,6 +136,9 @@ mod tests {
                 filename: 2,
                 build_id: 0,
                 has_functions: true,
+                has_filenames: true,
+                has_line_numbers: true,
+                has_inline_frames: false,
             }],
         }
     }

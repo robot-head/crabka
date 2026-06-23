@@ -1,5 +1,6 @@
 //! Live WAL-tail backed profile store.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -11,50 +12,202 @@ use crate::blockbuilder::{intern_record, profile_timestamp_ms};
 use crate::error::ProfilesError;
 use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord};
 
-#[derive(Clone, Default)]
+/// Default retention horizon for the in-memory WAL tail: samples older than this
+/// (relative to the newest sample seen) are dropped so the hot store cannot grow
+/// without bound.
+const DEFAULT_MAX_AGE_MS: i64 = 6 * 60 * 60 * 1_000; // 6h
+
+/// Hard cap on the number of retained source records, so a burst of same-instant
+/// samples still cannot grow the hot store unboundedly.
+const DEFAULT_MAX_RECORDS: usize = 1_000_000;
+
+/// Rebuild the queryable store only once evictions reach `1 / FACTOR` of the
+/// retained window. Rebuilding is O(window), so deferring it amortizes the cost
+/// to O(1) per append in steady state, at the price of at most `window / FACTOR`
+/// already-evicted records temporarily lingering in the queryable store (a
+/// bounded memory slack, not a correctness issue — those rows are real, just
+/// older than the strict horizon, and queries still filter by timestamp).
+const REBUILD_AMORTIZE_FACTOR: usize = 8;
+
+/// Retention policy for the in-memory WAL tail.
+#[derive(Clone, Copy, Debug)]
+pub struct RetentionConfig {
+    /// Drop samples whose timestamp is older than `newest_ts - max_age_ms`.
+    pub max_age_ms: i64,
+    /// Drop the oldest records once more than this many are retained.
+    pub max_records: usize,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_age_ms: DEFAULT_MAX_AGE_MS,
+            max_records: DEFAULT_MAX_RECORDS,
+        }
+    }
+}
+
+/// A source record retained for retention bookkeeping / rebuilds.
+struct Retained {
+    /// Newest sample timestamp (ms) carried by this record.
+    max_ts_ms: i64,
+    record: ProfileRecord,
+}
+
+/// Retained source records plus the count of records evicted since the last
+/// rebuild, used to amortize rebuilds (see [`REBUILD_AMORTIZE_FACTOR`]).
+#[derive(Default)]
+struct RetainedState {
+    records: VecDeque<Retained>,
+    evicted_since_rebuild: usize,
+}
+
+#[derive(Clone)]
 pub struct WalTailProfileStore {
-    inner: Arc<RwLock<InMemoryProfileStore>>,
+    /// Copy-on-write snapshot of the queryable store. Queries clone the inner
+    /// `Arc` (a cheap refcount bump) instead of deep-cloning every sample; writes
+    /// mutate via `Arc::make_mut`, which only deep-copies while a snapshot is
+    /// still outstanding.
+    inner: Arc<RwLock<Arc<InMemoryProfileStore>>>,
+    /// Source records retained within the retention window, used to rebuild the
+    /// queryable store after eviction (the inner store exposes no row-level
+    /// prune API).
+    retained: Arc<RwLock<RetainedState>>,
+    retention: RetentionConfig,
+}
+
+impl Default for WalTailProfileStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WalTailProfileStore {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_retention(RetentionConfig::default())
+    }
+
+    #[must_use]
+    pub fn with_retention(retention: RetentionConfig) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(InMemoryProfileStore::new())),
+            inner: Arc::new(RwLock::new(Arc::new(InMemoryProfileStore::new()))),
+            retained: Arc::new(RwLock::new(RetainedState::default())),
+            retention,
         }
     }
 
     pub fn append_record(&self, record: ProfileRecord) -> Result<(), ProfilesError> {
-        let mut guard = self
-            .inner
+        let max_ts_ms = record
+            .samples
+            .iter()
+            .map(|sample| profile_timestamp_ms(sample.timestamp_ns))
+            .max();
+
+        {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| ProfilesError::Wal("hot profile store lock poisoned".to_string()))?;
+            apply_record(Arc::make_mut(&mut guard), &record)?;
+        }
+
+        // Records with no samples carry no timestamp and need no retention
+        // bookkeeping (they contributed nothing to the store either).
+        let Some(max_ts_ms) = max_ts_ms else {
+            return Ok(());
+        };
+
+        let mut retained = self
+            .retained
             .write()
             .map_err(|_| ProfilesError::Wal("hot profile store lock poisoned".to_string()))?;
-        let stack_ids = intern_record(guard.symbols_mut(), &record)?;
-        let total_value = record.samples.iter().map(|sample| sample.value).sum();
-        for (sample, stack_id) in record.samples.iter().zip(stack_ids) {
-            let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
-            guard.push_sample_with_total_and_associations(
-                &record.tenant,
-                &record.profile_type,
-                record.labels.clone(),
-                crate::blockbuilder::STACKTRACE_PARTITION,
-                stack_id,
-                sample.value,
-                total_value,
-                timestamp_ms,
-                sample.span_id,
-                sample.trace_id.clone(),
-            );
+        retained.records.push_back(Retained { max_ts_ms, record });
+        Self::prune(&self.retention, &mut retained);
+        if Self::should_rebuild(&retained) {
+            self.rebuild(&retained.records)?;
+            retained.evicted_since_rebuild = 0;
         }
         Ok(())
     }
 
-    fn snapshot(&self) -> Result<InMemoryProfileStore, ProfileError> {
+    /// Drop retained records that fall outside the retention window, counting how
+    /// many were evicted since the last rebuild.
+    fn prune(retention: &RetentionConfig, state: &mut RetainedState) {
+        let newest = state.records.back().map_or(i64::MIN, |item| item.max_ts_ms);
+        let horizon = newest.saturating_sub(retention.max_age_ms);
+        while state
+            .records
+            .front()
+            .is_some_and(|item| item.max_ts_ms < horizon)
+        {
+            state.records.pop_front();
+            state.evicted_since_rebuild += 1;
+        }
+        while state.records.len() > retention.max_records {
+            state.records.pop_front();
+            state.evicted_since_rebuild += 1;
+        }
+    }
+
+    /// Rebuild only once evictions reach `1 / REBUILD_AMORTIZE_FACTOR` of the live
+    /// window (or the window has fully drained), so a steady-state append that
+    /// evicts one record does not trigger an O(window) rebuild every time.
+    fn should_rebuild(state: &RetainedState) -> bool {
+        state.evicted_since_rebuild > 0
+            && state
+                .evicted_since_rebuild
+                .saturating_mul(REBUILD_AMORTIZE_FACTOR)
+                >= state.records.len()
+    }
+
+    /// Rebuild the queryable store from the surviving retained records. Re-interning
+    /// is deterministic, so the rebuilt store is equivalent to the un-evicted tail.
+    fn rebuild(&self, retained: &VecDeque<Retained>) -> Result<(), ProfilesError> {
+        let mut fresh = InMemoryProfileStore::new();
+        for item in retained {
+            apply_record(&mut fresh, &item.record)?;
+        }
+        let mut guard = self
+            .inner
+            .write()
+            .map_err(|_| ProfilesError::Wal("hot profile store lock poisoned".to_string()))?;
+        *guard = Arc::new(fresh);
+        Ok(())
+    }
+
+    /// Cheap copy-on-write snapshot: clones the inner `Arc`, not the samples.
+    fn snapshot(&self) -> Result<Arc<InMemoryProfileStore>, ProfileError> {
         self.inner
             .read()
             .map_err(|_| ProfileError::Store("hot profile store lock poisoned".to_string()))
-            .map(|guard| guard.clone())
+            .map(|guard| Arc::clone(&guard))
     }
+}
+
+/// Intern + push every sample of `record` into `store`.
+fn apply_record(
+    store: &mut InMemoryProfileStore,
+    record: &ProfileRecord,
+) -> Result<(), ProfilesError> {
+    let stack_ids = intern_record(store.symbols_mut(), record)?;
+    let total_value = record.samples.iter().map(|sample| sample.value).sum();
+    for (sample, stack_id) in record.samples.iter().zip(stack_ids) {
+        let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
+        store.push_sample_with_total_and_associations(
+            &record.tenant,
+            &record.profile_type,
+            record.labels.clone(),
+            crate::blockbuilder::STACKTRACE_PARTITION,
+            stack_id,
+            sample.value,
+            total_value,
+            timestamp_ms,
+            sample.span_id,
+            sample.trace_id.clone(),
+        );
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -287,5 +440,121 @@ mod tests {
             .unwrap();
         assert!(!trace_ids.is_null(0));
         assert!(trace_ids.value(0) == &[0xaa; 16]);
+    }
+
+    fn record_at(value: i64, timestamp_ns: i64) -> ProfileRecord {
+        let mut rec = record();
+        rec.samples[0].value = value;
+        rec.samples[0].timestamp_ns = timestamp_ns;
+        rec
+    }
+
+    #[tokio::test]
+    async fn retention_evicts_samples_older_than_the_horizon() {
+        // Tight 1s window: an old sample must be dropped once a much newer one
+        // arrives, so the hot store does not grow without bound.
+        let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
+            max_age_ms: 1_000,
+            max_records: usize::MAX,
+        });
+        // Old sample at t=0ms, then a fresh sample 10s later.
+        store.append_record(record_at(5, 0)).unwrap();
+        store
+            .append_record(record_at(7, 10_000 * 1_000_000))
+            .unwrap();
+
+        // Querying the full range must see only the surviving fresh sample.
+        let stats = store.stats("tenant-a", 0, i64::MAX).await.unwrap();
+        assert!(stats.oldest_profile_time == Some(10_000), "{stats:?}");
+        assert!(stats.newest_profile_time == Some(10_000), "{stats:?}");
+
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+        let fg = engine
+            .select_merge_stacktraces("tenant-a", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
+            .await
+            .unwrap();
+        assert!(fg.total == 7, "old sample not evicted: {}", fg.total);
+    }
+
+    #[tokio::test]
+    async fn retention_evicts_by_record_budget() {
+        // max_records=2 with an unbounded age window: the third append drops the
+        // oldest record regardless of age.
+        let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
+            max_age_ms: i64::MAX,
+            max_records: 2,
+        });
+        store.append_record(record_at(1, 1_000_000)).unwrap();
+        store.append_record(record_at(2, 2_000_000)).unwrap();
+        store.append_record(record_at(4, 3_000_000)).unwrap();
+
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+        let fg = engine
+            .select_merge_stacktraces("tenant-a", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
+            .await
+            .unwrap();
+        // Only the two most recent records (values 2 and 4) survive.
+        assert!(fg.total == 6, "budget eviction wrong: {}", fg.total);
+    }
+
+    #[tokio::test]
+    async fn amortized_eviction_preserves_recent_query_results() {
+        // Small budget + many appends: rebuilds are amortized (deferred), so the
+        // queryable store may briefly over-retain already-evicted rows. A
+        // timestamp-scoped query must still return exactly the records inside the
+        // requested window, regardless of any lingering older rows.
+        let store = super::WalTailProfileStore::with_retention(super::RetentionConfig {
+            max_age_ms: i64::MAX,
+            max_records: 10,
+        });
+        for i in 1..=50_i64 {
+            store
+                .append_record(record_at(i, i * 1_000_000_000))
+                .unwrap();
+        }
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+        // Records 46..=50 sit at 46_000..=50_000 ms; query that window only.
+        let fg = engine
+            .select_merge_stacktraces(
+                "tenant-a",
+                PT,
+                r#"{service_name="api"}"#,
+                46_000,
+                i64::MAX,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            fg.total == 46 + 47 + 48 + 49 + 50,
+            "recent-window query wrong: {}",
+            fg.total
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_on_write_snapshot_is_isolated_from_later_appends() {
+        // A snapshot taken before an append must not observe the appended sample:
+        // proves queries read a consistent COW snapshot rather than a live store.
+        let store = super::WalTailProfileStore::new();
+        store.append_record(record_at(5, 1_000_000)).unwrap();
+        let snapshot = store.snapshot().unwrap();
+
+        // Mutate the store after taking the snapshot.
+        store.append_record(record_at(11, 2_000_000)).unwrap();
+
+        // The pre-append snapshot still sees only the original sample.
+        let before = snapshot.stats("tenant-a", 0, i64::MAX).await.unwrap();
+        assert!(before.oldest_profile_time == Some(1), "{before:?}");
+        assert!(before.newest_profile_time == Some(1), "{before:?}");
+
+        // A fresh snapshot sees both samples.
+        let after = store
+            .snapshot()
+            .unwrap()
+            .stats("tenant-a", 0, i64::MAX)
+            .await
+            .unwrap();
+        assert!(after.newest_profile_time == Some(2), "{after:?}");
     }
 }

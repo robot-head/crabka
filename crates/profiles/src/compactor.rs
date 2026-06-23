@@ -321,25 +321,58 @@ fn fnv1a(input_keys: &[String]) -> u64 {
 }
 
 fn source_partitions(index: &ProfileIndex, block_key: &str) -> Vec<u64> {
-    let partitions = index.stacktrace_partitions(block_key);
+    let mut partitions = index.stacktrace_partitions(block_key);
     if partitions.is_empty() {
-        vec![STACKTRACE_PARTITION]
-    } else {
-        partitions
+        return vec![STACKTRACE_PARTITION];
     }
+    // Sort + dedup so the dense local re-basing in `destination_partitions` is
+    // deterministic regardless of the order the index recorded partitions in.
+    partitions.sort_unstable();
+    partitions.dedup();
+    partitions
 }
 
+/// Build the source-partition -> destination-partition map for one input block.
+///
+/// The external partition scheme packs a per-block base in the high 32 bits and
+/// a local partition id in the low 32 bits: `external = base | local`. That is
+/// only collision-free while the local id fits the low 32 bits. After a block
+/// has already been compacted once, its stored partitions already occupy the
+/// high bits, so naively OR-ing a fresh base onto them folds bits together and
+/// can alias partitions across blocks (and trips `copy_partition_from`'s
+/// non-empty-destination reject).
+///
+/// To stay safe across repeated compactions we re-base each block's source
+/// partitions to a dense local `0..n` range first, so the high-bit base is only
+/// ever OR-ed with small local ids. `source_partitions` is sorted+deduped by the
+/// caller, so the dense assignment is deterministic. We also use checked
+/// arithmetic and error out rather than silently aliasing if a base or local id
+/// would not fit.
 fn destination_partitions(
     block_idx: usize,
     source_partitions: &[u64],
 ) -> Result<BTreeMap<u64, u64>, ProfilesError> {
     let block_base = u64::try_from(block_idx + 1)
         .map_err(|err| ProfilesError::Block(format!("block index does not fit u64: {err}")))?
-        << 32;
-    Ok(source_partitions
-        .iter()
-        .map(|partition| (*partition, block_base | *partition))
-        .collect())
+        .checked_shl(32)
+        .ok_or_else(|| {
+            ProfilesError::Block(format!("block base for index {block_idx} overflows u64"))
+        })?;
+    let mut map = BTreeMap::new();
+    for (local, source) in source_partitions.iter().enumerate() {
+        let local = u64::try_from(local).map_err(|err| {
+            ProfilesError::Block(format!("local partition does not fit u64: {err}"))
+        })?;
+        if local >= 1 << 32 {
+            return Err(ProfilesError::Block(format!(
+                "local partition {local} does not fit the low 32 bits"
+            )));
+        }
+        // `block_base` is a multiple of `1 << 32` and `local < 1 << 32`, so the
+        // low bits are guaranteed clear and OR is equivalent to addition.
+        map.insert(*source, block_base | local);
+    }
+    Ok(map)
 }
 
 async fn load_symdb(
@@ -560,6 +593,130 @@ mod tests {
             .unwrap();
 
         assert!(fg.total == 13);
+    }
+
+    #[tokio::test]
+    async fn recompacting_an_already_compacted_block_does_not_alias_partitions() {
+        // Round-trip two compactions: build four fresh blocks, compact them
+        // pairwise (so each compacted block has high-bit-based partitions), then
+        // compact the two compacted blocks together. Without dense re-basing the
+        // second compaction OR-folds the already-high partitions and aliases
+        // them across blocks (and `copy_partition_from` rejects the non-empty
+        // destination). Query results must be identical before and after.
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let rec_a = record("t", "api", 5, "alpha");
+        let rec_b = record("t", "api", 7, "bravo");
+        let rec_c = record("t", "api", 11, "charlie");
+        let rec_d = record("t", "api", 13, "delta");
+        let mut index = ProfileIndex::new();
+
+        let mut metas = Vec::new();
+        for (idx, rec) in [&rec_a, &rec_b, &rec_c, &rec_d].into_iter().enumerate() {
+            let labels = Labels::from_pairs(rec.labels.iter().cloned());
+            index.add_series("t", labels.fingerprint(), &labels);
+            let offset = i64::try_from(idx).unwrap();
+            let bounds = (offset, offset);
+            let meta = build_block(&store, "t", 0, std::slice::from_ref(rec), bounds)
+                .await
+                .unwrap()
+                .remove(0);
+            index.add_block(&meta);
+            index.add_profile_block("t", &meta.object_key, vec![STACKTRACE_PARTITION]);
+            metas.push(meta);
+        }
+
+        // First compaction: a+b -> c1, c+d -> c2.
+        let c1 = compact_blocks(
+            &store,
+            &mut index,
+            "t",
+            &[metas[0].object_key.clone(), metas[1].object_key.clone()],
+            "blocks/t/c1.parquet",
+        )
+        .await
+        .unwrap();
+        let c2 = compact_blocks(
+            &store,
+            &mut index,
+            "t",
+            &[metas[2].object_key.clone(), metas[3].object_key.clone()],
+            "blocks/t/c2.parquet",
+        )
+        .await
+        .unwrap();
+
+        // Query the once-compacted state for the baseline. `ProfileIndex` is
+        // not `Clone`, so hand it to an `Arc`, run the query, then reclaim it
+        // (the cold store / engine clones are dropped once the query resolves).
+        let mut index = {
+            let shared = Arc::new(index);
+            let cold = Arc::new(ColdProfileStore::new(store.clone(), shared.clone()));
+            let engine = FlameEngine::new(cold, EngineOpts::default());
+            let before = engine
+                .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
+                .await
+                .unwrap();
+            assert!(before.total == 36);
+            for name in ["alpha", "bravo", "charlie", "delta"] {
+                assert!(
+                    before.names.iter().any(|leaf| leaf == name),
+                    "{name} missing"
+                );
+            }
+            drop(engine);
+            Arc::try_unwrap(shared).unwrap_or_else(|_| panic!("sole owner after query"))
+        };
+        let before_total = 36_i64;
+
+        // Second compaction: c1 + c2 -> c3 (both inputs already compacted).
+        let c3 = compact_blocks(
+            &store,
+            &mut index,
+            "t",
+            &[c1.object_key.clone(), c2.object_key.clone()],
+            "blocks/t/c3.parquet",
+        )
+        .await
+        .unwrap();
+        assert!(c3.row_count == 4);
+
+        // After re-compaction every input partition must survive as a distinct
+        // destination partition: four source partitions (two per input block)
+        // must produce four distinct destinations with no aliasing.
+        let final_partitions = index.stacktrace_partitions(&c3.object_key);
+        assert!(final_partitions.len() == 4, "{final_partitions:?}");
+        let distinct: BTreeSet<u64> = final_partitions.iter().copied().collect();
+        assert!(
+            distinct.len() == 4,
+            "partitions aliased: {final_partitions:?}"
+        );
+
+        // Query results unchanged after the second compaction.
+        let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
+        let engine = FlameEngine::new(cold, EngineOpts::default());
+        let after = engine
+            .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
+            .await
+            .unwrap();
+        assert!(after.total == before_total);
+        for name in ["alpha", "bravo", "charlie", "delta"] {
+            assert!(after.names.iter().any(|leaf| leaf == name), "{name} lost");
+        }
+    }
+
+    #[test]
+    fn destination_partitions_rebases_high_bit_partitions_to_dense_local_ids() {
+        // Already-compacted source partitions live in the high bits. Re-basing
+        // them onto a fresh block base must produce dense, collision-free
+        // destinations rather than OR-folding the high bits together.
+        let sources = [1_u64 << 32, 2_u64 << 32, 3_u64 << 32];
+        let map = destination_partitions(1, &sources).unwrap();
+        let base = 2_u64 << 32;
+        assert!(map[&(1_u64 << 32)] == base);
+        assert!(map[&(2_u64 << 32)] == (base | 1));
+        assert!(map[&(3_u64 << 32)] == (base | 2));
+        let dests: BTreeSet<u64> = map.values().copied().collect();
+        assert!(dests.len() == 3);
     }
 
     #[test]
