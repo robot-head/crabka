@@ -16,6 +16,12 @@ categories = ["development-tools::debugging"]
 [lints]
 workspace = true
 
+[features]
+# Heap profiling endpoint via jemalloc. Only fully active on Unix where
+# tikv-jemalloc can be built; on non-Unix the feature flag is accepted but
+# the heap route and jemalloc dep are omitted.
+heap-profiling = []
+
 [dependencies]
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 opentelemetry = { workspace = true, features = ["trace"] }
@@ -25,6 +31,20 @@ tracing-opentelemetry = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 thiserror = { workspace = true }
+axum = { workspace = true, features = ["query", "tokio", "http1"] }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros"] }
+
+# CPU profiling via POSIX signals, and optional heap profiling via jemalloc —
+# both only compile on Unix.
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.15", default-features = false, features = ["prost-codec"] }
+# heap-profiling only: jemalloc_pprof provides PROF_CTL; the global allocator
+# is supplied by each binary binary, not this lib.
+jemalloc_pprof = { version = "0.9", optional = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros", "rt-multi-thread"] }
+axum = { workspace = true, features = ["query", "tokio", "http1"] }

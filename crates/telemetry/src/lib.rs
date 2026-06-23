@@ -36,6 +36,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod profiling;
+
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
