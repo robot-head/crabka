@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, labels,
+    BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
     series_fingerprint, write_log_block, write_log_block_to_object_store, write_log_index_manifest,
     write_tenant_log_index_manifest_to_object_store, write_tenant_log_index_shard_to_object_store,
     write_tenant_log_index_shards_to_object_store,

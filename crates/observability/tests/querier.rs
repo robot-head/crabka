@@ -7,8 +7,8 @@ use std::time::Duration;
 use assert2::assert;
 use async_trait::async_trait;
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, labels, write_log_block,
-    write_log_block_to_object_store,
+    BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
+    write_log_block, write_log_block_to_object_store,
 };
 use crabka_logql::{parse_metric_query, parse_query, plan_stream_query};
 use crabka_observability::{

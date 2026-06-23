@@ -1,6 +1,6 @@
 //! Legacy `POST /ingest` door.
 
-use crabka_blockstore::SeriesLabels as Labels;
+use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 use serde::Deserialize;
 use std::collections::BTreeMap;

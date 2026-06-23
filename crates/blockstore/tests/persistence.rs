@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use assert2::assert;
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockKey, LabelIndex, TimeRange, labels,
+    BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
     log_tenant_index_manifest_object_path, log_tenant_index_shard_catalog_object_path,
     log_tenant_index_shard_manifest_object_path, read_log_index_manifest,
     read_log_index_manifest_from_object_store, read_tenant_log_index_manifest_from_object_store,

@@ -1,6 +1,41 @@
 # crabka-traces Slice 6 — Query-frontend (search sharding + job queueing + fan-out + spanSet/trace merge)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **COMPLETION STATUS (as-built):** Done and green — implemented as the typed
+> `frontend/` module tree this plan prescribes (`wire`/`backend`/`job`/`merge`/
+> `metrics_merge`/`queue`/`config`/`http_backend`/`server` + the `QueryFrontend`
+> orchestrator in `mod.rs`), replacing raw-`serde_json::Value` merging with typed
+> serde wire structs. The role binary's `--target query-frontend` is cut over and
+> the old single-module `query_frontend.rs` is removed. Sharding (time → tier →
+> block → row-group), bounded fan-out, typed merge (`limit` newest-first + `spss`,
+> `matched` preserved), the `metrics{}` accounting, typed metrics/tag merges, and
+> the full Tempo HTTP surface are all present and tested.
+>
+> **Deviations from the literal plan (adapted to the real types/topology):**
+> - **Merge currency is the typed wire structs** (`TraceJson` for search, typed
+>   OTLP-JSON for by-id), not `crabka_traceql::TraceResult`/`TraceSpans`: the real
+>   `SpanRef` is 17 fields while the querier's search JSON is the thin Tempo shape,
+>   and the plan's `TraceSpans` accessors (`merge_in`/`span_ids`/`approx_size_bytes`)
+>   don't exist — so the as-built unions/dedupes/sizes at the wire level (lossless,
+>   no fabricated fields). `From<&crabka_traceql::*>` projections are kept for the
+>   mock backend.
+> - **By-id is frontend-side typed assembly fanned per-querier, not per-block**: the
+>   slice-5 querier reassembles a trace across blocks and exposes no block-scoped
+>   by-id, so the frontend fans one job per querier (different live-stores hold
+>   different recent spans), unions `resourceSpans`, dedupes by `spanID`, and sizes
+>   → COMPLETE/PARTIAL. (This replaces the byte proxy the old module used.)
+> - **`JobShard::Block` carries a `rowGroupStart`/`rowGroupEnd` range** (the real
+>   querier contract), not the plan's `rowGroup: Option<usize>`.
+> - **Error semantics:** search/tags/metrics shards partition the data → any job
+>   error propagates (an invalid query surfaces the querier's `4xx`+body, not a
+>   silent empty `200`); by-id queriers are redundant → tolerate per-querier
+>   failures, propagate only if all fail.
+> - Cross-request admission queueing (a slice-8 hardening concern) is out of scope;
+>   Task 6's bound is the within-request job fan-out, as the plan specifies.
+>
+> The per-step boxes are checked to reflect the built artifacts; read the deviations
+> above where a step's literal detail differs.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build the `query-frontend` role for `crabka-traces` — an axum server that sits in front of N queriers (Slice 5) and (1) **shards** the trace search space into bounded jobs (time: recent live-store vs backend blocks; then per-block; then per-row-group sized ~`target_bytes_per_job`), (2) **queues** those jobs and **fans** them across queriers in parallel through a trait-abstracted `QuerierBackend` with bounded concurrency, (3) **merges** the per-job partials back into one Tempo JSON response while respecting `limit` (traces) and `spss` (spans-per-spanset), and (4) accumulates the `metrics{}` job-accounting block (`totalJobs`/`completedJobs`/`inspectedTraces`/`inspectedBytes`/`totalBlocks`) — all while preserving the Tempo HTTP byte-shapes the querier (Slice 5) exposes. `trace_by_id` fans the same job model (one job per candidate block) and assembles the single trace.
 
@@ -88,7 +123,7 @@
   - `fn hex16(id:&[u8;16]) -> String`, `fn hex8(id:&[u8;8]) -> String` — lowercase hex (the universal cross-signal join key form).
   - `impl From<&crabka_traceql::TraceResult> for TraceJson` — the projection.
 
-- [ ] **Step 1: Add dependencies to `crates/traces/Cargo.toml`**
+- [x] **Step 1: Add dependencies to `crates/traces/Cargo.toml`**
 
 Add to `[dependencies]` (the crate already exists from Slices 4–5; add only what the frontend module needs that is not yet present):
 
@@ -116,7 +151,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 
 > **Workspace-dep verify-note:** `futures`, `async-trait`, `thiserror`, `clap`, `tracing`, `serde_json`, `assert2` are workspace members (see root `Cargo.toml`; the metrics slice-6 plan uses the same set). If `futures` is named `futures-util` only, use `futures-util` and import `stream::{self, StreamExt}` from `futures_util`. If a `workspace = true` line errors with "not a workspace dependency", add the pin to root `[workspace.dependencies]` first (a manifest fix, not a design change). `crabka-traceql` is the Slice-2 crate; if its path differs adjust the `path`.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `crates/traces/src/frontend/wire.rs` with only the test module first:
 
@@ -189,12 +224,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify it fails**
+- [x] **Step 3: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::wire`
 Expected: FAIL — `cannot find type SearchResponseJson` / unresolved module `frontend`.
 
-- [ ] **Step 4: Implement `wire.rs`**
+- [x] **Step 4: Implement `wire.rs`**
 
 Prepend above the `tests` module. The serde shape is the load-bearing part — Tempo serializes `traceID`/`spanID` as lowercase hex strings, nanos as **strings**, `durationMs` as an int, and the `metrics{}` accounting block in camelCase.
 
@@ -368,7 +403,7 @@ impl From<&TraceResult> for TraceJson {
 
 > **`crabka-traceql` import verify-note:** `TraceResult`/`SpanSet`/`SpanRef`/`AttrValue` field names and shapes are the Slice-2 pinned contract (`trace_id:[u8;16]`, `span_id:[u8;8]`, `attributes:Vec<(String,AttrValue)>`, etc.). If Slice 2 is not yet merged, these `From` impls will not compile until it lands — that is the intended dependency edge; do not stub the traceql types locally.
 
-- [ ] **Step 5: Create `frontend/mod.rs` and wire `lib.rs`**
+- [x] **Step 5: Create `frontend/mod.rs` and wire `lib.rs`**
 
 Create `crates/traces/src/frontend/mod.rs`:
 
@@ -391,12 +426,12 @@ Add to `crates/traces/src/lib.rs`:
 pub mod frontend;
 ```
 
-- [ ] **Step 6: Run to verify it passes**
+- [x] **Step 6: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::wire`
 Expected: PASS (3 tests).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -425,7 +460,7 @@ git commit -m "feat(traces): query-frontend Tempo-JSON edge model + metrics acco
 
 > **Ordering note:** Task 2 imports `JobShard` from Task 3's `job.rs`. Implement Task 3's `JobShard` enum (just the enum + its module) *before or alongside* Task 2 so `backend.rs` compiles. The two tasks touch different files (`backend.rs` vs `job.rs`) and can be authored in either order, but `JobShard` must exist when `backend.rs` is first built.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append a test module to `backend.rs`:
 
@@ -475,12 +510,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::backend`
 Expected: FAIL — `cannot find type QuerierBackend` / `MockQuerier` / `SearchPartial`.
 
-- [ ] **Step 3: Implement `backend.rs`**
+- [x] **Step 3: Implement `backend.rs`**
 
 ```rust
 //! The querier-backend abstraction the frontend fans out to, one call per
@@ -681,7 +716,7 @@ impl QuerierBackend for MockQuerier {
 }
 ```
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 ```rust
 pub mod backend;
@@ -692,12 +727,12 @@ pub use backend::{
 };
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::backend`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -723,7 +758,7 @@ git commit -m "feat(traces): QuerierBackend trait + per-job request/partial type
   - `fn plan_search_jobs(blocks:&[BlockMetaInfo], hot_frontier_ns:i64, target_bytes_per_job:u64) -> JobPlan` — emit one `Live` job for the hot window (when `end_ns >= hot_frontier_ns`); for each block overlapping `[start,end]` and older than the frontier, emit one `Block { row_group:None }` job if `size_bytes <= target_bytes_per_job`, else one `Block { row_group:Some(i) }` job per row-group (further splitting a large block into row-group jobs). Time-overlap and frontier filtering happen here.
   - `fn plan_trace_by_id_jobs(blocks:&[BlockMetaInfo], hot_frontier_ns:i64) -> Vec<TraceByIdShard>` where `enum TraceByIdShard { Live, Block(String) }` — one job per candidate block whose `[start,end]` could contain the trace (the bloom test is the querier's job; the frontend enumerates candidates) plus a `Live` job when the window reaches the hot tier.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traces/src/frontend/job.rs` with the test module:
 
@@ -814,12 +849,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::job`
 Expected: FAIL — `cannot find type JobShard` / `plan_search_jobs`.
 
-- [ ] **Step 3: Implement `job.rs`**
+- [x] **Step 3: Implement `job.rs`**
 
 The sharding rule (Tempo's): time first (hot live-store vs cold backend), then block, then — for a block exceeding `target_bytes_per_job` — per-row-group. A whole-block job is `row_group:None`; an oversized block fans into `row_group:Some(i)` jobs. The hot frontier (`hot_frontier_ns`, computed upstream from the committed block-builder offset vs the live-store retention window) decides whether the query window reaches the live tier.
 
@@ -976,7 +1011,7 @@ pub fn plan_trace_by_id_jobs(blocks: &[BlockMetaInfo], hot_frontier_ns: i64) -> 
 
 > **Frontier semantics note:** `hot_frontier_ns` is the *cold-edge* timestamp — data at or after it lives in the live-store (hot) tier, data before it is in committed blocks. The planner probes the `Live` shard whenever the window could reach hot data and emits cold-block jobs for everything the catalog returned (the catalog already filtered to the window). A trace that straddles the frontier (late spans in a new block + recent spans in live) is correctly covered by *both* a block job and the Live job; the merge (Task 5) reunions per `trace_id` so no span is double-counted or lost — this is the hot/cold-merge correctness the spec §10 calls out.
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 ```rust
 pub mod job;
@@ -987,12 +1022,12 @@ pub use job::{
 };
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::job`
 Expected: PASS (5 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1015,7 +1050,7 @@ git commit -m "feat(traces): job planner — time/shard/block/row-group sharding
   - `fn merge_search(partials:Vec<SearchPartial>, limit:usize, spss:usize) -> (Vec<TraceResult>, Metrics)` — union per-job partials by `trace_id` (a trace seen in multiple jobs/blocks merges its spanSets), accumulate `Metrics`, then **truncate**: keep at most `limit` traces (ordered by `start_time_unix_nano` descending — newest first, Tempo's default), and within each kept trace cap each spanSet's `spans` to `spss` (preserving `matched`, which reflects the *true* count before truncation).
   - `fn merge_one_trace(a:TraceResult, b:TraceResult) -> TraceResult` — same-`trace_id` reunion: concatenate `span_sets`, dedupe spans by `span_id` across blocks (the hot/cold + late-span overlap case), keep the earliest `start_time_unix_nano` and the max end (recompute `duration_ms`), prefer a non-empty `root_service_name`/`root_trace_name`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traces/src/frontend/merge.rs` with the test module:
 
@@ -1120,12 +1155,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::merge`
 Expected: FAIL — `cannot find function merge_search`.
 
-- [ ] **Step 3: Implement `merge.rs`**
+- [x] **Step 3: Implement `merge.rs`**
 
 ```rust
 //! Merge per-job search/by-id partials back into one Tempo response, honoring
@@ -1232,7 +1267,7 @@ fn dedupe_spans(span_sets: &mut Vec<SpanSet>) {
 
 > **`matched` semantics note:** Tempo's `matched` is the number of spans in the spanSet *that matched the query*, and it can exceed the number of spans actually returned (which is capped by `spss`). Here `merge_one_trace`/`dedupe_spans` set `matched` to the deduped real count, then `merge_search` truncates `spans` to `spss` **without** touching `matched` — so the wire shows the true match count alongside a capped span list, exactly as Tempo does (pinned by `spss_caps_spans_but_matched_is_true_count`). If Slice-3's TraceQL metrics path computes `matched` differently for pipeline aggregations, that is upstream of this merge; the frontend only re-totals after dedup.
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 ```rust
 pub mod merge;
@@ -1240,12 +1275,12 @@ pub mod merge;
 pub use merge::{merge_one_trace, merge_search};
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::merge`
 Expected: PASS (4 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1271,7 +1306,7 @@ git commit -m "feat(traces): trace/spanSet merge honoring limit+spss + cross-blo
 
 > **`TraceSpans` opacity note:** the Slice-2 contract states `TraceSpans { /* full OTLP resource→scope→spans for one trace */ }` without pinning its internal fields. This task therefore needs a *minimal accessor* on `TraceSpans` to union and size it. **Decision:** assume Slice 2 exposes (or this slice adds, as a `crabka-traceql` PR dependency) `TraceSpans { pub resource_spans: Vec<ResourceSpansJson>, ... }` plus `fn span_ids(&self) -> impl Iterator<Item=[u8;8]>` and `fn approx_size_bytes(&self) -> u64`. If those accessors are absent at authoring time, gate this task: implement `merge_tag_names`/`merge_tag_values` (which need no `TraceSpans` internals) now, and land `assemble_trace` once Slice 2 exposes the accessors. The test below for `assemble_trace` is written against those accessors — **verify against the Slice-2 `TraceSpans` definition before implementing**; do not fabricate fields.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to the `merge.rs` test module:
 
@@ -1322,12 +1357,12 @@ Append to the `merge.rs` test module:
 
 > **Note:** the `assemble_trace` "happy path" test (two blocks each carrying part of the trace → one unioned trace, deduped spans, `Complete`/`Partial` by size) is written in `tests/frontend_trace_by_id_assembly.rs` (Task 9) once the `TraceSpans` accessors are confirmed against Slice 2. The unit test above covers the `None` and metrics-accumulation paths, which need no `TraceSpans` internals.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::merge`
 Expected: FAIL — `cannot find function merge_tag_names` / `assemble_trace`.
 
-- [ ] **Step 3: Implement the additions to `merge.rs`**
+- [x] **Step 3: Implement the additions to `merge.rs`**
 
 Add above the `tests` module:
 
@@ -1452,16 +1487,16 @@ fn scope_key(scope: &TagScope) -> &'static str {
 
 > **`TraceSpans` accessor verify-note (the dependency edge):** `assemble_trace` calls `TraceSpans::merge_in(other, &mut seen)`, `TraceSpans::span_ids()`, and `TraceSpans::approx_size_bytes()`. These are **not** in the Slice-2 contract as pinned (which leaves `TraceSpans` opaque). Before implementing, **verify the real `TraceSpans` surface in `crabka-traceql`** and either (a) use the accessors it provides, or (b) add these three methods to `crabka-traceql` as a small companion PR (the merge logic belongs at the frontend, but the span-id/size introspection belongs with the type). Do not duplicate OTLP-decoding here. `merge_tag_names`/`merge_tag_values` have no such dependency and are fully implemented above.
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 Extend the merge re-export: `pub use merge::{TraceStatus, assemble_trace, merge_one_trace, merge_search, merge_tag_names, merge_tag_values};`.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::merge`
 Expected: PASS (the tag-union + `None`/metrics tests; the `assemble_trace` happy-path lands in Task 9 against confirmed accessors).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1482,7 +1517,7 @@ git commit -m "feat(traces): trace-by-id assembly (v2 PARTIAL/COMPLETE) + tag-un
 - Produces:
   - `async fn run_jobs<T, F, Fut>(jobs:Vec<T>, max_concurrency:usize, run:F) -> Vec<R>` where `F: Fn(T) -> Fut`, `Fut: Future<Output = R>` — drive `jobs` through a bounded-concurrency fan-out (`futures::stream::iter(...).map(run).buffer_unordered(max_concurrency).collect()`), preserving **no** ordering guarantee (results come back in completion order; callers key results by `trace_id`/job identity, never by position). `max_concurrency.max(1)` clamps a zero.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `crates/traces/src/frontend/queue.rs` with the test module:
 
@@ -1532,12 +1567,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::queue`
 Expected: FAIL — `cannot find function run_jobs`.
 
-- [ ] **Step 3: Implement `queue.rs`**
+- [x] **Step 3: Implement `queue.rs`**
 
 ```rust
 //! Bounded-concurrency fan-out of planned jobs across queriers. Results return
@@ -1565,7 +1600,7 @@ where
 
 > **`buffer_unordered` verify-note:** `futures::stream::iter(...).map(closure).buffer_unordered(n).collect::<Vec<_>>().await` is the standard bounded-fan-out idiom (`futures` 0.3 surface). `buffer_unordered` polls up to `n` futures concurrently and yields results as they complete — order is non-deterministic, which is why the merge (Tasks 4–5) keys on `trace_id`/`(type,value)` and never on index. If the workspace exposes `futures_util` rather than `futures`, change the import to `futures_util::stream::{self, StreamExt}`; the call is identical. The `runs_all_jobs_with_bounded_concurrency` test pins both the all-results invariant and the concurrency bound.
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 ```rust
 pub mod queue;
@@ -1573,12 +1608,12 @@ pub mod queue;
 pub use queue::run_jobs;
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::queue`
 Expected: PASS (2 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1604,7 +1639,7 @@ git commit -m "feat(traces): bounded-concurrency job fan-out queue"
   - `async fn trace_by_id(&self, tenant, trace_id, start_ns, end_ns) -> (Option<TraceSpans>, Metrics, TraceStatus)` — catalog → `plan_trace_by_id_jobs` → `run_jobs` (per-shard `trace_by_id_job`) → `assemble_trace`.
   - `fn backend_ref(&self) -> &B` (test accessor).
 
-- [ ] **Step 1: Write the failing test (fan-out counts + merge wiring)**
+- [x] **Step 1: Write the failing test (fan-out counts + merge wiring)**
 
 Add to `mod.rs` under `#[cfg(test)] mod orch_tests`:
 
@@ -1721,12 +1756,12 @@ mod orch_tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --lib frontend::orch_tests`
 Expected: FAIL — `cannot find type FrontendConfig` / `QueryFrontend`.
 
-- [ ] **Step 3: Implement `config.rs`**
+- [x] **Step 3: Implement `config.rs`**
 
 ```rust
 //! Query-frontend configuration.
@@ -1778,7 +1813,7 @@ impl Default for FrontendConfig {
 }
 ```
 
-- [ ] **Step 4: Implement the `QueryFrontend` orchestrator in `mod.rs`**
+- [x] **Step 4: Implement the `QueryFrontend` orchestrator in `mod.rs`**
 
 ```rust
 pub mod config;
@@ -1910,12 +1945,12 @@ use crate::frontend::{job, merge, queue};
 
 > **Suppressed-error note:** failed jobs degrade to empty partials (`unwrap_or_else`) so one slow/broken querier does not fail the whole search — Tempo's partial-results behavior. A future hardening slice can surface a `partial: true` flag / per-job error list; not in scope here.
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --lib frontend::orch_tests`
 Expected: PASS (2 tests).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -1941,7 +1976,7 @@ git commit -m "feat(traces): QueryFrontend orchestrator (plan+queue+fan-out+merg
 
 This is a churn-prone surface (reqwest + the querier's exact Tempo HTTP contract). It is **structure + behavior-pinning**: a loopback axum-stub test (reuses the crate's own axum dep, no new dev-dep) verifies the request shape (path, `blockID`, `X-Scope-OrgID`) and response parsing.
 
-- [ ] **Step 1: Write the failing test (stub querier over loopback)**
+- [x] **Step 1: Write the failing test (stub querier over loopback)**
 
 Create `crates/traces/tests/frontend_http_backend.rs`:
 
@@ -2028,12 +2063,12 @@ async fn http_querier_search_job_posts_and_parses() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --test frontend_http_backend`
 Expected: FAIL — `cannot find type HttpQuerier`.
 
-- [ ] **Step 3: Implement `http_backend.rs`**
+- [x] **Step 3: Implement `http_backend.rs`**
 
 ```rust
 //! The real querier fan-out backend: a reqwest client round-robining over a
@@ -2356,7 +2391,7 @@ fn parse_hex16(s: &str) -> [u8; 16] {
 
 > **reqwest 0.13 + Tempo-contract verify-note (the churn surface):** `Client::builder().timeout(..).build()`, `.get(url).header(..).query(&[(&str, String)]).send().await`, `Response::json::<T>().await`, and `reqwest::Error::is_timeout()` are reqwest 0.13 surface (already used in grpc-gateway's `forward.rs` with `json`+`rustls`). The loopback-stub test pins the **search** request shape (path, `blockID`/`shard`, `X-Scope-OrgID`) and response parse; fix any method drift against 0.13. The **trace-by-id** parse (`TraceByIdBody.trace: Option<TraceSpans>`) depends on Slice-2's `TraceSpans: Deserialize` — VERIFY that `TraceSpans` derives `Deserialize` from the v2 `{ trace: { resourceSpans:[...] } }` shape; if it does not, the `trace_by_id_job` deserialization and the `frontend_trace_by_id_assembly.rs` test (Task 9) are gated on a companion `crabka-traceql` change. The Slice-5 querier's exact param names (`blockID`/`shard`/`rowGroup`) are the assumed contract — if Slice 5 spells them differently, this file is the single edit point (the test pins behavior, not the spelling).
 
-- [ ] **Step 4: Re-export from `mod.rs`**
+- [x] **Step 4: Re-export from `mod.rs`**
 
 ```rust
 pub mod http_backend;
@@ -2364,12 +2399,12 @@ pub mod http_backend;
 pub use http_backend::HttpQuerier;
 ```
 
-- [ ] **Step 5: Run to verify it passes**
+- [x] **Step 5: Run to verify it passes**
 
 Run: `cargo test -p crabka-traces --test frontend_http_backend`
 Expected: PASS (the search-job loopback test; trace-by-id loopback is exercised in Task 9 once `TraceSpans: Deserialize` is confirmed).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2389,7 +2424,7 @@ git commit -m "feat(traces): HttpQuerier reqwest fan-out backend (per-job Tempo 
 **Interfaces:**
 - Consumes the public `frontend` API end-to-end with `MockQuerier` + `MockCatalog`.
 
-- [ ] **Step 1: Shard-equivalence test (`frontend_shard_equivalence.rs`)**
+- [x] **Step 1: Shard-equivalence test (`frontend_shard_equivalence.rs`)**
 
 The first-class correctness concern: a search sharded across N jobs (Live + per-block + per-row-group) equals the unsharded search over the same data — same trace set, `limit`/`spss` honored identically. The mock returns, for each job, the partial that shard would contribute; the assertion is that the merged result equals the hand-computed union.
 
@@ -2519,7 +2554,7 @@ async fn limit_and_spss_applied_after_merge() {
 
 > **Mock-stub ordering caveat:** `MockQuerier` pops stubs FIFO. The equivalence test sets `max_concurrency = 1` so dispatch order is the deterministic plan order `[Live, b1, b2-rg0, b2-rg1]`, matching the stub order. With higher concurrency the FIFO-vs-`buffer_unordered` pairing is nondeterministic; for a concurrent equivalence test, upgrade `MockQuerier` to match on `SearchJobRequest.shard` (return the partial keyed by block/row-group) — a small fixture upgrade flagged here, not needed for this deterministic test.
 
-- [ ] **Step 2: Trace-by-id-assembly test (`frontend_trace_by_id_assembly.rs`)**
+- [x] **Step 2: Trace-by-id-assembly test (`frontend_trace_by_id_assembly.rs`)**
 
 A trace split across two blocks (late spans) reassembles into one v2 trace. **Gated on the Slice-2 `TraceSpans` accessors** (`merge_in`/`span_ids`/`approx_size_bytes` + `Deserialize`); if those are not yet available, land this test in the same PR as the `crabka-traceql` companion change.
 
@@ -2573,12 +2608,12 @@ async fn trace_split_across_blocks_reassembles() {
 }
 ```
 
-- [ ] **Step 3: Run to verify they pass**
+- [x] **Step 3: Run to verify they pass**
 
 Run: `cargo test -p crabka-traces --test frontend_shard_equivalence --test frontend_trace_by_id_assembly`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cargo fmt -p crabka-traces
@@ -2603,7 +2638,7 @@ git commit -m "test(traces): frontend shard-equivalence + trace-by-id assembly"
   - `async fn run_query_frontend(cfg:FrontendConfig, shutdown:CancellationToken) -> std::io::Result<()>` — build the `HttpQuerier` pool + an `HttpCatalog` (Slice-5 block-metadata door), bind `cfg.listen_addr`, serve.
   - The binary's `--target query-frontend` arm calls `run_query_frontend`.
 
-- [ ] **Step 1: Write the failing handler test**
+- [x] **Step 1: Write the failing handler test**
 
 Create `crates/traces/tests/frontend_server.rs` — boot the frontend router against a `MockQuerier`+`MockCatalog`-backed `QueryFrontend` over loopback and assert `/api/search` round-trips with tenant + `limit`/`spss`, and `/api/echo` returns `echo`.
 
@@ -2680,12 +2715,12 @@ async fn server_round_trips_search_and_echo() {
 
 > Because the concrete `QueryFrontend` type parameters differ between the test (`MockQuerier`+`MockCatalog`) and production (`HttpQuerier`+`HttpCatalog`), the router is generic: `router_with_backend<B: QuerierBackend + 'static, C: BlockCatalog + 'static>(qf: Arc<QueryFrontend<B, C>>) -> Router`. Production `run_query_frontend` binds the concrete prod types.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo test -p crabka-traces --test frontend_server`
 Expected: FAIL — `cannot find function router_with_backend`.
 
-- [ ] **Step 3: Implement `server.rs`**
+- [x] **Step 3: Implement `server.rs`**
 
 ```rust
 //! axum HTTP surface for the query-frontend: the Tempo query endpoints, tenant
@@ -2830,7 +2865,7 @@ This task uses two small accessors on `QueryFrontend` — add them to the impl i
     }
 ```
 
-- [ ] **Step 4: Implement an `HttpCatalog` + `run_query_frontend` + the role binary**
+- [x] **Step 4: Implement an `HttpCatalog` + `run_query_frontend` + the role binary**
 
 Add an `HttpCatalog` (the production `BlockCatalog`) to `http_backend.rs`:
 
@@ -2976,13 +3011,13 @@ Ensure `Target` (the `clap::ValueEnum`) has a `QueryFrontend` variant; add it if
 
 > **Binary-config note:** this slice wires the role *dispatch* and a working `HttpQuerier`/`HttpCatalog` from the default config. Real config loading (querier addresses, `target_bytes_per_job`, `max_concurrency`, the per-partition `hot_frontier_ns` from the live-store/block-builder offsets, the listen addr) lands in Slice 8 hardening. The server test targets the library router, not the binary, so the default config suffices to pass.
 
-- [ ] **Step 5: Run to verify it passes + whole-crate gate**
+- [x] **Step 5: Run to verify it passes + whole-crate gate**
 
 Run: `cargo test -p crabka-traces --test frontend_server`
 Then the full gate: `cargo test -p crabka-traces && cargo clippy -p crabka-traces --all-targets && cargo fmt -p crabka-traces --check`
 Expected: all PASS, no warnings, formatting clean. Also confirm the binary builds: `cargo build -p crabka-traces --bin crabka-traces`.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/traces/

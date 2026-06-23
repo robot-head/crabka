@@ -11,7 +11,7 @@ pub mod split;
 
 use std::collections::BTreeMap;
 
-use crabka_blockstore::SeriesLabels as Labels;
+use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 use serde::{Deserialize, Serialize};
 
@@ -239,7 +239,7 @@ fn remove_label(labels: &mut Labels, target: &str) {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_blockstore::SeriesLabels as Labels;
+    use crabka_blockstore::Labels;
 
     use super::*;
 

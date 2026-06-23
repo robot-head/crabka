@@ -136,6 +136,38 @@ exclude_re = [
     # modules themselves.
     "schema-serde/src/format/(avro|json|protobuf)\\.rs",
     "schema-serde/src/format/mod\\.rs.*Binding::register",
+    # --- traces signal (crabka-traceql / crabka-blockstore) equivalent mutants ---
+    # lexer `prev` is only ever read as `prev == Prev::Dot` (lexer.rs:127), so
+    # mapping a `Token::Ident` to `Prev::Ident` rather than the `_ => Prev::Other`
+    # fallthrough is indistinguishable downstream. Every other op-token arm IS
+    # mutation-tested.
+    "traceql/src/lexer\\.rs.*delete match arm Token::Ident\\(_\\) in lex",
+    # `scan_number_or_duration` consumes a `.` only when the NEXT char is a digit
+    # (`chars.nth(1).is_some_and(is_digit)`), and that digit is then consumed on
+    # the following iteration, overwriting `end`. So `end = idx + 1` vs `idx * 1`
+    # (= idx) at the dot is never observable — the trailing digit always resets
+    # `end`. The `&&` guards on those same lines ARE mutation-tested.
+    "traceql/src/lexer\\.rs.*replace \\+ with \\* in scan_number_or_duration",
+    # `usize_from_integer_f64` rejects non-finite/negative/fractional inputs; the
+    # `||` -> `&&` rewrites of that validation guard still yield `Err` for every
+    # differing input (the subsequent `to_string().parse()` fails on it), so the
+    # observable `Result` is unchanged. The `<` boundary checks ARE mutation-tested.
+    "traceql/src/engine\\.rs.*replace \\|\\| with && in usize_from_integer_f64",
+    # `metric_label_value`'s Utf8 type guard: a non-string dictionary that skips
+    # the guard still `Err`s downstream (`string_array_value` recurses into the
+    # dictionary's non-Utf8 values and returns None -> Err), identical to the
+    # guarded path that falls straight through to `Err`.
+    "traceql/src/engine\\.rs.*replace match guard .* in metric_label_value",
+    # `assign_nested_set` self-parent guard (`parent_idx != i`): a self-parented
+    # span pushed into its own children list is inert — it is marked visited
+    # before its children are walked, and the unreached-node sweep re-seeds every
+    # span regardless, so the nested-set output is identical with the guard true.
+    "blockstore/src/nested_set\\.rs.*replace match guard parent_idx != i with true in assign_nested_set",
+    # `new_str_list` / `new_str_list_list` only choose a builder *constructor*
+    # (`new` vs `from`, default capacity); the produced column's schema and values
+    # are identical regardless, so the difference is unobservable. The promoted
+    # column CONTENTS are mutation-tested via the append/promote tests.
+    "blockstore/src/span_block\\.rs.*replace new_str_list(_list)? ->",
     # NB: `crates/broker/src/bin/**` (the broker entrypoint, incl. its
     # `BrokerConfig` field wiring and `wait_for_termination_signal`) is excluded
     # via `exclude_globs` above — name-regex exclusions don't reliably match the

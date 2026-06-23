@@ -40,6 +40,7 @@ jobs:
       broker_jvm: ${{ steps.filter.outputs.broker_jvm }}
       broker_integration: ${{ steps.filter.outputs.broker_integration }}
       doc_examples: ${{ steps.filter.outputs.doc_examples }}
+      traces: ${{ steps.filter.outputs.traces }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -178,6 +179,19 @@ jobs:
               - 'crates/records-legacy/**'
               - 'crates/remote-storage/**'
               - 'crates/security/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.config/nextest.toml'
+              - '.github/workflows/ci.yml'
+            traces:
+              - 'crates/traces/**'
+              - 'crates/traceql/**'
+              - 'crates/blockstore/**'
+              - 'crates/broker/**'
+              - 'crates/client-consumer/**'
+              - 'crates/client-producer/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.config/nextest.toml'
@@ -677,6 +691,57 @@ jobs:
           flags: schema-registry-integration
           fail_ci_if_error: false
 
+  # crabka-traces TraceQL conformance gate: replays the curated TraceQL golden
+  # corpus through the crabka-traceql harness and fails on any unexpected
+  # regression. Docker-free (the differential-vs-Tempo + Grafana suites are
+  # `#[ignore]`'d and run only in the scheduled/labeled `traces-differential`
+  # job, never in the default `cargo test --workspace`). The `unit` flag's
+  # `--lib --bins` walk never descends into this `tests/` binary, so this job is
+  # the only PR-time coverage for the conformance harness. The conformance
+  # report is uploaded as an artifact for inspection.
+  traces-conformance:
+    needs: changes
+    if: ${{ needs.changes.outputs.traces == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: traces-conformance
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+      - name: TraceQL conformance gate coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov nextest -p crabka-traces -p crabka-traceql --profile ci --tests --lcov --output-path coverage/traces-conformance.lcov -- --nocapture
+      - name: Upload TraceQL conformance report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: traceql-conformance-report
+          path: target/traceql-conformance-report.txt
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/traces-conformance.lcov
+          disable_search: true
+          flags: traces-conformance
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: traces-conformance
+          fail_ci_if_error: false
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See
@@ -981,6 +1046,7 @@ jobs:
       - doc-examples
       - grpc-gateway-integration
       - schema-registry-integration
+      - traces-conformance
       - broker-jvm-acceptance
       - broker-integration
       - operator-integration

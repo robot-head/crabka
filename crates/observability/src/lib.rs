@@ -25,9 +25,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockKey, BlockStoreError, LabelIndex, Labels, LogRow,
-    SeriesFingerprint, TimeRange, read_log_block, read_log_block_from_object_store,
-    read_log_index_manifest, read_tenant_log_index_manifest_from_object_store,
+    BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex,
+    LogBlockStoreError as BlockStoreError, LogLabels as Labels, LogRow,
+    LogSeriesFingerprint as SeriesFingerprint, TimeRange, read_log_block,
+    read_log_block_from_object_store, read_log_index_manifest,
+    read_tenant_log_index_manifest_from_object_store,
     read_tenant_log_index_shard_from_object_store,
     read_tenant_log_index_shard_ranges_from_object_store,
     read_tenant_log_index_shards_from_object_store, register_log_blocks,

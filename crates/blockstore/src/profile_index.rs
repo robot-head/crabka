@@ -12,7 +12,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockMeta;
-use crate::block_index::SignalBlockIndex;
+use crate::block_index::BlockIndex;
 use crate::error::Result;
 use crate::index::SeriesIndex;
 use crate::labels::{Labels, SeriesFingerprint};
@@ -326,17 +326,17 @@ impl ProfileIndex {
     }
 }
 
-impl SignalBlockIndex for ProfileIndex {
+impl BlockIndex for ProfileIndex {
     fn add_block(&mut self, meta: &BlockMeta) {
-        SignalBlockIndex::add_block(&mut self.series, meta);
+        BlockIndex::add_block(&mut self.series, meta);
     }
 
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String> {
-        SignalBlockIndex::candidate_blocks(&self.series, tenant, min_ts, max_ts)
+        BlockIndex::candidate_blocks(&self.series, tenant, min_ts, max_ts)
     }
 
     fn block_count(&self, tenant: &str) -> usize {
-        SignalBlockIndex::block_count(&self.series, tenant)
+        BlockIndex::block_count(&self.series, tenant)
     }
 }
 
@@ -462,7 +462,7 @@ mod tests {
 
         assert!(index.stacktrace_partitions("old.parquet").is_empty());
         assert!(index.stacktrace_partitions("new.parquet") == vec![99]);
-        assert!(SignalBlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
+        assert!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
     }
 
     #[tokio::test]

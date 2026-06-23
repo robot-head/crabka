@@ -100,7 +100,7 @@ pub async fn process_raw(
                 labels: profile
                     .labels
                     .iter()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .map(|(name, value)| (name.clone(), value.clone()))
                     .collect(),
                 profile_type: profile.profile_type,
                 samples: profile
@@ -677,7 +677,7 @@ mod tests {
     async fn push_normalizes_pprof_symbol_ids_to_wal_indices() {
         let sink = Arc::new(RecordingSink::default());
         let state = state_with(sink.clone());
-        let mut labels = crabka_blockstore::SeriesLabels::new();
+        let mut labels = crabka_blockstore::Labels::new();
         labels.insert("__name__", "samples");
         labels.insert("service_name", "api");
         let profile = PprofProfile::from(crabka_pprof::proto::Profile {

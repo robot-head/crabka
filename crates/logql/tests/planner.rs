@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use assert2::assert;
-use crabka_blockstore::{BlockDescriptor, BlockIndex, BlockKey, LabelIndex, TimeRange, labels};
+use crabka_blockstore::{
+    BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
+};
 use crabka_logql::{LineFilterOp, PipelineStage, parse_query, plan_stream_query};
 
 #[test]

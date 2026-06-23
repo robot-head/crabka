@@ -1,0 +1,38 @@
+# Negated structural operators (!>>, !<<, !>, !<).
+# Negated ops return right-hand spans that have NO matching left-hand span,
+# trace-isolated. Derived against the shared testkit fixture tree
+# (trace 1: span1->{span2,span3}, span2->span4).
+
+name: neg_descendant_keeps_unrelated_rhs
+kind: search
+query: { .svc = "c" } !>> { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: neg_descendant_drops_matched_rhs
+kind: search
+query: { .svc = "a" } !>> { .svc = "c" }
+expect_trace_ids:
+expect_span_ids:
+
+---
+name: neg_ancestor_keeps_rhs_without_descendant
+kind: search
+query: { .svc = "c" } !<< { .svc = "a" }
+expect_trace_ids: 3
+expect_span_ids: 1
+
+---
+name: neg_child_keeps_unrelated_rhs
+kind: search
+query: { .svc = "c" } !> { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3
+
+---
+name: neg_parent_keeps_unrelated_rhs
+kind: search
+query: { .svc = "a" } !< { .svc = "b" }
+expect_trace_ids: 1
+expect_span_ids: 2,3

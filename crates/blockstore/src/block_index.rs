@@ -1,11 +1,11 @@
-//! Pluggable per-signal block index declarations.
+//! Pluggable per-signal block index and schema declaration.
 
 use arrow::datatypes::DataType;
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::block::{BlockMeta, COL_FINGERPRINT, COL_TIMESTAMP};
+use crate::block::BlockMeta;
 
-/// One required column in a signal's block schema.
+/// One required column in a signal block schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequiredColumn {
     pub name: String,
@@ -24,31 +24,32 @@ impl RequiredColumn {
     }
 }
 
-/// A signal's block schema declaration: required columns plus row sort key.
+/// A signal's declared block schema and sort key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockSchema {
     pub required: Vec<RequiredColumn>,
     pub sort_key: Vec<String>,
 }
 
-/// The logs/metrics series block declaration.
+/// The logs/metrics block declaration.
 #[must_use]
 pub fn series_block_schema() -> BlockSchema {
     BlockSchema {
         required: vec![
-            RequiredColumn::new(COL_FINGERPRINT, DataType::UInt64, false),
-            RequiredColumn::new(COL_TIMESTAMP, DataType::Int64, false),
+            RequiredColumn::new(crate::block::COL_FINGERPRINT, DataType::UInt64, false),
+            RequiredColumn::new(crate::block::COL_TIMESTAMP, DataType::Int64, false),
         ],
-        sort_key: vec![COL_FINGERPRINT.to_string(), COL_TIMESTAMP.to_string()],
+        sort_key: vec![
+            crate::block::COL_FINGERPRINT.to_string(),
+            crate::block::COL_TIMESTAMP.to_string(),
+        ],
     }
 }
 
-/// Shared surface every per-signal block index exposes to `BlockStore`.
-pub trait SignalBlockIndex: Default + Serialize + DeserializeOwned {
+/// Signal-specific index seam.
+pub trait BlockIndex: Default + Serialize + DeserializeOwned {
     fn add_block(&mut self, meta: &BlockMeta);
-
     fn candidate_blocks(&self, tenant: &str, min_ts: i64, max_ts: i64) -> Vec<String>;
-
     fn block_count(&self, tenant: &str) -> usize;
 }
 

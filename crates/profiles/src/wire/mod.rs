@@ -83,7 +83,7 @@ pub mod pb {
 
 #[cfg(test)]
 pub(crate) mod test_fixtures {
-    use crabka_blockstore::SeriesLabels as Labels;
+    use crabka_blockstore::Labels;
     use crabka_pprof::PprofProfile;
     pub(crate) fn cpu_profile_pprof_bytes() -> Vec<u8> {
         cpu_profile().encode()

@@ -3,7 +3,7 @@
 //! This is not a profiles query language. It only parses the matcher subset
 //! carried in Pyroscope/Grafana requests.
 
-use crabka_blockstore::{LabelMatcher, SeriesMatchOp as MatchOp};
+use crabka_blockstore::{LabelMatcher, MatchOp};
 use regex::Regex;
 
 use crate::error::ProfileError;
@@ -128,7 +128,7 @@ fn unescape_quoted(input: &str) -> Result<String, ProfileError> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_blockstore::SeriesMatchOp as MatchOp;
+    use crabka_blockstore::MatchOp;
 
     use super::*;
 

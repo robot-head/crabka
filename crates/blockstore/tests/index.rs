@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use assert2::assert;
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockKey, LabelIndex, LabelPredicate, MatchOp, TimeRange, labels,
-    series_fingerprint,
+    BlockDescriptor, BlockKey, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
+    LogMatchOp as MatchOp, TimeRange, labels, series_fingerprint,
 };
 
 #[test]

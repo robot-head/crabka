@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use crabka_blockstore::{
-    BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, labels, log_block_object_path,
-    read_log_block, read_log_block_from_object_store, read_log_index_manifest,
-    read_tenant_log_index_manifest_from_object_store,
+    BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
+    log_block_object_path, read_log_block, read_log_block_from_object_store,
+    read_log_index_manifest, read_tenant_log_index_manifest_from_object_store,
     read_tenant_log_index_shard_from_object_store,
     read_tenant_log_index_shard_ranges_from_object_store,
     read_tenant_log_index_shards_from_object_store, series_fingerprint, write_log_block,

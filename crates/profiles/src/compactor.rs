@@ -453,7 +453,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_blockstore::{SeriesLabels as Labels, SignalBlockIndex};
+    use crabka_blockstore::{BlockIndex, Labels};
     use crabka_pprof::{EngineOpts, FlameEngine};
     use object_store::ObjectStore;
     use object_store::memory::InMemory;
@@ -500,7 +500,7 @@ mod tests {
 
         assert!(meta.row_count == 2);
         assert!(
-            index.candidate_blocks("t", 0, i64::MAX) == vec![meta.object_key.clone()]
+            BlockIndex::candidate_blocks(&index, "t", 0, i64::MAX) == vec![meta.object_key.clone()]
         );
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
         let engine = FlameEngine::new(cold, EngineOpts::default());

@@ -12,7 +12,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, LabelIndex, labels, write_log_index_manifest,
+    BlockDescriptor, LabelIndex, LogBlockIndex as BlockIndex, labels, write_log_index_manifest,
 };
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{

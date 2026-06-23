@@ -11,7 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use assert2::assert;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use crabka_blockstore::{BlockIndex, BlockKey, LabelIndex, LogRow, TimeRange, write_log_block};
+use crabka_blockstore::{
+    BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, write_log_block,
+};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_observability::{

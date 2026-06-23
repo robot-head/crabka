@@ -17,8 +17,9 @@ use base64::prelude::BASE64_STANDARD;
 use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use crabka_blockstore::{
-    BlockDescriptor, BlockIndex, BlockStoreError, LabelIndex, LabelPredicate,
-    MatchOp as BlockMatchOp, SeriesFingerprint, TimeRange,
+    BlockDescriptor, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
+    LogBlockStoreError as BlockStoreError, LogMatchOp as BlockMatchOp,
+    LogSeriesFingerprint as SeriesFingerprint, TimeRange,
 };
 use regex::{NoExpand, Regex};
 use thiserror::Error;

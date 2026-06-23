@@ -1,12 +1,13 @@
 [package]
 name = "crabka-blockstore"
+# Not published: depends on a git pin of datafusion, which crates.io disallows.
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
-publish = false
-description = "Signal-agnostic columnar block store (Parquet on object storage + label/series index + DataFusion query) for Crabka observability"
+description = "Signal-agnostic columnar block store for Crabka observability"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-blockstore"
