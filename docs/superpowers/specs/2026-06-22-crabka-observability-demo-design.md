@@ -273,6 +273,35 @@ One multi-stage `demo/observability/Dockerfile` that `cargo build --release
 Compose selects role/binary per service via `command:`. Build retains debug
 symbols for readable profiles.
 
+### 5.5 Packaging & publish flags
+
+`release-plz` publishes workspace crates to crates.io. The demo crate and the
+observability **backend** crates must never be published; this work makes that
+explicit. Dependency direction was checked so no publishable product crate
+(broker, cli, operator, rebalancer, grpc-gateway, schema-registry, audit) breaks.
+
+- **New crate** `crates/observability-demo-app` → `publish = false`.
+- **New `crabka-logs` binary** lives in `crabka-observability` (already
+  `publish = false`); if instead a separate wrapper crate, that wrapper is
+  `publish = false`.
+- **Flip to `publish = false`** (currently publishable; every dependent is itself
+  an observability crate — verified no product crate depends on them):
+  `crabka-metrics`, `crabka-metrics-service`, `crabka-promql`, `crabka-logql`,
+  and `crabka-observability-spike`.
+- **Already `publish = false`** (no change): `crabka-observability`,
+  `crabka-traces`, `crabka-traceql`, `crabka-profiles`, `crabka-pprof`,
+  `crabka-blockstore`.
+- **Deliberately kept publishable** — shared instrumentation/util/core libs that
+  publishable product binaries depend on, *not* observability backends:
+  - `crabka-telemetry` — `crabka-broker` + `crabka-grpc-gateway` depend on it.
+  - `crabka-logfmt` — "structured-JSON tracing log formatter shared across Crabka
+    services"; `operator`/`replicator`/`schema-registry`/`telemetry` depend on it.
+  - `crabka-log` — core partition-log storage; `broker`/`raft`/`audit` depend on
+    it (named log-* but unrelated to logs observability).
+
+Net effect: the LGTM+P backends and the demo are non-publishable, while the
+shared libs product binaries rely on stay intact.
+
 ## 6. Signal routing (end to end)
 
 | Signal | Source emits | Alloy stage | Backend ingest | Backend query | Grafana DS |
