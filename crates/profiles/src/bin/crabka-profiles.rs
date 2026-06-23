@@ -4,6 +4,15 @@
     clippy::too_many_lines
 )]
 
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -22,6 +31,7 @@ use crabka_profiles::ingest::{RelabelConfig, TenantLimitConfig};
 use crabka_profiles::limits::OverridesProvider;
 use crabka_profiles::query::{QuerierState, serve as serve_querier};
 use crabka_profiles::query_frontend::FrontendConfig;
+use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 
@@ -95,10 +105,18 @@ fn build_object_store(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init()
-        .ok();
+    let _telemetry = crabka_telemetry::init(
+        OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "crabka-profiles",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-profiles",
+        ),
+        "crabka_profiles=info,info",
+        "info",
+        "crabka-profiles",
+    )?;
+    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
     let cli = Cli::parse();
     match cli.target {

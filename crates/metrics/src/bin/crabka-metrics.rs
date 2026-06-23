@@ -1,3 +1,12 @@
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +24,7 @@ use crabka_metrics::distributor::{
     run_ha_election_consumer_loop, serve,
 };
 use crabka_metrics::{MetricsCompactorConfig, run_compactor_consumer_loop};
+use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -73,10 +83,18 @@ fn build_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, Box<dyn std::er
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init()
-        .ok();
+    let _telemetry = crabka_telemetry::init(
+        OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "crabka-metrics",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-metrics",
+        ),
+        "crabka_metrics=info,info",
+        "info",
+        "crabka-metrics",
+    )?;
+    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
     let cli = Cli::parse();
     if !runnable_targets().contains(&cli.target) {

@@ -3,6 +3,15 @@
 // awaits in the PromQL operator-path evaluation); the default limit is too low.
 #![recursion_limit = "256"]
 
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,6 +29,7 @@ use crabka_metrics_service::{
 use crabka_promql::{
     EngineOpts, PrometheusApiState, QueryFrontendOptions, RulerShard, WalHead, prometheus_router,
 };
+use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
 
 #[derive(Debug, Parser)]
@@ -74,10 +84,18 @@ enum Target {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init()
-        .ok();
+    let _telemetry = crabka_telemetry::init(
+        OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "metrics-service",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-metrics-service",
+        ),
+        "crabka_metrics_service=info,info",
+        "info",
+        "crabka-metrics-service",
+    )?;
+    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
 
     let cli = Cli::parse();
     match cli.target {

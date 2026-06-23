@@ -1,3 +1,12 @@
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(all(unix, feature = "heap-profiling"))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
+
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -7,6 +16,7 @@ use clap::{ArgAction, Parser, ValueEnum};
 use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
+use crabka_telemetry::OtlpConfig;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
 use crabka_traces::{
     LiveStore, TRACES_WAL_TOPIC, blockbuilder,
@@ -163,6 +173,19 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _telemetry = crabka_telemetry::init(
+        OtlpConfig::from_env(
+            |k| std::env::var(k).ok(),
+            "crabka-traces",
+            env!("CARGO_PKG_VERSION"),
+            "crabka-traces",
+        ),
+        "crabka_traces=info,info",
+        "info",
+        "crabka-traces",
+    )?;
+    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+
     let shutdown = CancellationToken::new();
     let shutdown_task = shutdown.clone();
     tokio::spawn(async move {

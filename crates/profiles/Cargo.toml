@@ -17,6 +17,9 @@ categories = ["database-implementations"]
 [lints]
 workspace = true
 
+[features]
+heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
+
 [dependencies]
 arrow = { workspace = true }
 datafusion = { workspace = true }
@@ -47,10 +50,14 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 url = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-pprof = { path = "../pprof", version = "0.3.7" }
+crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.8" }
 crabka-broker = { path = "../broker", version = "0.3.8" }
+
+[target.'cfg(unix)'.dependencies]
+tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true }
