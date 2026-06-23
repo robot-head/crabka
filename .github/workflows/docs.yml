@@ -216,19 +216,22 @@ jobs:
           # `--exclude cwiki.apache.org`: the GitHub-hosted runners have no
           # network egress to the Apache wiki, so the canonical Kafka KIP links
           # report a hard "Network unreachable" and cannot be validated here.
-          # `--exclude (localhost|127.0.0.1)`: the demo READMEs document local
-          # service URLs (Grafana on :3000, the per-signal queriers, etc.) that
-          # are only reachable while the demo stack is running — never in CI.
+          # `--exclude localhost` / `--exclude 127.0.0.1`: the demo READMEs
+          # document local service URLs (Grafana on :3000, the per-signal
+          # queriers, etc.) only reachable while the demo stack is running —
+          # never in CI. Two separate excludes rather than an `(a|b)` alternation
+          # because the lychee-action `eval`s the args, so the parens/pipe of a
+          # grouped regex are parsed as a shell subshell/pipe and error out.
           # (`#` is literal inside a folded scalar, so the exclusions live in the
-          # args below, not as inline comments.) KIP-link freshness is tracked
-          # separately by docs-freshness.yml.
+          # args below.) KIP-link freshness is tracked by docs-freshness.yml.
           args: >-
             --no-progress
             --format detailed
             --timeout 20
             --max-retries 1
             --exclude cwiki\.apache\.org
-            --exclude (localhost|127\.0\.0\.1)
+            --exclude localhost
+            --exclude 127\.0\.0\.1
             --include-fragments
             --fallback-extensions html
             --root-dir website/public
