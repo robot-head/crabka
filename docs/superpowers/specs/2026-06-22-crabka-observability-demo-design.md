@@ -183,6 +183,15 @@ proto domain (`crates/client-streams/examples/proto/order.proto`):
 - **Producer task** generates a synthetic stream of `Order` events
   (varied keys/categories/amounts, occasional malformed/anomalous records to
   produce error spans and warn logs) → input topic on `crabka-broker`.
+- **Tuning — order volume.** The producer's target emit rate is configurable via
+  `CRABKA_DEMO_ORDERS_PER_SEC` (env var, default `50`), settable in
+  `docker-compose.yml` without a rebuild. This is the demo's primary load lever:
+  it scales how hard the pipeline runs and therefore how much telemetry (span,
+  log, metric, and profile volume) every stage emits — dial it down for
+  low-memory hosts, up to show the system under sustained load. A value of `0`
+  pauses production (useful for inspecting a quiescent pipeline). The producer
+  paces to the target rate rather than emitting a fixed total, so the dashboards
+  stay live indefinitely.
 - **Streams topology** built with `crabka_client_streams::StreamsBuilder`:
   a windowed aggregation (e.g. revenue/count per category over tumbling windows)
   plus a `KTable` enrichment join, producing to an output topic. This exercises
@@ -299,6 +308,8 @@ crates/observability-demo-app/
 ## 8. How it runs (manual)
 
 1. `cd demo/observability && docker compose up --build`
+   (optionally set `CRABKA_DEMO_ORDERS_PER_SEC` in `docker-compose.yml` first to
+   scale the demo's order volume / telemetry load up or down).
 2. Wait for healthchecks (broker → backends → Alloy → demo app → Grafana).
 3. Open Grafana at `http://localhost:3000`.
 4. Explore each datasource and open the two provisioned dashboards.
@@ -317,7 +328,9 @@ crates/observability-demo-app/
   symbolizes against a non-stripped release image; confirm Alloy `pyroscope.scrape`
   accepts the pprof endpoints (godeltaprof vs raw pprof format).
 - **Resource footprint** — ~17–18 containers; document a minimum Docker memory
-  (likely ≥ 6–8 GB) in the README; offer a trimmed profile if needed.
+  (likely ≥ 6–8 GB) in the README; offer a trimmed profile if needed. Note that
+  `CRABKA_DEMO_ORDERS_PER_SEC` (§4.6) is the first knob to turn down on a
+  constrained host.
 - **Alloy config drift** — Alloy river/`.alloy` syntax changes across versions;
   pin the Alloy image tag.
 - **Broker OTLP self-export loop** — the broker exports its own spans to Alloy →
