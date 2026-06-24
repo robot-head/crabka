@@ -82,7 +82,7 @@ services:
   # the demo's order topics, so distributors can write and block-builders /
   # compactors can consume.
   topic-setup:
-    image: apache/kafka:3.9.2
+    image: apache/kafka:4.3.1
     restart: "no"
     depends_on:
       broker: { condition: service_healthy }
