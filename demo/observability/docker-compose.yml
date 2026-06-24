@@ -221,7 +221,7 @@ services:
 
   # ---- COLLECTOR + GRAFANA ----
   alloy:
-    image: grafana/alloy:v1.5.1
+    image: grafana/alloy:v1.17.0
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
     volumes:
       - "./alloy/config.alloy:/etc/alloy/config.alloy:ro"
