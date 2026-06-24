@@ -7,7 +7,7 @@ repositories { mavenCentral() }
 
 dependencies {
     // Match the Kafka version pinned in crates/protocol/schemas/VERSION.
-    implementation("org.apache.kafka:kafka-clients:4.3.0")
+    implementation("org.apache.kafka:kafka-clients:4.3.1")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.22.0")
     // Transitive compression codec deps — needed at compile time for the
     // compress/decompress oracle ops added in Task 9.
