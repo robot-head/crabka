@@ -269,7 +269,7 @@ pub(crate) async fn handle(
         cluster_authorized_operations,
         ..Default::default()
     };
-    tracing::info!(
+    tracing::debug!(
         version,
         req_topics = ?req.topics.as_ref().map(|ts| ts.iter().filter_map(|t| t.name.clone()).collect::<Vec<_>>()),
         resp_brokers = ?resp.brokers.iter().map(|b| format!("{}@{}:{}", b.node_id, b.host, b.port)).collect::<Vec<_>>(),
