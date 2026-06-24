@@ -1036,6 +1036,14 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    // The producer/consumer build step makes a real TCP connection to
+    // "broker:9092" before checking STATE_STOP.  On Linux the OS returns
+    // ECONNREFUSED immediately; on Windows DNS for "broker" triggers
+    // LLMNR/NetBIOS probes that take minutes to time out, hanging the test.
+    #[cfg_attr(
+        windows,
+        ignore = "broker DNS hangs on Windows; skip-note logic is OS-independent"
+    )]
     async fn failover_request_without_rf3_records_skip_note() {
         // Scenario asks for failover, but RF=1 + 1 broker → driver must
         // record a skip note. duration_s=0/warmup_s=0 means the
