@@ -520,12 +520,15 @@ fn nested_metric_projection_matcher(field: &Field) -> Option<SpanMatcher> {
         }
         Scope::Intrinsic(Intrinsic::LinkTraceId) => (MatchScope::Intrinsic, "link:traceID".into()),
         Scope::Intrinsic(Intrinsic::LinkSpanId) => (MatchScope::Intrinsic, "link:spanID".into()),
-        Scope::Both
-        | Scope::Span
-        | Scope::Resource
-        | Scope::Parent
-        | Scope::Instrumentation
-        | Scope::Intrinsic(_) => return None,
+        // A metric `by()`/value field on a regular span or resource attribute
+        // must be projected so the store materializes its `attr.<key>` column for
+        // GROUP BY — otherwise `rate() by(span.http.method)` fails with "missing
+        // column attr.http.method". Projection-only (does not filter), so spans
+        // lacking the attribute stay in the nil group.
+        Scope::Both => (MatchScope::Both, field.key.clone()),
+        Scope::Span => (MatchScope::Span, field.key.clone()),
+        Scope::Resource => (MatchScope::Resource, field.key.clone()),
+        Scope::Parent | Scope::Instrumentation | Scope::Intrinsic(_) => return None,
     };
     Some(SpanMatcher {
         scope,
@@ -4587,6 +4590,23 @@ mod tests {
             scope,
             key: key.to_string(),
         }
+    }
+
+    #[test]
+    fn metric_by_attribute_field_emits_projection_matcher() {
+        // A metric by()/value field on a regular span or resource attribute must
+        // produce a projection matcher so the store materializes its attr.<key>
+        // column for GROUP BY (otherwise `rate() by(span.http.method)` 400s with
+        // "missing column attr.http.method"). Projection-only, so it must not
+        // filter. Parent/instrumentation/intrinsic stay None.
+        let span = nested_metric_projection_matcher(&field(Scope::Span, "http.method")).unwrap();
+        assert!(span.scope == MatchScope::Span && span.key == "http.method");
+        let res =
+            nested_metric_projection_matcher(&field(Scope::Resource, "service.version")).unwrap();
+        assert!(res.scope == MatchScope::Resource && res.key == "service.version");
+        let both = nested_metric_projection_matcher(&field(Scope::Both, "team")).unwrap();
+        assert!(both.scope == MatchScope::Both && both.key == "team");
+        assert!(nested_metric_projection_matcher(&field(Scope::Parent, "x")).is_none());
     }
 
     #[test]
