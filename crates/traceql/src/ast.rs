@@ -133,11 +133,25 @@ pub enum StructuralOp {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pipeline {
     Aggregate(Aggregate),
-    Filter { op: ComparisonOp, value: f64 },
+    Filter {
+        op: ComparisonOp,
+        value: f64,
+    },
     By(Vec<Field>),
     TopK(usize),
     BottomK(usize),
-    Compare,
+    /// Tempo attribute-comparison metric: `compare({selection}, topN [, start_ns,
+    /// end_ns])`. Partitions the spans matching the outer spanset into a
+    /// `selection` group (also matching `selection`) and a `baseline` group (the
+    /// rest), then emits per-attribute value-distribution series for each group.
+    /// `top_n` keeps the most frequent values per attribute (default 10). The
+    /// optional `start`/`end` nanosecond bounds narrow the selection sub-window.
+    Compare {
+        selection: Box<SpansetExpr>,
+        top_n: usize,
+        start: Option<i64>,
+        end: Option<i64>,
+    },
     Select(Vec<Field>),
     Coalesce,
     With(Vec<WithBinding>),

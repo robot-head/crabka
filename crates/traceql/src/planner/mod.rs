@@ -102,7 +102,7 @@ fn pipeline_nested_projection_matchers(pipeline: &[Pipeline]) -> Vec<SpanMatcher
             Pipeline::Filter { .. }
             | Pipeline::TopK(_)
             | Pipeline::BottomK(_)
-            | Pipeline::Compare
+            | Pipeline::Compare { .. }
             | Pipeline::Coalesce
             | Pipeline::With(_) => {}
         }

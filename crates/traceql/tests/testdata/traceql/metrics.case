@@ -51,10 +51,17 @@ query: { .svc != nil } | histogram_over_time(span:duration)
 expect_series_count: 17
 
 ---
-name: metrics_compare_current_and_previous
+# Tempo attribute-comparison compare(): outer `{ .svc = "x" }` matches the one
+# "both" span (svc=x, a=1, b=2, name attr=xpost, resource service-name=svc-x);
+# no span has status=error so the selection group is empty. The 8 distinct
+# attribute values — span.svc, span.a, span.b, span.name, resource.service.name,
+# plus the name/status/kind intrinsics — form one shared value set, and EACH
+# value emits both a baseline and a (zero-filled) selection series so the two
+# groups cover the same values = 16, plus the two per-group total series = 18.
+name: metrics_compare_attribute_distribution
 kind: metrics
-query: { .svc != nil } | count_over_time() | compare()
-expect_series_count: 2
+query: { .svc = "x" } | compare({ status = error }, 10)
+expect_series_count: 18
 
 ---
 name: metrics_topk_truncates_groups
