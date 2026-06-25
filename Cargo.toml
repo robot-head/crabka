@@ -140,7 +140,7 @@ strum = { version = "0.28", features = ["derive"] }
 wincode = "=0.4"
 serde-wincode = "0.1"
 async-trait = "0.1"
-addr2line = "0.26"
+addr2line = "0.27"
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # rustls-pemfile retired upstream (RUSTSEC-2025-0134, archived 2025-08).
