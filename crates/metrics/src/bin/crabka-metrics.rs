@@ -40,6 +40,12 @@ struct Cli {
     compactor_client_id: String,
     #[arg(long, default_value_t = 1000)]
     compactor_poll_timeout_ms: u64,
+    /// Flush the accumulated compaction buffer once this many WAL records are buffered.
+    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_ROWS)]
+    compactor_flush_max_rows: usize,
+    /// Flush the accumulated compaction buffer once its oldest record reaches this age.
+    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
+    compactor_flush_max_age_ms: u64,
     #[arg(long, default_value = HA_TRACKER_TOPIC)]
     ha_tracker_topic: String,
     #[arg(long, default_value = "crabka-metrics-ha-tracker")]
@@ -287,6 +293,8 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     config.group_id = cli.compactor_group_id;
     config.client_id = cli.compactor_client_id;
     config.poll_timeout = Duration::from_millis(cli.compactor_poll_timeout_ms);
+    config.flush_max_rows = cli.compactor_flush_max_rows;
+    config.flush_max_age = Duration::from_millis(cli.compactor_flush_max_age_ms);
     let runtime = config.build_runtime(store)?;
     let mut consumer = config.build_consumer().await?;
     let stopping = Arc::new(AtomicBool::new(false));

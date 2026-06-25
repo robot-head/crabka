@@ -13,11 +13,51 @@ use crabka_blockstore::{
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use object_store::ObjectStore;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::TracesError;
 use crate::span::{AttrValue, Span, batch::span_batch_with_promoted_attrs};
 use crate::wal::SpanRecord;
+
+/// Minimal WAL-consumer poll surface the block-builder loop drives.
+///
+/// Narrowing `run` to this trait (rather than the concrete
+/// [`crabka_client_consumer::Consumer`]) lets the offset-commit invariants be
+/// driven by a scripted fake in tests. The record type matches what
+/// [`decode_consumer_records`] consumes so the loop body is unchanged.
+#[async_trait::async_trait]
+pub trait WalConsumerPoll: Send {
+    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError>;
+}
+
+/// Minimal WAL-consumer commit surface the block-builder loop drives.
+///
+/// Kept separate from [`WalConsumerPoll`] so the commit-only invariant
+/// (commit happens strictly after a durable flush) is expressible as its own
+/// recorded call in tests.
+#[async_trait::async_trait]
+pub trait WalConsumerCommit: Send {
+    async fn commit_sync(&mut self) -> Result<(), TracesError>;
+}
+
+#[async_trait::async_trait]
+impl WalConsumerPoll for Consumer {
+    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError> {
+        Consumer::poll(self, window)
+            .await
+            .map_err(|err| TracesError::Wal(err.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl WalConsumerCommit for Consumer {
+    async fn commit_sync(&mut self) -> Result<(), TracesError> {
+        Consumer::commit_sync(self)
+            .await
+            .map_err(|err| TracesError::Wal(err.to_string()))
+    }
+}
 
 /// Decoded records from one Kafka partition and their inclusive offset range.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +66,20 @@ pub struct PartitionWindow {
     pub records: Vec<SpanRecord>,
 }
 
+/// Default number of buffered span records that triggers a flush.
+pub const DEFAULT_FLUSH_MAX_RECORDS: usize = 50_000;
+
+/// Default maximum age of the oldest buffered span record before a flush.
+///
+/// In a cold-only deployment (no querier live tier, e.g. the demo) the
+/// block-builder is the only path that makes spans queryable, so this age also
+/// bounds how stale recent-trace search / trace-by-id can be. It is kept short
+/// (10s) so freshness stays close to the per-poll behaviour while the
+/// `flush_max_records` cap still batches bursty traffic into larger blocks
+/// (the proliferation case). Deployments that attach a querier live tier can
+/// raise it to batch more aggressively without a freshness cost.
+pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
+
 /// Runtime settings for the block-builder loop.
 #[derive(Clone, Debug)]
 pub struct BlockBuilderConfig {
@@ -33,11 +87,107 @@ pub struct BlockBuilderConfig {
     pub index_key: String,
     pub window: Duration,
     pub promoted_attrs: Vec<PromotedSpanAttr>,
+    /// Flush the accumulated buffer once this many span records are buffered.
+    pub flush_max_records: usize,
+    /// Flush the accumulated buffer once the oldest buffered record reaches this age.
+    pub flush_max_age: Duration,
 }
 
 struct BlockBuildOptions<'a> {
     object_key_prefix: &'a str,
     promoted_attrs: &'a [PromotedSpanAttr],
+}
+
+/// Accumulates decoded [`PartitionWindow`]s across multiple WAL polls so the
+/// block-builder can flush one larger block per partition instead of a tiny
+/// block per poll.
+///
+/// Successive polls are merged by partition: their records are appended and the
+/// inclusive offset range is widened to span every buffered record, so the block
+/// object key is a pure function of the buffered offset range. When a
+/// crash-and-reprocess re-forms the *same* buffer (same records, same flush
+/// boundary) the key is identical and the re-run overwrites it idempotently.
+/// Flush boundaries are timing-dependent (record count / age), so this is
+/// at-least-once delivery rather than a guarantee of byte-identical keys across
+/// every recovery.
+#[derive(Debug, Default)]
+pub struct FlushAccumulator {
+    windows: BTreeMap<i32, PartitionWindow>,
+    record_count: usize,
+    oldest_record_at: Option<Instant>,
+}
+
+impl FlushAccumulator {
+    /// Create an empty accumulator.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of span records currently buffered across all partitions.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.record_count
+    }
+
+    /// Whether the buffer holds no records.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.record_count == 0
+    }
+
+    /// Merge one poll's decoded windows into the buffer.
+    ///
+    /// Records are appended per partition and the inclusive offset range is
+    /// widened to cover both the buffered and incoming records. `now` stamps the
+    /// arrival time used for age-based flushing; it is only recorded the first
+    /// time records enter an otherwise-empty buffer so the age tracks the
+    /// *oldest* buffered record.
+    pub fn merge(&mut self, windows: BTreeMap<i32, PartitionWindow>, now: Instant) {
+        for (partition, incoming) in windows {
+            if incoming.records.is_empty() {
+                continue;
+            }
+            if self.oldest_record_at.is_none() {
+                self.oldest_record_at = Some(now);
+            }
+            self.record_count += incoming.records.len();
+            self.windows
+                .entry(partition)
+                .and_modify(|buffered| {
+                    buffered.offset_range.0 = buffered.offset_range.0.min(incoming.offset_range.0);
+                    buffered.offset_range.1 = buffered.offset_range.1.max(incoming.offset_range.1);
+                    buffered.records.extend(incoming.records.iter().cloned());
+                })
+                .or_insert(incoming);
+        }
+    }
+
+    /// Whether the buffered records should be flushed now.
+    ///
+    /// True once either the record-count threshold is reached or the oldest
+    /// buffered record has aged past `flush_max_age`. Always false when empty.
+    #[must_use]
+    pub fn should_flush(&self, config: &BlockBuilderConfig, now: Instant) -> bool {
+        if self.record_count == 0 {
+            return false;
+        }
+        if self.record_count >= config.flush_max_records {
+            return true;
+        }
+        match self.oldest_record_at {
+            Some(oldest) => now.saturating_duration_since(oldest) >= config.flush_max_age,
+            None => false,
+        }
+    }
+
+    /// Drain the buffered windows, resetting the accumulator to empty.
+    #[must_use]
+    pub fn take(&mut self) -> BTreeMap<i32, PartitionWindow> {
+        self.record_count = 0;
+        self.oldest_record_at = None;
+        std::mem::take(&mut self.windows)
+    }
 }
 
 /// Deterministic object key for one block-builder flush window.
@@ -245,19 +395,27 @@ async fn build_blocks_with_options(
 }
 
 /// Consume WAL records, write span blocks, save the trace index, then commit offsets.
-pub async fn run(
-    mut consumer: Consumer,
+///
+/// To avoid block proliferation, decoded windows are accumulated across polls
+/// and merged per partition; a single larger block per partition is flushed only
+/// once [`BlockBuilderConfig::flush_max_records`] records are buffered or the
+/// oldest buffered record reaches [`BlockBuilderConfig::flush_max_age`]. WAL
+/// offsets are committed only after the merged block(s) are durably written, and
+/// the remaining buffer is drained on shutdown so no spans are lost.
+pub async fn run<C>(
+    mut consumer: C,
     writer: BlockWriter,
     index: Arc<Mutex<TraceIndex>>,
     object_store: Arc<dyn ObjectStore>,
     config: BlockBuilderConfig,
     shutdown: CancellationToken,
-) -> Result<(), TracesError> {
+) -> Result<(), TracesError>
+where
+    C: WalConsumerPoll + WalConsumerCommit,
+{
+    let mut accumulator = FlushAccumulator::new();
     while !shutdown.is_cancelled() {
-        let records = consumer
-            .poll(config.window)
-            .await
-            .map_err(|err| TracesError::Wal(err.to_string()))?;
+        let records = consumer.poll(config.window).await?;
         let windows = decode_consumer_records(&records)?;
         if windows.is_empty() {
             // `poll` normally long-polls for `config.window`, so an empty round
@@ -266,27 +424,72 @@ pub async fn run(
             // returns `Ok(vec![])` immediately — without this backoff the loop
             // would busy-spin a core. A short sleep bounds that to a trickle.
             tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
+        } else {
+            accumulator.merge(windows, Instant::now());
         }
 
-        {
-            let mut guard = index.lock().await;
-            flush_partition_windows(
+        // Flush + commit only when a threshold is reached; a low-traffic stream
+        // still flushes within `flush_max_age` because every poll re-checks the
+        // age of the oldest buffered record (the empty-poll backoff above bounds
+        // the re-check interval). Committing only after `flush_partition_windows`
+        // returns `Ok` keeps WAL offsets behind the durable block(s).
+        if accumulator.should_flush(&config, Instant::now()) {
+            flush_and_commit(
+                &mut consumer,
                 &writer,
-                &mut guard,
-                Arc::clone(&object_store),
+                &index,
+                &object_store,
                 &config,
-                windows,
+                &mut accumulator,
             )
             .await?;
         }
+    }
 
-        consumer
-            .commit_sync()
-            .await
-            .map_err(|err| TracesError::Wal(err.to_string()))?;
+    // Drain the remaining buffer on shutdown so buffered spans are not lost.
+    if !accumulator.is_empty() {
+        flush_and_commit(
+            &mut consumer,
+            &writer,
+            &index,
+            &object_store,
+            &config,
+            &mut accumulator,
+        )
+        .await?;
     }
     Ok(())
+}
+
+/// Flush the accumulated buffer to durable blocks, then commit WAL offsets.
+///
+/// The accumulator is drained first so a flush error leaves nothing
+/// double-counted, and `commit_sync` runs only after `flush_partition_windows`
+/// reports the block(s) and trace index are durably written.
+async fn flush_and_commit<C>(
+    consumer: &mut C,
+    writer: &BlockWriter,
+    index: &Arc<Mutex<TraceIndex>>,
+    object_store: &Arc<dyn ObjectStore>,
+    config: &BlockBuilderConfig,
+    accumulator: &mut FlushAccumulator,
+) -> Result<(), TracesError>
+where
+    C: WalConsumerCommit,
+{
+    let windows = accumulator.take();
+    {
+        let mut guard = index.lock().await;
+        flush_partition_windows(
+            writer,
+            &mut guard,
+            Arc::clone(object_store),
+            config,
+            windows,
+        )
+        .await?;
+    }
+    consumer.commit_sync().await
 }
 
 /// Flush decoded partition windows and durably save the trace index.

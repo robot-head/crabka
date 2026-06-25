@@ -68,6 +68,10 @@ struct Cli {
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
     block_builder_window_secs: u64,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
+    block_builder_flush_max_records: usize,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
+    block_builder_flush_max_age_ms: u64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long)]
@@ -286,6 +290,8 @@ async fn run_block_builder(
             index_key: trace_index_key,
             window: Duration::from_secs(cli.block_builder_window_secs),
             promoted_attrs,
+            flush_max_records: cli.block_builder_flush_max_records,
+            flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
         },
         shutdown,
     )
@@ -919,6 +925,39 @@ mod tests {
 
         assert!(matches!(cli.target, Target::BlockBuilder));
         assert!(cli.block_builder_window_secs == 30);
+    }
+
+    #[test]
+    fn block_builder_flush_knobs_default() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+
+        assert!(
+            cli.block_builder_flush_max_records
+                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
+        );
+        assert!(
+            cli.block_builder_flush_max_age_ms
+                == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_block_builder_flush_knobs() {
+        let cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--block-builder-flush-max-records",
+            "1000",
+            "--block-builder-flush-max-age-ms",
+            "30000",
+        ])
+        .unwrap();
+
+        assert!(matches!(cli.target, Target::BlockBuilder));
+        assert!(cli.block_builder_flush_max_records == 1000);
+        assert!(cli.block_builder_flush_max_age_ms == 30_000);
     }
 
     #[test]

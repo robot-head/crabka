@@ -1838,6 +1838,23 @@ pub trait LogQueryAuthorizer: Send + Sync + 'static {
 
 pub trait LogHotTail: Send + Sync + 'static {
     fn records(&self) -> Vec<WalLogRecord>;
+
+    /// Return the hot-tail records whose `timestamp_ns` falls within the inclusive
+    /// window `[start_ns, end_ns]`.
+    ///
+    /// Callers re-apply their exact per-record time bound downstream, so this may
+    /// return a *superset* of the in-window records (e.g. records sharing a coarse
+    /// time bucket with the window edges); it MUST NOT drop any record whose
+    /// timestamp lies in `[start_ns, end_ns]`. The default implementation simply
+    /// filters [`LogHotTail::records`], preserving its order; implementations that
+    /// maintain a time index (see [`BufferedLogHotTail`]) override this to avoid a
+    /// full-buffer scan.
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        self.records()
+            .into_iter()
+            .filter(|record| record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns)
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -2193,31 +2210,113 @@ fn ingest_quota_bytes(records: &[WalLogRecord]) -> usize {
         .sum()
 }
 
+/// Width of a hot-tail time bucket, in nanoseconds (one minute).
+///
+/// Coarse enough that a wide retention window holds few buckets, fine enough that
+/// a typical query window (minutes to hours) only touches the buckets it overlaps.
+const HOT_TAIL_BUCKET_NS: i64 = 60_000_000_000;
+
+/// Map a record timestamp to its bucket key. Uses [`i64::div_euclid`] so negative
+/// timestamps (pre-epoch) still bucket monotonically and the bucket containing a
+/// given timestamp is unambiguous.
+fn hot_tail_bucket_key(timestamp_ns: i64) -> i64 {
+    timestamp_ns.div_euclid(HOT_TAIL_BUCKET_NS)
+}
+
+/// Buffer holding polled hot-tail records.
+///
+/// Records arrive from Kafka polling in NO timestamp order, so the buffer keeps two
+/// views of the same data:
+///
+/// * `records` — the append-ordered log. [`records`](Self::records) clones this whole
+///   list; it backs the WebSocket tail path, which indexes into the buffer by arrival
+///   order and must see every record.
+/// * `buckets` — a per-minute time index mapping each [`hot_tail_bucket_key`] to the
+///   positions in `records` whose timestamps land in that bucket. Out-of-order arrivals
+///   simply land in the correct bucket; no global sort is ever needed.
+///
+/// [`records_in_range`](Self::records_in_range) walks only the buckets overlapping the
+/// query window, so a 30-minute query over a buffer holding hours of logs touches only
+/// the window's records instead of scanning the entire buffer.
+#[derive(Debug, Default)]
+struct HotTailBuffer {
+    records: Vec<WalLogRecord>,
+    buckets: BTreeMap<i64, Vec<usize>>,
+}
+
+impl HotTailBuffer {
+    fn push(&mut self, record: WalLogRecord) {
+        let index = self.records.len();
+        let bucket = hot_tail_bucket_key(record.timestamp_ns);
+        self.records.push(record);
+        self.buckets.entry(bucket).or_default().push(index);
+    }
+
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        if start_ns > end_ns {
+            return Vec::new();
+        }
+        let start_bucket = hot_tail_bucket_key(start_ns);
+        let end_bucket = hot_tail_bucket_key(end_ns);
+        let mut matches: Vec<usize> = Vec::new();
+        for (_bucket, indices) in self.buckets.range(start_bucket..=end_bucket) {
+            for &index in indices {
+                let record = &self.records[index];
+                if record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns {
+                    matches.push(index);
+                }
+            }
+        }
+        // Restore append order so the windowed slice matches a full-buffer scan
+        // exactly (downstream collects into a BTreeMap and re-sorts, so order is not
+        // load-bearing, but matching the full-scan order keeps the two paths trivially
+        // equivalent for testing and reasoning).
+        matches.sort_unstable();
+        matches
+            .into_iter()
+            .map(|index| self.records[index].clone())
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BufferedLogHotTail {
-    records: Arc<Mutex<Vec<WalLogRecord>>>,
+    buffer: Arc<Mutex<HotTailBuffer>>,
 }
 
 impl BufferedLogHotTail {
     #[must_use]
     pub fn records(&self) -> Vec<WalLogRecord> {
-        self.records
+        self.buffer
             .lock()
             .expect("hot tail buffer lock poisoned")
+            .records
             .clone()
     }
 
-    pub fn append_records(&self, records: Vec<WalLogRecord>) {
-        self.records
+    #[must_use]
+    pub fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        self.buffer
             .lock()
             .expect("hot tail buffer lock poisoned")
-            .extend(records);
+            .records_in_range(start_ns, end_ns)
+    }
+
+    pub fn append_records(&self, records: Vec<WalLogRecord>) {
+        let mut buffer = self.buffer.lock().expect("hot tail buffer lock poisoned");
+        for record in records {
+            buffer.push(record);
+        }
     }
 }
 
 impl LogHotTail for BufferedLogHotTail {
     fn records(&self) -> Vec<WalLogRecord> {
         BufferedLogHotTail::records(self)
+    }
+
+    fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
+        BufferedLogHotTail::records_in_range(self, start_ns, end_ns)
     }
 }
 
@@ -9673,7 +9772,7 @@ async fn execute_http_metric_query(
         )
         .await?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -9692,7 +9791,7 @@ async fn execute_http_metric_query(
     let response =
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -10375,7 +10474,7 @@ async fn execute_http_metric_scalar_comparison_query(
         .await?;
         apply_metric_scalar_comparison_to_loki_result(&mut response, &comparison, query_text)?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -10396,7 +10495,7 @@ async fn execute_http_metric_scalar_comparison_query(
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     apply_metric_scalar_comparison_to_loki_result(&mut response, &comparison, query_text)?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -10450,7 +10549,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
         .await?;
         apply_metric_scalar_arithmetic_to_loki_result(&mut response, &arithmetic, query_text)?;
         if state.hot_tail.is_some() {
-            let (records, frontier) = hot_tail_snapshot(&state);
+            let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
             return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
                 response,
                 &plan,
@@ -10471,7 +10570,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
         execute_http_metric_instant_query(&state, &plan, &query, &delete_filters).await?;
     apply_metric_scalar_arithmetic_to_loki_result(&mut response, &arithmetic, query_text)?;
     if state.hot_tail.is_some() {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let eval_range = TimeRange::new(time_range.end_ns, time_range.end_ns)
             .expect("single timestamp metric eval range is valid");
         return Ok(add_loki_query_stats_for_metric_plan_with_hot_tail(
@@ -11440,7 +11539,7 @@ async fn execute_http_metric_range_query(
         return Err(HttpQueryError::InvalidStep);
     }
     if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(state);
+        let (records, frontier) = hot_tail_snapshot(state, plan.time_range);
         return execute_metric_query_range_from_object_store_with_hot_tail_frontier_and_deletes(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11457,7 +11556,9 @@ async fn execute_http_metric_range_query(
         .map_err(HttpQueryError::from);
     }
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         return execute_metric_query_range_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -11493,7 +11594,7 @@ async fn execute_http_metric_instant_query(
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> Result<Value, HttpQueryError> {
     let response = if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(state);
+        let (records, frontier) = hot_tail_snapshot(state, plan.time_range);
         execute_metric_query_from_object_store_with_hot_tail_frontier_and_deletes(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11507,7 +11608,9 @@ async fn execute_http_metric_instant_query(
         .await
         .map_err(HttpQueryError::from)?
     } else if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         execute_metric_query_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -11559,7 +11662,7 @@ async fn execute_http_stream_query(
     validate_query_bytes_limit(&state, &plan)?;
     let delete_filters = active_log_delete_filters(&state, tenant, time_range)?;
     if let Some(cold_store) = &state.cold_store {
-        let (records, frontier) = hot_tail_snapshot(&state);
+        let (records, frontier) = hot_tail_snapshot(&state, plan.time_range);
         let response = execute_stream_query_from_object_store_with_hot_tail_frontier(
             Arc::clone(&cold_store.store),
             &cold_store.prefix,
@@ -11578,7 +11681,9 @@ async fn execute_http_stream_query(
         ));
     }
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        let records = hot_tail
+            .source
+            .records_in_range(plan.time_range.start_ns, plan.time_range.end_ns);
         let frontier = hot_tail.frontier.snapshot();
         let response = execute_stream_query_with_hot_tail_frontier_and_deletes(
             &state.root,
@@ -14122,10 +14227,28 @@ fn validate_query_bytes_limit(
     Ok(())
 }
 
-fn hot_tail_snapshot(state: &QuerierState) -> (Vec<WalLogRecord>, CompactionFrontier) {
+/// Snapshot the hot-tail records overlapping `time_range`, plus the compaction frontier.
+///
+/// `time_range` must be the planned scan range (`plan.time_range`): every hot-tail
+/// query path re-applies the exact per-record time bound downstream, and that bound is
+/// always contained within the plan's scan range (the stream query range, or
+/// [`metric_scan_range`] for metric queries). Pruning to the plan range therefore drops
+/// only records the downstream filter would reject anyway, so results are identical to a
+/// full-buffer scan while a narrow window avoids touching the whole retained buffer.
+fn hot_tail_snapshot(
+    state: &QuerierState,
+    time_range: TimeRange,
+) -> (Vec<WalLogRecord>, CompactionFrontier) {
     state.hot_tail.as_ref().map_or(
         (Vec::new(), CompactionFrontier::new(i64::MAX)),
-        |hot_tail| (hot_tail.source.records(), hot_tail.frontier.snapshot()),
+        |hot_tail| {
+            (
+                hot_tail
+                    .source
+                    .records_in_range(time_range.start_ns, time_range.end_ns),
+                hot_tail.frontier.snapshot(),
+            )
+        },
     )
 }
 
@@ -14395,7 +14518,15 @@ async fn metadata_label_sets(
     }
 
     if let Some(hot_tail) = &state.hot_tail {
-        let records = hot_tail.source.records();
+        // Prune to the metadata window when one is supplied; the per-record bound below
+        // (`< start_ns || > end_ns`) is re-applied, so the windowed records are exactly
+        // the records a full scan would have kept. With no time range, scan everything.
+        let records = match time_range {
+            Some(range) => hot_tail
+                .source
+                .records_in_range(range.start_ns, range.end_ns),
+            None => hot_tail.source.records(),
+        };
         let frontier = hot_tail.frontier.snapshot();
         for record in records {
             if record.tenant != tenant || frontier.is_compacted(&record) {
@@ -18852,6 +18983,142 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hot_tail_test_record(timestamp_ns: i64, app: &str) -> WalLogRecord {
+        WalLogRecord {
+            tenant: "tenant".to_string(),
+            labels: BTreeMap::from([("app".to_string(), app.to_string())]),
+            timestamp_ns,
+            line: format!("line@{timestamp_ns}"),
+            structured_metadata: BTreeMap::new(),
+            position: None,
+        }
+    }
+
+    /// Brute-force oracle: the records a full linear scan keeps for an inclusive window.
+    fn brute_force_in_range(
+        records: &[WalLogRecord],
+        start_ns: i64,
+        end_ns: i64,
+    ) -> Vec<WalLogRecord> {
+        records
+            .iter()
+            .filter(|record| record.timestamp_ns >= start_ns && record.timestamp_ns <= end_ns)
+            .cloned()
+            .collect()
+    }
+
+    /// The time-bucketed `records_in_range` MUST return exactly the same records (and
+    /// therefore the same label/field sets) as a full-buffer scan, for any inclusive
+    /// `[start, end]`, even though records are appended in NO timestamp order. This is the
+    /// soundness guarantee that lets the query paths prune to the window instead of
+    /// scanning the whole retained buffer.
+    #[tokio::test]
+    async fn hot_tail_records_in_range_matches_full_scan_under_out_of_order_inserts() {
+        let hot_tail = BufferedLogHotTail::default();
+
+        // Timestamps deliberately out of order and spread across many one-minute buckets,
+        // with duplicates at the same instant and records straddling bucket boundaries.
+        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+        let timestamps = [
+            5 * BUCKET + 10,
+            BUCKET - 1, // last ns of bucket 0
+            3 * BUCKET,
+            BUCKET,          // first ns of bucket 1
+            5 * BUCKET + 10, // duplicate timestamp
+            0,
+            7 * BUCKET + 42,
+            2 * BUCKET + 999,
+            3 * BUCKET, // duplicate timestamp in a different append position
+            4 * BUCKET - 1,
+            -BUCKET + 5, // a pre-epoch (negative) timestamp
+            6 * BUCKET,
+        ];
+        let apps = ["api", "web", "db"];
+        let records: Vec<WalLogRecord> = timestamps
+            .iter()
+            .enumerate()
+            .map(|(i, &ts)| hot_tail_test_record(ts, apps[i % apps.len()]))
+            .collect();
+
+        // Append one at a time to exercise incremental bucket insertion of out-of-order data.
+        for record in &records {
+            hot_tail.append_records(vec![record.clone()]);
+        }
+
+        // `records()` must still return the full append-ordered buffer (the tail path
+        // depends on this).
+        assert_eq!(hot_tail.records(), records);
+
+        // Probe a wide set of windows: exact bucket edges, sub-bucket slivers, windows
+        // spanning many buckets, empty windows, and windows entirely outside the data.
+        let min_ts = *timestamps.iter().min().unwrap();
+        let max_ts = *timestamps.iter().max().unwrap();
+        let mut probes: Vec<(i64, i64)> = Vec::new();
+        // Walk window starts at a coarse quarter-bucket stride from below the earliest
+        // record to above the latest, pairing each with several spans.
+        let stride = BUCKET / 4;
+        let mut start = min_ts - 2 * BUCKET;
+        while start <= max_ts + 2 * BUCKET {
+            for span in [0_i64, 1, BUCKET - 1, BUCKET, BUCKET + 1, 3 * BUCKET] {
+                probes.push((start, start + span));
+            }
+            start += stride;
+        }
+        // Add exact per-record point windows and tight windows around each timestamp.
+        for &ts in &timestamps {
+            probes.push((ts, ts));
+            probes.push((ts - 1, ts));
+            probes.push((ts, ts + 1));
+            probes.push((ts + 1, ts + 1));
+        }
+
+        for (start, end) in probes {
+            if start > end {
+                // Mirror the guard: an inverted window yields nothing.
+                assert!(hot_tail.records_in_range(start, end).is_empty());
+                continue;
+            }
+            let expected = brute_force_in_range(&records, start, end);
+            let actual = hot_tail.records_in_range(start, end);
+            assert_eq!(
+                actual, expected,
+                "records_in_range({start}, {end}) diverged from full-scan oracle"
+            );
+
+            // The label sets a query would derive must be identical too (records are the
+            // sole input to label/field extraction).
+            let expected_labels: BTreeSet<Labels> =
+                expected.iter().map(|r| r.labels.clone()).collect();
+            let actual_labels: BTreeSet<Labels> = actual.iter().map(|r| r.labels.clone()).collect();
+            assert_eq!(
+                actual_labels, expected_labels,
+                "label sets diverged at [{start}, {end}]"
+            );
+        }
+
+        // The trait-object path the querier actually uses must agree with the inherent method.
+        let dyn_tail: Arc<dyn LogHotTail> = Arc::new(hot_tail.clone());
+        let window = (2 * BUCKET, 6 * BUCKET);
+        assert_eq!(
+            dyn_tail.records_in_range(window.0, window.1),
+            hot_tail.records_in_range(window.0, window.1),
+        );
+
+        // The default trait impl (used by other LogHotTail implementors, e.g. the
+        // in-memory sink) falls back to filtering the full buffer and must also agree.
+        let in_memory = InMemoryWalSink::default();
+        for record in &records {
+            LogWalSink::append(&in_memory, record.clone())
+                .await
+                .unwrap();
+        }
+        let in_memory_dyn: Arc<dyn LogHotTail> = Arc::new(in_memory);
+        assert_eq!(
+            in_memory_dyn.records_in_range(window.0, window.1),
+            brute_force_in_range(&records, window.0, window.1),
+        );
+    }
 
     #[test]
     fn detected_labels_empty_query_is_match_all() {
