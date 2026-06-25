@@ -43,8 +43,10 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
     let mut out = vec![
         NestedSet {
             nested_set_left: 0,
+            // -1 is Tempo's no-parent (root) sentinel; left values start at 1 so
+            // it never collides with a real parent's left.
             nested_set_right: 0,
-            parent_id: 0,
+            parent_id: -1,
         };
         spans.len()
     ];
@@ -61,7 +63,8 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
             idx: root,
-            parent_left: 0,
+            // Root span: nestedSetParent = -1 (Tempo no-parent sentinel).
+            parent_left: -1,
         });
     }
 
@@ -101,7 +104,8 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
         }
         stack.push(Frame::Enter {
             idx: next_seed,
-            parent_left: 0,
+            // Cycle-orphaned span re-seeded as a root: same -1 sentinel.
+            parent_left: -1,
         });
     }
 
@@ -142,7 +146,8 @@ mod tests {
     fn root_has_sentinel_parent_id() {
         let spans = sample_tree();
         let ns = assign_nested_set(&spans);
-        assert!(ns[idx(&spans, 1)].parent_id == 0);
+        // -1 = Tempo's no-parent sentinel (so `nestedSetParent < 0` finds roots).
+        assert!(ns[idx(&spans, 1)].parent_id == -1);
     }
 
     #[test]
@@ -184,7 +189,7 @@ mod tests {
     fn orphan_is_treated_as_root() {
         let spans = vec![node(5, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == 0);
+        assert!(ns[0].parent_id == -1); // dangling parent → root sentinel
         assert!(ns[0].nested_set_left < ns[0].nested_set_right);
     }
 

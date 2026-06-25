@@ -1,7 +1,7 @@
 //! Object-store backed cold-block `ProfileStore`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arrow::array::{ArrayRef, AsArray, UInt64Array};
 use arrow::datatypes::{Int64Type, UInt64Type};
@@ -24,7 +24,12 @@ use crabka_pprof::LazySymbolizer;
 #[derive(Clone)]
 pub struct ColdProfileStore {
     store: Arc<dyn ObjectStore>,
-    index: Arc<ProfileIndex>,
+    // The block index is loaded from object storage and must be REFRESHED as the
+    // block-builder writes new blocks — otherwise blocks created after the querier
+    // started are invisible (a query only sees the startup snapshot). Held behind a
+    // lock so a background task can swap in a freshly-loaded index; readers clone the
+    // inner `Arc` out and never hold the guard across an await.
+    index: Arc<RwLock<Arc<ProfileIndex>>>,
     resolver: Arc<ChainedResolver>,
 }
 
@@ -33,7 +38,7 @@ impl ColdProfileStore {
     pub fn new(store: Arc<dyn ObjectStore>, index: Arc<ProfileIndex>) -> Self {
         Self {
             store,
-            index,
+            index: Arc::new(RwLock::new(index)),
             resolver: local_native_resolver(),
         }
     }
@@ -52,9 +57,22 @@ impl ColdProfileStore {
         resolvers.push(Arc::new(AddressFallbackResolver));
         Ok(Self {
             store,
-            index,
+            index: Arc::new(RwLock::new(index)),
             resolver: Arc::new(ChainedResolver::new(resolvers)),
         })
+    }
+
+    /// Current block index snapshot. Clones the inner `Arc` (cheap) so the lock is
+    /// released immediately and never held across an `.await`.
+    #[must_use]
+    fn current_index(&self) -> Arc<ProfileIndex> {
+        Arc::clone(&self.index.read().expect("profile index lock poisoned"))
+    }
+
+    /// Swap in a freshly-loaded block index so blocks written since the querier
+    /// started become queryable. Called by the querier's periodic refresh task.
+    pub fn replace_index(&self, index: Arc<ProfileIndex>) {
+        *self.index.write().expect("profile index lock poisoned") = index;
     }
 
     async fn block_keys(
@@ -66,14 +84,14 @@ impl ColdProfileStore {
         end_ms: i64,
     ) -> Result<(Vec<String>, std::collections::BTreeSet<SeriesFingerprint>), ProfileError> {
         let fps = self
-            .index
+            .current_index()
             .select_fingerprints(tenant, profile_type, matchers)
             .map_err(|err| ProfileError::Store(err.to_string()))?;
         if fps.is_empty() {
             return Ok((Vec::new(), fps));
         }
         let blocks = self
-            .index
+            .current_index()
             .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
         Ok((blocks, fps))
     }
@@ -108,7 +126,7 @@ impl ProfileStore for ColdProfileStore {
             // fresh base straight onto them folds bits together and can collide
             // across blocks (e.g. `1<<32 | (2<<32)` and `2<<32 | (1<<32)` both ==
             // `3<<32`). Dense re-basing keeps each block's external keys unique.
-            let stored_partitions = self.index.stacktrace_partitions(block_key);
+            let stored_partitions = self.current_index().stacktrace_partitions(block_key);
             let partition_map = block_partition_map(block_idx, &stored_partitions)?;
             let symdb = self.load_symdb(block_key).await?;
             let source = Arc::new(LazySymbolizer::new(symdb, Arc::clone(&self.resolver)));
@@ -156,7 +174,9 @@ impl ProfileStore for ColdProfileStore {
         let active = self
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
-        Ok(self.index.label_names_for_fingerprints(tenant, &active))
+        Ok(self
+            .current_index()
+            .label_names_for_fingerprints(tenant, &active))
     }
 
     async fn label_values(
@@ -171,7 +191,7 @@ impl ProfileStore for ColdProfileStore {
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
         Ok(self
-            .index
+            .current_index()
             .label_values_for_fingerprints(tenant, name, &active))
     }
 
@@ -184,7 +204,9 @@ impl ProfileStore for ColdProfileStore {
         let active = self
             .active_fingerprints_for_rows(tenant, &[], start_ms, end_ms)
             .await?;
-        Ok(self.index.profile_types_for_fingerprints(tenant, &active))
+        Ok(self
+            .current_index()
+            .profile_types_for_fingerprints(tenant, &active))
     }
 
     async fn series(
@@ -199,7 +221,7 @@ impl ProfileStore for ColdProfileStore {
             .active_fingerprints_for_rows(tenant, matchers, start_ms, end_ms)
             .await?;
         Ok(self
-            .index
+            .current_index()
             .series_for_fingerprints(tenant, &active, label_names))
     }
 
@@ -228,14 +250,14 @@ impl ColdProfileStore {
         end_ms: i64,
     ) -> Result<Option<(i64, i64)>, ProfileError> {
         let fps = self
-            .index
+            .current_index()
             .matching_fingerprints(tenant, &[])
             .map_err(|err| ProfileError::Store(err.to_string()))?;
         if fps.is_empty() {
             return Ok(None);
         }
         let blocks = self
-            .index
+            .current_index()
             .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
         let mut bounds: Option<(i64, i64)> = None;
         for block_key in blocks {
@@ -268,14 +290,14 @@ impl ColdProfileStore {
         end_ms: i64,
     ) -> Result<BTreeSet<SeriesFingerprint>, ProfileError> {
         let fps = self
-            .index
+            .current_index()
             .matching_fingerprints(tenant, matchers)
             .map_err(|err| ProfileError::Store(err.to_string()))?;
         if fps.is_empty() {
             return Ok(BTreeSet::new());
         }
         let blocks = self
-            .index
+            .current_index()
             .candidate_blocks_for_series(tenant, &fps, start_ms, end_ms);
         let mut active = BTreeSet::new();
         for block_key in blocks {

@@ -22,9 +22,14 @@ use crate::store::{
 };
 
 /// Shared hot-head metric store rebuilt from the metrics WAL tail.
+///
+/// Reads clone the inner `Arc` pointer (O(1)); writers use `Arc::make_mut`
+/// which clones the store only if a reader is concurrently holding a snapshot.
+/// This avoids the O(N) full-store clone that the previous design incurred on
+/// every single query.
 #[derive(Clone, Default)]
 pub struct WalHead {
-    inner: Arc<RwLock<InMemoryMetricStore>>,
+    inner: Arc<RwLock<Arc<InMemoryMetricStore>>>,
 }
 
 impl WalHead {
@@ -42,30 +47,29 @@ impl WalHead {
     #[must_use]
     pub fn from_store(store: InMemoryMetricStore) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(store)),
+            inner: Arc::new(RwLock::new(Arc::new(store))),
         }
     }
 
     /// Apply one decoded metrics WAL record into the shared hot head.
     pub fn apply_wal_record(&self, record: &WalRecord) {
-        self.inner
-            .write()
-            .expect("wal head lock poisoned")
-            .apply_wal_record(record);
+        let mut guard = self.inner.write().expect("wal head lock poisoned");
+        Arc::make_mut(&mut *guard).apply_wal_record(record);
     }
 
     /// Apply one decoded metrics WAL record and advance the offset watermarks
     /// for `partition` to include `offset`.
     pub fn apply_wal_record_at(&self, record: &WalRecord, partition: i32, offset: i64) {
-        let mut inner = self.inner.write().expect("wal head lock poisoned");
-        inner.apply_wal_record(record);
-        inner.record_offset(partition, offset);
+        let mut guard = self.inner.write().expect("wal head lock poisoned");
+        let store = Arc::make_mut(&mut *guard);
+        store.apply_wal_record(record);
+        store.record_offset(partition, offset);
     }
 
     /// Apply decoded metrics WAL records in log order.
     pub fn apply_wal_records<'a>(&self, records: impl IntoIterator<Item = &'a WalRecord>) {
-        let mut inner = self.inner.write().expect("wal head lock poisoned");
-        inner.apply_wal_records(records);
+        let mut guard = self.inner.write().expect("wal head lock poisoned");
+        Arc::make_mut(&mut *guard).apply_wal_records(records);
     }
 
     /// Drop samples older than the retention window from the shared hot head.
@@ -75,10 +79,8 @@ impl WalHead {
     /// for the side effect of bounding memory and discarding them is valid.
     #[allow(clippy::must_use_candidate)]
     pub fn prune(&self, now_ms: i64) -> PruneStats {
-        self.inner
-            .write()
-            .expect("wal head lock poisoned")
-            .prune(now_ms)
+        let mut guard = self.inner.write().expect("wal head lock poisoned");
+        Arc::make_mut(&mut *guard).prune(now_ms)
     }
 
     /// The lowest WAL offset materialized in the head for `partition`.
@@ -493,7 +495,7 @@ impl MetricStore for WalHead {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ScanResult> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.scan(tenant, matchers, start_ms, end_ms).await
     }
 
@@ -504,7 +506,7 @@ impl MetricStore for WalHead {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.label_names(tenant, matchers, start_ms, end_ms).await
     }
 
@@ -516,7 +518,7 @@ impl MetricStore for WalHead {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<String>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store
             .label_values(tenant, name, matchers, start_ms, end_ms)
             .await
@@ -529,7 +531,7 @@ impl MetricStore for WalHead {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<Labels>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.series(tenant, matchers, start_ms, end_ms).await
     }
 
@@ -540,37 +542,37 @@ impl MetricStore for WalHead {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<Vec<ExemplarRecord>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.exemplars(tenant, matchers, start_ms, end_ms).await
     }
 
     async fn metadata(&self, tenant: &str, metric: Option<&str>) -> Result<Vec<MetadataRecord>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.metadata(tenant, metric).await
     }
 
     async fn cardinality_label_names(&self, tenant: &str) -> Result<Vec<LabelNameCardinality>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.cardinality_label_names(tenant).await
     }
 
     async fn cardinality_label_values(&self, tenant: &str) -> Result<Vec<LabelValueCardinality>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.cardinality_label_values(tenant).await
     }
 
     async fn cardinality_active_series(&self, tenant: &str) -> Result<Vec<Labels>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.cardinality_active_series(tenant).await
     }
 
     async fn tsdb_stats(&self, tenant: &str) -> Result<TsdbStats> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.tsdb_stats(tenant).await
     }
 
     async fn tsdb_blocks(&self, tenant: &str) -> Result<Vec<TsdbBlock>> {
-        let store = self.inner.read().expect("wal head lock poisoned").clone();
+        let store = Arc::clone(&*self.inner.read().expect("wal head lock poisoned"));
         store.tsdb_blocks(tenant).await
     }
 }

@@ -1383,7 +1383,7 @@ mod tests {
         let pid = out[0]
             .column(0)
             .as_primitive::<datafusion::arrow::datatypes::Int32Type>();
-        assert!(pid.value(0) == 0);
+        assert!(pid.value(0) == -1); // root: Tempo nestedSetParent sentinel
         assert!(pid.value(1) == 1);
     }
 
@@ -1899,12 +1899,10 @@ mod tests {
             .await
                 == 1
         );
-        // Nested-set intrinsics.
-        for key in [
-            "span:nestedSetLeft",
-            "span:nestedSetRight",
-            "span:nestedSetParent",
-        ] {
+        // Nested-set intrinsics. left/right are >= 0; a root span's
+        // nestedSetParent is -1 (Tempo's no-parent sentinel), so it matches < 0
+        // — the same predicate Grafana's Traces Drilldown uses to find roots.
+        for key in ["span:nestedSetLeft", "span:nestedSetRight"] {
             assert!(
                 scan_matches(&[matcher(
                     MatchScope::Intrinsic,
@@ -1917,6 +1915,17 @@ mod tests {
                 "nested-set intrinsic {key} should match"
             );
         }
+        assert!(
+            scan_matches(&[matcher(
+                MatchScope::Intrinsic,
+                "span:nestedSetParent",
+                MatchCmp::Lt,
+                MatchValue::Int(0),
+            )])
+            .await
+                == 1,
+            "root span nestedSetParent should match < 0"
+        );
         // Instrumentation intrinsics.
         assert!(
             scan_matches(&[matcher(
@@ -2436,7 +2445,7 @@ mod tests {
             tag_values_for("span:nestedSetParent").await
                 == vec![TypedValue {
                     type_: "int".into(),
-                    value: "0".into(),
+                    value: "-1".into(), // root: Tempo nestedSetParent sentinel
                 }]
         );
     }

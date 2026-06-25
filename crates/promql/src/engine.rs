@@ -2296,49 +2296,67 @@ impl<S: MetricStore> PromqlEngine<S> {
         // cap on the top-level query window; this guards the engine itself
         // (including subqueries, whose grid the front-gate never sees).
         check_resolution_points(start_ms, end_ms, step_ms)?;
-        let mut by_fp: BTreeMap<SeriesFingerprint, RangeSeries> = BTreeMap::new();
-        let mut step = start_ms;
-        while step <= end_ms {
-            let Some(planned) = self.plan_instant_expr(tenant, expr, step).await? else {
-                // This step's shape is not planner-supported (e.g. a histogram
-                // series appeared in-window). Abandon the operator path for the
-                // whole query so the interpreter produces a consistent result.
-                return Ok(None);
-            };
-            match self.assemble_planned_instant(planned, step).await? {
-                QueryResult::InstantVector(samples) => {
-                    for sample in samples {
-                        let fp = sample.labels.fingerprint();
-                        by_fp
-                            .entry(fp)
-                            .or_insert_with(|| RangeSeries {
-                                labels: sample.labels.clone(),
-                                samples: Vec::new(),
-                            })
-                            .samples
-                            .push((step, sample.value));
+        // Scan the union of all per-step lookback windows once per matcher set,
+        // shared across the step loop via the RANGE_SCAN_CACHE task-local. The
+        // union starts at the first step's lookback floor (`start - lookback`)
+        // and ends at the last step (`end`). Scans outside this window
+        // (offset/@-modifier or a `[range]` longer than the lookback) fall back to
+        // a direct scan inside `scan_float_rows`, so results are unchanged.
+        let cache: RangeScanCache =
+            std::sync::Arc::new(std::sync::Mutex::new(RangeScanCacheInner {
+                full_start_ms: start_ms.saturating_sub(self.opts.lookback_delta_ms),
+                full_end_ms: end_ms,
+                floats: std::collections::HashMap::new(),
+                histograms: std::collections::HashMap::new(),
+                labels: std::collections::HashMap::new(),
+            }));
+        RANGE_SCAN_CACHE
+            .scope(cache, async move {
+                let mut by_fp: BTreeMap<SeriesFingerprint, RangeSeries> = BTreeMap::new();
+                let mut step = start_ms;
+                while step <= end_ms {
+                    let Some(planned) = self.plan_instant_expr(tenant, expr, step).await? else {
+                        // This step's shape is not planner-supported (e.g. a histogram
+                        // series appeared in-window). Abandon the operator path for the
+                        // whole query so the interpreter produces a consistent result.
+                        return Ok(None);
+                    };
+                    match self.assemble_planned_instant(planned, step).await? {
+                        QueryResult::InstantVector(samples) => {
+                            for sample in samples {
+                                let fp = sample.labels.fingerprint();
+                                by_fp
+                                    .entry(fp)
+                                    .or_insert_with(|| RangeSeries {
+                                        labels: sample.labels.clone(),
+                                        samples: Vec::new(),
+                                    })
+                                    .samples
+                                    .push((step, sample.value));
+                            }
+                        }
+                        QueryResult::Scalar { value, .. } => {
+                            let labels = Labels::new();
+                            by_fp
+                                .entry(labels.fingerprint())
+                                .or_insert_with(|| RangeSeries {
+                                    labels,
+                                    samples: Vec::new(),
+                                })
+                                .samples
+                                .push((step, SampleValue::Float(value)));
+                        }
+                        QueryResult::Str { .. } | QueryResult::RangeMatrix(_) => {
+                            // The planner only ever assembles an instant vector or a
+                            // scalar; neither of these can arise. Fall back defensively.
+                            return Ok(None);
+                        }
                     }
+                    step = step.saturating_add(step_ms);
                 }
-                QueryResult::Scalar { value, .. } => {
-                    let labels = Labels::new();
-                    by_fp
-                        .entry(labels.fingerprint())
-                        .or_insert_with(|| RangeSeries {
-                            labels,
-                            samples: Vec::new(),
-                        })
-                        .samples
-                        .push((step, SampleValue::Float(value)));
-                }
-                QueryResult::Str { .. } | QueryResult::RangeMatrix(_) => {
-                    // The planner only ever assembles an instant vector or a
-                    // scalar; neither of these can arise. Fall back defensively.
-                    return Ok(None);
-                }
-            }
-            step = step.saturating_add(step_ms);
-        }
-        Ok(Some(by_fp.into_values().collect()))
+                Ok(Some(by_fp.into_values().collect()))
+            })
+            .await
     }
 
     /// Force the per-step planner range driver, bypassing the
@@ -5598,6 +5616,54 @@ impl<S: MetricStore> PromqlEngine<S> {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<BTreeMap<SeriesFingerprint, Labels>> {
+        // Range queries resolve the same selector's series at every step. Labels
+        // are window-independent, so cache the union-window resolution once per
+        // matcher set and reuse it across steps (see RANGE_SCAN_CACHE). Requests
+        // outside the pre-scanned union fall back to a direct resolution.
+        if let Ok(cache) = RANGE_SCAN_CACHE.try_with(std::sync::Arc::clone) {
+            let (full_start_ms, full_end_ms) = {
+                let guard = cache.lock().expect("range scan cache poisoned");
+                (guard.full_start_ms, guard.full_end_ms)
+            };
+            if start_ms >= full_start_ms && end_ms <= full_end_ms {
+                let key = matchers_cache_key(matchers);
+                let cached = {
+                    let guard = cache.lock().expect("range scan cache poisoned");
+                    guard.labels.get(&key).cloned()
+                };
+                let resolved = if let Some(map) = cached {
+                    map
+                } else {
+                    let map = std::sync::Arc::new(
+                        self.labels_by_fingerprint_uncached(
+                            tenant,
+                            matchers,
+                            full_start_ms,
+                            full_end_ms,
+                        )
+                        .await?,
+                    );
+                    cache
+                        .lock()
+                        .expect("range scan cache poisoned")
+                        .labels
+                        .insert(key, std::sync::Arc::clone(&map));
+                    map
+                };
+                return Ok((*resolved).clone());
+            }
+        }
+        self.labels_by_fingerprint_uncached(tenant, matchers, start_ms, end_ms)
+            .await
+    }
+
+    async fn labels_by_fingerprint_uncached(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<BTreeMap<SeriesFingerprint, Labels>> {
         Ok(self
             .store
             .series(tenant, matchers, start_ms, end_ms)
@@ -5625,6 +5691,54 @@ impl<S: MetricStore> PromqlEngine<S> {
     }
 
     async fn scan_float_rows(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<FloatRow>> {
+        // Inside a range query (see RANGE_SCAN_CACHE), serve overlapping per-step
+        // scans from a single union-window scan per matcher set. A request that
+        // falls outside the pre-scanned union (offset/@-modifier, or a `[range]`
+        // longer than the lookback) bypasses the cache and scans directly, so
+        // results are identical — only redundant re-scans are eliminated.
+        if let Ok(cache) = RANGE_SCAN_CACHE.try_with(std::sync::Arc::clone) {
+            let (full_start_ms, full_end_ms) = {
+                let guard = cache.lock().expect("range scan cache poisoned");
+                (guard.full_start_ms, guard.full_end_ms)
+            };
+            if start_ms >= full_start_ms && end_ms <= full_end_ms {
+                let key = matchers_cache_key(matchers);
+                let cached = {
+                    let guard = cache.lock().expect("range scan cache poisoned");
+                    guard.floats.get(&key).cloned()
+                };
+                let full_rows = if let Some(rows) = cached {
+                    rows
+                } else {
+                    let rows = std::sync::Arc::new(
+                        self.scan_float_rows_uncached(tenant, matchers, full_start_ms, full_end_ms)
+                            .await?,
+                    );
+                    cache
+                        .lock()
+                        .expect("range scan cache poisoned")
+                        .floats
+                        .insert(key, std::sync::Arc::clone(&rows));
+                    rows
+                };
+                return Ok(full_rows
+                    .iter()
+                    .filter(|row| row.ts_ms >= start_ms && row.ts_ms <= end_ms)
+                    .cloned()
+                    .collect());
+            }
+        }
+        self.scan_float_rows_uncached(tenant, matchers, start_ms, end_ms)
+            .await
+    }
+
+    async fn scan_float_rows_uncached(
         &self,
         tenant: &str,
         matchers: &[LabelMatcher],
@@ -5662,6 +5776,56 @@ impl<S: MetricStore> PromqlEngine<S> {
     }
 
     async fn scan_histogram_rows(
+        &self,
+        tenant: &str,
+        matchers: &[LabelMatcher],
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Vec<HistogramRow>> {
+        // Mirror scan_float_rows: serve per-step histogram probes from one
+        // union-window scan during a range query (see RANGE_SCAN_CACHE).
+        if let Ok(cache) = RANGE_SCAN_CACHE.try_with(std::sync::Arc::clone) {
+            let (full_start_ms, full_end_ms) = {
+                let guard = cache.lock().expect("range scan cache poisoned");
+                (guard.full_start_ms, guard.full_end_ms)
+            };
+            if start_ms >= full_start_ms && end_ms <= full_end_ms {
+                let key = matchers_cache_key(matchers);
+                let cached = {
+                    let guard = cache.lock().expect("range scan cache poisoned");
+                    guard.histograms.get(&key).cloned()
+                };
+                let full_rows = if let Some(rows) = cached {
+                    rows
+                } else {
+                    let rows = std::sync::Arc::new(
+                        self.scan_histogram_rows_uncached(
+                            tenant,
+                            matchers,
+                            full_start_ms,
+                            full_end_ms,
+                        )
+                        .await?,
+                    );
+                    cache
+                        .lock()
+                        .expect("range scan cache poisoned")
+                        .histograms
+                        .insert(key, std::sync::Arc::clone(&rows));
+                    rows
+                };
+                return Ok(full_rows
+                    .iter()
+                    .filter(|row| row.ts_ms >= start_ms && row.ts_ms <= end_ms)
+                    .cloned()
+                    .collect());
+            }
+        }
+        self.scan_histogram_rows_uncached(tenant, matchers, start_ms, end_ms)
+            .await
+    }
+
+    async fn scan_histogram_rows_uncached(
         &self,
         tenant: &str,
         matchers: &[LabelMatcher],
@@ -7142,6 +7306,51 @@ struct FloatRow {
     fp: SeriesFingerprint,
     ts_ms: i64,
     value: f64,
+}
+
+/// Per-range-query float-scan cache (see [`Engine::scan_float_rows`]).
+///
+/// A range query evaluates the same selector at every step, and each step's
+/// instant scan covers `[step - lookback, step]`. Those windows overlap almost
+/// entirely, so a naive driver re-scans the store once per step (240× for a
+/// 1h/15s query). This cache scans the union window `[start - lookback, end]`
+/// **once per matcher set** and serves each step from the in-memory result —
+/// the store is a pure time-range filter, so a filtered superset is byte-for-byte
+/// what a direct sub-window scan returns (both stores keep `[start, end]`
+/// inclusive). Only requests inside the pre-scanned union use the cache; an
+/// `offset`/`@`-modified or long-`[range]` scan that falls outside it transparently
+/// falls back to a direct scan, so results never change — only the redundant
+/// re-scans are removed.
+struct RangeScanCacheInner {
+    full_start_ms: i64,
+    full_end_ms: i64,
+    floats: std::collections::HashMap<String, std::sync::Arc<Vec<FloatRow>>>,
+    /// Per-matcher-set histogram rows over the union window. The instant-selector
+    /// path probes for histogram series at every step (`selector_has_histogram_series`),
+    /// a second per-step store scan alongside the float scan; cache it the same way.
+    histograms: std::collections::HashMap<String, std::sync::Arc<Vec<HistogramRow>>>,
+    /// Per-matcher-set fingerprint→labels resolution. A series' label set is
+    /// immutable, so the union-window result is a superset of any sub-window's
+    /// active series, and callers only ever use it as a `get(&fp)` lookup keyed
+    /// by rows already filtered to the sub-window — extra entries are never read.
+    labels: std::collections::HashMap<String, std::sync::Arc<BTreeMap<SeriesFingerprint, Labels>>>,
+}
+
+type RangeScanCache = std::sync::Arc<std::sync::Mutex<RangeScanCacheInner>>;
+
+tokio::task_local! {
+    /// Active only for the dynamic extent of [`Engine::eval_range_via_planner`]'s
+    /// step loop. Nested range evals (subqueries) shadow it with their own cache
+    /// and restore the outer one on exit, so each range scans its own union.
+    static RANGE_SCAN_CACHE: RangeScanCache;
+}
+
+/// Deterministic cache key for a matcher set. `LabelMatcher` is not `Hash`, but
+/// its `Debug` is stable and uniquely identifies the (name, op, value) triples
+/// in order — sufficient because the same selector yields the same matcher list
+/// at every step of a range query.
+fn matchers_cache_key(matchers: &[LabelMatcher]) -> String {
+    format!("{matchers:?}")
 }
 
 #[derive(Clone)]
@@ -11506,6 +11715,144 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "test defines an inline CountingStore mock with a full MetricStore impl"
+    )]
+    async fn range_query_scans_store_once_per_matcher_set_not_per_step() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crabka_blockstore::LabelMatcher;
+
+        use crate::error::Result;
+        use crate::store::{
+            ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord,
+            MetricStore, ScanResult, TsdbBlock, TsdbStats,
+        };
+
+        // Wraps the in-memory store and counts store-level scans / series
+        // resolutions, to prove the range driver no longer re-scans per step.
+        struct CountingStore {
+            inner: InMemoryMetricStore,
+            scans: Arc<AtomicUsize>,
+            series_calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl MetricStore for CountingStore {
+            async fn scan(
+                &self,
+                t: &str,
+                m: &[LabelMatcher],
+                s: i64,
+                e: i64,
+            ) -> Result<ScanResult> {
+                self.scans.fetch_add(1, Ordering::SeqCst);
+                self.inner.scan(t, m, s, e).await
+            }
+            async fn series(
+                &self,
+                t: &str,
+                m: &[LabelMatcher],
+                s: i64,
+                e: i64,
+            ) -> Result<Vec<Labels>> {
+                self.series_calls.fetch_add(1, Ordering::SeqCst);
+                self.inner.series(t, m, s, e).await
+            }
+            async fn label_names(
+                &self,
+                t: &str,
+                m: &[LabelMatcher],
+                s: i64,
+                e: i64,
+            ) -> Result<Vec<String>> {
+                self.inner.label_names(t, m, s, e).await
+            }
+            async fn label_values(
+                &self,
+                t: &str,
+                name: &str,
+                m: &[LabelMatcher],
+                s: i64,
+                e: i64,
+            ) -> Result<Vec<String>> {
+                self.inner.label_values(t, name, m, s, e).await
+            }
+            async fn exemplars(
+                &self,
+                t: &str,
+                m: &[LabelMatcher],
+                s: i64,
+                e: i64,
+            ) -> Result<Vec<ExemplarRecord>> {
+                self.inner.exemplars(t, m, s, e).await
+            }
+            async fn metadata(&self, t: &str, metric: Option<&str>) -> Result<Vec<MetadataRecord>> {
+                self.inner.metadata(t, metric).await
+            }
+            async fn cardinality_label_names(&self, t: &str) -> Result<Vec<LabelNameCardinality>> {
+                self.inner.cardinality_label_names(t).await
+            }
+            async fn cardinality_label_values(
+                &self,
+                t: &str,
+            ) -> Result<Vec<LabelValueCardinality>> {
+                self.inner.cardinality_label_values(t).await
+            }
+            async fn cardinality_active_series(&self, t: &str) -> Result<Vec<Labels>> {
+                self.inner.cardinality_active_series(t).await
+            }
+            async fn tsdb_stats(&self, t: &str) -> Result<TsdbStats> {
+                self.inner.tsdb_stats(t).await
+            }
+            async fn tsdb_blocks(&self, t: &str) -> Result<Vec<TsdbBlock>> {
+                self.inner.tsdb_blocks(t).await
+            }
+        }
+
+        let mut inner = InMemoryMetricStore::new();
+        for i in 0..20 {
+            inner.push_float(
+                "t",
+                labels(&[("__name__", "up"), ("job", "broker")]),
+                i * 15_000,
+                1.0,
+            );
+        }
+        let scans = Arc::new(AtomicUsize::new(0));
+        let series_calls = Arc::new(AtomicUsize::new(0));
+        let engine = PromqlEngine::new(
+            Arc::new(CountingStore {
+                inner,
+                scans: Arc::clone(&scans),
+                series_calls: Arc::clone(&series_calls),
+            }),
+            EngineOpts::default(),
+        );
+
+        // 20 steps at 15s. Pre-fix this scanned the store ~2× per step (float +
+        // histogram probe) plus a per-step series resolution. With the union-window
+        // cache it is one float scan + one histogram scan + one series resolution
+        // total, reused across every step.
+        let result = engine
+            .eval_range_via_planner_forced("t", "count({job=\"broker\"})", 0, 19 * 15_000, 15_000)
+            .await
+            .unwrap();
+        assert!(matches!(result, QueryResult::RangeMatrix(_)));
+        assert!(
+            scans.load(Ordering::SeqCst) == 2,
+            "store scans should collapse to one float + one histogram union scan, got {}",
+            scans.load(Ordering::SeqCst)
+        );
+        assert!(
+            series_calls.load(Ordering::SeqCst) == 1,
+            "series resolution should be cached across steps, got {}",
+            series_calls.load(Ordering::SeqCst)
+        );
     }
 
     fn set_op_store() -> InMemoryMetricStore {

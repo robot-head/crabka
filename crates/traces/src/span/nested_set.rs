@@ -44,7 +44,11 @@ pub fn assign_nested_set(spans: &[Span]) -> Vec<NestedSet> {
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
             idx: root,
-            parent_left: 0,
+            // Root spans have no parent. Tempo encodes this as nestedSetParent
+            // = -1 (left values start at 1, so -1 never collides with a real
+            // parent's left). Grafana's Traces Drilldown selects root spans with
+            // the primary signal `nestedSetParent < 0`, so roots MUST be < 0.
+            parent_left: -1,
         });
     }
 
@@ -130,11 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn roots_share_zero_parent_id() {
+    fn roots_have_negative_one_parent_id() {
+        // A span with no parent, and one whose parent_span_id is dangling
+        // (parent not in the batch), are both roots: nestedSetParent = -1,
+        // matching Tempo so `nestedSetParent < 0` selects them.
         let spans = vec![span(1, None), span(2, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == 0);
-        assert!(ns[1].parent_id == 0);
+        assert!(ns[0].parent_id == -1);
+        assert!(ns[1].parent_id == -1);
     }
 
     #[test]

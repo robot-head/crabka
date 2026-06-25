@@ -260,6 +260,12 @@ pub async fn run(
             .map_err(|err| TracesError::Wal(err.to_string()))?;
         let windows = decode_consumer_records(&records)?;
         if windows.is_empty() {
+            // `poll` normally long-polls for `config.window`, so an empty round
+            // already cost a full window. But when every assigned leader hits a
+            // transient transport error (e.g. the demo's flaky Docker DNS) `poll`
+            // returns `Ok(vec![])` immediately — without this backoff the loop
+            // would busy-spin a core. A short sleep bounds that to a trickle.
+            tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
 

@@ -1264,7 +1264,10 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
             idx: root,
-            parent_left: 0,
+            // Root spans encode nestedSetParent = -1 (Tempo's no-parent sentinel;
+            // left values start at 1 so -1 never collides). Must match the stored
+            // assignment in span/nested_set.rs and the Drilldown's `< 0` signal.
+            parent_left: -1,
         });
     }
     while let Some(frame) = stack.pop() {
@@ -1291,11 +1294,25 @@ fn recompute_trace_nested_sets(spans: &mut [SpanRef]) {
 }
 
 fn recompute_scan_nested_sets(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>, TraceqlError> {
+    // `concat_batches` materialises every matched span into one RecordBatch.
+    // Arrow's variable-length columns use i32 offsets, so a combined batch over
+    // ~2 GiB overflows with an opaque `Offset overflow error`. Cap the merge at a
+    // safe 1.5 GiB and surface an actionable error so a pathological query (an
+    // unbounded time range over a huge tenant) degrades cleanly instead of
+    // emitting `concat scan batches: Offset overflow error`.
+    const MAX_SCAN_CONCAT_BYTES: usize = 1_500_000_000;
     if batches.is_empty() {
         return Ok(batches);
     }
     let schema = batches[0].schema();
     let batches = align_scan_batches_to_schema(batches, &schema)?;
+    let total_bytes: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
+    if total_bytes > MAX_SCAN_CONCAT_BYTES {
+        return Err(TraceqlError::Store(format!(
+            "scan result too large to merge ({total_bytes} bytes > {MAX_SCAN_CONCAT_BYTES} cap); \
+             narrow the query time range or selector"
+        )));
+    }
     let batch = concat_batches(&schema, &batches)
         .map_err(|err| TraceqlError::Store(format!("concat scan batches: {err}")))?;
     recompute_batch_nested_sets(&batch).map(|batch| vec![batch])
@@ -1664,7 +1681,10 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
 
     let mut left = vec![0_i32; batch.num_rows()];
     let mut right = vec![0_i32; batch.num_rows()];
-    let mut parent_id = vec![0_i32; batch.num_rows()];
+    // Default to the root sentinel (-1): a row not reached by the per-trace DFS
+    // (e.g. a null trace_id) has no parent. 0 would be an invalid parent (left
+    // values start at 1) and would read as "has a parent at left 0".
+    let mut parent_id = vec![-1_i32; batch.num_rows()];
     let mut child_count = vec![0_i32; batch.num_rows()];
 
     for rows in by_trace.values() {
@@ -1706,7 +1726,8 @@ fn recompute_batch_nested_sets(batch: &RecordBatch) -> Result<RecordBatch, Trace
         for &row in roots.iter().rev() {
             stack.push(Frame::Enter {
                 row,
-                parent_left: 0,
+                // Root span: nestedSetParent = -1 (Tempo no-parent sentinel).
+                parent_left: -1,
             });
         }
         while let Some(frame) = stack.pop() {
@@ -2766,6 +2787,13 @@ mod tests {
         assert!(int32_value(&out, COL_CHILD_COUNT, 1).unwrap() == 0);
         assert!(int32_value(&out, COL_CHILD_COUNT, 2).unwrap() == 1);
         assert!(int32_value(&out, COL_CHILD_COUNT, 3).unwrap() == 0);
+        // Roots encode nestedSetParent = -1 (Tempo no-parent sentinel) so the
+        // Drilldown's `nestedSetParent < 0` primary signal selects them; each
+        // child points at its root's `left` (1 after the per-trace reset).
+        assert!(int32_value(&out, COL_PARENT_ID, 0).unwrap() == -1);
+        assert!(int32_value(&out, COL_PARENT_ID, 1).unwrap() == 1);
+        assert!(int32_value(&out, COL_PARENT_ID, 2).unwrap() == -1);
+        assert!(int32_value(&out, COL_PARENT_ID, 3).unwrap() == 1);
     }
 
     #[tokio::test]

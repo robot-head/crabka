@@ -654,18 +654,29 @@ fn grpc_status_from_error(err: &TracesError) -> GrpcStatus {
 }
 
 /// Append decoded spans to the WAL sink.
+///
+/// All spans in one request are appended concurrently: each `append` enqueues
+/// its record into the producer's per-partition accumulator (a fast, non-broker
+/// hop) and then awaits the broker ack. Awaiting them sequentially would force N
+/// serial produce+ack round-trips — on a single-partition WAL with
+/// `max.in.flight=1` that serialized a few-hundred-span batch into seconds,
+/// overrunning the OTLP client's deadline. Firing them together lets the
+/// producer coalesce them into a handful of batches drained in ~one round-trip.
+/// Per-partition ordering and idempotent sequencing are unaffected (the sender
+/// still drains each partition in order with one batch in flight); traces carry
+/// no cross-span WAL-order dependency (the block-builder regroups by `trace_id`).
 pub async fn produce_spans(
     sink: &dyn WalSink,
     tenant: &str,
     spans: Vec<Span>,
 ) -> Result<(), TracesError> {
-    for span in spans {
+    let appends = spans.into_iter().map(|span| {
         sink.append(SpanRecord {
             tenant: tenant.to_string(),
             span,
         })
-        .await?;
-    }
+    });
+    futures::future::try_join_all(appends).await?;
     Ok(())
 }
 

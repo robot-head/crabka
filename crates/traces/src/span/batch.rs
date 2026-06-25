@@ -334,7 +334,7 @@ mod tests {
         assert!(left.value(1) > left.value(0));
         assert!(right.value(1) < right.value(0));
         assert!(parent_id.value(1) == left.value(0));
-        assert!(parent_id.value(0) == 0);
+        assert!(parent_id.value(0) == -1); // root span: Tempo nestedSetParent sentinel
 
         let service = col::<StringArray>(&batch, SCOL_ROOT_SERVICE_NAME);
         assert!(service.value(0) == "api");

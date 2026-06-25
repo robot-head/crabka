@@ -457,7 +457,7 @@ where
     if let Err(err) = QueryEnforcer::check_search_duration(limits, start_ns, end_ns) {
         return limit_error_response(&err);
     }
-    let step_ns = match step_param(&uri) {
+    let step_ns = match step_param(&uri, start_ns, end_ns) {
         Ok(value) => value,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -850,9 +850,12 @@ fn parse_step_to_ns(value: &str) -> Option<i64> {
     parse_seconds_to_ns(value).or_else(|| i64::try_from(parse_go_duration_ns(value).ok()?).ok())
 }
 
-fn step_param(uri: &Uri) -> Result<i64, &'static str> {
+fn step_param(uri: &Uri, start_ns: i64, end_ns: i64) -> Result<i64, &'static str> {
     let Some(step) = query_param(uri, "step") else {
-        return Err("missing query parameter step");
+        // Tempo computes a default step when the client omits it; Grafana's
+        // Traces Drilldown breakdown queries send no `step`. Match that instead
+        // of rejecting the query.
+        return Ok(default_query_range_step_ns(start_ns, end_ns));
     };
     let Some(step_ns) = parse_step_to_ns(&step) else {
         return Err("invalid step");
@@ -861,6 +864,17 @@ fn step_param(uri: &Uri) -> Result<i64, &'static str> {
         return Err("step must be positive");
     }
     Ok(step_ns)
+}
+
+/// Default query-range step when none is supplied: aim for ~100 buckets over the
+/// range, rounded up to a whole second, with a 1s floor (mirrors Tempo's
+/// `DefaultQueryRangeStep` closely enough for a usable series).
+fn default_query_range_step_ns(start_ns: i64, end_ns: i64) -> i64 {
+    const SECOND_NS: i64 = 1_000_000_000;
+    let delta = end_ns.saturating_sub(start_ns).max(0);
+    let raw = delta / 100;
+    let rounded = raw.saturating_add(SECOND_NS - 1) / SECOND_NS * SECOND_NS;
+    rounded.max(SECOND_NS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1478,24 +1492,57 @@ fn typed_value_parts(value: &AttrValue) -> (String, String) {
     }
 }
 
+/// One TraceQL-metrics label as Tempo's protojson `commonv1.KeyValue`
+/// (`{"key": k, "value": {"stringValue": v}}`). Grafana's Tempo backend parses
+/// the `labels` field as a JSON array, so a map object fails to unmarshal
+/// (`cannot unmarshal object into Go value of type []json.RawMessage`).
+fn metric_label_json(key: &str, value: &str) -> Value {
+    json!({ "key": key, "value": { "stringValue": value } })
+}
+
+/// Prometheus-style label string for `TimeSeries.promLabels` (Grafana's legend),
+/// e.g. `{resource_service_name="api"}`. Empty label set renders as `{}`.
+fn metric_prom_labels(labels: &[(String, String)]) -> String {
+    let inner = labels
+        .iter()
+        .map(|(key, value)| {
+            format!(
+                "{}=\"{}\"",
+                key.replace('.', "_"),
+                value.replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{{inner}}}")
+}
+
 fn trace_metrics_json(resp: &TraceMetricsResponse) -> Value {
+    // Tempo `tempopb.QueryRangeResponse` protojson shape, which Grafana's Tempo
+    // backend unmarshals: `series[].labels` is an ARRAY of KeyValue, samples use
+    // `timestampMs` (milliseconds; int64 rendered as a string to match protojson)
+    // and `value`. Crabka's internal point timestamps are nanoseconds.
     json!({
         "series": resp.series.iter().map(|series| {
             json!({
                 "labels": series.labels.iter()
-                    .map(|(key, value)| (key.clone(), json!(value)))
-                    .collect::<Map<_, _>>(),
-                "points": series.points.iter()
-                    .map(|(ts, value)| json!([ts.to_string(), *value]))
+                    .map(|(key, value)| metric_label_json(key, value))
+                    .collect::<Vec<_>>(),
+                "promLabels": metric_prom_labels(&series.labels),
+                "samples": series.points.iter()
+                    .map(|(ts_ns, value)| json!({
+                        "timestampMs": (ts_ns / 1_000_000).to_string(),
+                        "value": *value,
+                    }))
                     .collect::<Vec<_>>(),
                 "exemplars": series.exemplars.iter()
                     .map(|exemplar| {
                         json!({
                             "labels": exemplar.labels.iter()
-                                .map(|(key, value)| (key.clone(), json!(value)))
-                                .collect::<Map<_, _>>(),
+                                .map(|(key, value)| metric_label_json(key, value))
+                                .collect::<Vec<_>>(),
                             "value": exemplar.value,
-                            "timestamp": exemplar.timestamp_ns.to_string(),
+                            "timestampMs": (exemplar.timestamp_ns / 1_000_000).to_string(),
                         })
                     })
                     .collect::<Vec<_>>(),
@@ -2274,15 +2321,19 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 2.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": [{
-                        "labels": {
-                            "span_id": "0101010101010101",
-                            "trace_id": "09090909090909090909090909090909"
-                        },
-                        "timestamp": "1001",
-                        "value": 1.0
+                        "labels": [
+                            {"key": "trace_id", "value": {"stringValue": "09090909090909090909090909090909"}},
+                            {"key": "span_id", "value": {"stringValue": "0101010101010101"}}
+                        ],
+                        "value": 1.0,
+                        "timestampMs": "0"
                     }]
                 }]
             })
@@ -2296,15 +2347,19 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 2.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 2.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": [{
-                        "labels": {
-                            "span_id": "0101010101010101",
-                            "trace_id": "09090909090909090909090909090909"
-                        },
-                        "timestamp": "1001",
-                        "value": 1.0
+                        "labels": [
+                            {"key": "trace_id", "value": {"stringValue": "09090909090909090909090909090909"}},
+                            {"key": "span_id", "value": {"stringValue": "0101010101010101"}}
+                        ],
+                        "value": 1.0,
+                        "timestampMs": "0"
                     }]
                 }]
             })
@@ -2334,8 +2389,12 @@ mod tests {
         assert!(
             body == json!({
                 "series": [{
-                    "labels": {},
-                    "points": [["0", 1.0], ["1000000000", 0.0]],
+                    "labels": [],
+                    "promLabels": "{}",
+                    "samples": [
+                        {"timestampMs": "0", "value": 1.0},
+                        {"timestampMs": "1000", "value": 0.0}
+                    ],
                     "exemplars": []
                 }]
             })
@@ -2434,8 +2493,12 @@ mod tests {
 
         assert!(status == StatusCode::OK);
         assert!(
-            body["series"][0]["points"]
-                == json!([["0", 2.0], ["500000000", 0.0], ["1000000000", 0.0]])
+            body["series"][0]["samples"]
+                == json!([
+                    {"timestampMs": "0", "value": 2.0},
+                    {"timestampMs": "500", "value": 0.0},
+                    {"timestampMs": "1000", "value": 0.0}
+                ])
         );
     }
 
@@ -2447,7 +2510,7 @@ mod tests {
         .await;
 
         assert!(status == StatusCode::OK);
-        assert!(body["series"][0]["points"] == json!([["1000000000", 2.0]]));
+        assert!(body["series"][0]["samples"] == json!([{"timestampMs": "1000", "value": 2.0}]));
         assert!(body["series"][0]["exemplars"] == json!([]));
     }
 
@@ -2485,14 +2548,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_query_range_requires_step() {
-        let (status, body) = get_text(
+    async fn metrics_query_range_defaults_step_when_omitted() {
+        // Grafana's Traces Drilldown breakdown queries omit `step`; Tempo defaults
+        // it rather than rejecting (was a 400 "missing query parameter step").
+        let (status, body) = get_json(
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter step");
+        assert!(status == StatusCode::OK);
+        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4866,7 +4931,7 @@ overrides:
                 "tagValues": [
                     {
                         "type": "int",
-                        "value": "0"
+                        "value": "-1"
                     },
                     {
                         "type": "int",

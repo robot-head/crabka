@@ -91,7 +91,9 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -2283,6 +2285,10 @@ impl KafkaLogWalConsumer {
             .await?;
         Ok(Self { consumer })
     }
+
+    pub(crate) async fn close(self) {
+        let _ = self.consumer.close().await;
+    }
 }
 
 #[async_trait]
@@ -2411,41 +2417,54 @@ fn spawn_log_hot_tail_poller(
 /// Spawn a background task that retries `KafkaLogWalConsumer::connect` until it succeeds,
 /// then runs the hot-tail poll loop.  On a cold boot the Kafka broker may not be ready yet;
 /// retrying here lets the querier serve its HTTP port immediately (FIX B2).
+///
+/// Cancelling `token` causes the poll loop to exit and calls `consumer.close()` to send
+/// LeaveGroup, removing the consumer from the broker's group immediately on graceful shutdown.
 fn spawn_wal_hot_tail_connect_and_poll(
     bootstrap: String,
     group_id: String,
     topic: String,
     hot_tail: BufferedLogHotTail,
-) {
+    token: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let consumer = loop {
-            match KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()).await {
-                Ok(c) => break c,
-                Err(error) => {
-                    eprintln!(
-                        "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
-                    );
-                    sleep(Duration::from_millis(500)).await;
+        let mut consumer = loop {
+            tokio::select! {
+                () = token.cancelled() => return,
+                result = KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()) => {
+                    match result {
+                        Ok(c) => break c,
+                        Err(error) => {
+                            eprintln!(
+                                "[crabka-observability] querier WAL consumer connect failed; retrying: {error}"
+                            );
+                            tokio::select! {
+                                () = token.cancelled() => return,
+                                () = sleep(Duration::from_millis(500)) => {}
+                            }
+                        }
+                    }
                 }
             }
         };
-        let consumer = Arc::new(tokio::sync::Mutex::new(
-            Box::new(consumer) as Box<dyn LogWalConsumer>
-        ));
         loop {
-            let result = {
-                let mut c = consumer.lock().await;
-                poll_log_hot_tail_once(c.as_mut(), &hot_tail, Duration::from_millis(50)).await
+            let result = tokio::select! {
+                () = token.cancelled() => break,
+                result = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(50)) => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
                 Err(_) => true,
             };
             if should_back_off {
-                sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    () = token.cancelled() => break,
+                    () = sleep(Duration::from_millis(50)) => {}
+                }
             }
         }
-    });
+        consumer.close().await;
+    })
 }
 
 /// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
@@ -4995,6 +5014,17 @@ pub async fn build_service_router(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Router, ServiceConfigError> {
+    build_service_router_with_shutdown(config, dependencies, object_store, CancellationToken::new())
+        .await
+        .map(|(router, _)| router)
+}
+
+async fn build_service_router_with_shutdown(
+    config: &ServiceConfig,
+    dependencies: ServiceDependencies,
+    object_store: Option<&dyn ObjectStore>,
+    token: CancellationToken,
+) -> Result<(Router, Option<JoinHandle<()>>), ServiceConfigError> {
     match config.target {
         Role::Distributor => {
             let sink = dependencies
@@ -5003,16 +5033,20 @@ pub async fn build_service_router(
             let ingest_limiter = dependencies
                 .ingest_limiter
                 .unwrap_or_else(|| Arc::new(AllowAllIngestLimiter));
-            Ok(distributor_router_with_sink(
-                sink,
-                ingest_limiter,
-                config.max_ingest_body_bytes,
-                config.wal_append_timeout_ms.map(Duration::from_millis),
-                Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
-                Some(LOKI_CREATION_GRACE_PERIOD),
+            Ok((
+                distributor_router_with_sink(
+                    sink,
+                    ingest_limiter,
+                    config.max_ingest_body_bytes,
+                    config.wal_append_timeout_ms.map(Duration::from_millis),
+                    Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
+                    Some(LOKI_CREATION_GRACE_PERIOD),
+                ),
+                None,
             ))
         }
         Role::Querier => {
+            let mut wal_handle: Option<JoinHandle<()>> = None;
             let configured_store = if object_store.is_none() {
                 build_configured_object_store(config)?
             } else {
@@ -5074,12 +5108,13 @@ pub async fn build_service_router(
                 let hot_tail = BufferedLogHotTail::default();
 
                 // Spawn the consumer connect + poll loop in a background task.
-                spawn_wal_hot_tail_connect_and_poll(
+                wal_handle = Some(spawn_wal_hot_tail_connect_and_poll(
                     deferred.bootstrap.clone(),
                     deferred.group_id,
                     deferred.topic.clone(),
                     hot_tail.clone(),
-                );
+                    token,
+                ));
 
                 // Install a swappable authorizer that starts as AllowAll and gets promoted
                 // to BrokerBackedQueryAuthorizer once connected in the background.
@@ -5111,12 +5146,12 @@ pub async fn build_service_router(
                     state = state.with_hot_tail(hot_tail, i64::MIN);
                 }
             }
-            Ok(loki_router(state))
+            Ok((loki_router(state), wal_handle))
         }
         Role::Compactor => {
             let delete_requests =
                 compactor_delete_requests_for_config(config, dependencies.delete_requests)?;
-            Ok(compactor_router_with_delete_requests(delete_requests))
+            Ok((compactor_router_with_delete_requests(delete_requests), None))
         }
     }
 }
@@ -5141,8 +5176,36 @@ pub async fn serve_service_listener(
             .await;
     }
 
-    let app = build_service_router(&config, dependencies, object_store).await?;
-    axum::serve(listener, app).await?;
+    let token = CancellationToken::new();
+    let token_sig = token.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        token_sig.cancel();
+    });
+    let token_srv = token.clone();
+    let (app, wal_handle) =
+        build_service_router_with_shutdown(&config, dependencies, object_store, token.clone())
+            .await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { token_srv.cancelled().await })
+        .await?;
+    token.cancel();
+    if let Some(h) = wal_handle {
+        let _ = h.await;
+    }
     Ok(())
 }
 
@@ -14756,7 +14819,14 @@ fn parse_detected_labels_params(
             let value = decode_form_component(value)?;
 
             match key.as_str() {
-                "query" if query.is_none() => query = Some(value),
+                // Grafana's Logs Drilldown sends `detected_labels?query=` (empty)
+                // on load to discover all labels. Treat an empty/blank query as
+                // "match all streams" (None) — the same as Loki — instead of
+                // parsing "" as a stream selector, which fails with
+                // `parse error: syntax error: unexpected $end, expecting '{'`.
+                // `execute_detected_labels_query` already maps `None` to no
+                // matchers (all series).
+                "query" if query.is_none() && !value.trim().is_empty() => query = Some(value),
                 "start" if start.is_none() => {
                     start = Some(parse_loki_timestamp_query_param("start", &value)?);
                 }
@@ -18782,6 +18852,21 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_labels_empty_query_is_match_all() {
+        // Grafana's Logs Drilldown loads `detected_labels?query=` with an empty
+        // query to discover every label. An empty/blank query must parse to
+        // `None` (match all streams), not be handed to the LogQL parser — which
+        // rejects "" with `syntax error: unexpected $end, expecting '{'`.
+        for raw in ["query=", "query=%20", "query=%20%20"] {
+            let params = parse_detected_labels_params(Some(raw)).unwrap();
+            assert!(params.query.is_none(), "{raw}: {:?}", params.query);
+        }
+        // A real stream selector is still preserved.
+        let params = parse_detected_labels_params(Some("query=%7Bapp%3D%22api%22%7D")).unwrap();
+        assert_eq!(params.query.as_deref(), Some(r#"{app="api"}"#));
+    }
 
     #[test]
     fn instant_synthetic_vector_uses_raw_loki_timestamp() {

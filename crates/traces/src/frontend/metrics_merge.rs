@@ -1,34 +1,53 @@
 //! Typed merge of `TraceQL`-metrics series across shards: union series by their
-//! label set, sum points at equal timestamps, concatenate exemplars, and apply
-//! exemplar limiting, over typed serde structs shaped to the querier's
-//! `trace_metrics_json` body.
-
-use std::collections::BTreeMap;
+//! label set, sum samples at equal timestamps, concatenate exemplars, and apply
+//! exemplar limiting. The serde structs are shaped to the querier's
+//! `trace_metrics_json` body — Tempo's protojson `QueryRangeResponse`: `labels`
+//! is a `KeyValue` array, `samples` carry `timestampMs` (milliseconds, int64
+//! rendered as a string) + `value`, plus `promLabels` and exemplars. This is the
+//! same shape Grafana's Tempo backend unmarshals, so the frontend both decodes
+//! per-shard querier responses and re-serializes the merged result correctly.
 
 use serde::{Deserialize, Serialize};
 
-/// One metric point: `[timestamp_string, value]` (the querier emits the
-/// timestamp as a string and the value as a float).
+/// One label as Tempo's `commonv1.KeyValue`: `{"key": k, "value": <AnyValue>}`.
+/// The value (e.g. `{"stringValue": "api"}`) is kept as raw JSON since merging
+/// only needs to compare label sets, not interpret values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MetricPoint(pub String, pub f64);
+pub struct KeyValue {
+    pub key: String,
+    pub value: serde_json::Value,
+}
 
-/// One Prometheus-style exemplar.
+/// One metric sample: `{"timestampMs": "<ms>", "value": <f64>}`. Tempo renders
+/// the int64 millisecond timestamp as a string (protojson), so it stays a string
+/// here; merging compares/orders it numerically.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MetricSample {
+    #[serde(rename = "timestampMs")]
+    pub timestamp_ms: String,
+    pub value: f64,
+}
+
+/// One exemplar in Tempo's metrics shape.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Exemplar {
     #[serde(default)]
-    pub labels: BTreeMap<String, serde_json::Value>,
+    pub labels: Vec<KeyValue>,
     pub value: f64,
-    #[serde(default)]
-    pub timestamp: String,
+    #[serde(rename = "timestampMs", default)]
+    pub timestamp_ms: String,
 }
 
-/// One metric series: a label set + step-aligned points + exemplars.
+/// One metric series: a label set, its Prometheus label string, step-aligned
+/// samples, and exemplars.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MetricSeries {
     #[serde(default)]
-    pub labels: BTreeMap<String, serde_json::Value>,
+    pub labels: Vec<KeyValue>,
+    #[serde(rename = "promLabels", default)]
+    pub prom_labels: String,
     #[serde(default)]
-    pub points: Vec<MetricPoint>,
+    pub samples: Vec<MetricSample>,
     #[serde(default)]
     pub exemplars: Vec<Exemplar>,
 }
@@ -40,29 +59,37 @@ pub struct MetricsResponseJson {
     pub series: Vec<MetricSeries>,
 }
 
-/// Merge a series into the accumulator: union by label set, summing points at
-/// equal timestamps and concatenating exemplars.
+/// Merge a series into the accumulator: union by label set, summing samples at
+/// equal timestamps and concatenating exemplars. The querier emits a series'
+/// labels in a deterministic order for a given group, so equal label sets across
+/// shards compare equal as vectors.
 pub fn merge_metric_series(acc: &mut Vec<MetricSeries>, incoming: MetricSeries) {
     let Some(existing) = acc.iter_mut().find(|s| s.labels == incoming.labels) else {
         acc.push(incoming);
         return;
     };
-    merge_points(&mut existing.points, incoming.points);
+    merge_samples(&mut existing.samples, incoming.samples);
     existing.exemplars.extend(incoming.exemplars);
+    // `prom_labels` is derived from the (matching) label set, so the existing
+    // series already carries the correct value.
 }
 
-fn merge_points(existing: &mut Vec<MetricPoint>, incoming: Vec<MetricPoint>) {
-    for point in incoming {
-        if let Some(found) = existing.iter_mut().find(|p| p.0 == point.0) {
-            found.1 += point.1;
+fn merge_samples(existing: &mut Vec<MetricSample>, incoming: Vec<MetricSample>) {
+    for sample in incoming {
+        if let Some(found) = existing
+            .iter_mut()
+            .find(|s| s.timestamp_ms == sample.timestamp_ms)
+        {
+            found.value += sample.value;
         } else {
-            existing.push(point);
+            existing.push(sample);
         }
     }
     existing.sort_by(|a, b| {
-        let ka = a.0.parse::<i128>().unwrap_or(i128::MAX);
-        let kb = b.0.parse::<i128>().unwrap_or(i128::MAX);
-        ka.cmp(&kb).then_with(|| a.0.cmp(&b.0))
+        let ka = a.timestamp_ms.parse::<i128>().unwrap_or(i128::MAX);
+        let kb = b.timestamp_ms.parse::<i128>().unwrap_or(i128::MAX);
+        ka.cmp(&kb)
+            .then_with(|| a.timestamp_ms.cmp(&b.timestamp_ms))
     });
 }
 
@@ -94,35 +121,39 @@ pub fn merge_metrics(
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,
-    reason = "test assertions compare exact hand-constructed point/exemplar values, not computed floats"
+    reason = "test assertions compare exact hand-constructed sample/exemplar values, not computed floats"
 )]
 mod tests {
     use assert2::assert;
 
     use super::*;
 
-    fn labels(svc: &str) -> BTreeMap<String, serde_json::Value> {
-        let mut m = BTreeMap::new();
-        m.insert("svc".to_string(), serde_json::json!(svc));
-        m
+    fn labels(svc: &str) -> Vec<KeyValue> {
+        vec![KeyValue {
+            key: "svc".to_string(),
+            value: serde_json::json!({ "stringValue": svc }),
+        }]
+    }
+
+    fn sample(ts_ms: &str, value: f64) -> MetricSample {
+        MetricSample {
+            timestamp_ms: ts_ms.to_string(),
+            value,
+        }
     }
 
     #[test]
-    fn merges_points_with_same_timestamp() {
+    fn merges_samples_with_same_timestamp() {
         let a = MetricSeries {
             labels: labels("api"),
-            points: vec![
-                MetricPoint("1000".into(), 2.0),
-                MetricPoint("2000".into(), 4.0),
-            ],
+            prom_labels: "{svc=\"api\"}".into(),
+            samples: vec![sample("1000", 2.0), sample("2000", 4.0)],
             exemplars: vec![],
         };
         let b = MetricSeries {
             labels: labels("api"),
-            points: vec![
-                MetricPoint("1000".into(), 3.0),
-                MetricPoint("3000".into(), 5.0),
-            ],
+            prom_labels: "{svc=\"api\"}".into(),
+            samples: vec![sample("1000", 3.0), sample("3000", 5.0)],
             exemplars: vec![],
         };
         let mut merged = Vec::new();
@@ -130,11 +161,11 @@ mod tests {
         merge_metric_series(&mut merged, b);
         assert!(merged.len() == 1);
         assert!(
-            merged[0].points
+            merged[0].samples
                 == vec![
-                    MetricPoint("1000".into(), 5.0),
-                    MetricPoint("2000".into(), 4.0),
-                    MetricPoint("3000".into(), 5.0),
+                    sample("1000", 5.0),
+                    sample("2000", 4.0),
+                    sample("3000", 5.0)
                 ]
         );
     }
@@ -143,12 +174,14 @@ mod tests {
     fn distinct_label_sets_stay_separate() {
         let a = MetricSeries {
             labels: labels("api"),
-            points: vec![],
+            prom_labels: String::new(),
+            samples: vec![],
             exemplars: vec![],
         };
         let b = MetricSeries {
             labels: labels("db"),
-            points: vec![],
+            prom_labels: String::new(),
+            samples: vec![],
             exemplars: vec![],
         };
         let mut merged = Vec::new();
@@ -161,17 +194,18 @@ mod tests {
     fn exemplar_limit_truncates() {
         let mut series = vec![MetricSeries {
             labels: labels("api"),
-            points: vec![],
+            prom_labels: String::new(),
+            samples: vec![],
             exemplars: vec![
                 Exemplar {
-                    labels: BTreeMap::new(),
+                    labels: vec![],
                     value: 1.0,
-                    timestamp: "1".into(),
+                    timestamp_ms: "1".into(),
                 },
                 Exemplar {
-                    labels: BTreeMap::new(),
+                    labels: vec![],
                     value: 2.0,
-                    timestamp: "2".into(),
+                    timestamp_ms: "2".into(),
                 },
             ],
         }];
@@ -184,43 +218,55 @@ mod tests {
         let p0 = MetricsResponseJson {
             series: vec![MetricSeries {
                 labels: labels("api"),
-                points: vec![MetricPoint("1".into(), 1.0)],
+                prom_labels: "{svc=\"api\"}".into(),
+                samples: vec![sample("1", 1.0)],
                 exemplars: vec![Exemplar {
-                    labels: BTreeMap::new(),
+                    labels: vec![],
                     value: 1.0,
-                    timestamp: "1".into(),
+                    timestamp_ms: "1".into(),
                 }],
             }],
         };
         let p1 = MetricsResponseJson {
             series: vec![MetricSeries {
                 labels: labels("api"),
-                points: vec![MetricPoint("1".into(), 2.0)],
+                prom_labels: "{svc=\"api\"}".into(),
+                samples: vec![sample("1", 2.0)],
                 exemplars: vec![Exemplar {
-                    labels: BTreeMap::new(),
+                    labels: vec![],
                     value: 2.0,
-                    timestamp: "2".into(),
+                    timestamp_ms: "2".into(),
                 }],
             }],
         };
         let merged = merge_metrics(vec![p0, p1], Some(1));
         assert!(merged.series.len() == 1);
-        assert!(merged.series[0].points[0].1 == 3.0);
+        assert!(merged.series[0].samples[0].value == 3.0);
         assert!(merged.series[0].exemplars.len() == 1);
     }
 
     #[test]
     fn round_trips_querier_metrics_body() {
+        // Exactly the shape the querier's `trace_metrics_json` emits.
         let body = serde_json::json!({
             "series": [{
-                "labels": { "svc": "api" },
-                "points": [["1000", 2.0]],
-                "exemplars": [{ "labels": {}, "value": 1.5, "timestamp": "1000" }]
+                "labels": [{"key": "svc", "value": {"stringValue": "api"}}],
+                "promLabels": "{svc=\"api\"}",
+                "samples": [{"timestampMs": "1000", "value": 2.0}],
+                "exemplars": [{
+                    "labels": [{"key": "trace_id", "value": {"stringValue": "0a"}}],
+                    "value": 1.5,
+                    "timestampMs": "1000"
+                }]
             }]
         });
-        let resp: MetricsResponseJson = serde_json::from_value(body).unwrap();
+        let resp: MetricsResponseJson = serde_json::from_value(body.clone()).unwrap();
         assert!(resp.series.len() == 1);
-        assert!(resp.series[0].points[0] == MetricPoint("1000".into(), 2.0));
+        assert!(resp.series[0].samples[0] == sample("1000", 2.0));
+        assert!(resp.series[0].prom_labels == "{svc=\"api\"}");
+        assert!(resp.series[0].labels[0].key == "svc");
         assert!(resp.series[0].exemplars[0].value == 1.5);
+        // Re-serializes to the same Tempo shape (round-trip stable).
+        assert!(serde_json::to_value(&resp).unwrap() == body);
     }
 }

@@ -25,6 +25,7 @@ const EXEMPLAR_TABLE: &str = "metric_exemplars";
 const METADATA_TABLE: &str = "metric_metadata";
 
 /// `PromQL` metric store over compacted metric blocks.
+#[derive(Clone)]
 pub struct MetricBlockStore {
     floats: BlockStore,
     histograms: Option<BlockStore>,

@@ -54,6 +54,7 @@ impl Parser {
             match name.as_str() {
                 "most_recent" => hints.most_recent = value,
                 "exemplars" => hints.exemplars = Some(value),
+                "sample" => hints.sample = Some(value),
                 other => return Err(Self::err(format!("unsupported query hint {other:?}"))),
             }
             if !self.eat(&Token::Comma) {
@@ -307,6 +308,12 @@ impl Parser {
 
     fn parse_spanset_primary(&mut self) -> Result<SpansetExpr> {
         if self.eat(&Token::LBrace) {
+            // `{}` is the match-all spanset (every span). TraceQL treats empty
+            // braces as a constant-true filter, so don't require a field
+            // expression — Grafana's Tempo Explore sends `{}` by default.
+            if self.eat(&Token::RBrace) {
+                return Ok(SpansetExpr::Selector(Box::new(FieldExpr::Const(true))));
+            }
             let fe = self.parse_field_or()?;
             self.expect(&Token::RBrace)?;
             return Ok(SpansetExpr::Selector(Box::new(fe)));
@@ -353,6 +360,14 @@ impl Parser {
             self.expect(&Token::RParen)?;
             return Ok(expr);
         }
+        // A bare boolean literal is a constant filter: `{ true }` matches every
+        // span, `{ false }` none. Only a *leading* bool is a constant — a bool on
+        // the right of a comparison (`{ .ok = true }`) is handled by parse_value.
+        if let Token::Bool(value) = self.peek() {
+            let value = *value;
+            self.pos += 1;
+            return Ok(FieldExpr::Const(value));
+        }
         let lhs = self.parse_field()?;
         let Some(op) = self.parse_comparison_op() else {
             return Ok(FieldExpr::Field(lhs));
@@ -384,6 +399,16 @@ impl Parser {
             return Ok(Field {
                 scope: scope(&first)?,
                 key: self.expect_ident()?,
+            });
+        }
+        // A bare identifier matching a reserved intrinsic name is the intrinsic,
+        // not an attribute. Tempo treats `duration`, `name`, `nestedSetParent`,
+        // etc. as intrinsics when written scopeless; only `.foo` / `span.foo` /
+        // `resource.foo` are attribute lookups.
+        if let Some(intrinsic) = scopeless_intrinsic(&first) {
+            return Ok(Field {
+                scope: Scope::Intrinsic(intrinsic),
+                key: first,
             });
         }
         Ok(Field {
@@ -575,6 +600,29 @@ fn intrinsic(scope: &str, key: &str) -> Result<Intrinsic> {
             "unknown intrinsic {scope}:{key}"
         ))),
     }
+}
+
+/// Resolves a bare (scopeless) identifier to a `TraceQL` intrinsic, matching the
+/// reserved intrinsic field names Tempo recognizes without a scope. A name not
+/// in this set is a span/resource attribute (`Scope::Both`). `parentID`, `id`,
+/// `traceID`, and the event/link/instrumentation intrinsics are intentionally
+/// excluded — Tempo requires an explicit scope (`span:`, `trace:`, …) for those.
+fn scopeless_intrinsic(name: &str) -> Option<Intrinsic> {
+    Some(match name {
+        "duration" => Intrinsic::Duration,
+        "kind" => Intrinsic::Kind,
+        "name" => Intrinsic::Name,
+        "status" => Intrinsic::Status,
+        "statusMessage" => Intrinsic::StatusMessage,
+        "childCount" => Intrinsic::ChildCount,
+        "nestedSetLeft" => Intrinsic::NestedSetLeft,
+        "nestedSetRight" => Intrinsic::NestedSetRight,
+        "nestedSetParent" => Intrinsic::NestedSetParent,
+        "rootName" => Intrinsic::TraceRootName,
+        "rootServiceName" => Intrinsic::TraceRootService,
+        "traceDuration" => Intrinsic::TraceDuration,
+        _ => return None,
+    })
 }
 
 fn is_duration_field(field: &Field) -> bool {
@@ -886,6 +934,87 @@ mod tests {
     }
 
     #[test]
+    fn scopeless_intrinsics_resolve_to_intrinsic_scope() {
+        // Tempo treats these reserved names as intrinsics when scopeless. Crabka
+        // previously parsed them as `Scope::Both` attributes, so they silently
+        // matched nothing (`attr.duration`, `attr.nestedSetParent`, …) and broke
+        // every Grafana Tempo/Traces-Drilldown query, which writes them bare.
+        for (query, want) in [
+            ("{ duration > 1s }", Intrinsic::Duration),
+            ("{ name != \"\" }", Intrinsic::Name),
+            ("{ kind = server }", Intrinsic::Kind),
+            ("{ status = error }", Intrinsic::Status),
+            ("{ statusMessage != \"\" }", Intrinsic::StatusMessage),
+            ("{ childCount > 0 }", Intrinsic::ChildCount),
+            ("{ nestedSetLeft > 0 }", Intrinsic::NestedSetLeft),
+            ("{ nestedSetRight > 0 }", Intrinsic::NestedSetRight),
+            ("{ nestedSetParent < 0 }", Intrinsic::NestedSetParent),
+            ("{ rootName != \"\" }", Intrinsic::TraceRootName),
+            ("{ rootServiceName != \"\" }", Intrinsic::TraceRootService),
+            ("{ traceDuration > 1s }", Intrinsic::TraceDuration),
+        ] {
+            let q = parse(query).unwrap();
+            let SpansetExpr::Selector(fe) = &q.root else {
+                panic!("{query}: selector")
+            };
+            let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+                panic!("{query}: comparison")
+            };
+            assert!(
+                lhs.scope == Scope::Intrinsic(want),
+                "{query}: got {:?}",
+                lhs.scope
+            );
+        }
+    }
+
+    #[test]
+    fn scopeless_duration_parses_duration_literal() {
+        // Resolving bare `duration` to the intrinsic also makes `is_duration_field`
+        // true, so the RHS lexes as a duration rather than a bare string.
+        let q = parse("{ duration > 100ms }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        let FieldExpr::Comparison { lhs, rhs, .. } = fe.as_ref() else {
+            panic!()
+        };
+        assert!(lhs.scope == Scope::Intrinsic(Intrinsic::Duration));
+        assert!(*rhs == Value::Duration(100_000_000));
+    }
+
+    #[test]
+    fn non_intrinsic_bare_ident_stays_attribute() {
+        // Only the exact reserved set is promoted; a near-miss like `durations`
+        // (not `duration`) is still a bare attribute.
+        for key in ["durations", "kindof", "foo"] {
+            let q = parse(&format!("{{ {key} = 1 }}")).unwrap();
+            let SpansetExpr::Selector(fe) = &q.root else {
+                panic!("{key}")
+            };
+            let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+                panic!("{key}")
+            };
+            assert!(lhs.scope == Scope::Both, "{key}: {:?}", lhs.scope);
+            assert!(lhs.key == key);
+        }
+    }
+
+    #[test]
+    fn leading_dot_keeps_intrinsic_name_as_attribute() {
+        // `.duration` / `.name` are explicit attribute lookups, never the intrinsic.
+        let q = parse("{ .duration = 5 }").unwrap();
+        let SpansetExpr::Selector(fe) = &q.root else {
+            panic!()
+        };
+        let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
+            panic!()
+        };
+        assert!(lhs.scope == Scope::Both);
+        assert!(lhs.key == "duration");
+    }
+
+    #[test]
     fn span_parent_alias_is_not_a_valid_intrinsic() {
         // `span:Parent` was a bogus alias for nestedSetParent inconsistent with
         // Tempo's naming and with the other nested-set intrinsics; it must not
@@ -1102,6 +1231,15 @@ mod tests {
     fn exemplars_query_hint_parses() {
         let q = parse("{ .a = 1 } | count_over_time() with (exemplars=false)").unwrap();
         assert!(q.hints.exemplars == Some(false));
+    }
+
+    #[test]
+    fn sample_query_hint_parses() {
+        // Grafana's Traces Drilldown appends `with(sample=true)` to its metrics
+        // queries; Crabka must accept it (it computes exact metrics regardless).
+        let q = parse("{ nestedSetParent < 0 } | histogram_over_time(duration) with(sample=true)")
+            .unwrap();
+        assert!(q.hints.sample == Some(true));
     }
 
     #[test]

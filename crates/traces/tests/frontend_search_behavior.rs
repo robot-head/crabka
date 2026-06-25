@@ -582,7 +582,13 @@ async fn metrics_query_range_is_a_single_unsharded_job() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // Returned verbatim — no cross-shard summing.
-    assert!(json["series"][0]["points"] == json!([["1000000000", 1.0], ["2000000000", 2.0]]));
+    assert!(
+        json["series"][0]["samples"]
+            == json!([
+                {"timestampMs": "1000000000", "value": 1.0},
+                {"timestampMs": "2000000000", "value": 2.0}
+            ])
+    );
 
     let log = seen.lock().unwrap();
     assert!(log.len() == 1); // exactly one job, not Live + per-block
@@ -641,7 +647,13 @@ async fn metrics_instant_query_is_a_single_unsharded_job() {
     assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["series"][0]["points"] == json!([["1000000000", 1.0], ["2000000000", 2.0]]));
+    assert!(
+        json["series"][0]["samples"]
+            == json!([
+                {"timestampMs": "1000000000", "value": 1.0},
+                {"timestampMs": "2000000000", "value": 2.0}
+            ])
+    );
 
     let log = seen.lock().unwrap();
     assert!(log.len() == 1);
@@ -1033,29 +1045,36 @@ async fn query_echo_search_response(State(()): State<()>, uri: Uri) -> axum::Jso
 }
 
 async fn sharded_metrics_response(State(()): State<()>, uri: Uri) -> axum::Json<Value> {
-    let (points, exemplar) = if is_backend_shard(uri.query().unwrap_or_default()) {
+    let (samples, exemplar) = if is_backend_shard(uri.query().unwrap_or_default()) {
         (
-            json!([["1000000000", 1.0], ["1999999999", 2.0]]),
+            json!([
+                {"timestampMs": "1000000000", "value": 1.0},
+                {"timestampMs": "1999999999", "value": 2.0}
+            ]),
             json!({
-                "labels": { "trace_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-                "timestamp": "1000000000",
+                "labels": [{"key": "trace_id", "value": {"stringValue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}],
+                "timestampMs": "1000000000",
                 "value": 1.0
             }),
         )
     } else {
         (
-            json!([["2000000000", 3.0], ["3000000000", 4.0]]),
+            json!([
+                {"timestampMs": "2000000000", "value": 3.0},
+                {"timestampMs": "3000000000", "value": 4.0}
+            ]),
             json!({
-                "labels": { "trace_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
-                "timestamp": "2000000000",
+                "labels": [{"key": "trace_id", "value": {"stringValue": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}],
+                "timestampMs": "2000000000",
                 "value": 3.0
             }),
         )
     };
     axum::Json(json!({
         "series": [{
-            "labels": { "svc": "api" },
-            "points": points,
+            "labels": [{"key": "svc", "value": {"stringValue": "api"}}],
+            "promLabels": "{svc=\"api\"}",
+            "samples": samples,
             "exemplars": [exemplar],
         }]
     }))
@@ -1070,8 +1089,12 @@ async fn record_metrics(
         .push(uri.query().unwrap_or_default().to_string());
     axum::Json(json!({
         "series": [{
-            "labels": { "svc": "api" },
-            "points": [["1000000000", 1.0], ["2000000000", 2.0]],
+            "labels": [{"key": "svc", "value": {"stringValue": "api"}}],
+            "promLabels": "{svc=\"api\"}",
+            "samples": [
+                {"timestampMs": "1000000000", "value": 1.0},
+                {"timestampMs": "2000000000", "value": 2.0}
+            ],
             "exemplars": [],
         }]
     }))

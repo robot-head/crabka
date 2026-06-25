@@ -11,6 +11,10 @@ pub struct Query {
 pub struct QueryHints {
     pub most_recent: bool,
     pub exemplars: Option<bool>,
+    /// `with(sample=...)` — Tempo's probabilistic metrics-sampling hint. Grafana's
+    /// Traces Drilldown sends `sample=true`. Accepted and recorded; Crabka computes
+    /// exact metrics (sampling is a performance hint, so ignoring it is sound).
+    pub sample: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +40,11 @@ pub enum FieldExpr {
     Or(Box<FieldExpr>, Box<FieldExpr>),
     Not(Box<FieldExpr>),
     Field(Field),
+    /// A constant boolean filter. The empty spanset `{}` and the scalar-boolean
+    /// spanset `{ true }` lower to `Const(true)` (match every span); `{ false }`
+    /// lowers to `Const(false)` (match no span). Mirrors Grafana Tempo, whose
+    /// Explore "Search" tab and TraceQL-metrics default to `{}`.
+    Const(bool),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

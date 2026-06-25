@@ -1886,6 +1886,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_match_all_selectors_return_every_trace() {
+        // Grafana's Tempo Explore "Search" tab and TraceQL-metrics default to the
+        // empty spanset `{}`; `{ true }` is the equivalent constant-true filter.
+        // Both must match every span (not error, not match-none). `{ false }`
+        // matches nothing. The fixture holds two traces (3 spans total).
+        let e = engine();
+        for q in ["{}", "{ true }", "{true}"] {
+            let r = e.search("t", q, 0, 100_000, 20).await.unwrap();
+            assert!(r.traces.len() == 2, "query {q:?} should match both traces");
+        }
+        let none = e.search("t", "{ false }", 0, 100_000, 20).await.unwrap();
+        assert!(none.traces.is_empty(), "{{ false }} should match no traces");
+    }
+
+    #[tokio::test]
     async fn search_reports_inspected_bytes() {
         // The scan's decoded data size is threaded up to inspected_bytes (non-zero
         // for a non-empty store) for the Tempo search `metrics.inspectedBytes`.
@@ -2037,6 +2052,33 @@ mod tests {
         assert!(r.traces[0].trace_id == [9; 16]);
         assert!(r.traces[0].span_sets[0].matched == 1);
         assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
+    }
+
+    #[tokio::test]
+    async fn search_scopeless_nested_set_parent_matches_scoped_and_finds_roots() {
+        // Grafana's Traces Drilldown selects root spans with the scopeless
+        // primary signal `nestedSetParent < 0`. This must (a) parse as the
+        // intrinsic rather than `attr.nestedSetParent`, and (b) actually match
+        // roots, whose sentinel is -1. It is equivalent to the scoped form and
+        // returns at least one trace (every trace has a root).
+        let e = engine();
+        let scopeless = e
+            .search("t", "{ nestedSetParent < 0 }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        let scoped = e
+            .search("t", "{ span:nestedSetParent < 0 }", 0, 100_000, 20)
+            .await
+            .unwrap();
+        let mut scopeless_ids: Vec<_> = scopeless.traces.iter().map(|t| t.trace_id).collect();
+        let mut scoped_ids: Vec<_> = scoped.traces.iter().map(|t| t.trace_id).collect();
+        scopeless_ids.sort_unstable();
+        scoped_ids.sort_unstable();
+        assert!(
+            !scopeless_ids.is_empty(),
+            "roots (nestedSetParent < 0) must exist"
+        );
+        assert!(scopeless_ids == scoped_ids);
     }
 
     #[tokio::test]
@@ -3244,7 +3286,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("nestedSetParent".into(), "0".into())]);
+        // Root span groups under nestedSetParent = -1 (Tempo root sentinel);
+        // "-1" sorts before "1".
+        assert!(got[0].labels == vec![("nestedSetParent".into(), "-1".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
         assert!(got[1].labels == vec![("nestedSetParent".into(), "1".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);

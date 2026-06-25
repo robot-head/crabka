@@ -16,8 +16,8 @@ use crabka_blockstore::{LABEL_PROFILE_TYPE, LabelMatcher, MatchOp};
 use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
     LabeledHeatmap, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE,
-    PCOL_VALUE, ProfileError, ProfileStore, ProfileType, Series, SeriesAgg, bin_heatmap,
-    parse_label_selector, step_bucket_ms, step_ms_from_secs,
+    PCOL_VALUE, ProfileError, ProfileStats, ProfileStore, ProfileType, Series, SeriesAgg,
+    bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
 };
 use prost::Message;
 use serde::{Deserialize, Deserializer};
@@ -121,6 +121,15 @@ impl<S: ProfileStore> QuerierState<S> {
             .for_tenant(tenant)
             .validate_query_range_ms(start_ms, end_ms)
             .map_err(|err| ProfileError::Plan(err.message()))
+    }
+
+    /// Global profile stats for a tenant across all ingested data. Pyroscope's
+    /// `GetProfileStats` is unbounded — the request carries no time range — so
+    /// this queries the full time span rather than a caller-supplied window. A
+    /// `[0, 0]`-scoped query always reports "no data" and traps Grafana's
+    /// Profiles Drilldown on its onboarding screen even when the tenant has data.
+    async fn global_profile_stats(&self, tenant: &str) -> Result<ProfileStats, ProfileError> {
+        self.store.stats(tenant, 0, i64::MAX).await
     }
 
     fn effective_max_nodes(&self, tenant: &str, requested: i64) -> i64 {
@@ -1647,18 +1656,21 @@ where
 async fn get_profile_stats_handler<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
-    req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
+    _req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
 ) -> Result<ConnectResponse<pb::querier::v1::GetProfileStatsResponse>, ConnectError>
 where
     S: ProfileStore,
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // GetProfileStats is a global "has this tenant ever ingested, and over what
+    // span" query. Pyroscope's request carries no time range, and Grafana's
+    // Profiles Drilldown sends an empty message (so start/end arrive as 0).
+    // Report stats across all data rather than time-scoping to [0, 0] — the
+    // latter always looks empty and wedges the Drilldown onto its onboarding
+    // screen even when the tenant has data. No range validation: a global
+    // metadata query is unbounded by design (Pyroscope doesn't limit it).
     let stats = state
-        .store
-        .stats(&tenant, req.0.start, req.0.end)
+        .global_profile_stats(&tenant)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
@@ -2765,6 +2777,52 @@ mod tests {
         value
             .as_i64()
             .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    }
+
+    #[tokio::test]
+    async fn get_profile_stats_is_global_not_time_scoped() {
+        // A sample ingested at a non-zero timestamp must be reported by
+        // GetProfileStats even though Grafana's Profiles Drilldown sends an empty
+        // request (start = end = 0). Time-scoping to [0, 0] hides it and wedges
+        // the Drilldown onto its onboarding screen.
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![("service_name".to_string(), "api".to_string())],
+            0,
+            stacktrace,
+            7,
+            5_000, // non-zero ingest timestamp
+        );
+        let store = Arc::new(store);
+
+        // Control: the old [0, 0]-scoped behavior misses the sample entirely.
+        let scoped = store.stats("tenant-a", 0, 0).await.unwrap();
+        assert!(!scoped.data_ingested);
+
+        // The handler path queries globally and reports the sample.
+        let state = QuerierState::new(Arc::clone(&store));
+        let stats = state.global_profile_stats("tenant-a").await.unwrap();
+        assert!(stats.data_ingested);
+        assert!(stats.oldest_profile_time == Some(5_000));
+        assert!(stats.newest_profile_time == Some(5_000));
     }
 
     #[tokio::test]

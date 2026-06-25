@@ -137,7 +137,10 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
     for &root in roots.iter().rev() {
         stack.push(Frame::Enter {
             idx: root,
-            parent_left: 0,
+            // Root spans encode nestedSetParent = -1 (Tempo's no-parent
+            // sentinel; left values start at 1 so -1 never collides). Grafana's
+            // Traces Drilldown selects roots with `nestedSetParent < 0`.
+            parent_left: -1,
         });
     }
 
@@ -173,7 +176,8 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
         }
         stack.push(Frame::Enter {
             idx: start,
-            parent_left: 0,
+            // Cycle-orphaned spans become additional roots: same -1 sentinel.
+            parent_left: -1,
         });
         while let Some(frame) = stack.pop() {
             match frame {
@@ -278,7 +282,7 @@ mod tests {
         ];
         let ns = assign_nested_set(&spans);
         let root_left = ns[idx(&spans, 1)].left;
-        assert!(ns[idx(&spans, 1)].parent_id == 0);
+        assert!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
         assert!(ns[idx(&spans, 2)].parent_id == root_left);
         assert!(ns[idx(&spans, 3)].parent_id == root_left);
         assert!(ns[idx(&spans, 4)].parent_id == ns[idx(&spans, 3)].left);
@@ -307,7 +311,7 @@ mod tests {
     fn orphan_parent_is_treated_as_root() {
         let spans = vec![span(9, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == 0);
+        assert!(ns[0].parent_id == -1); // dangling parent → root sentinel
         assert!(ns[0].left == 1);
         assert!(ns[0].right == 2);
     }
@@ -338,7 +342,7 @@ mod tests {
         let ns = assign_nested_set(&spans);
         // Pre-existing well-formed assignment is preserved.
         assert!(ns[idx(&spans, 1)].left == 1);
-        assert!(ns[idx(&spans, 1)].parent_id == 0);
+        assert!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
         let root = ns[idx(&spans, 1)];
         let child = ns[idx(&spans, 4)];
         assert!(root.left < child.left && child.right < root.right);

@@ -290,7 +290,14 @@ impl Group {
                 .insert(instance_id, member.member_id.clone());
         }
         let was_empty = matches!(self.state, GroupState::Empty);
-        let was_first_or_stable = matches!(self.state, GroupState::Empty | GroupState::Stable);
+        // Also restart a rebalance when a new member joins while stuck in
+        // CompletingRebalance. Real Kafka (KIP-62 AwaitingSync) transitions
+        // back to PreparingRebalance on any new join so a dead leader's
+        // CompletingRebalance deadlock doesn't strand the group forever.
+        let was_first_or_stable = matches!(
+            self.state,
+            GroupState::Empty | GroupState::Stable | GroupState::CompletingRebalance
+        );
         let member_id = member.member_id.clone();
         self.members.insert(member_id.clone(), member);
         if was_first_or_stable {
@@ -394,15 +401,20 @@ impl Group {
     /// so a restarting client reclaims its assignment on rejoin without
     /// kicking the rest of the group into a rebalance.
     pub fn expire_dead_members(&mut self, now: Instant) -> Vec<String> {
-        // Real Kafka only expires members once the group is `Stable` — i.e.,
-        // after SyncGroup has completed and the consumers are heartbeating.
-        // Before then, the member's `last_heartbeat` is just the time
-        // `add_member` was called, which can race with the JoinGroup wait
-        // when `session_timeout` is small (kafka-console-consumer defaults
-        // to 10s — same length as our rebalance wait). The result was that
-        // a single-member group would self-evict its only member at the
-        // exact moment the rebalance completed.
-        if !matches!(self.state, GroupState::Stable) {
+        // Expire members in all active states (PreparingRebalance,
+        // CompletingRebalance, Stable). Empty and Dead have no members to
+        // expire. Importantly, expiring in CompletingRebalance lets the broker
+        // evict a dead group leader that will never send SyncGroup — otherwise
+        // the group is permanently stuck: expire_dead_members only ran in
+        // Stable (post-SyncGroup), so a dead leader stranded the group forever.
+        //
+        // The original Stable-only guard existed to prevent a race where a
+        // member with a very small session_timeout could self-evict before its
+        // JoinGroup returned (last_heartbeat = add_member time, session_timeout
+        // = 3s = INITIAL_REBALANCE_DELAY). With the default session_timeout of
+        // 45s and a 3s rebalance delay this race is impossible in practice, and
+        // real Kafka expires members regardless of group state.
+        if matches!(self.state, GroupState::Empty | GroupState::Dead) {
             return Vec::new();
         }
         let dropped: Vec<String> = self
@@ -428,6 +440,13 @@ impl Group {
                 // start-from-empty herd: eager-complete once the survivors
                 // rejoin rather than holding the initial-delay window.
                 self.rebalance_from_empty = false;
+                // If we just evicted from CompletingRebalance, rebalance_deadline
+                // is None (complete_rebalance clears it). Set a fresh deadline so
+                // parked joiners/followers wake up via the actor's opt_sleep path
+                // rather than waiting indefinitely for a rejoin that never comes.
+                if self.rebalance_deadline.is_none() {
+                    self.rebalance_deadline = Some(Instant::now() + Duration::from_secs(3));
+                }
             }
         }
         dropped
@@ -688,8 +707,6 @@ mod tests {
         m.session_timeout = Duration::from_millis(1);
         m.last_heartbeat = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         g.add_member(m);
-        // Bring the group to Stable so expiration is active (the production
-        // path: members only expire once they are heartbeating, post-Sync).
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
         let dropped = g.expire_dead_members(Instant::now());

@@ -213,7 +213,7 @@ fn parent_field_expr_to_sql_qualified(
                     .map(|predicate| format!("(NOT {predicate})")),
             )
         }
-        FieldExpr::Comparison { .. } | FieldExpr::Field(_) => Ok(None),
+        FieldExpr::Comparison { .. } | FieldExpr::Field(_) | FieldExpr::Const(_) => Ok(None),
     }
 }
 
@@ -269,6 +269,12 @@ pub(crate) fn field_expr_to_sql(fe: &FieldExpr) -> Result<String> {
         )),
         FieldExpr::Not(inner) => Ok(format!("(NOT {})", field_expr_to_sql(inner)?)),
         FieldExpr::Field(field) => Ok(format!("{} IS NOT NULL", ident(&field_to_column(field)))),
+        // `{}` / `{ true }` => match every span; `{ false }` => match none.
+        FieldExpr::Const(value) => Ok(if *value {
+            "TRUE".into()
+        } else {
+            "FALSE".into()
+        }),
     }
 }
 
@@ -288,6 +294,7 @@ pub(crate) fn has_nested_scope(fe: &FieldExpr) -> bool {
         }
         FieldExpr::And(a, b) | FieldExpr::Or(a, b) => has_nested_scope(a) || has_nested_scope(b),
         FieldExpr::Not(inner) => has_nested_scope(inner),
+        FieldExpr::Const(_) => false,
     }
 }
 
@@ -298,6 +305,7 @@ pub(crate) fn has_parent_scope(fe: &FieldExpr) -> bool {
         }
         FieldExpr::And(a, b) | FieldExpr::Or(a, b) => has_parent_scope(a) || has_parent_scope(b),
         FieldExpr::Not(inner) => has_parent_scope(inner),
+        FieldExpr::Const(_) => false,
     }
 }
 
@@ -328,6 +336,11 @@ fn field_expr_to_sql_qualified(
             "{} IS NOT NULL",
             qualified_field_ident(field, span_alias, parent_alias)
         )),
+        FieldExpr::Const(value) => Ok(if *value {
+            "TRUE".into()
+        } else {
+            "FALSE".into()
+        }),
     }
 }
 
@@ -410,7 +423,11 @@ pub(crate) fn field_expr_to_matchers(fe: &FieldExpr) -> Vec<SpanMatcher> {
                 .and_then(|mut disjuncts| disjuncts.pop())
                 .unwrap_or_default()
         }
-        FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) => vec![],
+        // A constant filter carries no per-span matcher; the SQL predicate
+        // (`TRUE`/`FALSE`) is authoritative, so it contributes no pre-filter.
+        FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Field(_) | FieldExpr::Const(_) => {
+            vec![]
+        }
     }
 }
 
@@ -421,6 +438,14 @@ fn field_expr_to_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<SpanMatcher
                 "comparison and field expressions lower to matchers",
             )]])
         }
+        // A constant filter is the identity/annihilator of the matcher DNF, not
+        // "unrepresentable": `true` is match-all (one disjunct with no matchers,
+        // the AND-identity) and `false` is match-none (zero disjuncts). Returning
+        // `None` here would poison an enclosing `And` via `?`, dropping the
+        // sibling's matchers and the attribute columns they project (e.g.
+        // `{ span.http.method != nil && true }` would lose the `attr.http.method`
+        // projection and fail to plan).
+        FieldExpr::Const(value) => Some(if *value { vec![vec![]] } else { vec![] }),
         FieldExpr::And(a, b) => {
             let left = field_expr_to_matcher_disjuncts(a)?;
             let right = field_expr_to_matcher_disjuncts(b)?;
@@ -474,6 +499,10 @@ fn field_expr_to_negated_matcher_disjuncts(fe: &FieldExpr) -> Option<Vec<Vec<Spa
             Some(out)
         }
         FieldExpr::Not(inner) => field_expr_to_matcher_disjuncts(inner),
+        // Negated constant: `!true` is match-none (zero disjuncts), `!false` is
+        // match-all (one empty disjunct). Mirrors the non-negated identity so a
+        // `Const` sibling never poisons an enclosing conjunction.
+        FieldExpr::Const(value) => Some(if *value { vec![] } else { vec![vec![]] }),
     }
 }
 
@@ -493,7 +522,9 @@ fn matcher_from_field_expr(fe: &FieldExpr) -> Option<SpanMatcher> {
             value: MatchValue::Nil,
             negated: false,
         }),
-        FieldExpr::And(_, _) | FieldExpr::Or(_, _) | FieldExpr::Not(_) => None,
+        FieldExpr::And(_, _) | FieldExpr::Or(_, _) | FieldExpr::Not(_) | FieldExpr::Const(_) => {
+            None
+        }
     }
 }
 
@@ -725,6 +756,45 @@ mod tests {
     fn disjunction_does_not_prefilter() {
         let ms = field_expr_to_matchers(&selector("{ .a = 1 || .b = 2 }"));
         assert!(ms.is_empty());
+    }
+
+    #[test]
+    fn const_true_is_and_identity_in_matcher_disjuncts() {
+        // `{ .a != nil }` is one disjunct of one matcher; ANDing `&& true` (a
+        // `FieldExpr::Const(true)`) must NOT collapse the DNF to `None`, which
+        // would drop the `attr.a` projection and make planning fail. The const
+        // is the AND-identity: the disjuncts are unchanged.
+        let base = field_expr_to_matcher_disjuncts(&selector("{ .a != nil }")).unwrap();
+        for q in ["{ .a != nil && true }", "{ true && .a != nil }"] {
+            let with_const = field_expr_to_matcher_disjuncts(&selector(q)).unwrap();
+            assert!(with_const == base, "{q}: {with_const:?} != {base:?}");
+        }
+        // The prefilter matcher is still collected so the scan projects `attr.a`.
+        let ms = field_expr_to_matchers(&selector("{ .a != nil && true }"));
+        assert!(ms.len() == 1 && ms[0].key == "a");
+    }
+
+    #[test]
+    fn const_false_is_match_none_in_matcher_disjuncts() {
+        // `false` is the annihilator: zero disjuncts (match nothing), and ANDing
+        // it in drops all other disjuncts.
+        assert!(
+            field_expr_to_matcher_disjuncts(&selector("{ false }")).unwrap()
+                == Vec::<Vec<SpanMatcher>>::new()
+        );
+        assert!(
+            field_expr_to_matcher_disjuncts(&selector("{ .a != nil && false }"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn const_true_alone_is_single_empty_match_all_disjunct() {
+        // `{}` / `{ true }` => exactly one disjunct with no matchers, which the
+        // planner treats as an unfiltered (match-all) scan.
+        let d = field_expr_to_matcher_disjuncts(&selector("{ true }")).unwrap();
+        assert!(d.len() == 1 && d[0].is_empty());
     }
 
     #[test]

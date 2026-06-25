@@ -51,7 +51,8 @@ proptest! {
         for (i, span) in spans.iter().enumerate() {
             if let Some(parent) = span.parent_span_id.and_then(|p| by_id.get(&p).copied()) {
                 if parent == i {
-                    prop_assert_eq!(ns[i].parent_id, 0);
+                    // Self-parented span is treated as a root: -1 sentinel.
+                    prop_assert_eq!(ns[i].parent_id, -1);
                 } else {
                     prop_assert_eq!(ns[i].parent_id, ns[parent].nested_set_left);
                     let mut cur = Some(parent);
@@ -64,7 +65,8 @@ proptest! {
                     }
                 }
             } else {
-                prop_assert_eq!(ns[i].parent_id, 0);
+                // No parent in the batch → root: -1 sentinel.
+                prop_assert_eq!(ns[i].parent_id, -1);
             }
         }
     }

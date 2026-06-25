@@ -21,7 +21,7 @@
       "id": 3, "type": "traces", "title": "Recent traces",
       "datasource": { "type": "tempo", "uid": "crabka-tempo" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{}" } ]
+      "targets": [ { "refId": "A", "queryType": "traceql", "query": "{ .service.name != \"\" }", "limit": 20, "tableType": "spans" } ]
     },
     {
       "id": 4, "type": "flamegraph", "title": "Broker CPU profile",

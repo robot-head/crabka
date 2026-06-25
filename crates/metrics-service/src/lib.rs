@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path as StdPath;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use bytes::Bytes;
@@ -858,6 +858,7 @@ pub struct RefreshingMetricBlockStore {
     base: Url,
     manifest_prefix: String,
     hot_store: WalHead,
+    cold_cache: Arc<tokio::sync::RwLock<Option<(Instant, MetricBlockStore)>>>,
 }
 
 impl RefreshingMetricBlockStore {
@@ -873,12 +874,24 @@ impl RefreshingMetricBlockStore {
             base,
             manifest_prefix: manifest_prefix.into(),
             hot_store,
+            cold_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     async fn current_store(
         &self,
     ) -> Result<MergedMetricStore<MetricBlockStore, WalHead>, MetricsServiceError> {
+        const TTL: Duration = Duration::from_secs(30);
+
+        {
+            let guard = self.cold_cache.read().await;
+            if let Some((cached_at, ref cold)) = *guard
+                && cached_at.elapsed() < TTL
+            {
+                return Ok(MergedMetricStore::new(cold.clone(), self.hot_store.clone()));
+            }
+        }
+
         let manifests =
             load_compaction_manifests(self.store.clone(), &self.manifest_prefix).await?;
         let cold = MetricBlockStore::from_compaction_manifests(
@@ -886,7 +899,9 @@ impl RefreshingMetricBlockStore {
             Some(BlockStore::new(self.store.clone(), self.base.clone())),
             &manifests,
         );
-        Ok(MergedMetricStore::new(cold, self.hot_store.clone()))
+        let merged = MergedMetricStore::new(cold.clone(), self.hot_store.clone());
+        *self.cold_cache.write().await = Some((Instant::now(), cold));
+        Ok(merged)
     }
 }
 

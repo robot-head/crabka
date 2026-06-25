@@ -27,6 +27,7 @@ pub struct ScanTableRequest<'a> {
 }
 
 /// Owns the object store, its `DataFusion` URL prefix, and the in-memory index.
+#[derive(Clone)]
 pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,

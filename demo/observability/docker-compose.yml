@@ -9,6 +9,14 @@ x-s3-env: &s3-env
 
 x-otlp-env: &otlp-env
   CRABKA_OTLP_ENDPOINT: http://alloy:4317
+  # Head sampling ratio. Every Crabka service self-instruments at 100% by
+  # default, and the traces pipeline (distributor/broker/block-builder) traces
+  # its OWN span-ingest operations — those spans get exported back through Alloy
+  # into the traces WAL, which traces THAT ingest, and so on. At ratio 1.0 the
+  # loop diverges (observed: 62M+ spans, a 250MB+ trace index the querier cannot
+  # serve). 0.05 keeps the per-generation amplification < 1 so the feedback
+  # converges while still leaving plenty of demo traces to view.
+  CRABKA_OTLP_SAMPLE_RATIO: "0.05"
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
   # Activate jemalloc heap profiling (the image is built --features
   # heap-profiling). Default sample rate (~every 512 KiB) — NOT lg_prof_sample:0,
@@ -33,10 +41,14 @@ services:
   # before the broker starts. Idempotent — skips if already formatted. The
   # controller listener is advertised-host:9093 (broker.rs derives it from
   # --advertised-listener with port 9093).
+  # --feature streams.version=1 finalizes the KIP-1071 feature gate so that
+  # demo-stream (Kafka Streams group coordinator) starts successfully. If you
+  # already have a broker-data volume from before this flag was added, wipe it
+  # with `docker compose down -v` and restart.
   broker-format:
     image: crabka-demo:latest
     restart: "no"
-    entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093"]
+    entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093 --feature streams.version=1"]
     volumes: ["broker-data:/data"]
 
   broker:
@@ -187,8 +199,13 @@ services:
     command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-manifest", "--wal-group-id=crabka-observability-querier"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
+    # The hot-tail WAL consumer (--wal-bootstrap-server) connects to the broker at
+    # startup; without waiting for broker health it starts too early, the initial
+    # consumer-group join fails, and the tail never recovers -> empty labels/streams
+    # until the container is restarted. Wait for the broker like the compactor does.
     depends_on:
       minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
 
   # ---- PROFILES (Pyroscope) ----
   profiles-distributor:
@@ -216,8 +233,13 @@ services:
     command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["4040:4040"]
+    # The hot WAL-tail consumer (--bootstrap) connects to the broker at startup;
+    # without waiting for broker health it starts too early, the initial join fails,
+    # and the hot store stays empty -> profiles (especially sparse ones like memory)
+    # return nothing until the container is restarted. Wait for the broker.
     depends_on:
       minio-setup: { condition: service_completed_successfully }
+      broker: { condition: service_healthy }
 
   # ---- COLLECTOR + GRAFANA ----
   alloy:
