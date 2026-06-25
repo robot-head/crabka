@@ -1791,7 +1791,7 @@ fn otlp_span(trace_id: [u8; 16], span: &SpanRef) -> OtlpSpan {
             .map(|event| otlp_event(span, event))
             .collect(),
         links: span.links.iter().map(otlp_link).collect(),
-        status: otlp_status(span.status_code, &span.status_message),
+        status: Some(otlp_status(span.status_code, &span.status_message)),
         ..OtlpSpan::default()
     }
 }
@@ -1816,11 +1816,16 @@ fn otlp_link(link: &crabka_traceql::LinkRef) -> OtlpLink {
     }
 }
 
-fn otlp_status(code: i32, message: &str) -> Option<OtlpStatus> {
-    (code != 0 || !message.is_empty()).then(|| OtlpStatus {
+fn otlp_status(code: i32, message: &str) -> OtlpStatus {
+    // Tempo constructs a Status for every span, and Grafana's Tempo backend
+    // dereferences `span.Status` when transforming the protobuf trace
+    // (trace_transform.go) — an absent/nil status is a nil pointer dereference
+    // that 500s the trace view. STATUS_CODE_UNSET (0) is a valid, present status,
+    // so this is emitted unconditionally (wrapped in `Some` at the call site).
+    OtlpStatus {
         code,
         message: message.to_string(),
-    })
+    }
 }
 
 fn otlp_attrs(attrs: &[(String, AttrValue)]) -> Vec<OtlpKeyValue> {
@@ -1916,9 +1921,10 @@ fn trace_span_json(trace_id: [u8; 16], span: &SpanRef) -> Value {
         "endTimeUnixNano".into(),
         json!((span.start_time_unix_nano + span.duration_nanos).to_string()),
     );
-    if let Some(status) = span_status_json(span.status_code, &span.status_message) {
-        obj.insert("status".into(), status);
-    }
+    obj.insert(
+        "status".into(),
+        span_status_json(span.status_code, &span.status_message),
+    );
     obj.insert("attributes".into(), attrs_json(&span.attributes));
     if !span.events.is_empty() {
         obj.insert("events".into(), events_json(span));
@@ -1973,23 +1979,24 @@ fn span_kind_json(kind: i32) -> Option<&'static str> {
     }
 }
 
-fn span_status_json(code: i32, message: &str) -> Option<Value> {
-    let code_name = match code {
-        1 => Some("STATUS_CODE_OK"),
-        2 => Some("STATUS_CODE_ERROR"),
-        _ => None,
-    };
-    if code_name.is_none() && message.is_empty() {
-        return None;
-    }
+fn span_status_json(code: i32, message: &str) -> Value {
+    // Always emit a status object so the field is never missing (Tempo always
+    // sets a Status; Grafana dereferences it). STATUS_CODE_UNSET (0) is the
+    // protojson default and is omitted (rendered as `{}`); OK/ERROR are explicit.
     let mut status = Map::new();
-    if let Some(code_name) = code_name {
-        status.insert("code".into(), json!(code_name));
+    match code {
+        1 => {
+            status.insert("code".into(), json!("STATUS_CODE_OK"));
+        }
+        2 => {
+            status.insert("code".into(), json!("STATUS_CODE_ERROR"));
+        }
+        _ => {}
     }
     if !message.is_empty() {
         status.insert("message".into(), json!(message));
     }
-    Some(Value::Object(status))
+    Value::Object(status)
 }
 
 fn attrs_json(attrs: &[(String, AttrValue)]) -> Value {
@@ -3154,6 +3161,7 @@ overrides:
                                     "name": "span",
                                     "startTimeUnixNano": "1001",
                                     "endTimeUnixNano": "1201",
+                                    "status": {},
                                     "attributes": [{"key": "svc", "value": {"stringValue": "a"}}]
                                 },
                                 {
@@ -3163,6 +3171,7 @@ overrides:
                                     "name": "span",
                                     "startTimeUnixNano": "1002",
                                     "endTimeUnixNano": "1202",
+                                    "status": {},
                                     "attributes": [{"key": "svc", "value": {"stringValue": "b"}}]
                                 }
                             ]
@@ -3172,6 +3181,28 @@ overrides:
                 "status": "COMPLETE",
                 "message": ""
             })
+        );
+    }
+
+    #[test]
+    fn span_status_is_always_present_even_when_unset() {
+        // Grafana's Tempo backend dereferences span.Status when transforming the
+        // protobuf trace; an absent (nil) status panics it and 500s the trace
+        // view. Every span must carry a Status, including STATUS_CODE_UNSET (0).
+        for code in [0, 1, 2] {
+            assert!(
+                otlp_status(code, "").code == code,
+                "code {code} must emit status"
+            );
+        }
+        let unset = otlp_status(0, "");
+        assert!(unset.code == 0 && unset.message.is_empty());
+        // JSON mirrors the protojson shape: UNSET is present-but-empty, OK/ERROR
+        // carry the explicit code.
+        assert!(span_status_json(0, "") == json!({}));
+        assert!(span_status_json(1, "") == json!({"code": "STATUS_CODE_OK"}));
+        assert!(
+            span_status_json(2, "boom") == json!({"code": "STATUS_CODE_ERROR", "message": "boom"})
         );
     }
 
