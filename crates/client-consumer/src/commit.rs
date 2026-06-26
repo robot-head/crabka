@@ -54,16 +54,24 @@ fn build_commit_request(
     }
 }
 
-/// Map an `OffsetCommit` response to a result. `0` is success. The rebalance
-/// codes `ILLEGAL_GENERATION (22)` and `REBALANCE_IN_PROGRESS (27)` are DEFERRED
-/// — treated as `Ok` — because the generation we stamped only went stale due to
-/// a rebalance: the coordinator task rejoins and publishes the new generation
-/// (`current_generation`), and the offsets recommit on the next call. A
-/// long-running block-builder/compactor commit loop must therefore NOT crash on
-/// them (the offset is at-least-once). Any other non-zero code is fatal.
-fn commit_response_result(resp: &OffsetCommitResponse) -> Result<(), ConsumerError> {
+/// Map an `OffsetCommit` response to a result, given whether the coordinator
+/// task is still alive. `0` is success. The rebalance codes `ILLEGAL_GENERATION
+/// (22)` and `REBALANCE_IN_PROGRESS (27)` are DEFERRED — treated as `Ok` — ONLY
+/// while the coordinator task is alive to rejoin and republish the generation
+/// (`current_generation`): the offsets stay in `next_offsets` and recommit on
+/// the next call (at-least-once), so a long-running block-builder/compactor
+/// commit loop survives a routine rebalance instead of crashing. If the
+/// coordinator task has EXITED it can never republish a fresh generation, so
+/// deferring would silently never-advance — surface those codes as fatal
+/// instead, so the process restarts and rejoins from scratch. Any other
+/// non-zero code is always fatal.
+fn commit_response_result(
+    resp: &OffsetCommitResponse,
+    coordinator_alive: bool,
+) -> Result<(), ConsumerError> {
     match first_commit_error(resp) {
-        0 | 22 | 27 => Ok(()),
+        0 => Ok(()),
+        22 | 27 if coordinator_alive => Ok(()),
         code => Err(ConsumerError::Server(code)),
     }
 }
@@ -116,20 +124,25 @@ impl Consumer {
         .await?;
 
         // A rebalance can move the group out from under this commit (22
-        // ILLEGAL_GENERATION / 27 REBALANCE_IN_PROGRESS). `commit_response_result`
-        // treats those as deferred (Ok) — the coordinator rejoins, publishes the
-        // new generation, and the offsets recommit next round — so the commit
-        // loop survives a routine rebalance instead of crashing. Surface it once
-        // for ops visibility.
+        // ILLEGAL_GENERATION / 27 REBALANCE_IN_PROGRESS). While the coordinator
+        // task is alive it rejoins, republishes the generation, and the offsets
+        // recommit next round, so `commit_response_result` defers (Ok) and the
+        // commit loop survives the rebalance. If the coordinator task has exited
+        // it returns fatal instead — a dead coordinator can never recover the
+        // generation, so a loud restart beats a silent never-advance.
+        let coordinator_alive = self
+            .coordinator_handle
+            .as_ref()
+            .is_none_or(|h| !h.is_finished());
         let code = first_commit_error(&resp);
-        if code == 22 || code == 27 {
+        if (code == 22 || code == 27) && coordinator_alive {
             tracing::warn!(
                 group = %self.group_id,
                 error_code = code,
                 "offset commit deferred: group rebalancing; will recommit after the coordinator rejoins",
             );
         }
-        commit_response_result(&resp)
+        commit_response_result(&resp, coordinator_alive)
     }
 
     /// Fire-and-forget commit. Returns once the request is enqueued on the
@@ -281,20 +294,35 @@ mod tests {
     }
 
     #[test]
-    fn commit_response_result_defers_rebalance_codes_and_fails_others() {
-        // success
-        assert!(commit_response_result(&response(&[0, 0])).is_ok());
-        // a non-rebalance error is fatal
-        let err = commit_response_result(&response(&[0, 42])).unwrap_err();
-        assert!(matches!(err, ConsumerError::Server(42)));
-        // ILLEGAL_GENERATION (22) and REBALANCE_IN_PROGRESS (27) are DEFERRED,
-        // not fatal — a commit loop must survive a rebalance; the coordinator
-        // rejoins (publishing the new generation) and the offsets recommit.
-        assert!(commit_response_result(&response(&[22])).is_ok());
-        assert!(commit_response_result(&response(&[27])).is_ok());
-        assert!(commit_response_result(&response(&[0, 22])).is_ok());
+    fn commit_response_result_defers_rebalance_codes_only_while_coordinator_alive() {
+        // success regardless of coordinator liveness
+        assert!(commit_response_result(&response(&[0, 0]), true).is_ok());
+        assert!(commit_response_result(&response(&[0, 0]), false).is_ok());
+        // a non-rebalance error is always fatal
+        assert!(matches!(
+            commit_response_result(&response(&[0, 42]), true).unwrap_err(),
+            ConsumerError::Server(42)
+        ));
+        // ILLEGAL_GENERATION (22) and REBALANCE_IN_PROGRESS (27) DEFER while the
+        // coordinator is alive to rejoin (it republishes the generation and the
+        // offsets recommit next round) — a commit loop must survive a rebalance.
+        assert!(commit_response_result(&response(&[22]), true).is_ok());
+        assert!(commit_response_result(&response(&[27]), true).is_ok());
+        assert!(commit_response_result(&response(&[0, 22]), true).is_ok());
+        // ...but they are FATAL if the coordinator task has exited: it can never
+        // refresh the generation, so deferring would silently never-advance.
+        assert!(matches!(
+            commit_response_result(&response(&[22]), false).unwrap_err(),
+            ConsumerError::Server(22)
+        ));
+        assert!(matches!(
+            commit_response_result(&response(&[27]), false).unwrap_err(),
+            ConsumerError::Server(27)
+        ));
         // first-error precedence: a fatal code ahead of a rebalance code stays fatal
-        let err = commit_response_result(&response(&[16, 27])).unwrap_err();
-        assert!(matches!(err, ConsumerError::Server(16)));
+        assert!(matches!(
+            commit_response_result(&response(&[16, 27]), true).unwrap_err(),
+            ConsumerError::Server(16)
+        ));
     }
 }
