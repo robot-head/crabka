@@ -899,3 +899,110 @@ async fn committed_leader_epoch_survives_restart() {
         broker.shutdown().await;
     }
 }
+
+/// Regression for the WAL-consumer cold-start hang: a single-member group that
+/// JOINS before its subscribed topic exists gets a 0-partition assignment, and
+/// a Stable one-member group is never sent a broker-driven rebalance — so
+/// recovery depends *solely* on the coordinator noticing, via its metadata
+/// refresh, that the topic appeared, and rejoining. Without that loop the empty
+/// assignment strands forever (the `logs-compactor` / `profiles-block-builder`
+/// hang). No second member ever joins, so this isolates the metadata-driven
+/// rejoin from the heartbeat-driven `REBALANCE_IN_PROGRESS` path. It also guards
+/// the TOCTOU fix: the coordinator seeds its rejoin baseline from the snapshot
+/// the *initial* (empty) assignment was computed against, so a topic created any
+/// time after the join — including during start-up — is still seen as growth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_start_rejoins_when_subscribed_topic_appears() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+
+    // Subscribe to a topic that does NOT exist yet. The join still succeeds and
+    // the assignment is empty — exactly the cold start the WAL consumers hit.
+    let mut consumer = Consumer::builder()
+        .bootstrap(&bootstrap)
+        .client_id("c")
+        .group_id("cold-start-grp")
+        .session_timeout(Duration::from_secs(30))
+        .heartbeat_interval(Duration::from_millis(500))
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .subscribe(["wal-late".to_string()])
+        .build()
+        .await
+        .expect("consumer builds even though its subscribed topic does not exist yet");
+
+    // Let the initial join settle, then assert it really is the empty-assignment
+    // cold start (a single Stable member with nothing to consume).
+    let _ = consumer.poll(Duration::from_millis(200)).await;
+    assert!(
+        consumer.assignment().await.is_empty(),
+        "expected an empty assignment before the topic exists, got len {}",
+        consumer.assignment().await.len()
+    );
+
+    // The distributor creates the WAL topic AFTER the consumer has joined.
+    create_topic_with_partitions(&producer, "wal-late", 2).await;
+
+    // Recovery is driven only by the coordinator's metadata refresh
+    // (SUBSCRIPTION_METADATA_REFRESH = 5s) — there is no membership change — so
+    // allow a few multiples of that interval on slow CI.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = consumer.poll(Duration::from_millis(200)).await;
+            if consumer.assignment().await.len() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "consumer never rejoined after its topic appeared (last assignment len {})",
+                consumer.assignment().await.len()
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("metadata-driven rejoin within 30s");
+
+    // The recovered assignment must be functional: produce to both partitions
+    // and confirm every record is delivered (proves the re-acquired partitions
+    // primed their fetch offsets).
+    produce_to_partition(&broker, &producer, "wal-late", 0, &["p0a", "p0b"]).await;
+    produce_to_partition(&broker, &producer, "wal-late", 1, &["p1a", "p1b"]).await;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while seen.len() < 4 {
+            for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+                seen.insert(
+                    String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned(),
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "did not deliver all records from the recovered assignment, seen {seen:?}"
+            );
+        }
+    })
+    .await
+    .expect("records delivered from the recovered assignment within 30s");
+
+    let expected: HashSet<String> = ["p0a", "p0b", "p1a", "p1b"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    assert!(seen == expected, "expected {expected:?}, got {seen:?}");
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
+}

@@ -596,6 +596,12 @@ impl Consumer {
             heartbeat_interval,
             auto_offset_reset,
             client_rack: client_rack.clone(),
+            // The metadata snapshot this initial assignment was computed against,
+            // threaded to the coordinator so its rejoin baseline starts from
+            // exactly what we saw here — not a fresh fetch that could already
+            // include a topic created during start-up (which would strand a
+            // cold-start empty assignment permanently).
+            initial_subscribed_counts: topic_partitions,
         };
         // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
         // follows it.  Dropping a timed-out `start_once` future before this

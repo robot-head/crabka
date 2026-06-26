@@ -310,6 +310,14 @@ pub(crate) struct CoordinatorState {
     pub heartbeat_interval: Duration,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
+    /// Subscribed-topic partition counts the INITIAL assignment was computed
+    /// against — the metadata snapshot `start_once` already fetched. The
+    /// coordinator seeds its rejoin baseline from this rather than a fresh
+    /// post-spawn `Metadata` fetch: a fresh fetch could already include a topic
+    /// created in the window between the initial assignment and this task
+    /// starting, comparing equal to the baseline forever and stranding the
+    /// empty cold-start assignment permanently.
+    pub initial_subscribed_counts: HashMap<String, i32>,
 }
 
 /// Outcome of a single heartbeat RPC.
@@ -385,6 +393,19 @@ fn subscribed_topics_grew(known: &HashMap<String, i32>, current: &HashMap<String
         .any(|(topic, count)| *count > known.get(topic).copied().unwrap_or(0))
 }
 
+/// Fold `current` into `known`, taking the per-topic max. Kafka partition
+/// counts are monotonic (a topic never loses partitions), so the rejoin
+/// baseline must only ever ADVANCE: a transient metadata under-report
+/// (controller failover / a partial response) must never lower it and
+/// re-trigger a spurious rejoin, and a non-leader rejoin (whose snapshot is
+/// empty) must leave the baseline untouched rather than erase it.
+fn merge_counts(known: &mut HashMap<String, i32>, current: &HashMap<String, i32>) {
+    for (topic, &count) in current {
+        let entry = known.entry(topic.clone()).or_insert(0);
+        *entry = (*entry).max(count);
+    }
+}
+
 pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken) {
     // The coordinator task runs on its own `Client` (separate pool from the
     // build/data-path client), so its pool's (id → addr) registry starts empty.
@@ -402,16 +423,17 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_rejoin = false;
     // Subscribed-topic partition counts the current assignment was computed
-    // against. We rejoin when these grow (a topic created after we joined, or a
+    // against. We rejoin when these GROW (a topic created after we joined, or a
     // topic that gains partitions) so the assignor distributes the new
-    // partitions. Initialised to what's visible now (post-join) so a
-    // steady-state consumer never rejoins spuriously; a topic that appears later
-    // grows the map and triggers a rejoin. This is what lets a consumer that
-    // joined at cold-start before its WAL topic existed (empty assignment)
-    // recover once the distributor creates the topic.
-    let mut known_counts = subscribed_partition_counts(&state)
-        .await
-        .unwrap_or_default();
+    // partitions. Seeded from the snapshot the INITIAL assignment used (threaded
+    // in as `initial_subscribed_counts`), NOT a fresh fetch here: a fresh fetch
+    // could already include a topic created in the window between that initial
+    // Metadata and this task starting, comparing equal to the baseline forever
+    // and stranding the empty cold-start assignment permanently. Advanced only
+    // ever via `merge_counts` (monotonic max), so a transient metadata blip
+    // can't lower it. This is what lets a consumer that joined before its WAL
+    // topic existed (empty assignment) recover once the topic is created.
+    let mut known_counts = std::mem::take(&mut state.initial_subscribed_counts);
     let mut last_meta_check = tokio::time::Instant::now();
 
     loop {
@@ -433,7 +455,11 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
                     group = %state.group_id,
                     "subscribed-topic partitions changed; rejoining to update assignment"
                 );
-                known_counts = current;
+                // Don't advance `known_counts` here against this fresh fetch —
+                // it could record partitions the rejoin doesn't end up assigning
+                // (e.g. a leader whose Metadata lags this read). Advance only
+                // once the rejoin lands, from the snapshot its assignment was
+                // actually computed against (the Ok branch below).
                 needs_rejoin = true;
             }
         }
@@ -450,12 +476,15 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 result = rejoin(&mut state) => match result {
-                    Ok(()) => {
+                    Ok(snapshot) => {
                         needs_rejoin = false;
-                        // Re-baseline so we only rejoin again on a FURTHER change.
-                        if let Ok(current) = subscribed_partition_counts(&state).await {
-                            known_counts = current;
-                        }
+                        // Re-baseline from the metadata the rejoin's assignment
+                        // was actually computed against (the leader's snapshot;
+                        // empty for a non-leader, which `merge_counts` leaves
+                        // untouched) — NOT a third independent fetch, which could
+                        // read a newer count than was assigned and strand the
+                        // difference. Monotonic max-merge: only ever advance.
+                        merge_counts(&mut known_counts, &snapshot);
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
@@ -583,16 +612,21 @@ async fn refind_after(state: &CoordinatorState, ctx: &str) {
 /// For [`RebalanceProtocol::Cooperative`] this may issue *two* Join+Sync
 /// rounds back-to-back: the first to install the kept partitions only,
 /// the second (phase 2) to receive the freshly placed ones. See KIP-429.
-async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
+async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, ConsumerError> {
     let owned: Vec<(String, i32)> = state.assigned.lock().await.clone();
-    let (new_assignment, new_generation, _protocol_name) = join_and_sync(state, &owned).await?;
+    let (new_assignment, new_generation, _protocol_name, topic_partitions) =
+        join_and_sync(state, &owned).await?;
 
     let old_set: HashSet<(String, i32)> = owned.iter().cloned().collect();
     let new_set: HashSet<(String, i32)> = new_assignment.iter().cloned().collect();
     let revoked: Vec<(String, i32)> = old_set.difference(&new_set).cloned().collect();
     let added: Vec<(String, i32)> = new_set.difference(&old_set).cloned().collect();
 
-    match state.assignor.rebalance_protocol() {
+    // The subscribed-topic partition snapshot the FINAL published assignment was
+    // computed against — returned so the coordinator re-baselines against exactly
+    // what it assigned (eager / pure-add use the round-1 snapshot; a cooperative
+    // revoke uses phase 2's).
+    let final_counts = match state.assignor.rebalance_protocol() {
         RebalanceProtocol::Eager => {
             // Drop everything and reinstall in a single round. Prime the
             // added partitions' fetch offsets *before* publishing the new
@@ -616,6 +650,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                 pos.retain(|k, _| new_set.contains(k));
             }
             state.generation_id = new_generation;
+            topic_partitions
         }
         RebalanceProtocol::Cooperative => {
             if revoked.is_empty() {
@@ -638,6 +673,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                     }
                 }
                 state.generation_id = new_generation;
+                topic_partitions
             } else {
                 // Phase 1: drop the partitions we're losing, then
                 // immediately rejoin so the leader can place them on
@@ -669,7 +705,8 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
 
                 // Phase 2: rejoin with the reduced owned-set.
                 let owned_after_revoke: Vec<(String, i32)> = state.assigned.lock().await.clone();
-                let (assignment2, gen2, _) = join_and_sync(state, &owned_after_revoke).await?;
+                let (assignment2, gen2, _, topic_partitions2) =
+                    join_and_sync(state, &owned_after_revoke).await?;
                 let owned_after_revoke_set: HashSet<(String, i32)> =
                     owned_after_revoke.iter().cloned().collect();
                 let added2: Vec<(String, i32)> = assignment2
@@ -689,10 +726,11 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                     *a = assignment2;
                 }
                 state.generation_id = gen2;
+                topic_partitions2
             }
         }
-    }
-    Ok(())
+    };
+    Ok(final_counts)
 }
 
 /// Best-effort `OffsetCommit` for partitions being revoked in a
@@ -824,7 +862,7 @@ fn build_sync_group_request(
 async fn join_and_sync(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
-) -> Result<(Vec<(String, i32)>, i32, String), ConsumerError> {
+) -> Result<(Vec<(String, i32)>, i32, String, HashMap<String, i32>), ConsumerError> {
     let session_timeout_ms = i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
     let rebalance_timeout_ms =
         i32::try_from(state.rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
@@ -942,9 +980,13 @@ async fn join_and_sync(
 
     // Leader: resolve partition counts via Metadata and run the assignor.
     let is_leader = join_resp.leader == state.member_id;
+    // Subscribed-topic partition counts the assignment is computed against,
+    // captured from the SAME Metadata the leader runs the assignor on (empty for
+    // a non-leader). Returned so the coordinator's rejoin baseline tracks exactly
+    // what was assigned rather than a divergent later fetch.
+    let mut topic_partitions: HashMap<String, i32> = HashMap::new();
     let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
         let md = state.client.send(MetadataRequest::default()).await?;
-        let mut topic_partitions: HashMap<String, i32> = HashMap::new();
         let mut resolved_ids: HashMap<String, WireUuid> = HashMap::new();
         for t in &md.topics {
             let Some(name) = &t.name else { continue };
@@ -1029,7 +1071,12 @@ async fn join_and_sync(
         return Err(ConsumerError::Server(sync_resp.error_code));
     }
     let my_assignment = decode_assignment(&sync_resp.assignment);
-    Ok((my_assignment, generation_id, chosen_protocol))
+    Ok((
+        my_assignment,
+        generation_id,
+        chosen_protocol,
+        topic_partitions,
+    ))
 }
 
 /// Populate `next_offsets` for newly added partitions by batch-fetching
@@ -1134,6 +1181,41 @@ mod retry_tests {
         // A topic shrinking/disappearing is not "growth" -> no rejoin.
         assert!(!subscribed_topics_grew(&three, &one));
         assert!(!subscribed_topics_grew(&one, &empty));
+    }
+
+    #[test]
+    fn merge_counts_advances_monotonically_and_ignores_transient_under_reports() {
+        let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
+        let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
+        let five: HashMap<String, i32> = [("logs".to_string(), 5)].into_iter().collect();
+
+        // Empty baseline + a topic appears -> baseline records it.
+        let mut known: HashMap<String, i32> = HashMap::new();
+        merge_counts(&mut known, &one);
+        assert!(known.get("logs") == Some(&1));
+
+        // Growth advances the baseline; after merging the new count the SAME
+        // count is no longer seen as growth (so the rejoin doesn't re-fire).
+        merge_counts(&mut known, &three);
+        assert!(known.get("logs") == Some(&3));
+        assert!(!subscribed_topics_grew(&known, &three));
+
+        // A transient metadata under-report (controller failover / partial
+        // response) must NOT lower the baseline: Kafka partition counts are
+        // monotonic, so dropping to 1 then recovering to 3 would otherwise churn
+        // a spurious rejoin. max-merge pins it at 3.
+        merge_counts(&mut known, &one);
+        assert!(known.get("logs") == Some(&3));
+        assert!(!subscribed_topics_grew(&known, &three));
+
+        // A non-leader rejoin's snapshot is empty -> max-merge is a no-op, so the
+        // baseline survives (the next tick sees no phantom growth).
+        merge_counts(&mut known, &HashMap::new());
+        assert!(known.get("logs") == Some(&3));
+
+        // A genuinely larger count still advances.
+        merge_counts(&mut known, &five);
+        assert!(known.get("logs") == Some(&5));
     }
 
     #[tokio::test(start_paused = true)]

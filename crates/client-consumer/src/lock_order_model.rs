@@ -14,15 +14,17 @@
 //! ## Fidelity (the crabka stateright program's cardinal rule)
 //!
 //! Every modeled lock edge is extracted from the real source and cited below by
-//! `file:line`. Nothing here is invented. The model abstracts away *values*
-//! (offsets, partitions, RPC payloads) and the network — it keeps only what a
-//! deadlock can possibly depend on: **which task holds which `tokio::sync::Mutex`
-//! and where each task is suspended.**
+//! **function + lock variable** (bare line numbers drift whenever code is added
+//! above a lock site, so we anchor to stable names an auditor can `grep`).
+//! Nothing here is invented. The model abstracts away *values* (offsets,
+//! partitions, RPC payloads) and the network — it keeps only what a deadlock can
+//! possibly depend on: **which task holds which `tokio::sync::Mutex` and where
+//! each task is suspended.**
 //!
 //! ## The five shared `tokio::sync::Mutex`es
 //!
-//! Declared on `Consumer` (`consumer.rs:50-63`) and shared (`Arc::clone`) with
-//! `CoordinatorState` (`coordinator.rs:304-307`):
+//! Declared on `Consumer` (`consumer.rs`, the `Consumer` mutex fields) and
+//! shared (`Arc::clone`) into `CoordinatorState`:
 //!
 //! | id | field          | abbrev |
 //! |----|----------------|--------|
@@ -43,39 +45,43 @@
 //! thing this model interleaves.
 //!
 //! ### poll task (`poll.rs`, `seek.rs`, `validate.rs`)
-//! - `apply_pending_seeks` (seek.rs): PS(:96 fast-path, released) → A(:100
-//!   clone, released) → **PS(:101) → N(:105) → P(:106)** held together, all
-//!   released at scope end (:123). Region edges: PS→N, N→P.
-//! - `resolve_latest_sentinels` (poll.rs:559): **N alone**, held across a
-//!   `ListOffsets` `.await` at :572 — but no second lock is taken in the region,
-//!   so it cannot be half of a cycle. Modeled as N-alone.
-//! - `refresh_leader_epochs` (validate.rs:69): **P alone** (after the metadata
+//! - `apply_pending_seeks` (seek.rs): PS fast-path probe (released) → A
+//!   `assigned.clone()` (released) → **PS → N → P** held together, all released
+//!   at scope end. Region edges: PS→N, N→P.
+//! - `resolve_latest_sentinels` (poll.rs): **N alone**, held across a
+//!   `ListOffsets` `.await` — but no second lock is taken in the region, so it
+//!   cannot be half of a cycle. Modeled as N-alone.
+//! - `refresh_leader_epochs` (validate.rs): **P alone** (after the metadata
 //!   `.await`).
-//! - `validate_positions` (validate.rs:95→96): **N→P** held together, released
-//!   at :120 before the RPC; then **P alone** at :150 (post-RPC).
-//! - poll fetch-build (poll.rs:209→210): **N→P** held together, released at :239
-//!   before the Fetch `.await` (comment :203-206).
-//! - poll post-fetch (poll.rs): A(:296 clone, released) → **N(:304) held across
-//!   the whole processing loop**, and inside it P is acquired *second* at
-//!   :374, :396, :523 — i.e. **N→P every time** (comment :519-520 "offsets is
+//! - `validate_positions` (validate.rs): **N→P** snapshot held together,
+//!   released before the RPC; then **P alone** in the post-RPC apply.
+//! - `poll` fetch-build (poll.rs, the `by_leader` snapshot): **N→P** held
+//!   together, released before the Fetch `.await`.
+//! - `poll` post-fetch loop (poll.rs): A `assigned.clone()` (released) → **N
+//!   held across the whole processing loop**, and inside it P is acquired
+//!   *second* at each per-partition site — i.e. **N→P every time** ("offsets is
 //!   already locked, positions acquired second"). VERIFIED: there is **no P→N
-//!   inversion** on the post-fetch path. N released at :531 before the metadata
+//!   inversion** on the post-fetch path. N released before the metadata
 //!   refresh `.await`.
 //!
 //! ### coordinator task (`coordinator.rs`)
-//! - `rejoin`: A alone in every scope (:513 clone, :533-535, :559-565, :573-575,
-//!   :597 clone, :614-616). It also runs **N→P** scopes (:537→:541 eager,
-//!   :587→:588 cooperative). A is never held while N or P is acquired.
-//! - `commit_revoked` (:635→:636): **N→P**; then T alone (:653 clone).
-//! - `prime_offsets` (:976 T clone) → **N(:987) → P(:988)**.
-//! - `join_and_sync` (:886): **T alone**.
+//! - `rejoin`: A alone in every scope (`assigned.clone()` owned snapshot;
+//!   per-phase `assigned` retain/merge/publish; `owned_after_revoke`
+//!   `assigned.clone()`). It also runs **N→P** scopes (the eager and
+//!   cooperative `next_offsets`→`positions` prunes). A is never held while N or
+//!   P is acquired.
+//! - `commit_revoked`: **N→P** (the commit snapshot); then T alone
+//!   (`topic_ids.clone()`).
+//! - `prime_offsets`: T alone (`topic_ids.clone()`), then **N→P**
+//!   (`next_offsets`→`positions`).
+//! - `join_and_sync` (leader branch): **T alone** (`topic_ids` merge).
 //!
 //! ### commit task (`commit.rs`)
-//! - `commit_sync` (:70 N clone, :74 P then :76 drop, :77 T clone) and the
-//!   `commit_async` spawned task (:129/:133-135/:136): **at most one lock held
-//!   at a time** — N, then P, then T, each released before the next. No
-//!   multi-lock region, so the commit task can never be half of a cycle. Modeled
-//!   as three independent single-lock regions to confirm this.
+//! - `commit_sync` (N `next_offsets.clone()`, then P, then T `topic_ids.clone()`)
+//!   and the `commit_async` spawned task (same N→P→T sequence): **at most one
+//!   lock held at a time** — N, then P, then T, each released before the next.
+//!   No multi-lock region, so the commit task can never be half of a cycle.
+//!   Modeled as three independent single-lock regions to confirm this.
 //!
 //! ## The lock hierarchy these regions imply
 //!
@@ -113,7 +119,8 @@ use Op::{Acquire, Release};
 
 /// One concurrently-running future. Its `program` is the exact ordered sequence
 /// of lock acquisitions/releases from the real code (see module docs for the
-/// `file:line` of every step). `pc` is the program counter into it.
+/// function + lock-variable anchor of every step). `pc` is the program counter
+/// into it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Task {
     /// Human-readable label of the code region this program models.
@@ -161,54 +168,56 @@ struct Step {
 /// acquired in the real nesting order and released at the modeled scope end.
 ///
 /// Region boundaries (and the RPC `.await`s between them, where all guards are
-/// already dropped) are faithful to `poll.rs`:
-///   1. `apply_pending_seeks`  : PS, N, P           (seek.rs:101,105,106)
-///   2. `resolve_latest`       : N                  (poll.rs:559) [across await, alone]
-///   3. `refresh_leader_epochs`: P                  (validate.rs:69)
-///   4. `validate_positions`   : N, P  then  P      (validate.rs:95,96 ; :150)
-///   5. fetch build            : N, P               (poll.rs:209,210)
-///   6. post-fetch processing  : N  then (N,P)…     (poll.rs:304 ; :374/:396/:523)
+/// already dropped) are faithful to the real source, anchored by function:
+///   1. `apply_pending_seeks` (seek.rs)   : PS, N, P  (PS→N→P held)
+///   2. `resolve_latest_sentinels` (poll.rs): N       [across await, alone]
+///   3. `refresh_leader_epochs` (validate.rs): P      (P alone)
+///   4. `validate_positions` (validate.rs): N, P  then  P  (N→P snapshot, then P alone)
+///   5. `poll` fetch-build (poll.rs)      : N, P      (N→P snapshot)
+///   6. `poll` post-fetch loop (poll.rs)  : N  then (N,P)…  (N held, P second)
 fn poll_program() -> Vec<Op> {
     vec![
         // --- apply_pending_seeks (seek.rs) ---
-        // fast-path PS probe (:96), released immediately.
+        // fast-path PS probe (`pending_seeks`), released immediately.
         Acquire(PS),
         Release(PS),
-        // assigned snapshot (:100), released at end of statement.
+        // assigned snapshot (`assigned.clone()`), released at end of statement.
         Acquire(A),
         Release(A),
-        // held region: PS(:101) → N(:105) → P(:106), all dropped at :123.
+        // held region: PS (`pending_seeks`) → N → P, all dropped at scope end.
         Acquire(PS),
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
         Release(PS),
-        // --- resolve_latest_sentinels (poll.rs:559): N alone, across a
+        // --- resolve_latest_sentinels (poll.rs): N alone, across a
         //     ListOffsets await; no second lock taken in the region. ---
         Acquire(N),
         Release(N),
-        // --- refresh_leader_epochs (validate.rs:69): P alone. ---
+        // --- refresh_leader_epochs (validate.rs): P alone. ---
         Acquire(P),
         Release(P),
-        // --- validate_positions: N→P snapshot (validate.rs:95,96) … ---
+        // --- validate_positions (validate.rs): N→P snapshot … ---
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
-        // … then P alone post-RPC (validate.rs:150).
+        // … then P alone post-RPC (validate_positions apply).
         Acquire(P),
         Release(P),
-        // --- fetch build (poll.rs:209→210): N→P, dropped before the Fetch. ---
+        // --- poll fetch-build (poll.rs `by_leader` snapshot): N→P, dropped
+        //     before the Fetch. ---
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
-        // --- post-fetch (poll.rs): A snapshot (:296), released at stmt end. ---
+        // --- poll post-fetch (poll.rs): A snapshot (`assigned.clone()`),
+        //     released at stmt end. ---
         Acquire(A),
         Release(A),
-        // N held across the processing loop (:304); inside it P is acquired
-        // SECOND (:374/:396/:523) — N→P, never P→N. Model one representative
+        // N held across the processing loop; inside it P is acquired SECOND at
+        // each per-partition site — N→P, never P→N. Model one representative
         // nested P acquire/release inside the held-N region.
         Acquire(N),
         Acquire(P),
@@ -221,51 +230,51 @@ fn poll_program() -> Vec<Op> {
 /// regions for the offset/position prune. Models the cooperative phase-1 path
 /// (the most lock-dense), which also subsumes the eager path's edges.
 ///
-/// Sequence (coordinator.rs):
-///   A alone (:513 owned snapshot)
-///   [`join_and_sync` → T alone (:886)]
-///   A alone (:573 phase-1 retain)
-///   [`commit_revoked` → N,P (:635,:636) ; T alone (:653)]
-///   N,P prune (:587,:588)
-///   A alone (:597 `owned_after_revoke` snapshot)
-///   [`prime_offsets` → T alone (:976) ; N,P (:987,:988)]
-///   A alone (:614 publish phase-2 assignment)
+/// Sequence (coordinator.rs `rejoin`, cooperative-revoke path):
+///   A alone (`rejoin`: `assigned.clone()` owned snapshot)
+///   [`join_and_sync` → T alone (`topic_ids` merge)]
+///   A alone (`rejoin`: phase-1 `assigned` retain)
+///   [`commit_revoked` → N,P (`next_offsets`→`positions`) ; T alone (`topic_ids.clone()`)]
+///   N,P prune (`rejoin`: phase-1 `next_offsets`→`positions` remove)
+///   A alone (`rejoin`: `owned_after_revoke` `assigned.clone()` snapshot)
+///   [`prime_offsets` → T alone (`topic_ids.clone()`) ; N,P (`next_offsets`→`positions`)]
+///   A alone (`rejoin`: publish phase-2 `assigned`)
 fn coordinator_program() -> Vec<Op> {
     vec![
-        // owned snapshot (:513)
+        // rejoin: owned snapshot (`assigned.clone()`)
         Acquire(A),
         Release(A),
-        // join_and_sync → topic_ids merge (:886)
+        // join_and_sync → topic_ids merge (leader branch, T alone)
         Acquire(T),
         Release(T),
-        // phase-1 retain of kept partitions (:573)
+        // rejoin: phase-1 retain of kept partitions (`assigned`)
         Acquire(A),
         Release(A),
-        // commit_revoked: N→P (:635,:636)
+        // commit_revoked: N→P (`next_offsets`→`positions`)
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
-        // commit_revoked: topic_ids snapshot (:653)
+        // commit_revoked: topic_ids snapshot (`topic_ids.clone()`)
         Acquire(T),
         Release(T),
-        // prune next_offsets + positions: N→P (:587,:588)
+        // rejoin: phase-1 prune next_offsets + positions, N→P
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
-        // owned_after_revoke snapshot (:597)
+        // rejoin: owned_after_revoke snapshot (`assigned.clone()`)
         Acquire(A),
         Release(A),
-        // prime_offsets: topic_ids snapshot (:976)
+        // prime_offsets: topic_ids snapshot (`topic_ids.clone()`)
         Acquire(T),
         Release(T),
-        // prime_offsets: N→P (:987,:988)
+        // prime_offsets: N→P (`next_offsets`→`positions`)
         Acquire(N),
         Acquire(P),
         Release(P),
         Release(N),
-        // publish phase-2 assignment (:614)
+        // rejoin: publish phase-2 assignment (`assigned`)
         Acquire(A),
         Release(A),
     ]
@@ -276,13 +285,13 @@ fn coordinator_program() -> Vec<Op> {
 /// time, so it can never be half of a cycle. Modeled faithfully to confirm.
 fn commit_program() -> Vec<Op> {
     vec![
-        // next_offsets snapshot (:70 / :129)
+        // next_offsets snapshot (commit_sync / commit_async: `next_offsets.clone()`)
         Acquire(N),
         Release(N),
-        // positions snapshot (:74→:76 / :133→:135)
+        // positions snapshot (commit_sync / commit_async: `positions`)
         Acquire(P),
         Release(P),
-        // topic_ids snapshot (:77 / :136)
+        // topic_ids snapshot (commit_sync / commit_async: `topic_ids.clone()`)
         Acquire(T),
         Release(T),
     ]
