@@ -20,10 +20,14 @@ x-otlp-env: &otlp-env
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
   # Activate jemalloc heap profiling (the image is built --features
   # heap-profiling). Default sample rate (~every 512 KiB) — NOT lg_prof_sample:0,
-  # which backtraces every allocation and is pathologically slow. Continuous
-  # sampling here is what previously deadlocked crabka-client-consumer's group
-  # rejoin; that lost-wakeup is fixed in client-core (independent reader/writer
-  # io tasks), so consumers run fine under prof now.
+  # which backtraces every allocation and is pathologically slow. A prof-sampling
+  # latency race once stalled crabka-client-consumer's group rejoin; that is fixed
+  # in client-core (independent reader/writer io tasks). NOTE: a separate cold-start
+  # hang — a WAL consumer left with an EMPTY assignment when its topic is created
+  # after it joins — is NOT a prof problem (reproduced with prof off; the lock
+  # protocol is proven deadlock-free by a stateright model); it is fixed in the
+  # consumer coordinator's metadata-change-triggered rejoin, so consumers recover
+  # under prof now.
   MALLOC_CONF: "prof:true,prof_active:true"
 
 # Every Crabka service runs the same all-in-one demo image. By default this

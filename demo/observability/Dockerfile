@@ -5,11 +5,14 @@
 #
 # The service binaries are built `--features heap-profiling`, which swaps in the
 # jemalloc global allocator and exposes `/debug/pprof/heap` alongside the CPU
-# `/debug/pprof/profile`. Continuous jemalloc prof sampling used to deadlock
-# `crabka-client-consumer`'s group rejoin (a lost wakeup in the connection I/O
-# task); that is fixed in `crabka-client-core` (independent reader/writer tasks),
-# so WAL consumers — block-builders, compactors, queriers — run fine under prof.
-# `crabka-cli` and the demo app do not carry the feature.
+# `/debug/pprof/profile`. A prof-sampling latency race once stalled
+# `crabka-client-consumer`'s group rejoin; that is fixed in `crabka-client-core`
+# (independent reader/writer I/O tasks). NOTE: a separate cold-start hang — a WAL
+# consumer left with an EMPTY assignment when its topic is created after it joins
+# — is NOT a prof problem (reproduced with prof off; lock protocol proven
+# deadlock-free by a stateright model); it is fixed in the consumer coordinator's
+# metadata-change-triggered rejoin. `crabka-cli` and the demo app do not carry
+# the heap-profiling feature.
 FROM rust:1.96-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends \

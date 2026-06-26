@@ -347,6 +347,44 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
+/// How often the coordinator re-checks broker metadata for subscribed-topic
+/// partition changes (a topic being created, or gaining partitions) so it can
+/// rejoin to (re)distribute them. Short enough that a consumer which joined at
+/// cold-start before its WAL topic existed recovers within seconds.
+const SUBSCRIPTION_METADATA_REFRESH: Duration = Duration::from_secs(5);
+
+/// Current partition count of each subscribed topic that exists in broker
+/// metadata. A subscribed topic not yet created is simply absent from the map
+/// (so it later shows up as growth once the topic is created).
+async fn subscribed_partition_counts(
+    state: &CoordinatorState,
+) -> Result<HashMap<String, i32>, ConsumerError> {
+    let md = state.client.send(MetadataRequest::default()).await?;
+    let mut counts = HashMap::new();
+    for t in &md.topics {
+        let Some(name) = &t.name else { continue };
+        if state.subscribed_topics.iter().any(|s| s == name) {
+            counts.insert(
+                name.clone(),
+                i32::try_from(t.partitions.len()).unwrap_or(i32::MAX),
+            );
+        }
+    }
+    Ok(counts)
+}
+
+/// True when any subscribed topic has more partitions now than the assignment
+/// was last computed against (a topic appeared, or grew). Such a change means
+/// the group must rejoin so the assignor (re)distributes the new partitions —
+/// without it, a consumer that joined before its WAL topic existed keeps an
+/// EMPTY assignment forever, because a single-member Stable group is never sent
+/// a broker-driven rebalance (the only thing that otherwise sets `needs_rejoin`).
+fn subscribed_topics_grew(known: &HashMap<String, i32>, current: &HashMap<String, i32>) -> bool {
+    current
+        .iter()
+        .any(|(topic, count)| *count > known.get(topic).copied().unwrap_or(0))
+}
+
 pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken) {
     // The coordinator task runs on its own `Client` (separate pool from the
     // build/data-path client), so its pool's (id → addr) registry starts empty.
@@ -363,11 +401,41 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
     let mut ticker = tokio::time::interval(state.heartbeat_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_rejoin = false;
+    // Subscribed-topic partition counts the current assignment was computed
+    // against. We rejoin when these grow (a topic created after we joined, or a
+    // topic that gains partitions) so the assignor distributes the new
+    // partitions. Initialised to what's visible now (post-join) so a
+    // steady-state consumer never rejoins spuriously; a topic that appears later
+    // grows the map and triggers a rejoin. This is what lets a consumer that
+    // joined at cold-start before its WAL topic existed (empty assignment)
+    // recover once the distributor creates the topic.
+    let mut known_counts = subscribed_partition_counts(&state)
+        .await
+        .unwrap_or_default();
+    let mut last_meta_check = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
             _ = ticker.tick() => {}
+        }
+
+        // Detect a subscribed topic appearing / gaining partitions after we
+        // joined (the cold-start race that otherwise strands an empty
+        // assignment) and rejoin to distribute it. Throttled, and only when not
+        // already rejoining. Best-effort: a failed metadata RPC just retries.
+        if !needs_rejoin && last_meta_check.elapsed() >= SUBSCRIPTION_METADATA_REFRESH {
+            last_meta_check = tokio::time::Instant::now();
+            if let Ok(current) = subscribed_partition_counts(&state).await
+                && subscribed_topics_grew(&known_counts, &current)
+            {
+                tracing::info!(
+                    group = %state.group_id,
+                    "subscribed-topic partitions changed; rejoining to update assignment"
+                );
+                known_counts = current;
+                needs_rejoin = true;
+            }
         }
 
         // Race the per-tick RPCs against shutdown so `close()` returns
@@ -382,7 +450,13 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 result = rejoin(&mut state) => match result {
-                    Ok(()) => needs_rejoin = false,
+                    Ok(()) => {
+                        needs_rejoin = false;
+                        // Re-baseline so we only rejoin again on a FURTHER change.
+                        if let Ok(current) = subscribed_partition_counts(&state).await {
+                            known_counts = current;
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "rejoin failed; will retry on next tick");
                     }
@@ -1043,6 +1117,23 @@ mod retry_tests {
         assert!(req.key == "group-a");
         assert!(req.key_type == 0);
         assert!(req.coordinator_keys == vec!["group-a"]);
+    }
+
+    #[test]
+    fn subscribed_topics_grew_detects_appearance_and_partition_growth() {
+        let empty: HashMap<String, i32> = HashMap::new();
+        let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
+        let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
+
+        // Cold-start race: topic absent at join, created later -> growth -> rejoin.
+        assert!(subscribed_topics_grew(&empty, &one));
+        // Topic gained partitions -> rejoin to (re)distribute them.
+        assert!(subscribed_topics_grew(&one, &three));
+        // Steady state: unchanged -> no spurious rejoin.
+        assert!(!subscribed_topics_grew(&one, &one));
+        // A topic shrinking/disappearing is not "growth" -> no rejoin.
+        assert!(!subscribed_topics_grew(&three, &one));
+        assert!(!subscribed_topics_grew(&one, &empty));
     }
 
     #[tokio::test(start_paused = true)]

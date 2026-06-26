@@ -79,6 +79,8 @@ mod consumer;
 mod coordinator;
 mod error;
 mod group_metadata;
+#[cfg(test)]
+mod lock_order_model;
 mod offset_wire;
 mod poll;
 mod position;
