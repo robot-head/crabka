@@ -439,7 +439,7 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let start_ns = match required_seconds_param(&uri, "start") {
@@ -490,7 +490,7 @@ where
     S: SpanStore + 'static,
 {
     let tenant = tenant(&headers);
-    let Some(query) = query_param(&uri, "q") else {
+    let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
     };
     let (start_ns, end_ns, step_ns, point_ns) = match instant_metric_bounds(&uri) {
@@ -645,6 +645,14 @@ fn wants_json(headers: &HeaderMap) -> bool {
 fn query_param(uri: &Uri, key: &str) -> Option<String> {
     url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .find_map(|(k, v)| (k == key).then(|| v.into_owned()))
+}
+
+/// The `TraceQL` metrics query string. Tempo accepts both `q` and `query` on
+/// the metrics endpoints: the Explore `TraceQL` editor and the HTTP API send
+/// `q`, while the Grafana Tempo datasource powering the Traces Drilldown app
+/// sends `query`. Accept either, preferring `q`.
+fn metrics_query_param(uri: &Uri) -> Option<String> {
+    query_param(uri, "q").or_else(|| query_param(uri, "query"))
 }
 
 fn search_query(uri: &Uri) -> Result<Option<String>, &'static str> {
@@ -2560,6 +2568,19 @@ mod tests {
         // it rather than rejecting (was a 400 "missing query parameter step").
         let (status, body) = get_json(
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
+        )
+        .await;
+
+        assert!(status == StatusCode::OK);
+        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_query_range_accepts_query_param_alias() {
+        // The Grafana Tempo datasource (and thus the Traces Drilldown breakdown)
+        // sends the TraceQL under `query=`, not `q=`; accept it as an alias.
+        let (status, body) = get_json(
+            "/api/metrics/query_range?query=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1",
         )
         .await;
 

@@ -285,6 +285,65 @@ async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult
 
 #[tokio::test]
 #[ignore = "requires Docker and the grafana/tempo image"]
+async fn real_tempo_and_crabka_accept_query_param_alias() -> TestResult {
+    // The Grafana Tempo datasource — and therefore the Traces Drilldown
+    // breakdown — sends the TraceQL metrics query under `query=`, not `q=`.
+    // Real Tempo accepts both spellings; crabka must too, or every breakdown
+    // panel 400s with "missing query parameter q" and renders blank. The
+    // existing tests all send `q=`, so they could not catch this — this leg
+    // mirrors the live datasource exactly.
+    let client = reqwest::Client::new();
+    let tempo = start_tempo().await?;
+    let tempo_query = mapped_base_url(&tempo, 3200).await?;
+    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
+
+    let trace_start_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(60);
+    let query_start = trace_start_secs.saturating_sub(60);
+    let query_end = trace_start_secs + 120;
+    let query_range = format!("start={query_start}&end={query_end}");
+    let otlp_body = sample_otlp_body_at(trace_start_secs * 1_000_000_000);
+    let crabka = start_crabka_pair(&otlp_body).await?;
+
+    post_otlp(
+        &client,
+        &format!("{tempo_otlp}/v1/traces"),
+        None,
+        &otlp_body,
+    )
+    .await?;
+
+    // Identical query to the `q=` test, sent under the `query=` alias.
+    let metrics_query =
+        "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D%20%7C%20count_over_time()";
+    let tempo_metrics = get_json_until_positive_metric_total(
+        &client,
+        &format!(
+            "{tempo_query}/api/metrics/query_range?query={metrics_query}&{query_range}&step=30s"
+        ),
+        None,
+    )
+    .await?;
+    let crabka_metrics = get_json(
+        &client,
+        &format!(
+            "{}/api/metrics/query_range?query={metrics_query}&{query_range}&step=30s",
+            crabka.base_url
+        ),
+        Some(TENANT),
+    )
+    .await?;
+    assert_metric_totals_match(&tempo_metrics, &crabka_metrics);
+
+    crabka.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Docker and the grafana/tempo image"]
 async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
     // Regression for the Grafana Traces Drilldown breakdown: its per-attribute
     // panels key on the FULL scoped attribute (e.g. `resource.service.name`), so
