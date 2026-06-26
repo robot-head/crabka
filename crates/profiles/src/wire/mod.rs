@@ -31,6 +31,14 @@ pub mod pb {
         }
     }
 
+    /// Pyroscope `settings.v1.SettingsService` (UI settings the Grafana
+    /// Profiles Drilldown app loads on init).
+    pub mod settings {
+        pub mod v1 {
+            include!(concat!(env!("OUT_DIR"), "/settings.v1.rs"));
+        }
+    }
+
     /// OpenTelemetry packages, nested to match generated cross-package paths.
     pub mod opentelemetry {
         pub mod proto {

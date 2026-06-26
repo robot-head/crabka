@@ -1091,10 +1091,21 @@ where
         // proto clients like Grafana's built-in Pyroscope datasource (a connect-go client).
         .build_connect();
 
+    // Pyroscope `settings.v1.SettingsService`. The Grafana Profiles Drilldown
+    // app calls `Get` during init; a 404 aborts its init chain so it never
+    // issues the per-panel `SelectSeries` queries and the landing grid renders
+    // empty. Crabka doesn't persist UI settings, so `Get` returns an empty set
+    // (the app falls back to its defaults) and `Set` echoes the value back.
+    let settings = pb::settings::v1::settings_service_connect::SettingsServiceBuilder::<()>::new()
+        .get(get_settings_handler)
+        .set(set_settings_handler)
+        .build_connect();
+
     Router::new()
         .route("/pyroscope/render", get(render_handler::<S>))
         .route("/pyroscope/render-diff", get(render_diff_handler::<S>))
         .merge(querier)
+        .merge(settings)
         .layer(Extension(state))
 }
 
@@ -1117,6 +1128,32 @@ where
         }
     });
     Ok(bound)
+}
+
+/// Pyroscope `settings.v1.SettingsService/Get`. Crabka does not persist UI
+/// settings, so it reports an empty set; the Grafana Profiles Drilldown app then
+/// uses its built-in defaults (same as a fresh Pyroscope tenant). Without this
+/// endpoint the app's init 404s and the landing renders empty.
+async fn get_settings_handler(
+    _req: ConnectRequest<pb::settings::v1::GetSettingsRequest>,
+) -> Result<ConnectResponse<pb::settings::v1::GetSettingsResponse>, ConnectError> {
+    Ok(ConnectResponse::new(
+        pb::settings::v1::GetSettingsResponse {
+            settings: Vec::new(),
+        },
+    ))
+}
+
+/// Pyroscope `settings.v1.SettingsService/Set`. Settings are not persisted; echo
+/// the value back so the app's optimistic UI update succeeds for the session.
+async fn set_settings_handler(
+    req: ConnectRequest<pb::settings::v1::SetSettingsRequest>,
+) -> Result<ConnectResponse<pb::settings::v1::SetSettingsResponse>, ConnectError> {
+    Ok(ConnectResponse::new(
+        pb::settings::v1::SetSettingsResponse {
+            setting: req.0.setting,
+        },
+    ))
 }
 
 async fn profile_types_handler<S>(
@@ -2957,6 +2994,65 @@ overrides:
 
         assert!(body.starts_with("digraph flamegraph"));
         assert!(body.contains("main.work"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn settings_service_get_returns_empty_and_set_echoes() {
+        // Regression: the Grafana Profiles Drilldown app calls
+        // `settings.v1.SettingsService/Get` during init. A 404 aborts init — the
+        // app never issues the per-panel SelectSeries queries and the landing
+        // grid renders empty. The querier must answer 200 with an (empty)
+        // settings set; `Set` must echo the value back.
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_frame("main.work"))));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{bound}/settings.v1.SettingsService/Get"))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .header("x-scope-orgid", "tenant-a")
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Get must succeed (Grafana init calls this), got {}",
+            resp.status()
+        );
+        let json: serde_json::Value = resp.json().await.unwrap();
+        // Connect JSON omits empty repeated fields, so `settings` is absent or [].
+        let empty = json
+            .get("settings")
+            .and_then(|v| v.as_array())
+            .is_none_or(std::vec::Vec::is_empty);
+        assert!(empty, "expected empty settings, got {json}");
+
+        let resp = client
+            .post(format!("http://{bound}/settings.v1.SettingsService/Set"))
+            .header("content-type", "application/json")
+            .header("connect-protocol-version", "1")
+            .header("x-scope-orgid", "tenant-a")
+            .body(r#"{"setting":{"name":"flamegraph.collapsed","value":"true"}}"#)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == reqwest::StatusCode::OK,
+            "Set must succeed, got {}",
+            resp.status()
+        );
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert!(
+            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed"),
+            "Set must echo the setting, got {json}"
+        );
     }
 
     #[tokio::test]
