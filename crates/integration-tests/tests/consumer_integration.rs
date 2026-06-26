@@ -419,6 +419,114 @@ async fn eager_rebalance_reacquires_and_primes() {
     broker.shutdown().await;
 }
 
+/// Regression: a commit issued AFTER a rebalance bumped the group generation
+/// must stamp the CURRENT generation, not the start-up snapshot. The commit
+/// path used to read a `generation_id` captured at build time and never kept in
+/// sync as the coordinator rejoined, so the first commit after any rebalance hit
+/// `ILLEGAL_GENERATION (22)` and a long-running block-builder/compactor commit
+/// loop crashed (observed as the demo metrics-compactor crash-loop). Now the
+/// generation is shared (`Arc<AtomicI32>`) and published by the coordinator on
+/// every rejoin, and a rebalance code on commit defers rather than failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_succeeds_after_rebalance_bumps_generation() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+    create_topic_with_partitions(&producer, "genbump", 2).await;
+
+    let build = |client_id: &'static str| {
+        let bootstrap = bootstrap.clone();
+        async move {
+            Consumer::builder()
+                .bootstrap(&bootstrap)
+                .client_id(client_id)
+                .group_id("genbump-grp")
+                .session_timeout(Duration::from_secs(30))
+                .rebalance_timeout(Duration::from_secs(2))
+                .heartbeat_interval(Duration::from_millis(500))
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .subscribe(["genbump".to_string()])
+                .build()
+                .await
+                .expect("build consumer")
+        }
+    };
+
+    // Build both members in the first rebalance round → they split 1/1.
+    let (mut m1, m2) = tokio::join!(build("m1"), build("m2"));
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let settle = Instant::now() + Duration::from_secs(30);
+        loop {
+            if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
+                break;
+            }
+            assert!(Instant::now() < settle, "group did not split 1+1");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("1/1 split within 30s");
+    let gen_after_split = m1.generation_id();
+
+    // m2 leaves → m1 re-acquires both partitions via an eager rejoin, which
+    // advances the group generation. m1's commit must follow that bump.
+    m2.close().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let regain = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = m1.poll(Duration::from_millis(200)).await;
+            if m1.assignment().await.len() == 2 {
+                break;
+            }
+            assert!(Instant::now() < regain, "m1 did not re-acquire both partitions");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("m1 reacquired both partitions within 30s");
+
+    // The rejoin bumped the generation, and the accessor reads it live (shared
+    // atomic) — proving the generation the commit path stamps is current.
+    let gen_after_rejoin = m1.generation_id();
+    assert!(
+        gen_after_rejoin > gen_after_split,
+        "rejoin should advance the generation: split={gen_after_split} rejoin={gen_after_rejoin}",
+    );
+
+    // Consume a record on each partition so there are offsets to commit, then
+    // commit. Pre-fix this stamped the stale start-up generation and the broker
+    // returned ILLEGAL_GENERATION (22) → commit_sync errored → panic here.
+    produce_to_partition(&broker, &producer, "genbump", 0, &["g0"]).await;
+    produce_to_partition(&broker, &producer, "genbump", 1, &["g1"]).await;
+    let mut seen: HashSet<String> = HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.len() < 2 && Instant::now() < deadline {
+        for r in m1.poll(Duration::from_millis(200)).await.unwrap() {
+            let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
+            if v.starts_with('g') {
+                seen.insert(v);
+            }
+        }
+    }
+    assert!(seen.len() == 2, "m1 delivered both records: {seen:?}");
+
+    m1.commit_sync()
+        .await
+        .expect("commit after a generation-bumping rebalance must succeed (current generation)");
+
+    m1.close().await.unwrap();
+    broker.shutdown().await;
+}
+
 // ── KIP-320 truncation detection (Task 10) ───────────────────────────────────
 
 use crabka_client_consumer::ConsumerError;

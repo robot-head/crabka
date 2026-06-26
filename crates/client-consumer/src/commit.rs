@@ -54,12 +54,18 @@ fn build_commit_request(
     }
 }
 
+/// Map an `OffsetCommit` response to a result. `0` is success. The rebalance
+/// codes `ILLEGAL_GENERATION (22)` and `REBALANCE_IN_PROGRESS (27)` are DEFERRED
+/// — treated as `Ok` — because the generation we stamped only went stale due to
+/// a rebalance: the coordinator task rejoins and publishes the new generation
+/// (`current_generation`), and the offsets recommit on the next call. A
+/// long-running block-builder/compactor commit loop must therefore NOT crash on
+/// them (the offset is at-least-once). Any other non-zero code is fatal.
 fn commit_response_result(resp: &OffsetCommitResponse) -> Result<(), ConsumerError> {
-    let code = first_commit_error(resp);
-    if code != 0 {
-        return Err(ConsumerError::Server(code));
+    match first_commit_error(resp) {
+        0 | 22 | 27 => Ok(()),
+        code => Err(ConsumerError::Server(code)),
     }
-    Ok(())
 }
 
 impl Consumer {
@@ -98,7 +104,7 @@ impl Consumer {
                         .broker(target)
                         .send(build_commit_request(
                             group_id,
-                            self.generation_id,
+                            self.current_generation.load(Ordering::Relaxed),
                             member_id,
                             topics,
                         ))
@@ -109,6 +115,20 @@ impl Consumer {
         )
         .await?;
 
+        // A rebalance can move the group out from under this commit (22
+        // ILLEGAL_GENERATION / 27 REBALANCE_IN_PROGRESS). `commit_response_result`
+        // treats those as deferred (Ok) — the coordinator rejoins, publishes the
+        // new generation, and the offsets recommit next round — so the commit
+        // loop survives a routine rebalance instead of crashing. Surface it once
+        // for ops visibility.
+        let code = first_commit_error(&resp);
+        if code == 22 || code == 27 {
+            tracing::warn!(
+                group = %self.group_id,
+                error_code = code,
+                "offset commit deferred: group rebalancing; will recommit after the coordinator rejoins",
+            );
+        }
         commit_response_result(&resp)
     }
 
@@ -119,7 +139,7 @@ impl Consumer {
     pub fn commit_async(&self) {
         let client = self.client.clone();
         let group_id = self.group_id.clone();
-        let generation = self.generation_id;
+        let generation = self.current_generation.load(Ordering::Relaxed);
         let member_id = self.member_id.clone();
         let offsets = self.next_offsets.clone();
         let positions = self.positions.clone();
@@ -261,9 +281,20 @@ mod tests {
     }
 
     #[test]
-    fn commit_response_result_maps_first_error_to_server_error() {
+    fn commit_response_result_defers_rebalance_codes_and_fails_others() {
+        // success
         assert!(commit_response_result(&response(&[0, 0])).is_ok());
+        // a non-rebalance error is fatal
         let err = commit_response_result(&response(&[0, 42])).unwrap_err();
         assert!(matches!(err, ConsumerError::Server(42)));
+        // ILLEGAL_GENERATION (22) and REBALANCE_IN_PROGRESS (27) are DEFERRED,
+        // not fatal — a commit loop must survive a rebalance; the coordinator
+        // rejoins (publishing the new generation) and the offsets recommit.
+        assert!(commit_response_result(&response(&[22])).is_ok());
+        assert!(commit_response_result(&response(&[27])).is_ok());
+        assert!(commit_response_result(&response(&[0, 22])).is_ok());
+        // first-error precedence: a fatal code ahead of a rebalance code stays fatal
+        let err = commit_response_result(&response(&[16, 27])).unwrap_err();
+        assert!(matches!(err, ConsumerError::Server(16)));
     }
 }

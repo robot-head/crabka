@@ -299,6 +299,13 @@ pub(crate) struct CoordinatorState {
     pub coordinator_id: Arc<AtomicI32>,
     pub member_id: String,
     pub generation_id: i32,
+    /// Published copy of `generation_id`, shared (`Arc<AtomicI32>`) with the
+    /// parent `Consumer` so its commit path (`commit.rs`) stamps the CURRENT
+    /// generation onto `OffsetCommit`. The coordinator is the sole writer;
+    /// always update both fields together via [`set_generation`] so a commit
+    /// after a rebalance never carries the stale generation the broker rejects
+    /// with `ILLEGAL_GENERATION`.
+    pub current_generation: Arc<AtomicI32>,
     pub assignor: Assignor,
     pub subscribed_topics: Vec<String>,
     pub assigned: Arc<Mutex<Vec<(String, i32)>>>,
@@ -318,6 +325,17 @@ pub(crate) struct CoordinatorState {
     /// starting, comparing equal to the baseline forever and stranding the
     /// empty cold-start assignment permanently.
     pub initial_subscribed_counts: HashMap<String, i32>,
+}
+
+/// Set the coordinator's working generation AND publish it to the shared atomic
+/// the commit path reads. Use this for EVERY generation change (join, rejoin,
+/// from-scratch reset) so the parent `Consumer`'s `OffsetCommit` always stamps
+/// the current generation — a stale one is rejected with `ILLEGAL_GENERATION`.
+fn set_generation(state: &mut CoordinatorState, generation_id: i32) {
+    state.generation_id = generation_id;
+    state
+        .current_generation
+        .store(generation_id, Ordering::Relaxed);
 }
 
 /// Outcome of a single heartbeat RPC.
@@ -499,7 +517,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
                     HeartbeatOutcome::NeedRejoin => needs_rejoin = true,
                     HeartbeatOutcome::RejoinFromScratch => {
                         state.member_id.clear();
-                        state.generation_id = -1;
+                        set_generation(&mut state, -1);
                         needs_rejoin = true;
                     }
                 },
@@ -649,7 +667,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
                 let mut pos = state.positions.lock().await;
                 pos.retain(|k, _| new_set.contains(k));
             }
-            state.generation_id = new_generation;
+            set_generation(state, new_generation);
             topic_partitions
         }
         RebalanceProtocol::Cooperative => {
@@ -672,7 +690,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
                         }
                     }
                 }
-                state.generation_id = new_generation;
+                set_generation(state, new_generation);
                 topic_partitions
             } else {
                 // Phase 1: drop the partitions we're losing, then
@@ -691,7 +709,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
                 // member that picks them up in phase 2 primes from the offset
                 // we'd consumed to, rather than re-delivering records we
                 // already saw (KIP-429 onPartitionsRevoked semantics).
-                state.generation_id = new_generation;
+                set_generation(state, new_generation);
                 commit_revoked(state, &revoked).await;
                 {
                     let mut off = state.next_offsets.lock().await;
@@ -725,7 +743,7 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
                     let mut a = state.assigned.lock().await;
                     *a = assignment2;
                 }
-                state.generation_id = gen2;
+                set_generation(state, gen2);
                 topic_partitions2
             }
         }
