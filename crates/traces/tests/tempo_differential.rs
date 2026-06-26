@@ -284,6 +284,76 @@ async fn real_tempo_and_crabka_match_traceql_metrics_query_range() -> TestResult
 }
 
 #[tokio::test]
+#[ignore = "requires Docker and the grafana/tempo image"]
+async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
+    // Regression for the Grafana Traces Drilldown breakdown: its per-attribute
+    // panels key on the FULL scoped attribute (e.g. `resource.service.name`), so
+    // the grouped-series label key must match real Tempo exactly. Crabka
+    // previously emitted the scope-stripped key (`service.name`), which left the
+    // breakdown blank even though the data and totals were correct.
+    let client = reqwest::Client::new();
+    let tempo = start_tempo().await?;
+    let tempo_query = mapped_base_url(&tempo, 3200).await?;
+    let tempo_otlp = mapped_base_url(&tempo, 4318).await?;
+    wait_for_http_ok(&client, &tempo_query, &["/ready", "/status"]).await?;
+
+    let trace_start_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_secs()
+        .saturating_sub(60);
+    let query_start = trace_start_secs.saturating_sub(60);
+    let query_end = trace_start_secs + 120;
+    let query_range = format!("start={query_start}&end={query_end}");
+    let otlp_body = sample_otlp_body_at(trace_start_secs * 1_000_000_000);
+    let crabka = start_crabka_pair(&otlp_body).await?;
+
+    post_otlp(
+        &client,
+        &format!("{tempo_otlp}/v1/traces"),
+        None,
+        &otlp_body,
+    )
+    .await?;
+
+    // `{ resource.service.name = "checkout" }` matches every span in the sample
+    // trace; group by a resource- and a span-scoped attribute.
+    let base = "%7B%20resource.service.name%20%3D%20%22checkout%22%20%7D";
+    for by in ["resource.service.name", "span.http.method"] {
+        let metrics_query = format!("{base}%20%7C%20rate()%20by%20({by})");
+        let tempo_metrics = get_json_until_positive_metric_total(
+            &client,
+            &format!(
+                "{tempo_query}/api/metrics/query_range?q={metrics_query}&{query_range}&step=30s"
+            ),
+            None,
+        )
+        .await?;
+        let crabka_metrics = get_json(
+            &client,
+            &format!(
+                "{}/api/metrics/query_range?q={metrics_query}&{query_range}&step=30s",
+                crabka.base_url
+            ),
+            Some(TENANT),
+        )
+        .await?;
+        let tempo_keys = metric_series_label_keys(&tempo_metrics);
+        let crabka_keys = metric_series_label_keys(&crabka_metrics);
+        eprintln!(
+            "by({by}): Tempo keys={tempo_keys:?} promLabels={:?}; Crabka keys={crabka_keys:?} promLabels={:?}",
+            metric_prom_labels_list(&tempo_metrics),
+            metric_prom_labels_list(&crabka_metrics),
+        );
+        assert!(
+            crabka_keys == tempo_keys,
+            "by({by}) series label keys differ: Tempo={tempo_keys:?}, Crabka={crabka_keys:?}"
+        );
+    }
+    crabka.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResult {
     let client = reqwest::Client::new();
     let query_range = "start=0&end=1";
@@ -1031,6 +1101,41 @@ fn assert_metric_totals_match(tempo: &JsonValue, crabka: &JsonValue) {
         (tempo_total - crabka_total).abs() < f64::EPSILON,
         "metric totals differed; Tempo={tempo_total}, Crabka={crabka_total}, Tempo response={tempo}, Crabka response={crabka}"
     );
+}
+
+/// The set of `series[].labels[].key` strings across a TraceQL-metrics response
+/// (the grouped-attribute names Grafana renders panels by).
+fn metric_series_label_keys(resp: &JsonValue) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    if let Some(series) = resp.get("series").and_then(JsonValue::as_array) {
+        for s in series {
+            if let Some(labels) = s.get("labels").and_then(JsonValue::as_array) {
+                for kv in labels {
+                    if let Some(k) = kv.get("key").and_then(JsonValue::as_str) {
+                        keys.insert(k.to_string());
+                    }
+                }
+            }
+        }
+    }
+    keys
+}
+
+/// The `series[].promLabels` strings (Grafana's legend form), for diagnostics.
+fn metric_prom_labels_list(resp: &JsonValue) -> Vec<String> {
+    resp.get("series")
+        .and_then(JsonValue::as_array)
+        .map(|series| {
+            series
+                .iter()
+                .filter_map(|s| {
+                    s.get("promLabels")
+                        .and_then(JsonValue::as_str)
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn metric_points_total(value: &JsonValue) -> f64 {

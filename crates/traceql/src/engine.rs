@@ -1911,9 +1911,31 @@ fn metric_labels(
         .map(|field| {
             let column = metric_field_column(field)?;
             let value = metric_label_value(batch, &column, row)?;
-            Ok((field.key.clone(), value))
+            Ok((metric_label_key(field), value))
         })
         .collect()
+}
+
+/// The series label key for a `by(<field>)` grouping, matching real Tempo: the
+/// FULLY-SCOPED attribute name (e.g. `resource.service.name`, `span.http.method`),
+/// not the scope-stripped key. Grafana's Traces Drilldown keys its per-attribute
+/// breakdown panels on this exact name, so a stripped key (`service.name`) leaves
+/// the breakdown blank even though the underlying data is correct (verified
+/// against real Tempo by `tempo_differential`).
+fn metric_label_key(field: &Field) -> String {
+    let prefix = match &field.scope {
+        Scope::Resource => "resource.",
+        Scope::Span => "span.",
+        Scope::Event => "event.",
+        Scope::Link => "link.",
+        Scope::Both => ".",
+        Scope::Parent => "parent.",
+        Scope::Instrumentation => "instrumentation.",
+        // Intrinsics (name/status/kind/duration/trace:* …) are referenced by
+        // their own names, not a scoped attribute key — keep the parser key.
+        Scope::Intrinsic(_) => return field.key.clone(),
+    };
+    format!("{prefix}{}", field.key)
 }
 
 fn metric_field_column(field: &Field) -> Result<String> {
