@@ -75,6 +75,11 @@ services:
   minio:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
+    # minio's resident heap is small (~0.4 GiB); without a cap the kernel grows
+    # page cache from the block-store write/delete churn + the background data
+    # scanner re-reading objects into many GiB of (reclaimable) cache that
+    # inflates the WSL2 VM. Cap the container so that cache stays bounded.
+    mem_limit: 2g
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -257,7 +262,7 @@ services:
       broker: { condition: service_healthy }
 
   grafana:
-    image: grafana/grafana:13.1.0
+    image: grafana/grafana:13.0
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
