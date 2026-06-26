@@ -27,6 +27,7 @@ object_store = { workspace = true }
 parquet = { workspace = true }
 prost = { workspace = true }
 pbjson = { workspace = true }
+prometheus-client = { workspace = true }
 connectrpc-axum = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }

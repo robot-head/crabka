@@ -26,6 +26,7 @@ use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status as GrpcStat
 
 use crate::error::{TracesError, tempo_error_response};
 use crate::limits::{IngestEnforcer, LimitError, Limits, OverridesProvider};
+use crate::metrics::ServiceMetrics;
 use crate::span::{AttrValue, KeyValue, Span};
 use crate::wal::{SpanRecord, TRACES_WAL_TOPIC, partition_key};
 use crate::wire::jaeger::{decode_jaeger_binary_thrift, decode_jaeger_thrift};
@@ -123,11 +124,17 @@ pub struct DistributorState {
     pub overrides: Option<OverridesProvider>,
     pub ingest_enforcer: IngestEnforcer,
     pub max_decompressed: usize,
+    pub metrics: ServiceMetrics,
 }
 
 impl DistributorState {
     #[must_use]
     pub fn new(sink: Arc<dyn WalSink>) -> Self {
+        Self::with_metrics(sink, ServiceMetrics::new())
+    }
+
+    #[must_use]
+    pub fn with_metrics(sink: Arc<dyn WalSink>, metrics: ServiceMetrics) -> Self {
         Self {
             sink,
             limits: TenantLimits::default(),
@@ -135,6 +142,7 @@ impl DistributorState {
             overrides: None,
             ingest_enforcer: IngestEnforcer::new(),
             max_decompressed: 10 * 1024 * 1024,
+            metrics,
         }
     }
 }
@@ -308,11 +316,13 @@ async fn otlp_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+    let bytes = body.len() as u64;
     if let Err(err) = require_content_type(
         &headers,
         &["application/x-protobuf", "application/protobuf"],
     ) {
-        return error_response(&err);
+        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed)
         .and_then(|body| {
@@ -321,9 +331,12 @@ async fn otlp_push(
         .and_then(|data| decode_otlp(&data))
     {
         Ok(spans) => {
-            append_decoded_response(&state, &headers, spans, otlp_success_response()).await
+            let items = spans.len() as u64;
+            let resp =
+                append_decoded_response(&state, &headers, spans, otlp_success_response()).await;
+            record_ingest_response(&state, resp, bytes, items, start)
         }
-        Err(err) => error_response(&err),
+        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
     }
 }
 
@@ -332,13 +345,19 @@ async fn zipkin_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+    let bytes = body.len() as u64;
     if let Err(err) = require_content_type(&headers, &["application/json"]) {
-        return error_response(&err);
+        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| decode_zipkin(&body))
     {
-        Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await,
-        Err(err) => error_response(&err),
+        Ok(spans) => {
+            let items = spans.len() as u64;
+            let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
+            record_ingest_response(&state, resp, bytes, items, start)
+        }
+        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
     }
 }
 
@@ -347,6 +366,8 @@ async fn jaeger_push(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+    let bytes = body.len() as u64;
     if let Err(err) = require_content_type(
         &headers,
         &[
@@ -355,7 +376,7 @@ async fn jaeger_push(
             "application/vnd.apache.thrift.binary",
         ],
     ) {
-        return error_response(&err);
+        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| {
         if is_jaeger_binary_thrift(&headers) {
@@ -364,9 +385,31 @@ async fn jaeger_push(
             decode_jaeger_thrift(&body)
         }
     }) {
-        Ok(spans) => append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await,
-        Err(err) => error_response(&err),
+        Ok(spans) => {
+            let items = spans.len() as u64;
+            let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
+            record_ingest_response(&state, resp, bytes, items, start)
+        }
+        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
     }
+}
+
+/// Record one push-handler ingest outcome from the response status and return
+/// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
+/// counter is bumped separately at the [`produce_spans`] error site, so a 4xx
+/// validation/rate-limit reject here does not inflate it.
+fn record_ingest_response(
+    state: &DistributorState,
+    resp: Response,
+    bytes: u64,
+    items: u64,
+    start: std::time::Instant,
+) -> Response {
+    let ok = resp.status().is_success();
+    state
+        .metrics
+        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+    resp
 }
 
 async fn handle_jaeger_compact_datagram(
@@ -400,7 +443,12 @@ async fn append_decoded_response(
     }
     match produce_spans(state.sink.as_ref(), &tenant, spans).await {
         Ok(()) => success.into_response(),
-        Err(err) => error_response(&err),
+        Err(err) => {
+            // A produce failure is an actual WAL-append error (distinct from a
+            // 4xx validation/rate-limit reject handled above).
+            state.metrics.record_wal_append_failure();
+            error_response(&err)
+        }
     }
 }
 

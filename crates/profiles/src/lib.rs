@@ -35,6 +35,7 @@ pub mod error;
 pub mod hot_store;
 pub mod ingest;
 pub mod limits;
+pub mod metrics;
 pub mod query;
 pub mod query_frontend;
 pub mod symbolizer;

@@ -261,15 +261,26 @@ impl ProfileStore for InMemoryProfileStore {
             if !row_matches(row, &compiled) {
                 continue;
             }
-            let projected: Vec<_> = label_names
-                .iter()
-                .filter_map(|want| {
-                    row.labels
-                        .iter()
-                        .find(|(name, _)| name == want)
-                        .map(|(name, value)| (name.clone(), value.clone()))
-                })
-                .collect();
+            // An empty `label_names` means "return the full label set" (the
+            // Pyroscope `/series` convention). Projecting onto an empty name
+            // list yields an empty vec, which surfaces as a spurious `[{}]`
+            // entry — mirror the cold-path fix in `crabka_blockstore`'s index.
+            let projected: Vec<_> = if label_names.is_empty() {
+                row.labels
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            } else {
+                label_names
+                    .iter()
+                    .filter_map(|want| {
+                        row.labels
+                            .iter()
+                            .find(|(name, _)| name == want)
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                    })
+                    .collect()
+            };
             if !projected.is_empty() || label_names.is_empty() {
                 out.insert(projected);
             }

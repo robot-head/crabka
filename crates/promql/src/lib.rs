@@ -12,6 +12,7 @@ mod functions;
 mod http_api;
 mod in_memory;
 mod merged_store;
+pub mod metrics;
 mod planner;
 mod query_frontend;
 mod range_array;

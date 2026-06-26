@@ -18,6 +18,7 @@ use crabka_metrics::distributor::{
     DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
     run_ha_election_consumer_loop, serve,
 };
+use crabka_metrics::metrics::ServiceMetrics;
 use crabka_metrics::{MetricsCompactorConfig, run_compactor_consumer_loop};
 use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
@@ -95,7 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-metrics",
     )?;
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+    let metrics = ServiceMetrics::new();
+    crabka_telemetry::profiling::serve_admin_from_env_with(
+        "0.0.0.0:9404",
+        crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
+    )
+    .await?;
 
     let cli = Cli::parse();
     if !runnable_targets().contains(&cli.target) {
@@ -103,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(2);
     }
     match cli.target {
-        Target::Distributor => run_distributor(cli).await?,
+        Target::Distributor => run_distributor(cli, metrics).await?,
         Target::Compactor => run_compactor(cli).await?,
         Target::Querier => run_querier(cli).await?,
         Target::QueryFrontend => run_query_frontend(cli).await?,
@@ -240,7 +246,10 @@ fn role_build_info(role: &'static str) -> impl IntoResponse {
     )
 }
 
-async fn run_distributor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_distributor(
+    cli: Cli,
+    metrics: ServiceMetrics,
+) -> Result<(), Box<dyn std::error::Error>> {
     let producer = Arc::new(
         Producer::builder()
             .bootstrap(&cli.bootstrap)
@@ -260,7 +269,8 @@ async fn run_distributor(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             .with_ha_election_sink(Arc::new(KafkaHaElectionSink::new(
                 Arc::clone(&producer),
                 cli.ha_tracker_topic.clone(),
-            ))),
+            )))
+            .with_metrics(metrics),
     );
     let ha_state = Arc::clone(&state);
     let ha_topic = cli.ha_tracker_topic.clone();

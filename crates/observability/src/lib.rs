@@ -1,5 +1,7 @@
 //! Role-selectable service skeleton for Crabka observability.
 
+pub mod metrics;
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
@@ -12,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use crate::metrics::ServiceMetrics;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Bytes;
@@ -242,6 +245,11 @@ pub struct ServiceDependencies {
     /// Querier-only: params for the hot-tail WAL consumer that is connected
     /// asynchronously after HTTP serving begins (FIX B2).
     deferred_wal_consumer_connect: Option<DeferredWalConsumerConnect>,
+    /// Shared RED-metrics bundle threaded into the per-role state. `None` in
+    /// tests that don't care about metrics (each state then gets a fresh
+    /// bundle); the binary constructs one bundle and threads it through here so
+    /// the `:9404` exporter and the handlers share the same registry.
+    metrics: Option<ServiceMetrics>,
 }
 
 #[derive(Clone)]
@@ -307,6 +315,15 @@ pub enum ActiveLogDeleteFilterError {
 }
 
 impl ServiceDependencies {
+    /// Thread a shared RED-metrics bundle into the service so the per-role
+    /// state (distributor / querier) increments the same registry the `:9404`
+    /// exporter serves.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
     #[must_use]
     pub fn with_wal_sink(mut self, sink: impl LogWalSink) -> Self {
         self.wal_sink = Some(Arc::new(sink));
@@ -2834,6 +2851,7 @@ pub struct DistributorState {
     wal_append_timeout: Option<Duration>,
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
+    metrics: ServiceMetrics,
 }
 
 pub fn distributor_router(sink: impl LogWalSink) -> Router {
@@ -2844,6 +2862,7 @@ pub fn distributor_router(sink: impl LogWalSink) -> Router {
         None,
         None,
         None,
+        ServiceMetrics::new(),
     )
 }
 
@@ -2854,11 +2873,13 @@ fn distributor_router_with_sink(
     wal_append_timeout: Option<Duration>,
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
+    metrics: ServiceMetrics,
 ) -> Router {
     let grpc_logs_service = OtlpGrpcLogsService {
         sink: Arc::clone(&sink),
         ingest_limiter: Arc::clone(&ingest_limiter),
         wal_append_timeout,
+        metrics: metrics.clone(),
     };
 
     Router::new()
@@ -2902,6 +2923,7 @@ fn distributor_router_with_sink(
             wal_append_timeout,
             reject_old_samples_max_age,
             creation_grace_period,
+            metrics,
         })
 }
 
@@ -2910,6 +2932,7 @@ pub struct OtlpGrpcLogsService {
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
     wal_append_timeout: Option<Duration>,
+    metrics: ServiceMetrics,
 }
 
 pub fn otlp_grpc_logs_service(sink: impl LogWalSink) -> OtlpGrpcLogsService {
@@ -2924,6 +2947,7 @@ pub fn otlp_grpc_logs_service_with_limiter(
         sink: Arc::new(sink),
         ingest_limiter: Arc::new(ingest_limiter),
         wal_append_timeout: None,
+        metrics: ServiceMetrics::new(),
     }
 }
 
@@ -2946,6 +2970,7 @@ impl LogsService for OtlpGrpcLogsService {
             wal_append_timeout: self.wal_append_timeout,
             reject_old_samples_max_age: None,
             creation_grace_period: None,
+            metrics: self.metrics.clone(),
         };
         append_distributor_wal_records(&state, records)
             .await
@@ -3102,21 +3127,28 @@ async fn push_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
+    let bytes = body.len() as u64;
     if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return error.into_response();
+        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
     }
-    match normalize_loki_http_push(
+    let resp = match normalize_loki_http_push(
         &headers,
         &body,
         state.reject_old_samples_max_age,
         state.creation_grace_period,
     ) {
-        Ok(records) => match append_distributor_wal_records(&state, records).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(error) => error.into_response(),
-        },
+        Ok(records) => {
+            let items = records.len() as u64;
+            let resp = match append_distributor_wal_records(&state, records).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error.into_response(),
+            };
+            return record_ingest_response(&state, resp, bytes, items, start);
+        }
         Err(error) => error.into_response(),
-    }
+    };
+    record_ingest_response(&state, resp, bytes, 0, start)
 }
 
 async fn push_otlp_logs(
@@ -3124,21 +3156,46 @@ async fn push_otlp_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
+    let bytes = body.len() as u64;
     if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-        return error.into_response();
+        return record_ingest_response(&state, error.into_response(), bytes, 0, start);
     }
-    match normalize_otlp_http_logs(
+    let resp = match normalize_otlp_http_logs(
         &headers,
         &body,
         state.reject_old_samples_max_age,
         state.creation_grace_period,
     ) {
-        Ok(records) => match append_distributor_wal_records(&state, records).await {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(error) => error.into_response(),
-        },
+        Ok(records) => {
+            let items = records.len() as u64;
+            let resp = match append_distributor_wal_records(&state, records).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(error) => error.into_response(),
+            };
+            return record_ingest_response(&state, resp, bytes, items, start);
+        }
         Err(error) => otlp_http_error_response(error),
-    }
+    };
+    record_ingest_response(&state, resp, bytes, 0, start)
+}
+
+/// Record one push-handler ingest outcome from the response status and return
+/// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
+/// counter is bumped separately at the [`append_distributor_wal_records`] error
+/// site, so a 4xx validation/quota reject here does not inflate it.
+fn record_ingest_response(
+    state: &DistributorState,
+    resp: Response,
+    bytes: u64,
+    items: u64,
+    start: Instant,
+) -> Response {
+    let ok = resp.status().is_success();
+    state
+        .metrics
+        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+    resp
 }
 
 fn otlp_http_error_response(error: DistributorError) -> Response {
@@ -3203,15 +3260,27 @@ async fn append_distributor_wal_records(
     state: &DistributorState,
     records: Vec<WalLogRecord>,
 ) -> Result<(), DistributorError> {
+    // A quota/rate-limit reject is a 4xx client error, NOT a WAL-append
+    // failure, so it must not bump the WAL failure counter.
     check_ingest_quota(state.ingest_limiter.as_ref(), &records).await?;
-    if let Some(timeout) = state.wal_append_timeout {
-        tokio::time::timeout(timeout, append_wal_records(state.sink.as_ref(), records))
-            .await
-            .map_err(|_| DistributorError::WalAppendTimeout)??;
+    let result = if let Some(timeout) = state.wal_append_timeout {
+        match tokio::time::timeout(timeout, append_wal_records(state.sink.as_ref(), records)).await
+        {
+            Ok(inner) => inner.map_err(DistributorError::from),
+            Err(_) => Err(DistributorError::WalAppendTimeout),
+        }
     } else {
-        append_wal_records(state.sink.as_ref(), records).await?;
+        append_wal_records(state.sink.as_ref(), records)
+            .await
+            .map_err(DistributorError::from)
+    };
+    // Bump the WAL/produce append-failure counter only at the actual append
+    // error site (timeout or sink error), never on a 4xx validation/quota
+    // reject handled above or upstream.
+    if result.is_err() {
+        state.metrics.record_wal_append_failure();
     }
-    Ok(())
+    result
 }
 
 async fn check_ingest_quota(
@@ -4635,6 +4704,9 @@ pub struct QuerierState {
     max_query_series: Option<usize>,
     max_query_bytes: Option<u64>,
     max_query_length: Option<usize>,
+    /// Shared RED-metrics bundle. `None` for test routers that don't wire
+    /// metrics; the binary threads a shared bundle in via [`QuerierState::with_metrics`].
+    metrics: Option<ServiceMetrics>,
 }
 
 type LokiRuleGroupsByName = BTreeMap<String, serde_yaml::Value>;
@@ -4718,6 +4790,24 @@ impl QuerierState {
             max_query_series: None,
             max_query_bytes: None,
             max_query_length: None,
+            metrics: None,
+        }
+    }
+
+    /// Thread a shared RED-metrics bundle so each querier handler records its
+    /// per-route request count and latency on the same registry the `:9404`
+    /// exporter serves. A no-op when left unset (test routers).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Record one querier request outcome (per-route count + latency) on the
+    /// shared bundle. No-op when metrics are not wired (test routers).
+    fn record_query(&self, route: &str, ok: bool, start: Instant) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_query(route, ok, start.elapsed().as_secs_f64());
         }
     }
 
@@ -5124,6 +5214,7 @@ async fn build_service_router_with_shutdown(
     object_store: Option<&dyn ObjectStore>,
     token: CancellationToken,
 ) -> Result<(Router, Option<JoinHandle<()>>), ServiceConfigError> {
+    let metrics = dependencies.metrics.clone().unwrap_or_default();
     match config.target {
         Role::Distributor => {
             let sink = dependencies
@@ -5140,6 +5231,7 @@ async fn build_service_router_with_shutdown(
                     config.wal_append_timeout_ms.map(Duration::from_millis),
                     Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
                     Some(LOKI_CREATION_GRACE_PERIOD),
+                    metrics,
                 ),
                 None,
             ))
@@ -5245,6 +5337,7 @@ async fn build_service_router_with_shutdown(
                     state = state.with_hot_tail(hot_tail, i64::MIN);
                 }
             }
+            state = state.with_metrics(metrics);
             Ok((loki_router(state), wal_handle))
         }
         Role::Compactor => {
@@ -7446,7 +7539,16 @@ async fn query(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    handle_query(state, headers, raw_query.as_deref(), QueryKind::Instant).await
+    let start = Instant::now();
+    let resp = handle_query(
+        state.clone(),
+        headers,
+        raw_query.as_deref(),
+        QueryKind::Instant,
+    )
+    .await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
 }
 
 async fn query_post(
@@ -7455,11 +7557,18 @@ async fn query_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
     let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            let resp = error.into_response();
+            state.record_query("query", resp.status().is_success(), start);
+            return resp;
+        }
     };
-    handle_query(state, headers, Some(&raw_query), QueryKind::Instant).await
+    let resp = handle_query(state.clone(), headers, Some(&raw_query), QueryKind::Instant).await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
 }
 
 async fn api_prom_query(
@@ -7509,7 +7618,16 @@ async fn query_range(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    handle_query(state, headers, raw_query.as_deref(), QueryKind::Range).await
+    let start = Instant::now();
+    let resp = handle_query(
+        state.clone(),
+        headers,
+        raw_query.as_deref(),
+        QueryKind::Range,
+    )
+    .await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
 }
 
 async fn query_range_post(
@@ -7518,11 +7636,18 @@ async fn query_range_post(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
+    let start = Instant::now();
     let raw_query = match post_query_params_body_first(raw_query.as_deref(), &body) {
         Ok(raw_query) => raw_query,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            let resp = error.into_response();
+            state.record_query("query_range", resp.status().is_success(), start);
+            return resp;
+        }
     };
-    handle_query(state, headers, Some(&raw_query), QueryKind::Range).await
+    let resp = handle_query(state.clone(), headers, Some(&raw_query), QueryKind::Range).await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
 }
 
 async fn format_query(RawQuery(raw_query): RawQuery) -> Response {
@@ -7658,14 +7783,16 @@ async fn label_names(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_label_names_query(&state, &headers, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_label_names_query(&state, &headers, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("labels", resp.status().is_success(), start);
+    resp
 }
 
 async fn label_names_post(
@@ -7694,14 +7821,16 @@ async fn label_values(
     Path(name): Path<String>,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_label_values_query(&state, &headers, &name, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_label_values_query(&state, &headers, &name, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("label_values", resp.status().is_success(), start);
+    resp
 }
 
 async fn label_values_post(
@@ -7730,14 +7859,16 @@ async fn series(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    let params = match parse_series_params(raw_query.as_deref()) {
-        Ok(params) => params,
-        Err(error) => return error.into_response(),
-    };
-    match execute_series_query(&state, &headers, &params).await {
-        Ok(response) => response,
+    let start = Instant::now();
+    let resp = match parse_series_params(raw_query.as_deref()) {
+        Ok(params) => match execute_series_query(&state, &headers, &params).await {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        },
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("series", resp.status().is_success(), start);
+    resp
 }
 
 async fn series_post(
@@ -7872,10 +8003,13 @@ async fn index_stats(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_index_stats_query(&state, &headers, raw_query.as_deref()).await {
+    let start = Instant::now();
+    let resp = match execute_index_stats_query(&state, &headers, raw_query.as_deref()).await {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("index_stats", resp.status().is_success(), start);
+    resp
 }
 
 async fn index_stats_post(
@@ -7899,12 +8033,20 @@ async fn index_volume(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_index_volume_query(&state, &headers, raw_query.as_deref(), VolumeKind::Instant)
-        .await
+    let start = Instant::now();
+    let resp = match execute_index_volume_query(
+        &state,
+        &headers,
+        raw_query.as_deref(),
+        VolumeKind::Instant,
+    )
+    .await
     {
         Ok(value) => json_response(StatusCode::OK, &value),
         Err(error) => error.into_response(),
-    }
+    };
+    state.record_query("index_volume", resp.status().is_success(), start);
+    resp
 }
 
 async fn index_volume_post(

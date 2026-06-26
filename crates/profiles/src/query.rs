@@ -25,6 +25,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 
 use crate::limits::{Limits, OverridesProvider};
+use crate::metrics::ServiceMetrics;
 use crate::query_frontend::{FrontendConfig, split_inclusive_range};
 use crate::wire::pb;
 
@@ -51,6 +52,7 @@ pub struct QuerierState<S: ProfileStore = DefaultStore> {
     engine: FlameEngine<S>,
     execution: QueryExecution,
     overrides: OverridesProvider,
+    metrics: ServiceMetrics,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,7 +110,20 @@ impl<S: ProfileStore> QuerierState<S> {
             engine,
             execution,
             overrides,
+            // A self-contained default registry; the binary `main` attaches the
+            // process-shared bundle (the one wired to `/metrics`) via
+            // [`Self::with_metrics`] so query handlers feed the exported series.
+            metrics: ServiceMetrics::new(),
         }
+    }
+
+    /// Attach the process-shared metrics bundle (the one whose registry backs
+    /// the `/metrics` exporter) so query handlers record into the exported
+    /// series. Called once by the binary `main` after constructing the state.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: ServiceMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     fn validate_query_range(
@@ -1068,6 +1083,35 @@ fn heatmap_slot_timestamp(
     Some(start_ms + (bucket + 1) * step_ms)
 }
 
+/// Time `fut` (a Connect handler body) and record the outcome on `route`.
+/// `Ok` => `status="ok"`, any `ConnectError` => `status="error"`. The latency is
+/// observed regardless of outcome.
+async fn timed_query<T>(
+    metrics: &ServiceMetrics,
+    route: &str,
+    fut: impl Future<Output = Result<T, ConnectError>>,
+) -> Result<T, ConnectError> {
+    let start = std::time::Instant::now();
+    let result = fut.await;
+    metrics.record_query(route, result.is_ok(), start.elapsed().as_secs_f64());
+    result
+}
+
+/// Time `fut` (a raw axum handler body returning a `Response`) and record the
+/// outcome on `route`. A 2xx/3xx status counts as `ok`; 4xx/5xx counts as
+/// `error`.
+async fn timed_query_response(
+    metrics: &ServiceMetrics,
+    route: &str,
+    fut: impl Future<Output = Response>,
+) -> Response {
+    let start = std::time::Instant::now();
+    let response = fut.await;
+    let ok = response.status().is_success() || response.status().is_redirection();
+    metrics.record_query(route, ok, start.elapsed().as_secs_f64());
+    response
+}
+
 pub fn router<S>(state: Arc<QuerierState<S>>) -> Router
 where
     S: ProfileStore + 'static,
@@ -1157,6 +1201,23 @@ async fn set_settings_handler(
 }
 
 async fn profile_types_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::ProfileTypesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::ProfileTypesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "profile_types",
+        profile_types_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn profile_types_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::ProfileTypesRequest>,
@@ -1203,6 +1264,23 @@ where
 }
 
 async fn label_names_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelNamesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelNamesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "label_names",
+        label_names_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn label_names_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::LabelNamesRequest>,
@@ -1212,12 +1290,21 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     let mut names = state
         .store
-        .label_names(&tenant, &matchers, req.0.start, req.0.end)
+        .label_names(&tenant, &matchers, start, end)
         .await
         .map_err(connect_error)?;
     names.retain(|name| !is_internal_label(name));
@@ -1227,6 +1314,23 @@ where
 }
 
 async fn label_values_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::LabelValuesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::LabelValuesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "label_values",
+        label_values_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn label_values_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::LabelValuesRequest>,
@@ -1236,9 +1340,18 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     if is_internal_label(&req.0.name) {
         return Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
             names: Vec::new(),
@@ -1246,7 +1359,7 @@ where
     }
     let names = state
         .store
-        .label_values(&tenant, &req.0.name, &matchers, req.0.start, req.0.end)
+        .label_values(&tenant, &req.0.name, &matchers, start, end)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
@@ -1255,6 +1368,18 @@ where
 }
 
 async fn series_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(&metrics, "series", series_inner(state, headers, req)).await
+}
+
+async fn series_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SeriesRequest>,
@@ -1264,18 +1389,25 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    state
-        .validate_query_range(&tenant, req.0.start, req.0.end)
-        .map_err(connect_error)?;
+    // An omitted range (start == end == 0) means "unbounded" — the Grafana
+    // Profiles Drilldown enumerates series without a range. Match Pyroscope:
+    // expand to the full range and skip the range-limit check (mirrors
+    // `profile_types_inner`). Honoring [0, 0] literally filters out every row
+    // and leaves the drilldown with no series to chart.
+    let range_omitted = req.0.start == 0 && req.0.end == 0;
+    let (start, end) = if range_omitted {
+        (0, i64::MAX)
+    } else {
+        (req.0.start, req.0.end)
+    };
+    if !range_omitted {
+        state
+            .validate_query_range(&tenant, start, end)
+            .map_err(connect_error)?;
+    }
     let labels_set = state
         .store
-        .series(
-            &tenant,
-            &matchers,
-            &req.0.label_names,
-            req.0.start,
-            req.0.end,
-        )
+        .series(&tenant, &matchers, &req.0.label_names, start, end)
         .await
         .map_err(connect_error)?
         .into_iter()
@@ -1289,6 +1421,23 @@ where
 }
 
 async fn select_merge_stacktraces_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeStacktracesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeStacktracesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_stacktraces",
+        select_merge_stacktraces_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_stacktraces_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeStacktracesRequest>,
@@ -1365,6 +1514,23 @@ where
 }
 
 async fn select_series_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectSeriesRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectSeriesResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_series",
+        select_series_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_series_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectSeriesRequest>,
@@ -1454,6 +1620,23 @@ where
 }
 
 async fn select_merge_span_profile_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectMergeSpanProfileResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_span_profile",
+        select_merge_span_profile_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_span_profile_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeSpanProfileRequest>,
@@ -1503,6 +1686,23 @@ where
 }
 
 async fn select_merge_profile_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
+) -> Result<ConnectResponse<pb::google::v1::Profile>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_merge_profile",
+        select_merge_profile_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_merge_profile_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectMergeProfileRequest>,
@@ -1538,6 +1738,23 @@ where
 }
 
 async fn select_heatmap_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::SelectHeatmapRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::SelectHeatmapResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "select_heatmap",
+        select_heatmap_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn select_heatmap_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::SelectHeatmapRequest>,
@@ -1630,6 +1847,18 @@ where
 }
 
 async fn diff_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::DiffRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::DiffResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(&metrics, "diff", diff_inner(state, headers, req)).await
+}
+
+async fn diff_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::DiffRequest>,
@@ -1691,6 +1920,23 @@ where
 }
 
 async fn get_profile_stats_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::GetProfileStatsResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "profile_stats",
+        get_profile_stats_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn get_profile_stats_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     _req: ConnectRequest<pb::querier::v1::GetProfileStatsRequest>,
@@ -1720,6 +1966,23 @@ where
 }
 
 async fn analyze_query_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
+) -> Result<ConnectResponse<pb::querier::v1::AnalyzeQueryResponse>, ConnectError>
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query(
+        &metrics,
+        "analyze_query",
+        analyze_query_inner(state, headers, req),
+    )
+    .await
+}
+
+async fn analyze_query_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     req: ConnectRequest<pb::querier::v1::AnalyzeQueryRequest>,
@@ -1811,6 +2074,18 @@ where
 }
 
 async fn render_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    query: Query<RenderQuery>,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query_response(&metrics, "render", render_inner(state, headers, query)).await
+}
+
+async fn render_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     Query(query): Query<RenderQuery>,
@@ -1865,6 +2140,23 @@ where
 }
 
 async fn render_diff_handler<S>(
+    state: Extension<Arc<QuerierState<S>>>,
+    headers: HeaderMap,
+    query: RawQuery,
+) -> Response
+where
+    S: ProfileStore,
+{
+    let metrics = state.0.metrics.clone();
+    timed_query_response(
+        &metrics,
+        "render_diff",
+        render_diff_inner(state, headers, query),
+    )
+    .await
+}
+
+async fn render_diff_inner<S>(
     Extension(state): Extension<Arc<QuerierState<S>>>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,

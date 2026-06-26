@@ -25,6 +25,7 @@ use crate::ingest::{
     split_sample_types,
 };
 use crate::limits::{Limits, OverridesProvider};
+use crate::metrics::ServiceMetrics;
 use crate::wal::{
     PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
     WalSymbolSet, partition_key,
@@ -96,6 +97,10 @@ pub struct DistributorState {
     pub ingestion_buckets: Mutex<HashMap<String, Arc<TokenBucket>>>,
     pub relabel: Vec<RelabelConfig>,
     pub max_decompressed: usize,
+    /// Prometheus metrics bundle. `record_ingest` is called at each ingest
+    /// handler boundary; `record_wal_append_failure` fires at the WAL-append
+    /// error site inside [`process_raw`].
+    pub metrics: ServiceMetrics,
 }
 
 pub async fn process_raw(
@@ -153,8 +158,11 @@ pub async fn process_raw(
 
     for rec in pending {
         if let Err(err) = state.sink.append(rec).await {
-            // The WAL append failed: undo the series reservation so a transient
-            // produce error doesn't leak into the tenant's max-series budget.
+            // The WAL append failed: count it as a WAL/produce failure (distinct
+            // from a 4xx client/validation rejection) and undo the series
+            // reservation so a transient produce error doesn't leak into the
+            // tenant's max-series budget.
+            state.metrics.record_wal_append_failure();
             rollback_reserved_series(state, tenant, &reserved);
             return Err(err);
         }
@@ -422,11 +430,23 @@ async fn push_handler(
     headers: HeaderMap,
     req: ConnectRequest<pb::push::v1::PushRequest>,
 ) -> Result<ConnectResponse<pb::push::v1::PushResponse>, ConnectError> {
-    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
-    let raws = decode_push(&req.0, state.max_decompressed).map_err(connect_error)?;
-    process_raw(&state, &tenant, raws)
-        .await
-        .map_err(connect_error)?;
+    let start = std::time::Instant::now();
+    // No raw body is exposed by the Connect codec; the decoded message size is a
+    // faithful proxy for the request payload bytes.
+    let bytes = req.0.encoded_len() as u64;
+    let result = async {
+        let tenant = tenant_from_headers(&headers)?;
+        let raws = decode_push(&req.0, state.max_decompressed)?;
+        let items = raws.len() as u64;
+        process_raw(&state, &tenant, raws).await?;
+        Ok::<u64, ProfilesError>(items)
+    }
+    .await;
+    let items = *result.as_ref().unwrap_or(&0);
+    state
+        .metrics
+        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    result.map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::push::v1::PushResponse {}))
 }
 
@@ -435,11 +455,23 @@ async fn export_handler(
     headers: HeaderMap,
     req: ConnectRequest<pb::otlp_profiles::ExportProfilesServiceRequest>,
 ) -> Result<ConnectResponse<pb::otlp_profiles::ExportProfilesServiceResponse>, ConnectError> {
-    let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
-    let raws = decode_otlp(&req.0).map_err(connect_error)?;
-    process_raw(&state, &tenant, raws)
-        .await
-        .map_err(connect_error)?;
+    let start = std::time::Instant::now();
+    // No raw body is exposed by the Connect codec; the decoded message size is a
+    // faithful proxy for the request payload bytes.
+    let bytes = req.0.encoded_len() as u64;
+    let result = async {
+        let tenant = tenant_from_headers(&headers)?;
+        let raws = decode_otlp(&req.0)?;
+        let items = raws.len() as u64;
+        process_raw(&state, &tenant, raws).await?;
+        Ok::<u64, ProfilesError>(items)
+    }
+    .await;
+    let items = *result.as_ref().unwrap_or(&0);
+    state
+        .metrics
+        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    result.map_err(connect_error)?;
     Ok(ConnectResponse::new(
         pb::otlp_profiles::ExportProfilesServiceResponse {
             partial_success: None,
@@ -452,11 +484,15 @@ async fn otlp_http_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+    let bytes = body.len() as u64;
+    let mut items: u64 = 0;
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let req = pb::otlp_profiles::ExportProfilesServiceRequest::decode(body)
             .map_err(|err| ProfilesError::Decode(format!("OTLP profiles decode: {err}")))?;
         let raws = decode_otlp(&req)?;
+        items = raws.len() as u64;
         process_raw(&state, &tenant, raws).await?;
         Ok::<_, ProfilesError>(
             pb::otlp_profiles::ExportProfilesServiceResponse {
@@ -467,6 +503,9 @@ async fn otlp_http_handler(
     }
     .await;
 
+    state
+        .metrics
+        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
     match result {
         Ok(body) => (
             StatusCode::OK,
@@ -484,6 +523,8 @@ async fn ingest_handler(
     RawQuery(query): RawQuery,
     body: Bytes,
 ) -> Response {
+    let start = std::time::Instant::now();
+    let bytes = body.len() as u64;
     let result = async {
         let tenant = tenant_from_headers(&headers)?;
         let query = parse_ingest_query(query.as_deref().unwrap_or(""))?;
@@ -495,6 +536,10 @@ async fn ingest_handler(
     }
     .await;
 
+    // The `/ingest` door carries exactly one profile per request.
+    state
+        .metrics
+        .record_ingest(result.is_ok(), bytes, 1, start.elapsed().as_secs_f64());
     match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => profiles_error_response(err),
@@ -737,6 +782,7 @@ mod tests {
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         })
     }
 
@@ -929,6 +975,7 @@ mod tests {
                 action: RelabelAction::Drop,
             }],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
         let raws = vec![crate::wire::test_fixtures::raw_profile_cpu()];
 
@@ -954,6 +1001,7 @@ mod tests {
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -991,6 +1039,7 @@ mod tests {
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -1023,6 +1072,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -1061,6 +1111,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -1094,6 +1145,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -1127,6 +1179,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         process_raw(
@@ -1355,6 +1408,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         let err = process_raw(
@@ -1396,6 +1450,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         // Two distinct series in one request exceed the cap of 1 and are rejected.
@@ -1457,6 +1512,7 @@ overrides:
             ingestion_buckets: Default::default(),
             relabel: vec![],
             max_decompressed: 1 << 24,
+            metrics: ServiceMetrics::new(),
         });
 
         for idx in 0..(MAX_TENANTS + 50) {

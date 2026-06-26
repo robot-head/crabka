@@ -1,0 +1,480 @@
+# Grafana-managed alert rules for Crabka, provisioned into the "Crabka Alerts"
+# folder. All rules query the Crabka Metrics (Prometheus) datasource (crabka-prom).
+# Pattern per rule: node A is an instant PromQL query; node C is a threshold
+# expression over A and is the alert condition. noDataState=OK so a quiet
+# subsystem (no traffic) does not page; execErrState=Error so a broken query is
+# visible during verification.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: crabka-broker
+    folder: Crabka Alerts
+    interval: 1m
+    rules:
+      - uid: crabka-broker-no-controller
+        title: Broker has no active controller
+        condition: C
+        for: 2m
+        labels: { severity: critical, area: broker }
+        annotations:
+          summary: No active KRaft controller
+          description: "crabka_broker_active_controller is < 1 — the cluster has no elected controller; metadata changes (topic create, leader election) will stall."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: max(crabka_broker_active_controller)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+              refId: C
+
+      - uid: crabka-broker-offline-partitions
+        title: Broker offline partitions
+        condition: C
+        for: 2m
+        labels: { severity: critical, area: broker }
+        annotations:
+          summary: Partitions are offline
+          description: "crabka_broker_offline_partitions_count > 0 — one or more partitions have no leader and are unavailable for produce/fetch."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(crabka_broker_offline_partitions_count)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: crabka-broker-under-min-isr
+        title: Broker partitions under min-ISR
+        condition: C
+        for: 5m
+        labels: { severity: critical, area: broker }
+        annotations:
+          summary: Partitions below min.insync.replicas
+          description: "crabka_broker_under_min_isr_partition_count > 0 — acks=all producers are blocked on these partitions."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(crabka_broker_under_min_isr_partition_count)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: crabka-broker-under-replicated
+        title: Broker under-replicated partitions
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: broker }
+        annotations:
+          summary: Under-replicated partitions
+          description: "crabka_broker_under_replicated_partitions > 0 for 10m — a replica is lagging or down."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(crabka_broker_under_replicated_partitions)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+      - uid: crabka-broker-audit-write-failures
+        title: Broker audit write failures
+        condition: C
+        for: 5m
+        labels: { severity: warning, area: broker }
+        annotations:
+          summary: Audit log write failures
+          description: "crabka_broker_audit_write_failures_total is increasing — FedRAMP MLA audit records are failing to persist."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(rate(crabka_broker_audit_write_failures_total[5m]))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+              refId: C
+
+  - orgId: 1
+    name: crabka-observability
+    folder: Crabka Alerts
+    interval: 1m
+    rules:
+      - uid: crabka-obs-service-down
+        title: Observability service down
+        condition: C
+        for: 1m
+        labels: { severity: critical, area: observability }
+        annotations:
+          summary: "A Crabka observability role is down: {{ $labels.job }}"
+          description: "up < 1 for {{ $labels.job }} — its :9404 /metrics scrape is failing (process down or unreachable)."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: 'up{job=~"(metrics|logs|traces|profiles)-.*"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+              refId: C
+
+      - uid: crabka-metrics-ingest-errors
+        title: Metrics ingest error ratio high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: metrics }
+        annotations:
+          summary: Metrics ingest error ratio > 5%
+          description: "More than 5% of metrics push requests are failing over the last 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(rate(crabka_metrics_ingest_requests_total{status="error"}[5m])) / clamp_min(sum(rate(crabka_metrics_ingest_requests_total[5m])), 1)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+              refId: C
+
+      - uid: crabka-logs-ingest-errors
+        title: Logs ingest error ratio high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: logs }
+        annotations:
+          summary: Logs ingest error ratio > 5%
+          description: "More than 5% of log push requests are failing over the last 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(rate(crabka_logs_ingest_requests_total{status="error"}[5m])) / clamp_min(sum(rate(crabka_logs_ingest_requests_total[5m])), 1)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+              refId: C
+
+      - uid: crabka-traces-ingest-errors
+        title: Traces ingest error ratio high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: traces }
+        annotations:
+          summary: Traces ingest error ratio > 5%
+          description: "More than 5% of trace push requests are failing over the last 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(rate(crabka_traces_ingest_requests_total{status="error"}[5m])) / clamp_min(sum(rate(crabka_traces_ingest_requests_total[5m])), 1)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+              refId: C
+
+      - uid: crabka-profiles-ingest-errors
+        title: Profiles ingest error ratio high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: profiles }
+        annotations:
+          summary: Profiles ingest error ratio > 5%
+          description: "More than 5% of profile push requests are failing over the last 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: sum(rate(crabka_profiles_ingest_requests_total{status="error"}[5m])) / clamp_min(sum(rate(crabka_profiles_ingest_requests_total[5m])), 1)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0.05] }
+              refId: C
+
+      - uid: crabka-traces-query-latency
+        title: Traces query p99 latency high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: traces }
+        annotations:
+          summary: Traces query p99 > 5s
+          description: "p99 of crabka_traces_query_duration_seconds exceeds 5s over 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: histogram_quantile(0.99, sum by (le) (rate(crabka_traces_query_duration_seconds_bucket[5m])))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+              refId: C
+
+      - uid: crabka-metrics-query-latency
+        title: Metrics query p99 latency high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: metrics }
+        annotations:
+          summary: Metrics query p99 > 5s
+          description: "p99 of crabka_metrics_query_duration_seconds exceeds 5s over 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: histogram_quantile(0.99, sum by (le) (rate(crabka_metrics_query_duration_seconds_bucket[5m])))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+              refId: C
+
+      - uid: crabka-logs-query-latency
+        title: Logs query p99 latency high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: logs }
+        annotations:
+          summary: Logs query p99 > 5s
+          description: "p99 of crabka_logs_query_duration_seconds exceeds 5s over 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: histogram_quantile(0.99, sum by (le) (rate(crabka_logs_query_duration_seconds_bucket[5m])))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+              refId: C
+
+      - uid: crabka-profiles-query-latency
+        title: Profiles query p99 latency high
+        condition: C
+        for: 10m
+        labels: { severity: warning, area: profiles }
+        annotations:
+          summary: Profiles query p99 > 5s
+          description: "p99 of crabka_profiles_query_duration_seconds exceeds 5s over 5m."
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: crabka-prom
+            model:
+              datasource: { type: prometheus, uid: crabka-prom }
+              editorMode: code
+              expr: histogram_quantile(0.99, sum by (le) (rate(crabka_profiles_query_duration_seconds_bucket[5m])))
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource: { type: __expr__, uid: __expr__ }
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+              refId: C

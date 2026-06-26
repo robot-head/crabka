@@ -9,6 +9,7 @@ pub mod error;
 pub mod frontend;
 pub mod limits;
 pub mod livestore;
+pub mod metrics;
 pub mod metricsgen;
 pub mod querier;
 pub mod span;

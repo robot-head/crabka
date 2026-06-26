@@ -9,6 +9,7 @@ pub mod distributor;
 pub mod histogram;
 pub mod limits;
 pub mod metadata;
+pub mod metrics;
 pub mod otlp;
 pub mod sample;
 pub mod schema;

@@ -34,6 +34,7 @@ crabka-throttle = { path = "../throttle", version = "0.3.8" }
 dashmap = { workspace = true }
 object_store = { workspace = true }
 opentelemetry-proto = { workspace = true }
+prometheus-client = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -154,10 +154,17 @@ pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()>
 /// Like [`serve_admin`] but resolves the bind address from
 /// `CRABKA_ADMIN_LISTEN_ADDR`, falling back to `default_addr`.
 pub async fn serve_admin_from_env(default_addr: &str) -> std::io::Result<()> {
+    serve_admin_from_env_with(default_addr, Router::new()).await
+}
+
+/// Like [`serve_admin_from_env`] but merges `extra` (e.g. a `GET /metrics`
+/// route) alongside the pprof routes. Services that expose Prometheus metrics
+/// call this with their `/metrics` router so the exporter shares the admin port.
+pub async fn serve_admin_from_env_with(default_addr: &str, extra: Router) -> std::io::Result<()> {
     let raw =
         std::env::var("CRABKA_ADMIN_LISTEN_ADDR").unwrap_or_else(|_| default_addr.to_string());
     let addr: SocketAddr = raw
         .parse()
         .unwrap_or_else(|e| panic!("invalid CRABKA_ADMIN_LISTEN_ADDR `{raw}`: {e}"));
-    serve_admin(addr, Router::new()).await
+    serve_admin(addr, extra).await
 }

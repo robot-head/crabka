@@ -35,6 +35,7 @@ flate2 = { workspace = true }
 object_store.workspace = true
 opentelemetry-proto = { workspace = true, features = ["gen-tonic", "logs"] }
 parquet.workspace = true
+prometheus-client.workspace = true
 prost.workspace = true
 regex.workspace = true
 serde = { workspace = true, features = ["derive"] }

@@ -35,17 +35,29 @@ otelcol.exporter.otlphttp "logs" {
   }
 }
 
-// ---------------- Metrics: scrape every Crabka :9404 + demo app ----------------
+// ---------------- Metrics: scrape every Crabka service's :9404 /metrics ----------------
+// Every Crabka service exposes a Prometheus exporter on its admin port 9404
+// (the broker via its metrics server; the four observability services via the
+// shared profiling-admin server, across all roles). The `job` label carries the
+// compose service name so dashboards/alerts can select per service+role. The
+// demo apps are intentionally NOT scraped here — they expose pprof on 9404 but
+// no /metrics, so a metrics scrape would 404 (up=0). They remain in the
+// pyroscope scrape below for CPU profiles.
 prometheus.scrape "crabka" {
   targets = [
-    { __address__ = "broker:9404",               job = "broker" },
-    { __address__ = "metrics-distributor:9404",  job = "metrics-distributor" },
-    { __address__ = "metrics-querier:9404",       job = "metrics-querier" },
-    { __address__ = "traces-distributor:9404",   job = "traces-distributor" },
-    { __address__ = "logs-distributor:9404",     job = "logs-distributor" },
-    { __address__ = "profiles-distributor:9404", job = "profiles-distributor" },
-    { __address__ = "demo-produce:9404",         job = "demo-produce" },
-    { __address__ = "demo-stream:9404",          job = "demo-stream" },
+    { __address__ = "broker:9404",                 job = "broker" },
+    { __address__ = "metrics-distributor:9404",    job = "metrics-distributor" },
+    { __address__ = "metrics-querier:9404",         job = "metrics-querier" },
+    { __address__ = "metrics-compactor:9404",      job = "metrics-compactor" },
+    { __address__ = "traces-distributor:9404",     job = "traces-distributor" },
+    { __address__ = "traces-querier:9404",          job = "traces-querier" },
+    { __address__ = "traces-block-builder:9404",   job = "traces-block-builder" },
+    { __address__ = "logs-distributor:9404",       job = "logs-distributor" },
+    { __address__ = "logs-querier:9404",            job = "logs-querier" },
+    { __address__ = "logs-compactor:9404",         job = "logs-compactor" },
+    { __address__ = "profiles-distributor:9404",   job = "profiles-distributor" },
+    { __address__ = "profiles-querier:9404",        job = "profiles-querier" },
+    { __address__ = "profiles-block-builder:9404", job = "profiles-block-builder" },
   ]
   scrape_interval = "15s"
   forward_to = [prometheus.remote_write.crabka.receiver]

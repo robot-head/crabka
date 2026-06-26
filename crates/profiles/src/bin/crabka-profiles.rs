@@ -24,6 +24,7 @@ use crabka_profiles::distributor::{DistributorState, KafkaSink, serve};
 use crabka_profiles::hot_store::{WalTailProfileStore, run_wal_tail};
 use crabka_profiles::ingest::{RelabelConfig, TenantLimitConfig};
 use crabka_profiles::limits::OverridesProvider;
+use crabka_profiles::metrics::ServiceMetrics;
 use crabka_profiles::query::{QuerierState, serve as serve_querier};
 use crabka_profiles::query_frontend::FrontendConfig;
 use crabka_telemetry::OtlpConfig;
@@ -134,7 +135,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "info",
         "crabka-profiles",
     )?;
-    crabka_telemetry::profiling::serve_admin_from_env("0.0.0.0:9404").await?;
+    let metrics = ServiceMetrics::new();
+    crabka_telemetry::profiling::serve_admin_from_env_with(
+        "0.0.0.0:9404",
+        crabka_profiles::metrics::metrics_router(metrics.registry.clone()),
+    )
+    .await?;
 
     let cli = Cli::parse();
     match cli.target {
@@ -155,6 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ingestion_buckets: Default::default(),
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: 1 << 24,
+                metrics: metrics.clone(),
             });
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
@@ -192,7 +199,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(QuerierState::new_with_overrides(union, overrides));
+            let state = Arc::new(
+                QuerierState::new_with_overrides(union, overrides).with_metrics(metrics.clone()),
+            );
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
@@ -220,13 +229,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
-            let state = Arc::new(QuerierState::new_frontend_with_overrides(
-                union,
-                FrontendConfig {
-                    shard_width_ms: cli.query_frontend_shard_ms,
-                },
-                overrides,
-            ));
+            let state = Arc::new(
+                QuerierState::new_frontend_with_overrides(
+                    union,
+                    FrontendConfig {
+                        shard_width_ms: cli.query_frontend_shard_ms,
+                    },
+                    overrides,
+                )
+                .with_metrics(metrics.clone()),
+            );
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
             };

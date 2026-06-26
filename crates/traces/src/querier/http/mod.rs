@@ -26,6 +26,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::tempo_limit_error_response;
 use crate::limits::{LimitError, Limits, OverridesProvider, QueryEnforcer};
+use crate::metrics::ServiceMetrics;
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 const INTRINSIC_TAGS: &[&str] = &[
@@ -53,6 +54,7 @@ const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
     cfg: HttpConfig,
+    metrics: Option<ServiceMetrics>,
 }
 
 impl<S: SpanStore> Clone for AppState<S> {
@@ -60,6 +62,17 @@ impl<S: SpanStore> Clone for AppState<S> {
         Self {
             engine: Arc::clone(&self.engine),
             cfg: self.cfg.clone(),
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<S: SpanStore> AppState<S> {
+    /// Record one querier request on `route` with the given outcome and
+    /// elapsed time. No-op when metrics are not wired (test routers).
+    fn record_query(&self, route: &str, ok: bool, start: std::time::Instant) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_query(route, ok, start.elapsed().as_secs_f64());
         }
     }
 }
@@ -100,6 +113,34 @@ pub fn router_with_config<S>(engine: Arc<TraceqlEngine<S>>, cfg: HttpConfig) -> 
 where
     S: SpanStore + 'static,
 {
+    router_with_state(AppState {
+        engine,
+        cfg,
+        metrics: None,
+    })
+}
+
+/// Like [`router_with_config`] but threads a [`ServiceMetrics`] bundle so each
+/// query handler records `query_requests` / `query_duration_seconds`.
+pub fn router_with_config_and_metrics<S>(
+    engine: Arc<TraceqlEngine<S>>,
+    cfg: HttpConfig,
+    metrics: ServiceMetrics,
+) -> Router
+where
+    S: SpanStore + 'static,
+{
+    router_with_state(AppState {
+        engine,
+        cfg,
+        metrics: Some(metrics),
+    })
+}
+
+fn router_with_state<S>(state: AppState<S>) -> Router
+where
+    S: SpanStore + 'static,
+{
     Router::new()
         .route("/api/echo", get(echo))
         .route("/ready", get(ready))
@@ -117,7 +158,7 @@ where
         .route("/api/metrics/query", get(query_instant::<S>))
         .route("/api/v2/traces/{trace_id}", get(trace_by_id::<S>))
         .route("/api/traces/{trace_id}", get(trace_by_id_v1::<S>))
-        .with_state(AppState { engine, cfg })
+        .with_state(state)
 }
 
 async fn echo() -> &'static str {
@@ -149,6 +190,16 @@ async fn buildinfo() -> Response {
 }
 
 async fn search<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = search_inner(&state, headers, uri).await;
+    state.record_query("search", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
 where
     S: SpanStore + 'static,
 {
@@ -248,6 +299,16 @@ async fn search_tags<S>(State(state): State<AppState<S>>, headers: HeaderMap, ur
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tags_inner(&state, headers, uri).await;
+    state.record_query("tags", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tags_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -294,6 +355,16 @@ async fn search_tags_v2<S>(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = search_tags_v2_inner(&state, headers, uri).await;
+    state.record_query("tags", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tags_v2_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
 where
     S: SpanStore + 'static,
 {
@@ -349,6 +420,21 @@ async fn search_tag_values<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tag_values_inner(&state, headers, tag, uri).await;
+    state.record_query("tag_values", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tag_values_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    tag: String,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -396,6 +482,21 @@ async fn search_tag_values_v2<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = search_tag_values_v2_inner(&state, headers, tag, uri).await;
+    state.record_query("tag_values", resp.status().is_success(), start);
+    resp
+}
+
+async fn search_tag_values_v2_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    tag: String,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let (start_ns, end_ns) = match optional_time_bounds(&uri) {
         Ok(bounds) => bounds,
@@ -435,6 +536,16 @@ where
 }
 
 async fn query_range<S>(State(state): State<AppState<S>>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = query_range_inner(&state, headers, uri).await;
+    state.record_query("query_range", resp.status().is_success(), start);
+    resp
+}
+
+async fn query_range_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
 where
     S: SpanStore + 'static,
 {
@@ -489,6 +600,16 @@ async fn query_instant<S>(
 where
     S: SpanStore + 'static,
 {
+    let start = std::time::Instant::now();
+    let resp = query_instant_inner(&state, headers, uri).await;
+    state.record_query("query", resp.status().is_success(), start);
+    resp
+}
+
+async fn query_instant_inner<S>(state: &AppState<S>, headers: HeaderMap, uri: Uri) -> Response
+where
+    S: SpanStore + 'static,
+{
     let tenant = tenant(&headers);
     let Some(query) = metrics_query_param(&uri) else {
         return (StatusCode::BAD_REQUEST, "missing query parameter q").into_response();
@@ -521,6 +642,21 @@ async fn trace_by_id<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = trace_by_id_inner(&state, headers, trace_id, uri).await;
+    state.record_query("trace_by_id", resp.status().is_success(), start);
+    resp
+}
+
+async fn trace_by_id_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    trace_id: String,
     uri: Uri,
 ) -> Response
 where
@@ -567,6 +703,21 @@ async fn trace_by_id_v1<S>(
     State(state): State<AppState<S>>,
     headers: HeaderMap,
     Path(trace_id): Path<String>,
+    uri: Uri,
+) -> Response
+where
+    S: SpanStore + 'static,
+{
+    let start = std::time::Instant::now();
+    let resp = trace_by_id_v1_inner(&state, headers, trace_id, uri).await;
+    state.record_query("trace_by_id", resp.status().is_success(), start);
+    resp
+}
+
+async fn trace_by_id_v1_inner<S>(
+    state: &AppState<S>,
+    headers: HeaderMap,
+    trace_id: String,
     uri: Uri,
 ) -> Response
 where
