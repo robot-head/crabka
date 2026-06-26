@@ -241,8 +241,14 @@ mod tests {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
         assert!(buf.contains("status=\"ok\""), "ok status label missing");
-        assert!(buf.contains("status=\"error\""), "error status label missing");
-        assert!(buf.contains("route=\"search\""), "search route label missing");
+        assert!(
+            buf.contains("status=\"error\""),
+            "error status label missing"
+        );
+        assert!(
+            buf.contains("route=\"search\""),
+            "search route label missing"
+        );
     }
 
     #[test]
@@ -315,7 +321,12 @@ mod tests {
         m.record_ingest(true, 42, 1, 0.01);
         let app = metrics_router(m.registry);
         let resp = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert!(resp.status() == StatusCode::OK);
@@ -326,7 +337,9 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(ct.starts_with("application/openmetrics-text"), "ct={ct}");
-        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         assert!(s.contains("crabka_traces_ingest_requests_total"), "{s}");
         assert!(s.contains("# EOF"), "{s}");

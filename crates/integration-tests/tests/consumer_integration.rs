@@ -487,7 +487,10 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
             if m1.assignment().await.len() == 2 {
                 break;
             }
-            assert!(Instant::now() < regain, "m1 did not re-acquire both partitions");
+            assert!(
+                Instant::now() < regain,
+                "m1 did not re-acquire both partitions"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
