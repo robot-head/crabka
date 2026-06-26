@@ -40,6 +40,59 @@ x-crabka-image: &crabka-image
   image: ghcr.io/robot-head/crabka-demo:latest
   restart: unless-stopped
 
+# ---------------------------------------------------------------------------
+# Per-tier resource limits (hard caps; memswap_limit == mem_limit so a tier that
+# exceeds its cap is OOM-killed + restarted rather than swap-thrashing). Defaults
+# target a ~16 GB / 8-core dev machine (steady-state usage is ~8-9 GiB; a ~12 GiB
+# host is the practical floor). Every value is overridable via .env, so the SAME
+# compose scales from a laptop to a large server — see .env for the per-tier
+# knobs, the small-host path (the distributors carry a fixed ~1.5-1.7 GiB
+# heap-profiling RSS floor, so the real small-host lever is disabling prof, NOT
+# shrinking their cap), and how the workload knob couples to the distributor /
+# compactor caps. Caps may sum above host RAM (real usage is far lower); a `cpus`
+# above the host core count is simply non-binding.
+# ---------------------------------------------------------------------------
+x-broker-res: &broker-res
+  mem_limit: ${CRABKA_BROKER_MEM:-2g}
+  memswap_limit: ${CRABKA_BROKER_MEM:-2g}
+  cpus: ${CRABKA_BROKER_CPUS:-4}
+x-distributor-res: &distributor-res
+  mem_limit: ${CRABKA_DISTRIBUTOR_MEM:-3g}
+  memswap_limit: ${CRABKA_DISTRIBUTOR_MEM:-3g}
+  cpus: ${CRABKA_DISTRIBUTOR_CPUS:-2}
+x-querier-res: &querier-res
+  mem_limit: ${CRABKA_QUERIER_MEM:-2g}
+  memswap_limit: ${CRABKA_QUERIER_MEM:-2g}
+  cpus: ${CRABKA_QUERIER_CPUS:-2}
+x-compactor-res: &compactor-res
+  mem_limit: ${CRABKA_COMPACTOR_MEM:-1g}
+  memswap_limit: ${CRABKA_COMPACTOR_MEM:-1g}
+  cpus: ${CRABKA_COMPACTOR_CPUS:-2}
+x-registry-res: &registry-res
+  mem_limit: ${CRABKA_SCHEMA_REGISTRY_MEM:-768m}
+  memswap_limit: ${CRABKA_SCHEMA_REGISTRY_MEM:-768m}
+  cpus: ${CRABKA_SCHEMA_REGISTRY_CPUS:-1}
+x-minio-res: &minio-res
+  mem_limit: ${CRABKA_MINIO_MEM:-2g}
+  memswap_limit: ${CRABKA_MINIO_MEM:-2g}
+  cpus: ${CRABKA_MINIO_CPUS:-2}
+x-alloy-res: &alloy-res
+  mem_limit: ${CRABKA_ALLOY_MEM:-512m}
+  memswap_limit: ${CRABKA_ALLOY_MEM:-512m}
+  cpus: ${CRABKA_ALLOY_CPUS:-1}
+x-grafana-res: &grafana-res
+  mem_limit: ${CRABKA_GRAFANA_MEM:-1g}
+  memswap_limit: ${CRABKA_GRAFANA_MEM:-1g}
+  cpus: ${CRABKA_GRAFANA_CPUS:-2}
+x-demo-res: &demo-res
+  mem_limit: ${CRABKA_DEMO_MEM:-1g}
+  memswap_limit: ${CRABKA_DEMO_MEM:-1g}
+  cpus: ${CRABKA_DEMO_CPUS:-1}
+x-setup-res: &setup-res
+  mem_limit: ${CRABKA_SETUP_MEM:-512m}
+  memswap_limit: ${CRABKA_SETUP_MEM:-512m}
+  cpus: ${CRABKA_SETUP_CPUS:-1}
+
 services:
   # One-shot: format the broker's KRaft storage (writes meta.properties.json)
   # before the broker starts. Idempotent — skips if already formatted. The
@@ -51,12 +104,13 @@ services:
   # with `docker compose down -v` and restart.
   broker-format:
     image: crabka-demo:latest
+    <<: *setup-res
     restart: "no"
     entrypoint: ["sh", "-c", "test -f /data/meta.properties.json || crabka format --log-dir /data --standalone --node-id 1 --controller-listener broker:9093 --feature streams.version=1"]
     volumes: ["broker-data:/data"]
 
   broker:
-    <<: *crabka-image
+    <<: [*crabka-image, *broker-res]
     command: ["crabka-broker", "--listen-addr=0.0.0.0:9092", "--advertised-listener=broker:9092", "--log-dir=/data", "--process-roles=controller,broker"]
     environment:
       <<: *otlp-env
@@ -74,12 +128,9 @@ services:
 
   minio:
     image: minio/minio:latest
+    # Resource caps (see x-minio-res / .env); heap is ~0.4 GiB, the rest is reclaimable page cache.
+    <<: *minio-res
     command: ["server", "/data", "--console-address", ":9001"]
-    # minio's resident heap is small (~0.4 GiB); without a cap the kernel grows
-    # page cache from the block-store write/delete churn + the background data
-    # scanner re-reading objects into many GiB of (reclaimable) cache that
-    # inflates the WSL2 VM. Cap the container so that cache stays bounded.
-    mem_limit: 2g
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -93,6 +144,7 @@ services:
 
   minio-setup:
     image: minio/mc:latest
+    <<: *setup-res
     depends_on:
       minio: { condition: service_healthy }
     entrypoint: ["/bin/sh", "/bootstrap.sh"]
@@ -104,6 +156,7 @@ services:
   # compactors can consume.
   topic-setup:
     image: apache/kafka:4.3.1
+    <<: *setup-res
     restart: "no"
     depends_on:
       broker: { condition: service_healthy }
@@ -118,7 +171,7 @@ services:
         done; echo "topics ready"
 
   schema-registry:
-    <<: *crabka-image
+    <<: [*crabka-image, *registry-res]
     command: ["crabka-schema-registry", "--bootstrap-servers=broker:9092", "--listen-addr=0.0.0.0:8081", "--schemas-topic-rf=1"]
     environment: { <<: *otlp-env }
     depends_on:
@@ -129,14 +182,14 @@ services:
   metrics-distributor:
     # crabka-metrics uses --bootstrap (not --wal-bootstrap); the distributor
     # writes to the WAL (Kafka), not the object store, so no --object-store-url.
-    <<: *crabka-image
+    <<: [*crabka-image, *distributor-res]
     command: ["crabka-metrics", "--target=distributor", "--listen=0.0.0.0:4041", "--bootstrap=broker:9092"]
     environment: { <<: *otlp-env }
     depends_on:
       broker: { condition: service_healthy }
 
   metrics-compactor:
-    <<: *crabka-image
+    <<: [*crabka-image, *compactor-res]
     command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
@@ -145,7 +198,7 @@ services:
 
   metrics-querier:
     # crabka-metrics-service uses --wal-bootstrap (its own flag name).
-    <<: *crabka-image
+    <<: [*crabka-image, *querier-res]
     command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["9090:9090"]
@@ -155,14 +208,14 @@ services:
 
   # ---- TRACES (Tempo) ----
   traces-distributor:
-    <<: *crabka-image
+    <<: [*crabka-image, *distributor-res]
     command: ["crabka-traces", "--target=distributor", "--bootstrap=broker:9092", "--listen=0.0.0.0:3200", "--grpc-listen=0.0.0.0:4317", "--otlp-http-listen=0.0.0.0:4318"]
     environment: { <<: *otlp-env }
     depends_on:
       broker: { condition: service_healthy }
 
   traces-block-builder:
-    <<: *crabka-image
+    <<: [*crabka-image, *compactor-res]
     command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
@@ -170,7 +223,7 @@ services:
       broker: { condition: service_healthy }
 
   traces-querier:
-    <<: *crabka-image
+    <<: [*crabka-image, *querier-res]
     command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-traces"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3200:3200"]
@@ -179,7 +232,7 @@ services:
 
   # ---- LOGS (Loki) — binary is `crabka-observability` (the logs service) ----
   logs-distributor:
-    <<: *crabka-image
+    <<: [*crabka-image, *distributor-res]
     command: ["crabka-observability", "--target=distributor", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
@@ -187,7 +240,7 @@ services:
       minio-setup: { condition: service_completed_successfully }
 
   logs-compactor:
-    <<: *crabka-image
+    <<: [*crabka-image, *compactor-res]
     command: ["crabka-observability", "--target=compactor", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
@@ -204,7 +257,7 @@ services:
     # compactor wrote to S3 (default `local-manifest` reads the querier's empty
     # local disk -> no labels/series). With no --tenant, the tenant is resolved
     # per-request from X-Scope-OrgID.
-    <<: *crabka-image
+    <<: [*crabka-image, *querier-res]
     command: ["crabka-observability", "--target=querier", "--listen-addr=0.0.0.0:3100", "--wal-bootstrap-server=broker:9092", "--object-store-url=s3://crabka-logs", "--index-prefix=logs", "--querier-index-source=tenant-object-store-manifest", "--wal-group-id=crabka-observability-querier"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["3100:3100"]
@@ -218,14 +271,14 @@ services:
 
   # ---- PROFILES (Pyroscope) ----
   profiles-distributor:
-    <<: *crabka-image
+    <<: [*crabka-image, *distributor-res]
     command: ["crabka-profiles", "--target=distributor", "--listen=0.0.0.0:4040", "--bootstrap=broker:9092"]
     environment: { <<: *otlp-env }
     depends_on:
       broker: { condition: service_healthy }
 
   profiles-block-builder:
-    <<: *crabka-image
+    <<: [*crabka-image, *compactor-res]
     command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles"]
     environment: { <<: [*s3-env, *otlp-env] }
     depends_on:
@@ -238,7 +291,7 @@ services:
     # falls back to 127.0.0.1:9092, can't reach the broker, and dies -> the hot
     # store stays empty and the cold store only has whatever index existed at
     # startup, so the querier returns no profiles.
-    <<: *crabka-image
+    <<: [*crabka-image, *querier-res]
     command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles", "--bootstrap=broker:9092"]
     environment: { <<: [*s3-env, *otlp-env] }
     ports: ["4040:4040"]
@@ -253,6 +306,7 @@ services:
   # ---- COLLECTOR + GRAFANA ----
   alloy:
     image: grafana/alloy:v1.17.0
+    <<: *alloy-res
     command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "/etc/alloy/config.alloy"]
     volumes:
       - "./alloy/config.alloy:/etc/alloy/config.alloy:ro"
@@ -263,6 +317,7 @@ services:
 
   grafana:
     image: grafana/grafana:13.0
+    <<: *grafana-res
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
@@ -278,19 +333,19 @@ services:
 
   # ---- DEMO APP ----
   demo-produce:
-    <<: *crabka-image
+    <<: [*crabka-image, *demo-res]
     command: ["observability-demo-app", "--role=produce"]
     environment:
       <<: *otlp-env
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
-      CRABKA_DEMO_ORDERS_PER_SEC: "50"
+      CRABKA_DEMO_ORDERS_PER_SEC: "${CRABKA_DEMO_ORDERS_PER_SEC:-50}"
     depends_on:
       broker: { condition: service_healthy }
       schema-registry: { condition: service_started }
 
   demo-stream:
-    <<: *crabka-image
+    <<: [*crabka-image, *demo-res]
     command: ["observability-demo-app", "--role=stream"]
     environment:
       <<: *otlp-env
@@ -301,7 +356,7 @@ services:
       schema-registry: { condition: service_started }
 
   demo-consume:
-    <<: *crabka-image
+    <<: [*crabka-image, *demo-res]
     command: ["observability-demo-app", "--role=consume"]
     environment:
       <<: *otlp-env
