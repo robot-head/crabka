@@ -4268,8 +4268,11 @@ mod tests {
             .series;
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
+        // `by(event.exception.type)` groups by an event ATTRIBUTE, so the series
+        // label key carries its `event.` scope (matching real Tempo, per the
+        // live-Tempo differential) — unlike the bare `event:name` intrinsic above.
         assert!(series.iter().any(|series| series.labels
-            == vec![("exception.type".into(), "timeout".into())]
+            == vec![("event.exception.type".into(), "timeout".into())]
             && series.points == vec![(0, 3.0), (10_000, 0.0)]));
 
         let mut series = engine
