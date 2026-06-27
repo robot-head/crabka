@@ -26,8 +26,9 @@ heap-profiling = ["dep:jemalloc_pprof"]
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
-opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-otlp = { workspace = true, features = ["trace", "logs", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { workspace = true }
+opentelemetry-appender-tracing = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 thiserror = { workspace = true }
