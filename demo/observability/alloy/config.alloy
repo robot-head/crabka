@@ -153,6 +153,38 @@ pyroscope.scrape "demo_apps" {
   forward_to = [pyroscope.write.crabka.receiver]
 }
 
+// CPU-only profiling for the compaction / block-builder / querier roles that the
+// `crabka_services` block above (broker + distributors + schema-registry) does
+// not cover — without this they are a profiling blind spot. CPU pprof is
+// signal-based and allocator-independent, so it works regardless of the
+// allocator. `profile.memory` is left off here to keep the per-scrape cost down
+// on the heavy DataFusion query/compaction roles; these binaries are still built
+// with `--features heap-profiling`, so `/debug/pprof/heap` exists and can be
+// enabled later if heap profiles are wanted. `scrape_interval = "60s"` for the
+// same reason as the blocks above (the CPU endpoint runs a 30s profile per
+// scrape behind one global pprof guard).
+pyroscope.scrape "crabka_workers" {
+  targets = [
+    { __address__ = "metrics-compactor:9404",      service_name = "metrics-compactor" },
+    { __address__ = "metrics-querier:9404",         service_name = "metrics-querier" },
+    { __address__ = "traces-block-builder:9404",    service_name = "traces-block-builder" },
+    { __address__ = "traces-querier:9404",          service_name = "traces-querier" },
+    { __address__ = "logs-compactor:9404",          service_name = "logs-compactor" },
+    { __address__ = "logs-querier:9404",            service_name = "logs-querier" },
+    { __address__ = "profiles-block-builder:9404",  service_name = "profiles-block-builder" },
+    { __address__ = "profiles-querier:9404",        service_name = "profiles-querier" },
+  ]
+  scrape_interval = "60s"
+  profiling_config {
+    profile.process_cpu { enabled = true }
+    profile.memory    { enabled = false }
+    profile.goroutine { enabled = false }
+    profile.block     { enabled = false }
+    profile.mutex     { enabled = false }
+  }
+  forward_to = [pyroscope.write.crabka.receiver]
+}
+
 pyroscope.write "crabka" {
   endpoint {
     url     = "http://profiles-distributor:4040"
