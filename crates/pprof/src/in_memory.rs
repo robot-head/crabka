@@ -525,10 +525,15 @@ mod tests {
             .unwrap();
         assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
 
+        // Empty `label_names` means "return the full label set" (the Pyroscope
+        // `/series` convention), mirroring `crabka_blockstore`'s index. It must
+        // NOT collapse to a single empty label set (`[{}]`), which breaks
+        // Grafana's Pyroscope label autocomplete. All samples here carry the same
+        // single label, so the full sets dedup to one series.
         let unprojected = store
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert!(unprojected == vec![Vec::<(String, String)>::new()]);
+        assert!(unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
     }
 }
