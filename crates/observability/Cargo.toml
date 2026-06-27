@@ -41,6 +41,7 @@ regex.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
+tracing = { workspace = true }
 snap.workspace = true
 thiserror = { workspace = true }
 time = { version = "0.3", default-features = false, features = ["parsing"] }

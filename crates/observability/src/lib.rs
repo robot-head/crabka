@@ -3171,11 +3171,27 @@ async fn push_otlp_logs(
             let items = records.len() as u64;
             let resp = match append_distributor_wal_records(&state, records).await {
                 Ok(()) => StatusCode::NO_CONTENT.into_response(),
-                Err(error) => error.into_response(),
+                Err(error) => {
+                    // Surface why an accepted OTLP log batch failed to persist
+                    // (WAL append errors are otherwise opaque to the client).
+                    tracing::debug!(error = %error, "OTLP logs: WAL append failed");
+                    error.into_response()
+                }
             };
             return record_ingest_response(&state, resp, bytes, items, start);
         }
-        Err(error) => otlp_http_error_response(error),
+        Err(error) => {
+            // Surface why an OTLP log push was rejected at decode/normalize
+            // (content-type, encoding, and size pinpoint client misconfig).
+            tracing::debug!(
+                error = %error,
+                content_type = ?headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+                content_encoding = ?headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+                bytes,
+                "OTLP logs: decode/normalize rejected the request"
+            );
+            otlp_http_error_response(error)
+        }
     };
     record_ingest_response(&state, resp, bytes, 0, start)
 }
@@ -3612,6 +3628,13 @@ fn normalize_otlp_http_logs(
     reject_old_samples_max_age: Option<Duration>,
     creation_grace_period: Option<Duration>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
+    // OTLP/HTTP clients (e.g. the OpenTelemetry SDK's otlphttp exporter, which
+    // defaults to gzip) honour Content-Encoding just like the Loki push path, so
+    // decompress before decode. Without this, a gzip body reaches the protobuf
+    // decoder as raw deflate stream bytes and fails to parse.
+    let body = decode_loki_http_body(headers, body)?;
+    let body = body.as_slice();
+
     if is_protobuf_content_type(headers) {
         let payload =
             ProtoExportLogsServiceRequest::decode(body).map_err(DistributorError::OtlpDecode)?;
@@ -19125,6 +19148,69 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
+    /// before protobuf-decoding. The OpenTelemetry SDK's `otlphttp` exporter
+    /// (what the demo's Alloy uses) gzips by default, so a regression here means
+    /// every emitted log line silently fails to decode and no logs are ingested.
+    #[test]
+    fn normalize_otlp_http_logs_decodes_gzip_identically_to_identity() {
+        use opentelemetry_proto::tonic::logs::v1::{ResourceLogs, ScopeLogs};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
+        use std::io::Write as _;
+
+        let request = ProtoExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![ProtoKeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(ProtoAnyValue {
+                            value: Some(proto_any_value::Value::StringValue(
+                                "checkout".to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![ProtoLogRecord {
+                        time_unix_nano: 1_700_000_000_000_000_000,
+                        body: Some(ProtoAnyValue {
+                            value: Some(proto_any_value::Value::StringValue(
+                                "hello world".to_string(),
+                            )),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let raw = request.encode_to_vec();
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Scope-OrgID", "demo".parse().unwrap());
+        headers.insert(CONTENT_TYPE, "application/x-protobuf".parse().unwrap());
+
+        // Identity (no Content-Encoding) decodes to a single record.
+        let identity = normalize_otlp_http_logs(&headers, &raw, None, None)
+            .expect("uncompressed OTLP proto logs should decode");
+        assert_eq!(identity.len(), 1);
+        assert_eq!(identity[0].line, "hello world");
+
+        // The gzip-compressed body must decode to exactly the same records.
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        let mut gz_headers = headers.clone();
+        gz_headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
+        let from_gzip = normalize_otlp_http_logs(&gz_headers, &gzipped, None, None)
+            .expect("gzip-compressed OTLP proto logs should decode");
+        assert_eq!(from_gzip, identity);
+    }
 
     fn hot_tail_test_record(timestamp_ns: i64, app: &str) -> WalLogRecord {
         WalLogRecord {
