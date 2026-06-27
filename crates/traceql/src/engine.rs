@@ -3596,9 +3596,9 @@ mod tests {
             .series;
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0), (120_000, 0.0)]);
-        assert!(got[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(got[1].labels == vec![("span.svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 1.0), (120_000, 0.0)]);
     }
 
@@ -3630,7 +3630,7 @@ mod tests {
             .series;
 
         assert!(got.len() == 1);
-        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(got[0].points == vec![(0, 2.0)]);
     }
 
@@ -3659,9 +3659,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("service.name".into(), "billing".into())]);
+        assert!(got[0].labels == vec![("resource.service.name".into(), "billing".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("service.name".into(), "checkout".into())]);
+        assert!(got[1].labels == vec![("resource.service.name".into(), "checkout".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -3685,9 +3685,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("http.method".into(), "GET".into())]);
+        assert!(got[0].labels == vec![("span.http.method".into(), "GET".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("http.method".into(), "POST".into())]);
+        assert!(got[1].labels == vec![("span.http.method".into(), "POST".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -3798,9 +3798,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("cache.key".into(), "orders".into())]);
+        assert!(got[0].labels == vec![("event.cache.key".into(), "orders".into())]);
         assert!(got[0].points == vec![(0, 1.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("cache.key".into(), "users".into())]);
+        assert!(got[1].labels == vec![("event.cache.key".into(), "users".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -3900,9 +3900,9 @@ mod tests {
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(got.len() == 2);
-        assert!(got[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(got[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(got[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(got[1].labels == vec![("span.svc".into(), "db".into())]);
         assert!(got[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -4264,9 +4264,21 @@ mod tests {
             .series;
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(series.len() == 2);
-        assert!(series[0].labels == vec![("p".into(), "0.5".into()), ("svc".into(), "api".into())]);
+        assert!(
+            series[0].labels
+                == vec![
+                    ("p".into(), "0.5".into()),
+                    ("span.svc".into(), "api".into())
+                ]
+        );
         assert!(series[0].points == vec![(0, 300.0), (60_000, 0.0)]);
-        assert!(series[1].labels == vec![("p".into(), "0.9".into()), ("svc".into(), "api".into())]);
+        assert!(
+            series[1].labels
+                == vec![
+                    ("p".into(), "0.9".into()),
+                    ("span.svc".into(), "api".into())
+                ]
+        );
         assert!(series[1].points == vec![(0, 460.0), (60_000, 0.0)]);
     }
 
@@ -4310,7 +4322,7 @@ mod tests {
             s.labels
                 == vec![
                     ("le".into(), "2000000".into()),
-                    ("svc".into(), "api".into()),
+                    ("span.svc".into(), "api".into()),
                 ]
                 && s.points == vec![(0, 1.0), (60_000, 0.0)]
         }));
@@ -4318,19 +4330,23 @@ mod tests {
             s.labels
                 == vec![
                     ("le".into(), "2048000000".into()),
-                    ("svc".into(), "api".into()),
+                    ("span.svc".into(), "api".into()),
                 ]
                 && s.points == vec![(0, 2.0), (60_000, 0.0)]
         }));
         assert!(series.iter().any(|s| {
-            s.labels == vec![("le".into(), "+Inf".into()), ("svc".into(), "api".into())]
+            s.labels
+                == vec![
+                    ("le".into(), "+Inf".into()),
+                    ("span.svc".into(), "api".into()),
+                ]
                 && s.points == vec![(0, 3.0), (60_000, 0.0)]
         }));
         assert!(series.iter().any(|s| {
             s.labels
                 == vec![
                     ("__metric__".into(), "sum".into()),
-                    ("svc".into(), "api".into()),
+                    ("span.svc".into(), "api".into()),
                 ]
                 && s.points == vec![(0, 14_001_000_000.0), (60_000, 0.0)]
         }));
@@ -4338,7 +4354,7 @@ mod tests {
             s.labels
                 == vec![
                     ("__metric__".into(), "count".into()),
-                    ("svc".into(), "api".into()),
+                    ("span.svc".into(), "api".into()),
                 ]
                 && s.points == vec![(0, 3.0), (60_000, 0.0)]
         }));
@@ -4373,7 +4389,7 @@ mod tests {
             s.labels
                 == vec![
                     ("le".into(), "2000000".into()),
-                    ("svc".into(), "api".into()),
+                    ("span.svc".into(), "api".into()),
                 ]
                 && s.points == vec![(0, 1.0), (60_000, 0.0)]
         }));
@@ -4410,9 +4426,9 @@ mod tests {
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
+        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
         assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
 
         let bottom = e
@@ -4426,7 +4442,7 @@ mod tests {
             .await
             .unwrap();
         assert!(bottom.series.len() == 1);
-        assert!(bottom.series[0].labels == vec![("svc".into(), "db".into())]);
+        assert!(bottom.series[0].labels == vec![("span.svc".into(), "db".into())]);
         assert!(bottom.series[0].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -4461,9 +4477,9 @@ mod tests {
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
         assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
+        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
         assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
     }
 
@@ -4496,9 +4512,9 @@ mod tests {
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
 
         assert!(series.len() == 2);
-        assert!(series[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(series[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(series[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(series[1].labels == vec![("svc".into(), "db".into())]);
+        assert!(series[1].labels == vec![("span.svc".into(), "db".into())]);
         assert!(series[1].points == vec![(0, 1.0), (60_000, 0.0)]);
     }
 
@@ -4534,9 +4550,9 @@ mod tests {
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
 
         assert!(top.len() == 2);
-        assert!(top[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(top[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(top[0].points == vec![(0, 2.0), (60_000, 0.0)]);
-        assert!(top[1].labels == vec![("svc".into(), "worker".into())]);
+        assert!(top[1].labels == vec![("span.svc".into(), "worker".into())]);
         assert!(top[1].points == vec![(0, 3.0), (60_000, 0.0)]);
     }
 
@@ -4614,7 +4630,7 @@ mod tests {
             .unwrap();
 
         assert!(got.series.len() == 1);
-        assert!(got.series[0].labels == vec![("svc".into(), "api".into())]);
+        assert!(got.series[0].labels == vec![("span.svc".into(), "api".into())]);
         assert!(got.series[0].points == vec![(0, 2.0)]);
         assert!(got.series[0].exemplars.len() == 1);
         assert!(got.series[0].exemplars[0].timestamp_ns == 0);
