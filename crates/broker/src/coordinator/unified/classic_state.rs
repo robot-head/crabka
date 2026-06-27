@@ -428,6 +428,13 @@ impl Group {
         for id in &dropped {
             // Dynamic members only — no static_members entry to clear.
             self.members.remove(id);
+            // Keep per-round join tracking consistent with `members`: a member
+            // expired mid-`PreparingRebalance` (it joined this round, then timed
+            // out) must not linger in `joined_this_round`, or the
+            // `joined_this_round ⊆ members` invariant breaks and
+            // `all_members_joined_this_round` could count a ghost. Mirrors the
+            // cleanup `remove_member` already performs.
+            self.joined_this_round.remove(id);
         }
         if !dropped.is_empty() {
             if self.members.is_empty() {
