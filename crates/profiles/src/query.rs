@@ -2830,6 +2830,44 @@ mod tests {
         store
     }
 
+    /// A store whose single series carries multiple labels pushed in an order
+    /// that is NOT sorted by name (`service_name` before `__profile_type__`),
+    /// exercising the `Series` response's sort-by-name path.
+    fn store_with_unsorted_labels() -> InMemoryProfileStore {
+        let mut store = InMemoryProfileStore::new();
+        let name_ref = store.symbols_mut().intern_string("main.work");
+        let function_id = store.symbols_mut().intern_function(FunctionRec {
+            name: name_ref,
+            system_name: name_ref,
+            filename: 0,
+            start_line: 0,
+        });
+        let location_id = store.symbols_mut().intern_location(LocationRec {
+            address: 0,
+            mapping_id: 0,
+            lines: vec![LineRec {
+                function_id,
+                line: 1,
+            }],
+        });
+        let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location_id]);
+        store.push_sample(
+            "tenant-a",
+            PT,
+            vec![
+                ("service_name".to_string(), "api".to_string()),
+                ("__name__".to_string(), "process_cpu".to_string()),
+                ("env".to_string(), "pprofdiff".to_string()),
+                ("__profile_type__".to_string(), PT.to_string()),
+            ],
+            0,
+            stacktrace,
+            7,
+            10,
+        );
+        store
+    }
+
     fn store_with_two_profile_types() -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name_ref = store.symbols_mut().intern_string("main.work");
@@ -4054,6 +4092,81 @@ overrides:
         assert!(
             points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
             "{response}"
+        );
+    }
+
+    /// The `Series` RPC must emit each label set SORTED by name, matching real
+    /// Pyroscope's `/series` wire order (e.g. `__profile_type__` before
+    /// `service_name`). The Grafana Profiles Drilldown compares this order, so an
+    /// insertion-order response is a wire-compat regression. Drives the live
+    /// handler over HTTP for both the projected and full-label-set forms.
+    #[tokio::test]
+    async fn series_emits_label_sets_sorted_by_name() {
+        let state = Arc::new(QuerierState::new(Arc::new(store_with_unsorted_labels())));
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let bound = serve("127.0.0.1:0".parse().unwrap(), state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap();
+
+        let series_labels = |body: serde_json::Value| {
+            let url = format!("http://{bound}/querier.v1.QuerierService/Series");
+            async move {
+                let response: serde_json::Value = reqwest::Client::new()
+                    .post(url)
+                    .header("x-scope-orgid", "tenant-a")
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                response
+                    .pointer("/labelsSet/0/labels")
+                    .and_then(serde_json::Value::as_array)
+                    .unwrap_or_else(|| panic!("missing labelsSet: {response}"))
+                    .iter()
+                    .map(|pair| {
+                        pair.get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap()
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Projected onto the drilldown's exact label list, sent in NON-sorted
+        // request order — the response must still be sorted by name.
+        let projected = series_labels(json!({
+            "matchers": [],
+            "labelNames": ["service_name", "__profile_type__"],
+        }))
+        .await;
+        assert!(
+            projected == vec!["__profile_type__".to_string(), "service_name".to_string()],
+            "{projected:?}"
+        );
+
+        // Full label set (`labelNames=[]`) — also sorted by name, not the order
+        // the labels were ingested.
+        let full = series_labels(json!({
+            "matchers": [],
+            "labelNames": [],
+        }))
+        .await;
+        assert!(
+            full == vec![
+                "__name__".to_string(),
+                "__profile_type__".to_string(),
+                "env".to_string(),
+                "service_name".to_string(),
+            ],
+            "{full:?}"
         );
     }
 

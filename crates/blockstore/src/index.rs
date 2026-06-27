@@ -333,7 +333,7 @@ impl Index {
             // Prometheus/Loki/Pyroscope `/series` convention). Projecting onto an
             // empty name list previously yielded one empty label set (`[{}]`),
             // which broke Grafana's Pyroscope label autocomplete.
-            let projected = if label_names.is_empty() {
+            let mut projected = if label_names.is_empty() {
                 labels
                     .iter()
                     .map(|(name, value)| (name.clone(), value.clone()))
@@ -348,6 +348,11 @@ impl Index {
                     })
                     .collect::<Vec<_>>()
             };
+            // Pyroscope's `/series` emits each set's labels SORTED by name. The
+            // full-label-set form already iterates the `BTreeMap` in key order, but
+            // the projected form follows the request's `label_names` order, so sort
+            // unconditionally to keep the wire order identical to Pyroscope's.
+            projected.sort();
             if !projected.is_empty() {
                 out.insert(projected);
             }
@@ -1162,6 +1167,27 @@ mod tests {
         let none =
             idx.series_for_fingerprints("nope", &BTreeSet::from([web_prod]), &["app".to_string()]);
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn series_for_fingerprints_projection_is_sorted_by_name() {
+        // Pyroscope's `/series` emits each set's labels SORTED by name regardless
+        // of the request's `labelNames` order. Request the projection in REVERSE
+        // sorted order (`env` before `app`) and assert the response is still
+        // `[app, env]` — the wire order the Grafana drilldown compares against.
+        let idx = seed();
+        let web_prod = labels(&[("app", "web"), ("env", "prod")]).fingerprint();
+        let got = idx.series_for_fingerprints(
+            "t",
+            &BTreeSet::from([web_prod]),
+            &["env".to_string(), "app".to_string()],
+        );
+        assert!(
+            got == vec![vec![
+                ("app".to_string(), "web".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]]
+        );
     }
 
     #[test]
