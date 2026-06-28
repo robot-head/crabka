@@ -143,13 +143,30 @@ mod tests {
         let mut l = Labels::new();
         assert!(l.is_empty());
         l.insert("app", "api");
+        assert!(!l.is_empty());
         assert!(l.get("app") == Some("api"));
         assert!(l.get("missing") == None);
         assert!(l.len() == 1);
+        l.insert("env", "prod");
+        assert!(l.len() == 2);
         let pairs = l
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert!(pairs == vec![("app", "api")]);
+        assert!(pairs == vec![("app", "api"), ("env", "prod")]);
+    }
+
+    #[test]
+    fn from_iterator_preserves_pairs() {
+        let labels = vec![
+            ("app".to_string(), "api".to_string()),
+            ("env".to_string(), "prod".to_string()),
+        ]
+        .into_iter()
+        .collect::<Labels>();
+
+        assert!(labels.len() == 2);
+        assert!(labels.get("app") == Some("api"));
+        assert!(labels.get("env") == Some("prod"));
     }
 }

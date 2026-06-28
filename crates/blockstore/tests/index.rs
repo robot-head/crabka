@@ -36,6 +36,32 @@ fn label_index_is_tenant_scoped_and_applies_all_matcher_ops() {
 }
 
 #[test]
+fn label_predicate_equal_matches_only_identical_label_value() {
+    let predicate = LabelPredicate::new("app", MatchOp::Equal, "api").unwrap();
+    let matching = labels([("app", "api"), ("env", "prod")]);
+    let different = labels([("app", "worker"), ("env", "prod")]);
+
+    assert!(predicate.matches(&matching));
+    assert!(!predicate.matches(&different));
+    assert!(!predicate.matches(&labels([("env", "prod")])));
+}
+
+#[test]
+fn label_index_exact_match_requires_posting_candidate_set() {
+    let mut index = LabelIndex::default();
+    let api = index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
+    let worker = index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+
+    let matched = index.match_series(
+        "tenant-a",
+        &[LabelPredicate::new("app", MatchOp::Equal, "api").unwrap()],
+    );
+
+    assert!(matched == BTreeSet::from([api]));
+    assert!(!matched.contains(&worker));
+}
+
+#[test]
 fn label_metadata_is_tenant_scoped() {
     let mut index = LabelIndex::default();
     index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
@@ -48,6 +74,27 @@ fn label_metadata_is_tenant_scoped() {
     assert!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
     assert!(index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()]));
     assert!(index.label_values("tenant-b", "app").is_empty());
+}
+
+#[test]
+fn label_index_returns_labels_and_tenant_series() {
+    let mut index = LabelIndex::default();
+    let api_labels = labels([("app", "api"), ("env", "prod")]);
+    let worker_labels = labels([("app", "worker"), ("env", "prod")]);
+    let api = index.insert_series("tenant-a", api_labels.clone());
+    let worker = index.insert_series("tenant-a", worker_labels.clone());
+    index.insert_series("tenant-b", labels([("app", "api")]));
+
+    assert!(index.labels_for("tenant-a", api) == Some(&api_labels));
+    assert!(index.labels_for("tenant-a", worker) == Some(&worker_labels));
+    assert!(index.labels_for("tenant-a", 0).is_none());
+    assert!(index.labels_for("tenant-b", api).is_none());
+
+    let series = index.tenant_series("tenant-a");
+    assert!(series.len() == 2);
+    assert!(series.contains(&(api, api_labels)));
+    assert!(series.contains(&(worker, worker_labels)));
+    assert!(index.tenant_series("missing").is_empty());
 }
 
 #[test]
@@ -78,6 +125,24 @@ fn block_index_prunes_by_tenant_time_and_fingerprint() {
         matched[0].key.object_key()
             == "tenant=tenant-a/partition=0/offsets=10-20/time=100-199.parquet"
     );
+}
+
+#[test]
+fn block_index_blocks_exposes_inserted_descriptors_in_key_order() {
+    let mut blocks = BlockIndex::default();
+    let first = BlockDescriptor::new(
+        BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(100, 199).unwrap()),
+        BTreeSet::from([1]),
+    );
+    let second = BlockDescriptor::new(
+        BlockKey::new("tenant-a", 0, 21, 30, TimeRange::new(200, 299).unwrap()),
+        BTreeSet::from([2]),
+    );
+
+    blocks.insert(second.clone());
+    blocks.insert(first.clone());
+
+    assert!(blocks.blocks() == &[first, second]);
 }
 
 #[test]

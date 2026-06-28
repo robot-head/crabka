@@ -374,23 +374,35 @@ mod tests {
     use crate::labels::Labels;
     use crate::matcher::{LabelMatcher, MatchOp};
 
+    const CPU_TYPE: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+    const HEAP_TYPE: &str = "memory:alloc_space:bytes:space:bytes";
+
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         Labels::from_pairs(pairs.iter().copied())
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    fn profile_labels(name: &str, profile_type: &str, service_name: &str) -> Labels {
+        labels(&[
+            ("__name__", name),
+            ("__profile_type__", profile_type),
+            ("service_name", service_name),
+        ])
     }
 
     fn seed() -> ProfileIndex {
         let mut index = ProfileIndex::new();
         let cpu = labels(&[
             ("__name__", "process_cpu"),
-            (
-                "__profile_type__",
-                "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
-            ),
+            ("__profile_type__", CPU_TYPE),
             ("service_name", "checkout"),
         ]);
         let heap = labels(&[
             ("__name__", "memory"),
-            ("__profile_type__", "memory:alloc_space:bytes:space:bytes"),
+            ("__profile_type__", HEAP_TYPE),
             ("service_name", "checkout"),
         ]);
         index.add_series("t", cpu.fingerprint(), &cpu);
@@ -398,30 +410,241 @@ mod tests {
         index
     }
 
+    fn seed_with_blocks() -> (
+        ProfileIndex,
+        SeriesFingerprint,
+        SeriesFingerprint,
+        SeriesFingerprint,
+    ) {
+        let mut index = ProfileIndex::new();
+        let cpu_checkout = profile_labels("process_cpu", CPU_TYPE, "checkout");
+        let heap_checkout = profile_labels("memory", HEAP_TYPE, "checkout");
+        let cpu_payments = profile_labels("process_cpu", CPU_TYPE, "payments");
+        let cpu_checkout_fp = cpu_checkout.fingerprint();
+        let heap_checkout_fp = heap_checkout.fingerprint();
+        let cpu_payments_fp = cpu_payments.fingerprint();
+
+        index.add_series("t", cpu_checkout_fp, &cpu_checkout);
+        index.add_series("t", heap_checkout_fp, &heap_checkout);
+        index.add_series("t", cpu_payments_fp, &cpu_payments);
+
+        for meta in [
+            BlockMeta {
+                tenant: "t".to_string(),
+                object_key: "cpu-checkout.parquet".to_string(),
+                min_ts: 100,
+                max_ts: 199,
+                row_count: 10,
+                fingerprints: vec![cpu_checkout_fp],
+            },
+            BlockMeta {
+                tenant: "t".to_string(),
+                object_key: "heap-checkout.parquet".to_string(),
+                min_ts: 300,
+                max_ts: 399,
+                row_count: 20,
+                fingerprints: vec![heap_checkout_fp],
+            },
+            BlockMeta {
+                tenant: "t".to_string(),
+                object_key: "cpu-payments.parquet".to_string(),
+                min_ts: 150,
+                max_ts: 250,
+                row_count: 30,
+                fingerprints: vec![cpu_payments_fp],
+            },
+        ] {
+            <ProfileIndex as BlockIndex>::add_block(&mut index, &meta);
+        }
+
+        (index, cpu_checkout_fp, heap_checkout_fp, cpu_payments_fp)
+    }
+
+    #[test]
+    fn snapshot_size_cap_is_256_mib() {
+        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
+        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 268_435_456);
+    }
+
     #[test]
     fn profile_types_lists_distinct_type_strings() {
         let index = seed();
         let mut types = index.profile_types("t");
         types.sort();
-        assert!(
-            types
-                == vec![
-                    "memory:alloc_space:bytes:space:bytes".to_string(),
-                    "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
-                ]
-        );
+        assert!(types == strings(&[HEAP_TYPE, CPU_TYPE]));
         assert!(index.profile_types("nope").is_empty());
     }
 
     #[test]
     fn profile_type_index_maps_type_to_its_series() {
         let index = seed();
-        let cpu_fps =
-            index.fingerprints_for_profile_type("t", "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        let cpu_fps = index.fingerprints_for_profile_type("t", CPU_TYPE);
+        let heap_fps = index.fingerprints_for_profile_type("t", HEAP_TYPE);
         assert!(cpu_fps.len() == 1);
-        let heap_fps =
-            index.fingerprints_for_profile_type("t", "memory:alloc_space:bytes:space:bytes");
         assert!(cpu_fps.is_disjoint(&heap_fps));
+    }
+
+    #[test]
+    fn profile_index_matching_and_block_helpers_return_pruned_metadata() {
+        let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
+
+        assert!(
+            index
+                .matching_fingerprints(
+                    "t",
+                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                )
+                .unwrap()
+                == BTreeSet::from([cpu_checkout, heap_checkout])
+        );
+        assert!(
+            index
+                .select_fingerprints(
+                    "t",
+                    CPU_TYPE,
+                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                )
+                .unwrap()
+                == BTreeSet::from([cpu_checkout])
+        );
+        assert!(
+            index.select_fingerprints("t", CPU_TYPE, &[]).unwrap()
+                == BTreeSet::from([cpu_checkout, cpu_payments])
+        );
+
+        assert!(
+            index.candidate_blocks_for_series(
+                "t",
+                &BTreeSet::from([cpu_checkout, cpu_payments]),
+                175,
+                180,
+            ) == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
+        );
+        assert!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
+        assert!(index.block_time_bounds("t", 450, 500) == None);
+        assert!(
+            BlockIndex::candidate_blocks(&index, "t", 175, 180)
+                == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
+        );
+        assert!(BlockIndex::block_count(&index, "t") == 3);
+    }
+
+    #[test]
+    fn profile_index_profile_type_helpers_return_pruned_metadata() {
+        let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
+
+        assert!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
+        assert!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
+        assert!(
+            index.profile_types_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
+                == strings(&[CPU_TYPE])
+        );
+        assert!(
+            index.profile_types_for_fingerprints("t", &BTreeSet::from([heap_checkout]))
+                == strings(&[HEAP_TYPE])
+        );
+    }
+
+    #[test]
+    fn profile_index_label_helpers_return_pruned_metadata() {
+        let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
+
+        assert!(
+            index
+                .label_values_for_time("t", "service_name", &[], 175, 180)
+                .unwrap()
+                == strings(&["checkout", "payments"])
+        );
+        assert!(
+            index.label_values_for_fingerprints(
+                "t",
+                "service_name",
+                &BTreeSet::from([heap_checkout])
+            ) == strings(&["checkout"])
+        );
+        assert!(
+            index.label_names_for_time("t", &[], 175, 180).unwrap()
+                == strings(&["__name__", "__profile_type__", "service_name"])
+        );
+        assert!(
+            index.label_names_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
+                == strings(&["__name__", "__profile_type__", "service_name"])
+        );
+
+        assert!(
+            index.label_names("t") == strings(&["__name__", "__profile_type__", "service_name"])
+        );
+        assert!(index.label_values("t", "service_name") == strings(&["checkout", "payments"]));
+        assert!(
+            index
+                .label_names_for(
+                    "t",
+                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                )
+                .unwrap()
+                == strings(&["__name__", "__profile_type__", "service_name"])
+        );
+        assert!(
+            index
+                .label_values_for(
+                    "t",
+                    "__name__",
+                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                )
+                .unwrap()
+                == strings(&["memory", "process_cpu"])
+        );
+    }
+
+    #[test]
+    fn profile_index_series_helpers_return_projected_metadata() {
+        let (index, _, heap_checkout, _) = seed_with_blocks();
+
+        assert!(
+            index
+                .series_for_time("t", &[], &["service_name".to_string()], 175, 180)
+                .unwrap()
+                == vec![
+                    vec![("service_name".to_string(), "checkout".to_string())],
+                    vec![("service_name".to_string(), "payments".to_string())],
+                ]
+        );
+        assert!(
+            index.series_for_fingerprints("t", &BTreeSet::from([heap_checkout]), &[])
+                == vec![vec![
+                    ("__name__".to_string(), "memory".to_string()),
+                    ("__profile_type__".to_string(), HEAP_TYPE.to_string()),
+                    ("service_name".to_string(), "checkout".to_string()),
+                ]]
+        );
+        assert!(
+            index
+                .series(
+                    "t",
+                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
+                    &["__name__".to_string()]
+                )
+                .unwrap()
+                == vec![
+                    vec![("__name__".to_string(), "memory".to_string())],
+                    vec![("__name__".to_string(), "process_cpu".to_string())],
+                ]
+        );
+
+        let mut block_keys = index
+            .all_blocks()
+            .into_iter()
+            .map(|block| block.object_key)
+            .collect::<Vec<_>>();
+        block_keys.sort();
+        assert!(
+            block_keys
+                == strings(&[
+                    "cpu-checkout.parquet",
+                    "cpu-payments.parquet",
+                    "heap-checkout.parquet",
+                ])
+        );
     }
 
     #[test]

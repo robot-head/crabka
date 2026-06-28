@@ -82,3 +82,29 @@ pub fn parse_query_shard_selector(value: &str) -> Result<QueryShardSelector, Str
     }
     Ok(QueryShardSelector { index, total })
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    #[test]
+    fn parse_query_shard_selector_accepts_inclusive_upper_bound() {
+        let selector = parse_query_shard_selector("1_of_1").unwrap();
+
+        assert!(selector.index == 1);
+        assert!(selector.total == 1);
+        assert!(selector.matches(42));
+    }
+
+    #[test]
+    fn parse_query_shard_selector_rejects_zero_and_out_of_range_bounds() {
+        for value in ["0_of_1", "1_of_0", "2_of_1", "3_of_2", "not-a-shard"] {
+            assert!(
+                parse_query_shard_selector(value).is_err(),
+                "expected {value} to be rejected"
+            );
+        }
+    }
+}
