@@ -57,6 +57,7 @@ tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling",
 assert2 = { workspace = true }
 flate2 = { workspace = true }
 futures-util = { workspace = true }
+mutants = { workspace = true }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tokio-tungstenite = { workspace = true }
