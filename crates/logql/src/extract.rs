@@ -410,15 +410,6 @@ impl<'a> LogfmtParser<'a> {
         Self { input, pos: 0 }
     }
 
-    pub(crate) fn next_pair(&mut self) -> Option<(String, String)> {
-        self.next_pair_with_standalone(false)
-    }
-
-    fn next_pair_with_standalone(&mut self, keep_standalone: bool) -> Option<(String, String)> {
-        self.next_pair_with_options(keep_standalone, false)
-            .unwrap_or(None)
-    }
-
     pub(crate) fn next_pair_with_options(
         &mut self,
         keep_standalone: bool,

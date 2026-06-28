@@ -373,8 +373,13 @@ fn selected_json_value_to_string(value: &serde_json::Value) -> String {
 
 fn parse_logfmt_fields(line: &str, fields: &mut Labels) {
     let mut parser = LogfmtParser::new(line);
-    while let Some((key, value)) = parser.next_pair() {
-        insert_extracted_field(fields, &sanitize_logfmt_field_name(&key), value);
+    loop {
+        match parser.next_pair_with_options(false, false) {
+            Ok(Some((key, value))) => {
+                insert_extracted_field(fields, &sanitize_logfmt_field_name(&key), value);
+            }
+            Ok(None) | Err(_) => break,
+        }
     }
 }
 
