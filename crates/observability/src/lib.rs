@@ -19726,7 +19726,7 @@ mod tests {
             check_tenant_wal_write_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
-                &[allow_write.clone()]
+                std::slice::from_ref(&allow_write)
             )
             .is_ok()
         );
@@ -19734,7 +19734,7 @@ mod tests {
             check_tenant_wal_read_acl(
                 "tenant-a",
                 "__crabka_observability_logs_wal",
-                &[allow_read.clone()]
+                std::slice::from_ref(&allow_read)
             )
             .is_ok()
         );
@@ -19781,7 +19781,7 @@ mod tests {
         assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
 
         let mut bucket = IngestQuotaBucket::new(10.0);
-        assert_eq!(bucket.capacity(), 10.0);
+        assert!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
         assert!(bucket.consume(10.0));
         assert!(!bucket.consume(0.1));
         bucket.update_rate(5.0);
@@ -20058,7 +20058,7 @@ mod tests {
             "type=alert&exclude_alerts=true&time=10&rule_name=HighError&rule_group=api&file=rules.yaml&group_limit=2&group_next_token=next&match=%7Bapp%3D%22api%22%7D",
         ))
         .unwrap();
-        assert_eq!(filters.rule_kind.as_deref(), Some("alerting"));
+        assert_eq!(filters.rule_kind, Some("alerting"));
         assert!(filters.exclude_alerts);
         assert!(filters.evaluation_time.is_some());
         assert!(filters.rule_names.contains("HighError"));
@@ -20070,7 +20070,7 @@ mod tests {
         assert!(filters.has_rule_filter());
 
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
-        assert_eq!(recording.rule_kind.as_deref(), Some("recording"));
+        assert_eq!(recording.rule_kind, Some("recording"));
         assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
         assert!(
             !PrometheusRulesFilters::parse(Some(""))
