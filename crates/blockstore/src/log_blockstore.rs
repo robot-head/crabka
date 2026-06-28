@@ -176,7 +176,10 @@ impl LabelIndex {
             .into_iter()
             .filter(|fingerprint| {
                 series.get(fingerprint).is_some_and(|labels| {
-                    predicates.iter().all(|predicate| predicate.matches(labels))
+                    predicates
+                        .iter()
+                        .filter(|predicate| predicate.op != MatchOp::Equal)
+                        .all(|predicate| predicate.matches(labels))
                 })
             })
             .collect()

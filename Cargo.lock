@@ -2787,6 +2787,7 @@ dependencies = [
  "datafusion",
  "flate2",
  "futures-util",
+ "mutants",
  "object_store",
  "opentelemetry-proto",
  "parquet",

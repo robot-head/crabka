@@ -58,17 +58,14 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
     // a node can be neither a root nor a descendant of one, so it would keep
     // `{0, 0, 0}` and collide with real roots. Seed each such span as an
     // additional root so every node gets a valid `left < right` interval.
-    let mut next_seed = 0_usize;
     let mut stack = Vec::new();
-    for &root in roots.iter().rev() {
+    for root in roots.iter().copied().chain(0..spans.len()) {
         stack.push(Frame::Enter {
             idx: root,
-            // Root span: nestedSetParent = -1 (Tempo no-parent sentinel).
+            // Root span, or cycle-orphaned span re-seeded as a root:
+            // nestedSetParent = -1 (Tempo no-parent sentinel).
             parent_left: -1,
         });
-    }
-
-    loop {
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::Enter { idx, parent_left } => {
@@ -94,19 +91,6 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
                 }
             }
         }
-
-        // Find the next unvisited span and re-seed the DFS from it as a root.
-        while next_seed < spans.len() && visited[next_seed] {
-            next_seed += 1;
-        }
-        if next_seed >= spans.len() {
-            break;
-        }
-        stack.push(Frame::Enter {
-            idx: next_seed,
-            // Cycle-orphaned span re-seeded as a root: same -1 sentinel.
-            parent_left: -1,
-        });
     }
 
     out
@@ -114,6 +98,9 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use assert2::assert;
 
     use super::*;
@@ -218,6 +205,7 @@ mod tests {
         lefts.sort_unstable();
         lefts.dedup();
         assert!(lefts.len() == ns.len());
+        assert!(ns.iter().any(|n| n.parent_id == -1));
     }
 
     #[test]
@@ -232,5 +220,21 @@ mod tests {
         lefts.sort_unstable();
         lefts.dedup();
         assert!(lefts.len() == ns.len());
+        assert!(ns.iter().any(|n| n.parent_id == -1));
+    }
+
+    #[test]
+    fn cyclic_parentage_assignment_completes() {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let spans = vec![node(1, None), node(2, Some(3)), node(3, Some(2))];
+            let _ = tx.send(assign_nested_set(&spans));
+        });
+
+        let ns = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("cyclic parentage assignment should complete");
+        assert!(ns.len() == 3);
+        assert!(ns.iter().all(|node| node.nested_set_left > 0));
     }
 }

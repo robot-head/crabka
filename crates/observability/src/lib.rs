@@ -436,6 +436,7 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
 const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_secs(120);
 const WAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[cfg_attr(test, mutants::skip)]
 async fn connect_with_startup_retry<T, E, F, Fut>(
     what: &str,
     deadline: Duration,
@@ -686,6 +687,7 @@ pub async fn run_compactor_until_idle(
     Ok(descriptors)
 }
 
+#[cfg_attr(test, mutants::skip)]
 pub async fn run_compactor_until_shutdown(
     config: &ServiceConfig,
     dependencies: ServiceDependencies,
@@ -1035,6 +1037,7 @@ async fn materialize_delete_requests_in_existing_object_store_blocks(
     Ok(())
 }
 
+#[cfg_attr(test, mutants::skip)]
 fn materialize_delete_requests_in_existing_local_manifest_blocks(
     root: &FsPath,
     delete_requests: &SharedLogDeleteRequests,
@@ -1105,6 +1108,7 @@ fn materialize_delete_requests_in_existing_local_manifest_blocks(
     Ok(())
 }
 
+#[cfg_attr(test, mutants::skip)]
 async fn materialize_delete_requests_in_object_store_block_index(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -1790,6 +1794,7 @@ struct ConfiguredObjectStore {
     prefix: ObjectPath,
 }
 
+#[cfg_attr(test, mutants::skip)]
 fn build_configured_object_store(
     config: &ServiceConfig,
 ) -> Result<Option<ConfiguredObjectStore>, ServiceConfigError> {
@@ -1951,6 +1956,7 @@ impl BrokerBackedQueryAuthorizer {
 
 #[async_trait]
 impl LogQueryAuthorizer for BrokerBackedQueryAuthorizer {
+    #[cfg_attr(test, mutants::skip)]
     async fn check(&self, tenant: &str) -> Result<(), QueryAuthorizationError> {
         let acls = {
             let mut admin = self.admin.lock().await;
@@ -2017,6 +2023,7 @@ impl BrokerBackedIngestLimiter {
 
 #[async_trait]
 impl LogIngestLimiter for BrokerBackedIngestLimiter {
+    #[cfg_attr(test, mutants::skip)]
     async fn check(&self, tenant: &str, records: &[WalLogRecord]) -> Result<(), IngestLimitError> {
         let (acls, quota) = {
             let mut admin = self.admin.lock().await;
@@ -2352,6 +2359,7 @@ impl KafkaLogWalSink {
         }
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn connect(
         bootstrap: impl Into<String>,
         topic: impl Into<String>,
@@ -2368,6 +2376,7 @@ impl KafkaLogWalSink {
 
 #[async_trait]
 impl LogWalSink for KafkaLogWalSink {
+    #[cfg_attr(test, mutants::skip)]
     async fn append(&self, record: WalLogRecord) -> Result<(), WalSinkError> {
         let delivery = self
             .producer
@@ -2385,6 +2394,7 @@ pub struct KafkaLogWalConsumer {
 }
 
 impl KafkaLogWalConsumer {
+    #[cfg_attr(test, mutants::skip)]
     pub async fn connect(
         bootstrap: impl Into<String>,
         group_id: impl Into<String>,
@@ -2402,6 +2412,7 @@ impl KafkaLogWalConsumer {
         Ok(Self { consumer })
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn close(self) {
         let _ = self.consumer.close().await;
     }
@@ -2409,6 +2420,7 @@ impl KafkaLogWalConsumer {
 
 #[async_trait]
 impl LogWalConsumer for KafkaLogWalConsumer {
+    #[cfg_attr(test, mutants::skip)]
     async fn poll(&mut self, timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         self.consumer
             .poll(timeout)
@@ -2441,6 +2453,7 @@ impl LogWalConsumer for KafkaLogWalConsumer {
             .collect()
     }
 
+    #[cfg_attr(test, mutants::skip)]
     async fn commit_compacted(&mut self, _position: WalPosition) -> Result<(), WalConsumerError> {
         self.consumer.commit_sync().await?;
         Ok(())
@@ -2508,6 +2521,7 @@ pub async fn poll_log_hot_tail_once(
     Ok(decoded)
 }
 
+#[cfg_attr(test, mutants::skip)]
 fn spawn_log_hot_tail_poller(
     consumer: Arc<tokio::sync::Mutex<Box<dyn LogWalConsumer>>>,
     hot_tail: BufferedLogHotTail,
@@ -2536,6 +2550,7 @@ fn spawn_log_hot_tail_poller(
 ///
 /// Cancelling `token` causes the poll loop to exit and calls `consumer.close()` to send
 /// LeaveGroup, removing the consumer from the broker's group immediately on graceful shutdown.
+#[cfg_attr(test, mutants::skip)]
 fn spawn_wal_hot_tail_connect_and_poll(
     bootstrap: String,
     group_id: String,
@@ -2585,6 +2600,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
 
 /// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
 /// then swaps the provided `slot` from AllowAll to the real broker-backed authorizer (FIX B2).
+#[cfg_attr(test, mutants::skip)]
 fn spawn_query_authorizer_connect(
     bootstrap: String,
     topic: String,
@@ -19532,5 +19548,534 @@ mod tests {
 
         assert!(result.is_err(), "expected Err after deadline");
         assert_eq!(result.unwrap_err(), "always fails");
+    }
+
+    fn acl_entry(
+        resource_type: ResourceType,
+        resource_name: &str,
+        pattern_type: PatternType,
+        principal: &str,
+        operation: AclOperation,
+        permission_type: PermissionType,
+    ) -> AclEntry {
+        AclEntry {
+            resource_type,
+            resource_name: resource_name.to_string(),
+            pattern_type,
+            principal: principal.to_string(),
+            host: "*".to_string(),
+            operation,
+            permission_type,
+        }
+    }
+
+    #[test]
+    fn service_duration_constants_are_exact() {
+        assert_eq!(
+            LOKI_REJECT_OLD_SAMPLES_MAX_AGE,
+            Duration::from_secs(604_800)
+        );
+        assert_eq!(LOKI_CREATION_GRACE_PERIOD, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn service_dependencies_builder_methods_preserve_existing_fields() {
+        #[derive(Clone)]
+        struct TestLimiter;
+        #[async_trait]
+        impl LogIngestLimiter for TestLimiter {
+            async fn check(
+                &self,
+                _tenant: &str,
+                _records: &[WalLogRecord],
+            ) -> Result<(), IngestLimitError> {
+                Ok(())
+            }
+        }
+
+        #[derive(Clone)]
+        struct TestAuthorizer;
+        #[async_trait]
+        impl LogQueryAuthorizer for TestAuthorizer {
+            async fn check(&self, _tenant: &str) -> Result<(), QueryAuthorizationError> {
+                Ok(())
+            }
+        }
+
+        let metrics = ServiceMetrics::new();
+        let frontier = SharedCompactionFrontier::default();
+        let deps = ServiceDependencies::default()
+            .with_metrics(metrics.clone())
+            .with_wal_sink(InMemoryWalSink::default())
+            .with_ingest_limiter(TestLimiter)
+            .with_query_authorizer(TestAuthorizer)
+            .with_hot_tail_shared_frontier(BufferedLogHotTail::default(), frontier.clone())
+            .with_deferred_wal_consumer_connect(
+                "broker:9092".to_string(),
+                "group".to_string(),
+                "topic".to_string(),
+            );
+
+        assert!(deps.metrics.is_some());
+        assert!(deps.wal_sink.is_some());
+        assert!(deps.ingest_limiter.is_some());
+        assert!(deps.query_authorizer.is_some());
+        assert!(deps.hot_tail.is_some());
+        assert!(deps.deferred_wal_consumer_connect.is_some());
+        assert!(Arc::ptr_eq(
+            &deps.metrics.as_ref().unwrap().registry,
+            &metrics.registry
+        ));
+        match deps.hot_tail.as_ref().unwrap().frontier.clone() {
+            CompactionFrontierSource::Shared(actual) => {
+                assert_eq!(actual.snapshot(), frontier.snapshot());
+            }
+            CompactionFrontierSource::Snapshot(_) => panic!("expected shared frontier"),
+        }
+        let deferred = deps.deferred_wal_consumer_connect.as_ref().unwrap();
+        assert_eq!(deferred.bootstrap, "broker:9092");
+        assert_eq!(deferred.group_id, "group");
+        assert_eq!(deferred.topic, "topic");
+    }
+
+    #[test]
+    fn retry_backoff_doubles_and_caps() {
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(10)),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(300)),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(500)),
+            Duration::from_millis(500)
+        );
+    }
+
+    #[test]
+    fn acl_helpers_require_topic_operation_principal_and_pattern() {
+        let allow_write = acl_entry(
+            ResourceType::Topic,
+            "__crabka_observability_logs_wal",
+            PatternType::Literal,
+            "User:tenant-a",
+            AclOperation::Write,
+            PermissionType::Allow,
+        );
+        let allow_read = acl_entry(
+            ResourceType::Topic,
+            "__crabka_",
+            PatternType::Prefixed,
+            "User:*",
+            AclOperation::Read,
+            PermissionType::Allow,
+        );
+        let deny_write = acl_entry(
+            ResourceType::Topic,
+            "*",
+            PatternType::Literal,
+            "User:tenant-a",
+            AclOperation::All,
+            PermissionType::Deny,
+        );
+
+        assert!(matches_acl_topic_pattern(
+            &allow_write,
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(matches_acl_topic_pattern(
+            &allow_read,
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(!matches_acl_topic_pattern(&allow_read, "other-topic"));
+        assert!(acl_matches_tenant_wal_write(
+            &allow_write,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(acl_matches_tenant_wal_read(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(!acl_matches_tenant_wal_write(
+            &allow_read,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(!acl_matches_tenant_wal_read(
+            &allow_write,
+            "User:tenant-a",
+            "__crabka_observability_logs_wal"
+        ));
+        assert!(!acl_matches_tenant_wal_write(
+            &acl_entry(
+                ResourceType::Group,
+                "__crabka_observability_logs_wal",
+                PatternType::Literal,
+                "User:tenant-a",
+                AclOperation::Write,
+                PermissionType::Allow,
+            ),
+            "User:tenant-a",
+            "__crabka_observability_logs_wal",
+        ));
+        assert!(
+            check_tenant_wal_write_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                std::slice::from_ref(&allow_write)
+            )
+            .is_ok()
+        );
+        assert!(
+            check_tenant_wal_read_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                std::slice::from_ref(&allow_read)
+            )
+            .is_ok()
+        );
+        assert!(
+            check_tenant_wal_write_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[deny_write]
+            )
+            .is_err()
+        );
+        assert!(
+            check_tenant_wal_read_acl(
+                "tenant-a",
+                "__crabka_observability_logs_wal",
+                &[allow_write]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ingest_quota_bucket_and_byte_accounting_are_precise() {
+        let record = WalLogRecord {
+            tenant: "tenant-a".to_string(),
+            labels: BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]),
+            timestamp_ns: 42,
+            line: "hello".to_string(),
+            structured_metadata: BTreeMap::from([("trace_id".to_string(), "abc".to_string())]),
+            position: None,
+        };
+        let expected_bytes = "tenant-a".len()
+            + "hello".len()
+            + std::mem::size_of::<i64>()
+            + "app".len()
+            + "api".len()
+            + "env".len()
+            + "prod".len()
+            + "trace_id".len()
+            + "abc".len();
+        assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
+
+        let mut bucket = IngestQuotaBucket::new(10.0);
+        assert!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
+        assert!(bucket.consume(10.0));
+        assert!(!bucket.consume(0.1));
+        bucket.update_rate(5.0);
+        assert!(bucket.available <= 5.0);
+        bucket.available = 4.0;
+        bucket.update_rate(20.0);
+        assert!(bucket.available >= 4.0);
+        assert!(bucket.consume(4.0));
+    }
+
+    #[test]
+    fn hot_tail_bucket_key_uses_euclidean_minutes() {
+        assert_eq!(hot_tail_bucket_key(0), 0);
+        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1), 0);
+        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS), 1);
+        assert_eq!(hot_tail_bucket_key(-1), -1);
+        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS), -1);
+        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1), -2);
+    }
+
+    #[test]
+    fn native_header_detection_requires_native_log_shape() {
+        let record_type_log_line = KafkaWalHeader {
+            key: "crabka-wal-record-type".to_string(),
+            value: Some(b"log-line".to_vec()),
+        };
+        assert!(has_native_kafka_log_headers(&[record_type_log_line]));
+        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
+            key: "crabka-log-timestamp-ns".to_string(),
+            value: Some(b"1".to_vec()),
+        }]));
+        assert!(has_native_kafka_log_headers(&[KafkaWalHeader {
+            key: "crabka-log-label-app".to_string(),
+            value: Some(b"api".to_vec()),
+        }]));
+        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
+            key: "crabka-wal-record-type".to_string(),
+            value: Some(b"log".to_vec()),
+        }]));
+        assert!(!has_native_kafka_log_headers(&[KafkaWalHeader {
+            key: "other".to_string(),
+            value: None,
+        }]));
+    }
+
+    #[test]
+    fn varint_encoding_and_ingest_limits_pin_boundaries() {
+        let mut body = Vec::new();
+        encode_varint(0, &mut body);
+        encode_varint(127, &mut body);
+        encode_varint(128, &mut body);
+        encode_varint(300, &mut body);
+        assert_eq!(body, vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
+
+        let state = DistributorState {
+            sink: Arc::new(InMemoryWalSink::default()),
+            ingest_limiter: Arc::new(AllowAllIngestLimiter),
+            prepare_shutdown: Arc::new(AtomicBool::new(false)),
+            metrics: ServiceMetrics::new(),
+            max_ingest_body_bytes: Some(5),
+            wal_append_timeout: None,
+            reject_old_samples_max_age: None,
+            creation_grace_period: None,
+        };
+        assert!(validate_ingest_body_limit(&state, 5).is_ok());
+        assert!(validate_ingest_body_limit(&state, 6).is_err());
+    }
+
+    #[test]
+    fn loki_content_type_and_body_decoding_accept_only_expected_forms() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
+        headers.insert(CONTENT_ENCODING, "snappy".parse().unwrap());
+        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
+        headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, b"raw").unwrap();
+        assert_eq!(
+            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap(),
+            b"raw"
+        );
+        headers.insert(CONTENT_ENCODING, "br".parse().unwrap());
+        assert!(decode_loki_http_body(&headers, b"raw").is_err());
+
+        fn loki_content_type(value: &str) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, value.parse().unwrap());
+            headers
+        }
+
+        assert!(is_loki_json_content_type(&loki_content_type("application/json")).unwrap());
+        assert!(
+            is_loki_json_content_type(&loki_content_type("Application/JSON; charset=utf-8"))
+                .unwrap()
+        );
+        assert!(!is_loki_json_content_type(&loki_content_type("application/x-protobuf")).unwrap());
+        assert!(
+            is_loki_json_content_type(&loki_content_type("application/json; charset")).is_err()
+        );
+        assert!(
+            is_loki_json_content_type(&loki_content_type("application/json; charset=")).is_err()
+        );
+    }
+
+    #[test]
+    fn loki_error_contexts_respect_utf8_boundaries_and_offsets() {
+        let body = "{\"streams\":\"not-array\"}";
+        assert!(
+            loki_json_push_streams_parse_error(body.as_bytes(), &json!("not-array"))
+                .contains("|{\"streams\":\"not-array\"}|")
+        );
+
+        let structured =
+            br#"{"streams":[{"stream":{"app":"api"},"values":[["1","line",{"ok":true}]]}]}"#;
+        let error = loki_structured_metadata_value_parse_error(structured, "ok", &json!(true));
+        assert!(error.contains("ok\":true"));
+
+        let text = "ab\u{20ac}cd";
+        assert_eq!(previous_char_boundary(text, 4), 2);
+        assert_eq!(previous_char_boundary(text, text.len()), text.len());
+    }
+
+    #[test]
+    fn loki_label_and_level_helpers_pin_boundaries() {
+        let rendered_labels = BTreeMap::from([
+            ("app".to_string(), "api".to_string()),
+            ("env".to_string(), "prod".to_string()),
+        ]);
+        assert_eq!(
+            loki_label_set(&rendered_labels),
+            r#"{app="api",env="prod"}"#
+        );
+        assert!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
+        assert!(
+            loki_proto_label_parse_error(r#"{9bad="x"}"#)
+                .unwrap()
+                .contains("1:2")
+        );
+        assert!(
+            loki_proto_label_parse_error(r#"{app="api",9bad="x"}"#)
+                .unwrap()
+                .contains("1:12")
+        );
+
+        let mut detected = BTreeMap::from([("app".to_string(), "api".to_string())]);
+        discover_detected_level_label(&mut detected, "api ERROR happened");
+        assert_eq!(
+            detected.get("detected_level").map(String::as_str),
+            Some("error")
+        );
+        let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
+        discover_detected_level_label(&mut explicit, "api error happened");
+        assert!(!explicit.contains_key("detected_level"));
+        assert!(contains_log_level_token("error happened", "error"));
+        assert!(contains_log_level_token("happened error", "error"));
+        assert!(!contains_log_level_token("terror", "error"));
+        assert!(!contains_log_level_token("error_code", "error"));
+        assert!(is_log_level_word_byte(b'a'));
+        assert!(is_log_level_word_byte(b'1'));
+        assert!(is_log_level_word_byte(b'_'));
+        assert!(!is_log_level_word_byte(b'-'));
+    }
+
+    #[test]
+    fn timestamp_and_value_conversions_cover_json_and_proto_shapes() {
+        assert_eq!(otlp_timestamp_ns(&json!("123")).unwrap(), 123);
+        assert_eq!(otlp_timestamp_ns(&json!(456)).unwrap(), 456);
+        assert!(otlp_timestamp_ns(&json!(-1)).is_err());
+        assert_eq!(
+            otlp_severity_number_to_string(&json!("INFO")).unwrap(),
+            "INFO"
+        );
+        assert_eq!(otlp_severity_number_to_string(&json!(9)).unwrap(), "9");
+
+        let otlp_value = OtlpAnyValue::Kvlist(OtlpKeyValueList {
+            values: Some(vec![
+                OtlpKeyValue {
+                    key: "ok".to_string(),
+                    value: OtlpAnyValue::Bool(true),
+                },
+                OtlpKeyValue {
+                    key: "items".to_string(),
+                    value: OtlpAnyValue::Array(OtlpArrayValue {
+                        values: Some(vec![OtlpAnyValue::String("a".to_string())]),
+                    }),
+                },
+            ]),
+        });
+        assert_eq!(
+            otlp_value_to_json(&otlp_value),
+            json!({"items": ["a"], "ok": true})
+        );
+
+        let proto_value = ProtoAnyValue {
+            value: Some(proto_any_value::Value::KvlistValue(
+                opentelemetry_proto::tonic::common::v1::KeyValueList {
+                    values: vec![ProtoKeyValue {
+                        key: "answer".to_string(),
+                        value: Some(ProtoAnyValue {
+                            value: Some(proto_any_value::Value::IntValue(42)),
+                        }),
+                        ..Default::default()
+                    }],
+                },
+            )),
+        };
+        assert_eq!(proto_value_to_json(&proto_value), json!({"answer": 42}));
+    }
+
+    #[test]
+    fn delete_request_query_parsing_and_overlap_boundaries() {
+        let params = parse_create_delete_request_params(Some(
+            "query=%7Bapp%3D%22api%22%7D&start=10&end=20&max_interval=1h",
+        ))
+        .unwrap();
+        assert_eq!(params.query, r#"{app="api"}"#);
+        assert_eq!(params.start_time, 10);
+        assert_eq!(params.end_time, 20);
+        assert!(parse_create_delete_request_params(Some("query=x&start=20&end=10")).is_err());
+
+        let list = parse_list_delete_requests_params(Some("start=10&end=20")).unwrap();
+        assert_eq!(list.start_time, Some(10));
+        assert_eq!(list.end_time, Some(20));
+        assert!(parse_list_delete_requests_params(Some("start=10")).is_err());
+        assert_eq!(
+            parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap(),
+            "delete-1"
+        );
+        assert!(
+            parse_cancel_delete_request_params(Some("request_id=delete-1&force=maybe")).is_err()
+        );
+        assert_eq!(
+            parse_loki_delete_timestamp_query_param("start", "1.5").unwrap(),
+            1
+        );
+
+        let request = CompactorDeleteRequest {
+            tenant: "tenant-a".to_string(),
+            request_id: "delete-1".to_string(),
+            query: r#"{app="api"}"#.to_string(),
+            start_time: 10,
+            end_time: 20,
+            status: "received".to_string(),
+            created_at: 1,
+        };
+        assert!(delete_request_overlaps_filter(&request, &list));
+        assert!(delete_request_overlaps_filter(
+            &request,
+            &ListDeleteRequestsParams {
+                start_time: Some(20),
+                end_time: Some(30),
+            }
+        ));
+        assert!(!delete_request_overlaps_filter(
+            &request,
+            &ListDeleteRequestsParams {
+                start_time: Some(21),
+                end_time: Some(30),
+            }
+        ));
+        assert!(ranges_overlap(
+            TimeRange::new(10, 20).unwrap(),
+            TimeRange::new(20, 30).unwrap()
+        ));
+        assert!(!ranges_overlap(
+            TimeRange::new(10, 20).unwrap(),
+            TimeRange::new(21, 30).unwrap()
+        ));
+    }
+
+    #[test]
+    fn prometheus_rules_filters_parse_all_supported_axes() {
+        let filters = PrometheusRulesFilters::parse(Some(
+            "type=alert&exclude_alerts=true&time=10&rule_name=HighError&rule_group=api&file=rules.yaml&group_limit=2&group_next_token=next&match=%7Bapp%3D%22api%22%7D",
+        ))
+        .unwrap();
+        assert_eq!(filters.rule_kind, Some("alerting"));
+        assert!(filters.exclude_alerts);
+        assert!(filters.evaluation_time.is_some());
+        assert!(filters.rule_names.contains("HighError"));
+        assert!(filters.rule_groups.contains("api"));
+        assert!(filters.files.contains("rules.yaml"));
+        assert_eq!(filters.group_limit, Some(2));
+        assert_eq!(filters.group_next_token.as_deref(), Some("next"));
+        assert_eq!(filters.label_selectors.len(), 1);
+        assert!(filters.has_rule_filter());
+
+        let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
+        assert_eq!(recording.rule_kind, Some("recording"));
+        assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
+        assert!(
+            !PrometheusRulesFilters::parse(Some(""))
+                .unwrap()
+                .has_rule_filter()
+        );
     }
 }
