@@ -1,3 +1,0 @@
-# Cargo lockfile for the opt-in GSSAPI (@crates_gssapi) crate_universe repo.
-# Generated/maintained by crate_universe; safe to start empty.
-exports_files(["Cargo.gssapi.lock"])

@@ -1,5 +1,3 @@
-#![cfg(feature = "sspi-keytab")]
-
 //! End-to-end GSSAPI (Kerberos) parity tests.
 //!
 //! These prove that a stock cp-kafka GSSAPI client authenticates to Crabka

@@ -577,7 +577,6 @@ fn synthesize_token_scram_credential(
 ///
 /// Any GSS/codec error returns `SASL_AUTHENTICATION_FAILED` (58) and the
 /// dispatcher closes the connection.
-#[cfg(feature = "sspi-keytab")]
 pub fn handle_authenticate_gssapi(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
@@ -641,15 +640,6 @@ pub fn handle_authenticate_gssapi(
     }
 
     fail_authenticate("not in GSSAPI negotiation")
-}
-
-#[cfg(not(feature = "sspi-keytab"))]
-pub fn handle_authenticate_gssapi(
-    _req: &SaslAuthenticateRequest,
-    _auth: &mut ConnectionAuth,
-    _config: &crabka_security::gssapi::GssapiConfig,
-) -> SaslAuthenticateResponse {
-    fail_authenticate("GSSAPI support requires the sspi-keytab feature")
 }
 
 /// A non-terminal GSSAPI round: hand the next token back to the client with

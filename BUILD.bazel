@@ -5,27 +5,7 @@ These aliases are the stable names embedders depend on, e.g.
 targets under //crates/... and //bazel/....
 """
 
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
-
 package(default_visibility = ["//visibility:public"])
-
-# --------------------------------------------------------------------------- #
-# GSSAPI / Kerberos gate.
-#
-# The `sspi` git dependency (SASL/GSSAPI) is heavyweight and platform-touchy, so
-# it is OFF by default. Flip it with `--//:gssapi=true` (or `--config=gssapi`).
-# //crates/security and //crates/client-core select on `:gssapi_enabled` to turn
-# the `sspi-keytab` feature (and the `sspi` dep) on.
-# --------------------------------------------------------------------------- #
-bool_flag(
-    name = "gssapi",
-    build_setting_default = False,
-)
-
-config_setting(
-    name = "gssapi_enabled",
-    flag_values = {":gssapi": "True"},
-)
 
 # --------------------------------------------------------------------------- #
 # Re-exported client crates.
@@ -75,8 +55,7 @@ alias(
     actual = "//crates/metadata",
 )
 
-# Lean facade bundling the client surface (no polars/arrow/jsonschema; GSSAPI
-# gated behind //:gssapi).
+# Lean facade bundling the client surface (no polars/arrow/jsonschema).
 alias(
     name = "client_minimal",
     actual = "//bazel/client_minimal:client_minimal",

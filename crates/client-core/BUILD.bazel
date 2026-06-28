@@ -4,18 +4,12 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 # Manifest is consumed by crate_universe (see //MODULE.bazel).
 exports_files(["Cargo.toml"])
 
-# Connection management and request dispatch. The `sspi-keytab` feature (which
-# forwards to crabka-security) is gated behind the //:gssapi flag so a default
-# client build stays Kerberos-free.
+# Connection management and request dispatch.
 rust_library(
     name = "client-core",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     crate_name = "crabka_client_core",
-    crate_features = select({
-        "//:gssapi_enabled": ["sspi-keytab"],
-        "//conditions:default": [],
-    }),
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     visibility = ["//visibility:public"],

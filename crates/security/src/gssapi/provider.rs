@@ -1,16 +1,12 @@
-#![cfg(feature = "sspi-keytab")]
-
 //! `sspi`-rs-backed implementations of [`GssAcceptor`] and [`GssInitiator`].
 //!
 //! Both the acceptor and the initiator authenticate from a keytab: the
 //! acceptor uses the service key to decrypt incoming AP-REQs, and the
-//! initiator uses the client principal's long-term key (via the forked
-//! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
-//! password. The fork is pulled in via `[patch.crates-io]` in the workspace
-//! `Cargo.toml` (Devolutions/sspi-rs#681).
+//! initiator uses the client principal's long-term key (via
+//! [`sspi::KeytabIdentity`]) to drive the AS/TGS exchange with no password.
 use std::sync::Mutex;
 
-use sspi::kerberos::ServerProperties;
+use sspi::kerberos::{DEFAULT_ENCRYPTION_TYPE, ServerProperties};
 use sspi::{
     BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
     DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KeytabIdentity, Secret,
@@ -199,8 +195,8 @@ impl GssAcceptor for SspiAcceptor {
 /// Client-side GSSAPI initiator backed by sspi + a keytab-extracted client key.
 ///
 /// Keytab-based (no password): the client principal's long-term key is loaded
-/// from a keytab and injected via the vendored `sspi::Credentials::Keytab`
-/// extension. The client context and credentials handle must persist across
+/// from a keytab and injected via [`sspi::KeytabIdentity`]. The client context
+/// and credentials handle must persist across
 /// [`GssInitiator::step`] calls, so they live in this struct.
 pub struct SspiInitiator {
     client: Mutex<Kerberos>,
@@ -251,9 +247,7 @@ impl SspiInitiator {
         let identity = KeytabIdentity {
             principal,
             key: Secret::new(entry.key),
-            key_enctype: u8::try_from(entry.enctype).map_err(|_| {
-                GssError::Keytab(format!("enctype {} does not fit in u8", entry.enctype))
-            })?,
+            key_enctype: DEFAULT_ENCRYPTION_TYPE,
         };
         let creds: Credentials = identity.into();
         let cred_handle = client

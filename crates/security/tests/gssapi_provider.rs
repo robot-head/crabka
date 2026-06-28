@@ -1,5 +1,3 @@
-#![cfg(feature = "sspi-keytab")]
-
 //! KDC-backed contract test for the sspi-rs GSSAPI providers.
 //!
 //! This test requires the MIT KDC fixture and real network access to the KDC,
@@ -22,7 +20,7 @@
 //! initiates *from a keytab* (`alice.keytab`, no password) to the
 //! `kafka/localhost@CRABKA.TEST` service whose key lives in `kafka.keytab`,
 //! asserts the recovered source principal, then round-trips a wrapped RFC 4752
-//! security-layer message. This exercises the vendored sspi keytab-client-auth
+//! security-layer message. This exercises the released sspi keytab-client-auth
 //! path end-to-end against a real KDC.
 
 use assert2::assert;

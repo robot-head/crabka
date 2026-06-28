@@ -19,7 +19,7 @@ use crabka_observability::{
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::core::{Host, IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tokio::net::TcpListener;
@@ -82,8 +82,9 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     .unwrap();
     assert!(descriptors.len() == 1);
 
-    let querier_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let querier_addr = querier_listener.local_addr().unwrap();
+    let querier_listener = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
+    let querier_port = querier_listener.local_addr().unwrap().port();
+    let querier_addr = SocketAddr::from(([127, 0, 0, 1], querier_port));
     let querier = spawn_querier(
         querier_listener,
         &bootstrap,
@@ -101,7 +102,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         .with_env_var("GF_SECURITY_ADMIN_USER", GRAFANA_USER)
         .with_env_var("GF_SECURITY_ADMIN_PASSWORD", GRAFANA_PASSWORD)
         .with_env_var("GF_AUTH_ANONYMOUS_ENABLED", "false")
-        .with_exposed_host_port(querier_addr.port())
+        .with_host(HOST_ALIAS, Host::HostGateway)
         .start()
         .await
         .expect("start Grafana container");

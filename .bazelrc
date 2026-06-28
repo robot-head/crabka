@@ -11,11 +11,6 @@ common --enable_bzlmod
 # Keep the action environment hermetic so build-script outputs are reproducible.
 build --incompatible_strict_action_env
 
-# GSSAPI/Kerberos (the `sspi` git dependency) is OFF by default. Turn it on with:
-#   bazel build //:client_minimal --//:gssapi=true
-# A convenience config for the same:
-build:gssapi --//:gssapi=true
-
 test --test_output=errors
 
 # Optional developer-local overrides (registry mirrors, remote cache, etc.).
