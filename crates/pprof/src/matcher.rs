@@ -181,6 +181,35 @@ mod tests {
     }
 
     #[test]
+    fn keeps_commas_inside_quoted_matcher_values() {
+        let ms = parse_label_selector(r#"{service_name="api,primary",instance="pod-1"}"#).unwrap();
+
+        assert!(ms.len() == 2);
+        assert!(ms[0].name == "service_name");
+        assert!(ms[0].value == "api,primary");
+        assert!(ms[1].name == "instance");
+        assert!(ms[1].value == "pod-1");
+    }
+
+    #[test]
+    fn escaped_quotes_do_not_toggle_comma_splitting() {
+        let ms = parse_label_selector(r#"{note="say \"hi, there\"",service_name="api"}"#).unwrap();
+
+        assert!(ms.len() == 2);
+        assert!(ms[0].name == "note");
+        assert!(ms[0].value == "say \"hi, there\"");
+        assert!(ms[1].name == "service_name");
+        assert!(ms[1].value == "api");
+    }
+
+    #[test]
+    fn splitter_does_not_treat_backslash_outside_quotes_as_escape() {
+        assert!(
+            split_top_level_commas("left\\,right,tail").unwrap() == vec!["left\\", "right", "tail"]
+        );
+    }
+
+    #[test]
     fn rejects_malformed() {
         assert!(parse_label_selector(r"{service_name=}").is_err());
         assert!(parse_label_selector(r#"{=~"x"}"#).is_err());

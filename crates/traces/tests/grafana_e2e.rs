@@ -1006,14 +1006,38 @@ async fn get_json_until_prom_result_non_empty(
 }
 
 fn metric_points_total(value: &JsonValue) -> f64 {
-    value["series"]
+    let points_total: f64 = value["series"]
         .as_array()
         .into_iter()
         .flatten()
         .flat_map(|series| series["points"].as_array().into_iter().flatten())
         .filter_map(|point| point.as_array().and_then(|items| items.get(1)))
         .filter_map(JsonValue::as_f64)
-        .sum()
+        .sum();
+    let samples_total: f64 = value["series"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|series| series["samples"].as_array().into_iter().flatten())
+        .filter_map(|sample| sample["value"].as_f64())
+        .sum();
+    points_total + samples_total
+}
+
+#[test]
+fn metric_points_total_sums_tempo_samples() {
+    let metrics = json!({
+        "series": [
+            {
+                "samples": [
+                    {"timestampMs": "1782676277000", "value": 0.133_333_333_333_333_33},
+                    {"timestampMs": "1782676307000", "value": 0.0}
+                ]
+            }
+        ]
+    });
+
+    assert!(metric_points_total(&metrics) > 0.0);
 }
 
 /// Percent-encode a `TraceQL` query so it survives the Grafana proxy query string.
@@ -1461,10 +1485,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
             .as_array()
             .into_iter()
             .flatten()
-            .all(|series| series["points"]
+            .all(|series| series["samples"]
                 .as_array()
-                .is_some_and(|points| points.len() == 1)),
-        "instant query must collapse each series to one point: {metrics}"
+                .is_some_and(|samples| samples.len() == 1)),
+        "instant query must collapse each series to one sample: {metrics}"
     );
 
     // E23 — instant metrics via start/end bounds (single point at `end`).
@@ -1480,9 +1504,9 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .into_iter()
         .flatten()
         .all(|series| {
-            series["points"].as_array().is_some_and(|points| {
-                points.len() == 1
-                    && points[0][0].as_str() == Some(&(now_secs * 1_000_000_000).to_string())
+            series["samples"].as_array().is_some_and(|samples| {
+                samples.len() == 1
+                    && samples[0]["timestampMs"].as_str() == Some(&(now_secs * 1_000).to_string())
             })
         });
     assert!(
@@ -1530,16 +1554,20 @@ async fn grafana_e2e_full_surface() -> TestResult {
         "q-derived values missing checkout-frontend: {values}"
     );
 
-    // E26 — metrics query_range requires `step` -> 400.
-    let (status, body) = get_text(
+    // E26 — metrics query_range defaults `step` when omitted.
+    let metrics = get_json(
         &client,
         &proxy(&format!(
             "api/metrics/query_range?q={mq}&start={metric_start}&end={metric_end}"
         )),
     )
     .await?;
-    assert!(status == ReqwestStatusCode::BAD_REQUEST);
-    assert!(body.contains("missing query parameter step"), "{body}");
+    assert!(
+        metrics["series"]
+            .as_array()
+            .is_some_and(|series| !series.is_empty())
+    );
+    assert!(metric_points_total(&metrics) > 0.0);
 
     // E27 — metrics query_range rejects a non-positive `step` -> 400.
     let (status, body) = get_text(

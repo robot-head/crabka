@@ -95,12 +95,19 @@ mod tests {
     fn sample_pprof() -> crate::proto::Profile {
         crate::proto::Profile {
             sample_type: vec![crate::proto::ValueType { r#type: 1, unit: 2 }],
+            period_type: Some(crate::proto::ValueType { r#type: 3, unit: 4 }),
             sample: vec![crate::proto::Sample {
                 location_id: vec![1],
                 value: vec![42],
                 label: Vec::new(),
             }],
-            string_table: vec![String::new(), "cpu".to_string(), "nanoseconds".to_string()],
+            string_table: vec![
+                String::new(),
+                "cpu".to_string(),
+                "nanoseconds".to_string(),
+                "wall".to_string(),
+                "milliseconds".to_string(),
+            ],
             ..Default::default()
         }
     }
@@ -130,5 +137,20 @@ mod tests {
         let profile = PprofProfile::from(inner.clone());
 
         assert!(crate::proto::Profile::from(profile) == inner);
+    }
+
+    #[test]
+    fn accessors_return_decoded_profile_contents() {
+        let inner = sample_pprof();
+        let profile = PprofProfile::from(inner.clone());
+
+        assert!(profile.string(1) == Some("cpu"));
+        assert!(profile.string(-1).is_none());
+        assert!(profile.string(99).is_none());
+        assert!(profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]);
+        assert!(profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string()));
+        assert!(profile.samples().len() == 1);
+        assert!(profile.samples()[0].value == vec![42]);
+        assert!(profile.into_inner() == inner);
     }
 }

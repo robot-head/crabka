@@ -1137,6 +1137,47 @@ mod tests {
         FlameEngine::new(Arc::new(store), EngineOpts::default())
     }
 
+    fn branchy_fixture(default_max_nodes: i64) -> FlameEngine<InMemoryProfileStore> {
+        let mut store = InMemoryProfileStore::new();
+        let (work_stack, cold_stack) = {
+            let db = store.symbols_mut();
+            let main = intern_location(db, "main");
+            let work = intern_location(db, "work");
+            let cold = intern_location(db, "cold_leaf");
+            (
+                db.intern_stacktrace(0, &[work, main]),
+                db.intern_stacktrace(0, &[cold, main]),
+            )
+        };
+        let labels = vec![("service".to_string(), "api".to_string())];
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            labels.clone(),
+            0,
+            work_stack,
+            10,
+            10,
+            0,
+            111,
+        );
+        store.push_sample_with_total_and_span(
+            "tenant-a",
+            PT,
+            labels.clone(),
+            0,
+            cold_stack,
+            5,
+            5,
+            0,
+            111,
+        );
+        store.push_sample_with_total_and_span(
+            "tenant-a", PT, labels, 0, work_stack, 4, 4, 30_000, 111,
+        );
+        FlameEngine::new(Arc::new(store), EngineOpts { default_max_nodes })
+    }
+
     fn intern_location(db: &mut crate::SymbolDb, name: &str) -> u32 {
         let name_ref = db.intern_string(name);
         let filename_ref = db.intern_string(&format!("{name}.go"));
@@ -1167,6 +1208,39 @@ mod tests {
             .flat_map(|level| level.values.chunks_exact(4))
             .find(|chunk| chunk[3] == i64::try_from(name_index).expect("index fits i64"))
             .expect("bar exists")[2]
+    }
+
+    fn has_name(fg: &FlameGraph, name: &str) -> bool {
+        fg.names.iter().any(|value| value == name)
+    }
+
+    fn diff_has_name(diff: &FlameGraphDiff, name: &str) -> bool {
+        diff.names.iter().any(|value| value == name)
+    }
+
+    fn bytes_contain(bytes: &[u8], needle: &str) -> bool {
+        bytes
+            .windows(needle.len())
+            .any(|window| window == needle.as_bytes())
+    }
+
+    fn decoded_profile_total(bytes: &[u8]) -> i64 {
+        crate::PprofProfile::decode(bytes)
+            .unwrap()
+            .inner()
+            .sample
+            .iter()
+            .map(|sample| sample.value.iter().sum::<i64>())
+            .sum()
+    }
+
+    fn decoded_profile_has_string(bytes: &[u8], value: &str) -> bool {
+        crate::PprofProfile::decode(bytes)
+            .unwrap()
+            .inner()
+            .string_table
+            .iter()
+            .any(|entry| entry == value)
     }
 
     #[test]
@@ -1462,6 +1536,238 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn max_nodes_zero_uses_default_for_stacktrace_wrappers() {
+        let engine = branchy_fixture(3);
+        let selector = ["main".to_string()];
+        let service_group = ["service".to_string()];
+
+        let grouped_default = engine
+            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", 0, 60_000, 0, &service_group)
+            .await
+            .unwrap();
+        let grouped_limited = engine
+            .select_merge_stacktraces_grouped("tenant-a", PT, "{}", 0, 60_000, 16, &service_group)
+            .await
+            .unwrap();
+        assert!(has_name(&grouped_default, "api"));
+        assert!(has_name(&grouped_default, "other"));
+        assert!(has_name(&grouped_limited, "api"));
+        assert!(!has_name(&grouped_limited, "other"));
+
+        let selected_default = engine
+            .select_merge_stacktraces_with_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 60_000, 0, &selector,
+            )
+            .await
+            .unwrap();
+        let selected_limited = engine
+            .select_merge_stacktraces_with_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 60_000, 16, &selector,
+            )
+            .await
+            .unwrap();
+        assert!(has_name(&selected_default, "other"));
+        assert!(!has_name(&selected_limited, "other"));
+
+        let sharded_default = engine
+            .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 0), (30_000, 30_000)], 0)
+            .await
+            .unwrap();
+        let sharded_limited = engine
+            .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 0), (30_000, 30_000)], 16)
+            .await
+            .unwrap();
+        assert!(has_name(&sharded_default, "other"));
+        assert!(has_name(&sharded_default, "main"));
+        assert!(!has_name(&sharded_limited, "other"));
+
+        let selected_sharded_default = engine
+            .select_merge_stacktraces_with_stack_trace_selector_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[(0, 0), (30_000, 30_000)],
+                0,
+                &selector,
+            )
+            .await
+            .unwrap();
+        let selected_sharded_limited = engine
+            .select_merge_stacktraces_with_stack_trace_selector_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[(0, 0), (30_000, 30_000)],
+                16,
+                &selector,
+            )
+            .await
+            .unwrap();
+        assert!(has_name(&selected_sharded_default, "other"));
+        assert!(has_name(&selected_sharded_default, "main"));
+        assert!(!has_name(&selected_sharded_limited, "other"));
+    }
+
+    #[tokio::test]
+    async fn max_nodes_zero_uses_default_for_diff_and_span_wrappers() {
+        let engine = branchy_fixture(3);
+        let diff_default = engine
+            .diff("tenant-a", (PT, "{}", 0, 0), (PT, "{}", 30_000, 30_000), 0)
+            .await
+            .unwrap();
+        let diff_limited = engine
+            .diff("tenant-a", (PT, "{}", 0, 0), (PT, "{}", 30_000, 30_000), 16)
+            .await
+            .unwrap();
+        assert!(diff_has_name(&diff_default, "other"));
+        assert!(!diff_has_name(&diff_limited, "other"));
+
+        let span_default = engine
+            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .await
+            .unwrap();
+        let span_limited = engine
+            .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 16)
+            .await
+            .unwrap();
+        let span_sharded_default = engine
+            .select_merge_span_profile_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[111],
+                &[(0, 0), (30_000, 30_000)],
+                0,
+            )
+            .await
+            .unwrap();
+        let span_sharded_limited = engine
+            .select_merge_span_profile_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[111],
+                &[(0, 0), (30_000, 30_000)],
+                16,
+            )
+            .await
+            .unwrap();
+        assert!(has_name(&span_default, "other"));
+        assert!(!has_name(&span_limited, "other"));
+        assert!(has_name(&span_sharded_default, "other"));
+        assert!(!has_name(&span_sharded_limited, "other"));
+    }
+
+    #[tokio::test]
+    async fn tree_and_pprof_byte_wrappers_apply_selectors_and_max_nodes() {
+        let engine = branchy_fixture(3);
+        let selector = ["main".to_string()];
+
+        let tree_default = engine
+            .select_merge_stacktraces_tree_with_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 60_000, 0, &selector,
+            )
+            .await
+            .unwrap();
+        let tree_limited = engine
+            .select_merge_stacktraces_tree_with_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 60_000, 16, &selector,
+            )
+            .await
+            .unwrap();
+        assert!(!bytes_contain(&tree_default, "cold_leaf"));
+        assert!(bytes_contain(&tree_default, "other"));
+        assert!(bytes_contain(&tree_default, "main"));
+        assert!(bytes_contain(&tree_limited, "main"));
+        assert!(bytes_contain(&tree_limited, "cold_leaf"));
+        assert!(!bytes_contain(&tree_limited, "other"));
+
+        let sharded_tree_default = engine
+            .select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[(0, 0), (30_000, 30_000)],
+                0,
+                &selector,
+            )
+            .await
+            .unwrap();
+        let sharded_tree = engine
+            .select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[(0, 0), (30_000, 30_000)],
+                16,
+                &selector,
+            )
+            .await
+            .unwrap();
+        assert!(bytes_contain(&sharded_tree_default, "other"));
+        assert!(bytes_contain(&sharded_tree_default, "main"));
+        assert!(bytes_contain(&sharded_tree, "cold_leaf"));
+        assert!(!bytes_contain(&sharded_tree, "other"));
+
+        let profile_default = engine
+            .select_merge_profile_with_max_nodes_and_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 0, 0, &selector,
+            )
+            .await
+            .unwrap();
+        let profile_limited = engine
+            .select_merge_profile_with_max_nodes_and_stack_trace_selector(
+                "tenant-a", PT, "{}", 0, 0, 16, &selector,
+            )
+            .await
+            .unwrap();
+        assert!(decoded_profile_total(&profile_default) == 15);
+        assert!(decoded_profile_total(&profile_limited) == 15);
+        assert!(decoded_profile_has_string(&profile_default, "other"));
+        assert!(decoded_profile_has_string(&profile_default, "main"));
+        assert!(!decoded_profile_has_string(&profile_limited, "other"));
+
+        let span_tree_default = engine
+            .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
+            .await
+            .unwrap();
+        let span_tree_limited = engine
+            .select_merge_span_profile_tree("tenant-a", PT, "{}", &[111], 0, 60_000, 16)
+            .await
+            .unwrap();
+        assert!(bytes_contain(&span_tree_default, "other"));
+        assert!(bytes_contain(&span_tree_default, "main"));
+        assert!(!bytes_contain(&span_tree_limited, "other"));
+
+        let span_tree_sharded_default = engine
+            .select_merge_span_profile_tree_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[111],
+                &[(0, 0), (30_000, 30_000)],
+                0,
+            )
+            .await
+            .unwrap();
+        let span_tree_sharded = engine
+            .select_merge_span_profile_tree_sharded(
+                "tenant-a",
+                PT,
+                "{}",
+                &[111],
+                &[(0, 0), (30_000, 30_000)],
+                16,
+            )
+            .await
+            .unwrap();
+        assert!(bytes_contain(&span_tree_sharded_default, "other"));
+        assert!(bytes_contain(&span_tree_sharded_default, "main"));
+        assert!(bytes_contain(&span_tree_sharded, "cold_leaf"));
+        assert!(!bytes_contain(&span_tree_sharded, "other"));
+    }
+
+    #[tokio::test]
     async fn sharded_merge_matches_whole_range_merge() {
         let engine = merge_fixture();
         let whole = engine
@@ -1474,6 +1780,109 @@ mod tests {
             .unwrap();
 
         assert!(sharded == whole);
+    }
+
+    #[tokio::test]
+    async fn stack_trace_selector_series_sums_selected_stacks_per_profile() {
+        let got = branchy_fixture(16)
+            .select_series_with_stack_trace_selector(
+                "tenant-a",
+                PT,
+                r#"{service="api"}"#,
+                &[],
+                15.0,
+                SeriesAgg::Sum,
+                0,
+                0,
+                &["main".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            got == vec![Series {
+                labels: Vec::new(),
+                points: vec![(0, 15.0)],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn sharded_average_uses_covering_range_instead_of_summing_shards() {
+        let got = branchy_fixture(16)
+            .select_series_with_stack_trace_selector_sharded(
+                "tenant-a",
+                PT,
+                r#"{service="api"}"#,
+                &[],
+                60.0,
+                SeriesAgg::Average,
+                &[(0, 0), (30_000, 30_000)],
+                &["main".to_string()],
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            got == vec![Series {
+                labels: Vec::new(),
+                points: vec![(0, 9.5)],
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn sharded_queries_reject_reversed_ranges() {
+        assert!(
+            branchy_fixture(16)
+                .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(10, 0)], 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn grouped_heatmaps_skip_label_sets_without_selected_profile_points() {
+        let mut store = InMemoryProfileStore::new();
+        store.push_sample_with_total(
+            "tenant-a",
+            PT,
+            vec![("service".to_string(), "api".to_string())],
+            0,
+            1,
+            5,
+            5,
+            0,
+        );
+        store.push_sample_with_total(
+            "tenant-a",
+            "memory:alloc_space:bytes:space:bytes",
+            vec![("service".to_string(), "idle".to_string())],
+            0,
+            1,
+            9,
+            9,
+            0,
+        );
+        let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
+
+        let got = engine
+            .select_heatmaps(
+                "tenant-a",
+                PT,
+                "{}",
+                &["service".to_string()],
+                0,
+                60_000,
+                2,
+                2,
+            )
+            .await
+            .unwrap();
+
+        assert!(got.len() == 1);
+        assert!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
+        assert!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {

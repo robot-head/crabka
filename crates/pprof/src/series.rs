@@ -68,8 +68,13 @@ mod tests {
     fn step_secs_to_ms_rounds_and_rejects_nonpositive() {
         assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
         assert!(step_ms_from_secs(0.5).unwrap() == 500);
-        assert!(step_ms_from_secs(0.0).is_err());
+        let zero = step_ms_from_secs(0.0).unwrap_err();
+        assert!(matches!(zero, ProfileError::Plan(message) if message.contains("positive finite")));
         assert!(step_ms_from_secs(-1.0).is_err());
+        let infinity = step_ms_from_secs(f64::INFINITY).unwrap_err();
+        assert!(
+            matches!(infinity, ProfileError::Plan(message) if message.contains("positive finite"))
+        );
     }
 
     #[test]

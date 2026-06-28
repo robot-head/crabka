@@ -2893,6 +2893,7 @@ dependencies = [
  "async-trait",
  "crabka-blockstore",
  "datafusion",
+ "mutants",
  "object 0.39.1",
  "proptest",
  "prost 0.14.4",

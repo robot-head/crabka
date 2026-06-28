@@ -102,4 +102,33 @@ mod tests {
         assert!(heatmap.counts[1][1] == 2);
         assert!(heatmap.min_value == 0 && heatmap.max_value == 35);
     }
+
+    #[test]
+    fn bin_returns_empty_counts_for_invalid_ranges_or_zero_buckets() {
+        let invalid_range = bin_heatmap(&[(10, 1)], 20, 10, 2, 2);
+        assert!(invalid_range.counts == vec![vec![0, 0], vec![0, 0]]);
+
+        let zero_time_buckets = bin_heatmap(&[(10, 1)], 0, 20, 0, 2);
+        assert!(zero_time_buckets.counts.is_empty());
+
+        let zero_value_buckets = bin_heatmap(&[(10, 1)], 0, 20, 2, 0);
+        assert!(zero_value_buckets.counts == vec![Vec::<u64>::new(), Vec::new()]);
+    }
+
+    #[test]
+    fn bin_uses_offsets_and_excludes_points_outside_time_range() {
+        let points = vec![
+            (99, 30),
+            (100, 10),
+            (149, 20),
+            (150, 20),
+            (199, 30),
+            (200, 10),
+        ];
+
+        let heatmap = bin_heatmap(&points, 100, 200, 2, 2);
+
+        assert!(heatmap.min_value == 10 && heatmap.max_value == 30);
+        assert!(heatmap.counts == vec![vec![1, 1], vec![0, 2]]);
+    }
 }

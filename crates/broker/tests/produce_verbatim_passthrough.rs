@@ -25,6 +25,7 @@ use crabka_protocol::owned::produce_request::{
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Attributes, HEADER_LEN, Record, RecordBatch, RecordsPayload};
+use tokio::time::{Duration, Instant};
 
 async fn topic_id_for(client: &crabka_client_core::Client, name: &str) -> WireUuid {
     let resp = client
@@ -155,33 +156,44 @@ async fn fetch_first_batch(
     topic: &str,
     topic_id: WireUuid,
 ) -> RecordBatch {
-    let resp = client
-        .send(FetchRequest {
-            replica_id: -1,
-            max_wait_ms: 1_000,
-            min_bytes: 1,
-            max_bytes: 8 << 20,
-            topics: vec![FetchTopic {
-                topic: topic.into(),
-                topic_id,
-                partitions: vec![FetchPartition {
-                    partition: 0,
-                    fetch_offset: 0,
-                    partition_max_bytes: 8 << 20,
-                    ..FetchPartition::default()
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let resp = client
+            .send(FetchRequest {
+                replica_id: -1,
+                max_wait_ms: 1_000,
+                min_bytes: 1,
+                max_bytes: 8 << 20,
+                topics: vec![FetchTopic {
+                    topic: topic.into(),
+                    topic_id,
+                    partitions: vec![FetchPartition {
+                        partition: 0,
+                        fetch_offset: 0,
+                        partition_max_bytes: 8 << 20,
+                        ..FetchPartition::default()
+                    }],
+                    ..FetchTopic::default()
                 }],
-                ..FetchTopic::default()
-            }],
-            ..FetchRequest::default()
-        })
-        .await
-        .expect("Fetch");
-    let pd = &resp.responses[0].partitions[0];
-    assert!(pd.error_code == 0, "fetch error: {pd:?}");
-    let payload = pd.records.as_ref().expect("records present");
-    let batches = payload.as_v2().expect("v2 payload");
-    assert!(!batches.is_empty(), "at least one batch fetched");
-    batches[0].clone()
+                ..FetchRequest::default()
+            })
+            .await
+            .expect("Fetch");
+        let pd = &resp.responses[0].partitions[0];
+        assert!(pd.error_code == 0, "fetch error: {pd:?}");
+        if let Some(payload) = pd.records.as_ref() {
+            let batches = payload.as_v2().expect("v2 payload");
+            if let Some(batch) = batches.first() {
+                return batch.clone();
+            }
+        }
+        let last_partition = format!("{pd:?}");
+        assert!(
+            Instant::now() < deadline,
+            "records present; last partition: {last_partition}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
