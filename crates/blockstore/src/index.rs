@@ -686,6 +686,12 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_size_cap_is_256_mib() {
+        assert!(MAX_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
+        assert!(MAX_INDEX_SNAPSHOT_BYTES == 268_435_456);
+    }
+
+    #[test]
     fn resolve_eq_intersection() {
         let idx = seed();
         let want = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
@@ -1028,6 +1034,37 @@ mod tests {
     }
 
     #[test]
+    fn resolve_query_shard_not_equal_returns_complement() {
+        let mut idx = Index::new();
+        let series = (0..12)
+            .map(|id| labels(&[("app", "api"), ("series", &id.to_string())]))
+            .collect::<Vec<_>>();
+        for labels in &series {
+            idx.add_series("t", labels.fingerprint(), labels);
+        }
+
+        let expected = series
+            .iter()
+            .map(Labels::fingerprint)
+            .filter(|fp| fp % 2 != 0)
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert!(expected.len() < series.len());
+
+        let got = idx
+            .resolve(
+                "t",
+                &[
+                    LabelMatcher::new("app", MatchOp::Eq, "api"),
+                    LabelMatcher::new("__query_shard__", MatchOp::Neq, "1_of_2"),
+                ],
+            )
+            .unwrap();
+
+        assert!(got == expected);
+    }
+
+    #[test]
     fn matching_fingerprints_returns_matched_set() {
         let idx = seed();
         // Specific matcher → exactly the two `app=api` series.
@@ -1351,22 +1388,28 @@ mod tests {
     #[test]
     fn index_implements_block_index_time_prefilter() {
         let mut idx = seed();
-        idx.add_block(&BlockMeta {
-            tenant: "t".into(),
-            object_key: "b1.parquet".into(),
-            min_ts: 0,
-            max_ts: 100,
-            row_count: 1,
-            fingerprints: vec![],
-        });
-        idx.add_block(&BlockMeta {
-            tenant: "t".into(),
-            object_key: "b2.parquet".into(),
-            min_ts: 200,
-            max_ts: 300,
-            row_count: 1,
-            fingerprints: vec![],
-        });
+        <Index as BlockIndex>::add_block(
+            &mut idx,
+            &BlockMeta {
+                tenant: "t".into(),
+                object_key: "b1.parquet".into(),
+                min_ts: 0,
+                max_ts: 100,
+                row_count: 1,
+                fingerprints: vec![],
+            },
+        );
+        <Index as BlockIndex>::add_block(
+            &mut idx,
+            &BlockMeta {
+                tenant: "t".into(),
+                object_key: "b2.parquet".into(),
+                min_ts: 200,
+                max_ts: 300,
+                row_count: 1,
+                fingerprints: vec![],
+            },
+        );
 
         assert!(<Index as BlockIndex>::block_count(&idx, "t") == 2);
         assert!(

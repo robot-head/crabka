@@ -60,11 +60,19 @@ pub async fn read_row_group_metadata(
     store: Arc<dyn ObjectStore>,
     object_key: &str,
 ) -> Result<Vec<RowGroupMeta>> {
+    read_row_group_metadata_with_cap(store, object_key, MAX_BLOCK_BYTES).await
+}
+
+async fn read_row_group_metadata_with_cap(
+    store: Arc<dyn ObjectStore>,
+    object_key: &str,
+    max_bytes: u64,
+) -> Result<Vec<RowGroupMeta>> {
     let path = Path::from(object_key);
     let meta = store.head(&path).await?;
-    if meta.size > MAX_BLOCK_BYTES {
+    if meta.size > max_bytes {
         return Err(BlockStoreError::InvalidBlock(format!(
-            "block `{object_key}` is {} bytes, exceeds cap of {MAX_BLOCK_BYTES} bytes",
+            "block `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",
             meta.size
         )));
     }
@@ -91,11 +99,20 @@ pub async fn read_block_row_groups(
     object_key: &str,
     row_groups: &[usize],
 ) -> Result<Vec<RecordBatch>> {
+    read_block_row_groups_with_cap(store, object_key, row_groups, MAX_BLOCK_BYTES).await
+}
+
+async fn read_block_row_groups_with_cap(
+    store: Arc<dyn ObjectStore>,
+    object_key: &str,
+    row_groups: &[usize],
+    max_bytes: u64,
+) -> Result<Vec<RecordBatch>> {
     let path = Path::from(object_key);
     let meta = store.head(&path).await?;
-    if meta.size > MAX_BLOCK_BYTES {
+    if meta.size > max_bytes {
         return Err(BlockStoreError::InvalidBlock(format!(
-            "block `{object_key}` is {} bytes, exceeds cap of {MAX_BLOCK_BYTES} bytes",
+            "block `{object_key}` is {} bytes, exceeds cap of {max_bytes} bytes",
             meta.size
         )));
     }
@@ -125,6 +142,12 @@ mod tests {
 
     use super::*;
     use crate::writer::BlockWriter;
+
+    #[test]
+    fn max_block_bytes_is_one_gib() {
+        assert!(MAX_BLOCK_BYTES == 1024 * 1024 * 1024);
+        assert!(MAX_BLOCK_BYTES == 1_073_741_824);
+    }
 
     #[tokio::test]
     async fn write_then_read_round_trips_rows() {
@@ -182,10 +205,10 @@ mod tests {
         let got = read_block_with_cap(store.clone(), "b.parquet", 1).await;
         assert!(got.is_err());
 
-        // Above the real size, the same block reads back.
-        let out = read_block_with_cap(store, "b.parquet", MAX_BLOCK_BYTES)
-            .await
-            .unwrap();
+        // A cap exactly at the real size is accepted; only bytes above the cap
+        // are rejected.
+        let size = store.head(&Path::from("b.parquet")).await.unwrap().size;
+        let out = read_block_with_cap(store, "b.parquet", size).await.unwrap();
         let total: usize = out.iter().map(RecordBatch::num_rows).sum();
         assert!(total == 2);
     }
@@ -219,7 +242,20 @@ mod tests {
         writer.write(&batch).await.unwrap();
         writer.close().await.unwrap();
 
-        let meta = read_row_group_metadata(store, "meta.parquet")
+        let meta = read_row_group_metadata(store.clone(), "meta.parquet")
+            .await
+            .unwrap();
+        assert!(meta.len() == 2);
+        assert!(meta[0].index == 0);
+        assert!(meta[1].index == 1);
+        assert!(meta[0].compressed_bytes > 0);
+        assert!(meta[1].compressed_bytes > 0);
+
+        let got = read_row_group_metadata_with_cap(store.clone(), "meta.parquet", 1).await;
+        assert!(got.is_err());
+
+        let size = store.head(&Path::from("meta.parquet")).await.unwrap().size;
+        let meta = read_row_group_metadata_with_cap(store, "meta.parquet", size)
             .await
             .unwrap();
         assert!(meta.len() == 2);
@@ -257,7 +293,11 @@ mod tests {
         writer.write(&batch).await.unwrap();
         writer.close().await.unwrap();
 
-        let out = read_block_row_groups(store, "rg.parquet", &[1])
+        let got = read_block_row_groups_with_cap(store.clone(), "rg.parquet", &[1], 1).await;
+        assert!(got.is_err());
+
+        let size = store.head(&Path::from("rg.parquet")).await.unwrap().size;
+        let out = read_block_row_groups_with_cap(store, "rg.parquet", &[1], size)
             .await
             .unwrap();
 
