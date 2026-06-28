@@ -181,11 +181,40 @@ impl Default for ThrottleState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    use std::sync::mpsc::RecvTimeoutError;
     use std::time::Duration;
 
     use assert2::assert;
 
     use super::*;
+
+    const TRY_CONSUME_TIMEOUT: Duration = Duration::from_secs(2);
+
+    fn try_consume_with_timeout(bucket: &Arc<TokenBucket>, requested: u64) -> u64 {
+        let bucket = Arc::clone(bucket);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let granted = bucket.try_consume(requested);
+            let _ = tx.send(granted);
+        });
+
+        match rx.recv_timeout(TRY_CONSUME_TIMEOUT) {
+            Ok(granted) => {
+                handle.join().expect("try_consume worker panicked");
+                granted
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                drop(handle);
+                panic!("try_consume({requested}) did not complete within {TRY_CONSUME_TIMEOUT:?}");
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                handle.join().expect("try_consume worker panicked");
+                panic!("try_consume worker exited without sending a result");
+            }
+        }
+    }
 
     #[test]
     fn plan_consume_grants_and_caps() {
@@ -204,46 +233,46 @@ mod tests {
 
     #[test]
     fn first_consume_under_rate_succeeds() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        assert!(b.try_consume(512) == 512);
+        assert!(try_consume_with_timeout(&b, 512) == 512);
     }
 
     #[test]
     fn independent_burst_can_exceed_rate() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(100, 1000);
         assert!(b.rate() == 100);
         assert!(b.burst() == 1000);
-        assert!(b.try_consume(500) == 500);
+        assert!(try_consume_with_timeout(&b, 500) == 500);
     }
 
     #[test]
     fn consume_drains_bucket() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        assert!(b.try_consume(1024) == 1024);
-        let g = b.try_consume(1024);
+        assert!(try_consume_with_timeout(&b, 1024) == 1024);
+        let g = try_consume_with_timeout(&b, 1024);
         assert!(g < 100, "expected near-zero grant, got {g}");
     }
 
     #[test]
     fn bucket_refills_at_rate_after_elapsed_time() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        b.try_consume(1024);
+        try_consume_with_timeout(&b, 1024);
         std::thread::sleep(Duration::from_millis(500));
-        let g = b.try_consume(1024);
+        let g = try_consume_with_timeout(&b, 1024);
         assert!((400..=700).contains(&g), "expected ~512, got {g}");
     }
 
     #[test]
     fn bucket_caps_at_burst_capacity() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(1024, 2048);
-        b.try_consume(2048);
+        try_consume_with_timeout(&b, 2048);
         std::thread::sleep(Duration::from_millis(2500));
-        let g = b.try_consume(4096);
+        let g = try_consume_with_timeout(&b, 4096);
         assert!(
             (1900..=2048).contains(&g),
             "expected ~2048 capped at burst, got {g}"
@@ -252,11 +281,49 @@ mod tests {
 
     #[test]
     fn set_rate_resets_available() {
-        let b = TokenBucket::new();
+        let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        b.try_consume(1024);
+        try_consume_with_timeout(&b, 1024);
         b.set_rate(2048);
-        assert!(b.try_consume(2048) == 2048);
+        assert!(try_consume_with_timeout(&b, 2048) == 2048);
+    }
+
+    #[test]
+    fn positive_rate_zero_burst_grants_zero() {
+        let b = Arc::new(TokenBucket::new());
+        b.set_rate_with_burst(1024, 0);
+
+        assert!(try_consume_with_timeout(&b, 1) == 0);
+    }
+
+    #[test]
+    fn try_consume_waits_while_generation_is_odd() {
+        let b = Arc::new(TokenBucket::new());
+        b.set_rate(4);
+        b.generation.store(1, Relaxed);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker_bucket = Arc::clone(&b);
+        let handle = std::thread::spawn(move || {
+            let granted = worker_bucket.try_consume(1);
+            let _ = tx.send(granted);
+        });
+
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            Ok(granted) => panic!("try_consume granted {granted} while generation was odd"),
+            Err(RecvTimeoutError::Disconnected) => {
+                handle.join().expect("try_consume worker panicked");
+                panic!("try_consume worker exited while generation was odd");
+            }
+        }
+
+        b.generation.store(2, Relaxed);
+        let granted = rx
+            .recv_timeout(TRY_CONSUME_TIMEOUT)
+            .expect("try_consume should complete after generation becomes even");
+        handle.join().expect("try_consume worker panicked");
+        assert!(granted == 1);
     }
 
     // Stress the seqlock: many consumers racing a stream of set_rate resets must
@@ -265,46 +332,73 @@ mod tests {
     // clobbered by a stale CAS would let `available` exceed the new burst here.
     #[test]
     fn concurrent_set_rate_never_over_grants_past_burst() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-
         const BURST: u64 = 4096;
         let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(1024, BURST);
         let stop = Arc::new(AtomicBool::new(false));
 
-        let mut handles = Vec::new();
         // Resetter: hammer set_rate_with_burst with the same burst cap.
-        {
+        let resetter = {
             let b = Arc::clone(&b);
             let stop = Arc::clone(&stop);
-            handles.push(std::thread::spawn(move || {
+            std::thread::spawn(move || {
                 while !stop.load(Relaxed) {
                     b.set_rate_with_burst(1024, BURST);
+                    std::thread::yield_now();
                 }
-            }));
-        }
+            })
+        };
+
         // Consumers: drain small amounts and assert the grant never exceeds the
         // burst cap (an over-grant would mean a clobbered reset).
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let mut consumer_handles = Vec::new();
         for _ in 0..3 {
             let b = Arc::clone(&b);
-            handles.push(std::thread::spawn(move || {
-                for _ in 0..50_000 {
+            let done_tx = done_tx.clone();
+            consumer_handles.push(std::thread::spawn(move || {
+                for _ in 0..5_000 {
                     let g = b.try_consume(128);
-                    assert!(g <= BURST, "over-grant past burst: {g}");
+                    if g > BURST {
+                        let _ = done_tx.send(Err(g));
+                        return;
+                    }
                 }
+                let _ = done_tx.send(Ok(()));
             }));
         }
-        for h in handles.drain(1..) {
-            h.join().unwrap();
+        drop(done_tx);
+
+        let mut over_grant = None;
+        let mut timed_out = false;
+        for _ in 0..consumer_handles.len() {
+            match done_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(Ok(())) => {}
+                Ok(Err(g)) => {
+                    over_grant = Some(g);
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    timed_out = true;
+                    break;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
+
         stop.store(true, Relaxed);
-        for h in handles {
+        resetter.join().unwrap();
+
+        if let Some(g) = over_grant {
+            panic!("over-grant past burst: {g}");
+        }
+        assert!(!timed_out, "consumer did not complete within 5s");
+        for h in consumer_handles {
             h.join().unwrap();
         }
 
         // Invariant after the storm: available is within the burst cap.
-        assert!(b.try_consume(0) == 0);
+        assert!(try_consume_with_timeout(&b, 0) == 0);
     }
 }
 

@@ -353,6 +353,28 @@ pub fn init(
 mod tests {
     use super::*;
     use assert2::assert;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    #[derive(Clone, Debug)]
+    struct ShutdownCountingSpanExporter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl opentelemetry_sdk::trace::SpanExporter for ShutdownCountingSpanExporter {
+        fn export(
+            &self,
+            _batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> impl std::future::Future<Output = OTelSdkResult> + Send {
+            std::future::ready(Ok(()))
+        }
+
+        fn shutdown_with_timeout(&self, _timeout: std::time::Duration) -> OTelSdkResult {
+            self.calls.fetch_add(1, SeqCst);
+            Ok(())
+        }
+    }
 
     fn env_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k: &str| {
@@ -367,6 +389,35 @@ mod tests {
     fn disabled_when_no_env() {
         let cfg = OtlpConfig::from_env(env_from(&[]), "1", "0.1.1", "crabka-broker");
         assert!(cfg.is_none());
+    }
+
+    #[test]
+    fn env_truthy_rejects_falsy_values() {
+        for value in ["", "0", "false", "no", "off", " definitely "] {
+            assert!(!env_truthy(value), "expected {value:?} to be falsy");
+        }
+    }
+
+    #[test]
+    fn falsy_env_flags_do_not_enable_or_disable_otlp() {
+        let cfg = OtlpConfig::from_env(
+            env_from(&[("CRABKA_OTLP_ENABLED", "false")]),
+            "1",
+            "0.1.1",
+            "crabka-broker",
+        );
+        assert!(cfg.is_none());
+
+        let cfg = OtlpConfig::from_env(
+            env_from(&[
+                ("CRABKA_OTLP_ENDPOINT", "http://collector:4317"),
+                ("OTEL_SDK_DISABLED", "off"),
+            ]),
+            "1",
+            "0.1.1",
+            "crabka-broker",
+        );
+        assert!(cfg.is_some());
     }
 
     #[test]
@@ -519,5 +570,40 @@ mod tests {
         assert!(OtlpProtocol::parse("http/protobuf") == OtlpProtocol::HttpProtobuf);
         assert!(OtlpProtocol::parse("HTTP") == OtlpProtocol::HttpProtobuf);
         assert!(OtlpProtocol::parse("nonsense") == OtlpProtocol::Grpc);
+    }
+
+    #[test]
+    fn otel_filter_uses_override_or_default() {
+        let filter = otel_filter("warn", env_from(&[]));
+        assert!(filter.to_string() == "warn");
+
+        let filter = otel_filter(
+            "warn",
+            env_from(&[("CRABKA_OTLP_FILTER", "crabka_telemetry=debug")]),
+        );
+        assert!(filter.to_string() == "crabka_telemetry=debug");
+
+        let filter = otel_filter("warn", env_from(&[("CRABKA_OTLP_FILTER", "[")]));
+        assert!(filter.to_string() == "warn");
+    }
+
+    #[test]
+    fn telemetry_guard_shutdown_flushes_held_provider_clone() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(ShutdownCountingSpanExporter {
+                calls: Arc::clone(&calls),
+            })
+            .build();
+        let held_clone = provider.clone();
+
+        TelemetryGuard {
+            provider: Some(provider),
+            logger_provider: None,
+        }
+        .shutdown();
+
+        assert!(calls.load(SeqCst) == 1);
+        drop(held_clone);
     }
 }

@@ -90,7 +90,9 @@ fn gzip(raw: &[u8]) -> Vec<u8> {
 }
 
 /// Stub for non-Unix targets: CPU profiling is unavailable.
+// cargo-mutants: non-Unix stub is not built or exercised on the default Linux mutation run.
 #[cfg(not(unix))]
+#[cfg_attr(test, mutants::skip)]
 async fn cpu_profile(_q: Query<CpuQuery>) -> axum::response::Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
@@ -99,7 +101,9 @@ async fn cpu_profile(_q: Query<CpuQuery>) -> axum::response::Response {
         .into_response()
 }
 
+// cargo-mutants: optional heap-profiling route is feature-gated out of the default mutation run.
 #[cfg(all(unix, feature = "heap-profiling"))]
+#[cfg_attr(test, mutants::skip)]
 async fn heap_profile() -> axum::response::Response {
     let Some(ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
         return (
