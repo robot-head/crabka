@@ -69,7 +69,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
         let rest = &input[i..];
         let ch = rest.chars().next().unwrap();
         if ch.is_whitespace() {
-            i += ch.len_utf8();
+            let next = advance(input, i, ch.len_utf8())?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             continue;
         }
 
@@ -91,13 +95,21 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
         {
             let (tok, len) = scan_number_or_duration(rest)?;
             tokens.push(tok);
-            i += len;
+            let next = advance(input, i, len)?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             prev = Prev::Ident;
             continue;
         }
 
         if let Some((tok, len)) = op_token(rest) {
-            i += len;
+            let next = advance(input, i, len)?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             prev = match tok {
                 Token::Dot => Prev::Dot,
                 Token::Ident(_) => Prev::Ident,
@@ -110,7 +122,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
         if ch == '"' {
             let (s, len) = scan_string(rest)?;
             tokens.push(Token::Str(s));
-            i += len;
+            let next = advance(input, i, len)?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             prev = Prev::Other;
             continue;
         }
@@ -118,7 +134,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
         if ch.is_ascii_digit() {
             let (tok, len) = scan_number_or_duration(rest)?;
             tokens.push(tok);
-            i += len;
+            let next = advance(input, i, len)?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             prev = Prev::Ident;
             continue;
         }
@@ -127,7 +147,11 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
             let allow_dots = prev == Prev::Dot;
             let (ident, len) = scan_ident(rest, allow_dots);
             tokens.push(keyword_or_ident(ident));
-            i += len;
+            let next = advance(input, i, len)?;
+            if next <= i {
+                return Err(no_progress(i));
+            }
+            i = next;
             prev = Prev::Ident;
             continue;
         }
@@ -139,6 +163,25 @@ pub fn lex(input: &str) -> Result<Vec<Token>> {
 
     tokens.push(Token::Eof);
     Ok(tokens)
+}
+
+fn no_progress(pos: usize) -> TraceqlError {
+    TraceqlError::Parse(format!("lexer made no progress at byte {pos}"))
+}
+
+fn advance(input: &str, pos: usize, len: usize) -> Result<usize> {
+    if len == 0 {
+        return Err(no_progress(pos));
+    }
+    let next = pos
+        .checked_add(len)
+        .ok_or_else(|| TraceqlError::Parse(format!("lexer position overflow at byte {pos}")))?;
+    if next > input.len() {
+        return Err(TraceqlError::Parse(format!(
+            "lexer advanced past end of input at byte {pos}"
+        )));
+    }
+    Ok(next)
 }
 
 fn op_token(s: &str) -> Option<(Token, usize)> {
@@ -414,6 +457,19 @@ mod tests {
     }
 
     #[test]
+    fn identifier_character_helpers_match_traceql_grammar() {
+        assert!(is_ident_start('_'));
+        assert!(is_ident_start('a'));
+        assert!(!is_ident_start('1'));
+        assert!(!is_ident_start('@'));
+
+        assert!(is_ident_continue('_'));
+        assert!(is_ident_continue('-'));
+        assert!(is_ident_continue('1'));
+        assert!(!is_ident_continue('@'));
+    }
+
+    #[test]
     fn leading_dot_fraction_is_single_float_preserving_zeros() {
         assert!(toks(".05") == vec![Token::Float(0.05)]);
         assert!(toks(".99") == vec![Token::Float(0.99)]);
@@ -447,5 +503,12 @@ mod tests {
         // three tokens kills both mutants; `1.5` guards the legit-float path.
         assert!(toks("1+2") == vec![Token::Int(1), Token::Plus, Token::Int(2)]);
         assert!(toks("1.5") == vec![Token::Float(1.5)]);
+    }
+
+    #[test]
+    fn advance_rejects_zero_or_out_of_bounds_progress() {
+        assert!(advance("abc", 0, 1).unwrap() == 1);
+        assert!(advance("abc", 1, 0).is_err());
+        assert!(advance("abc", 2, 2).is_err());
     }
 }

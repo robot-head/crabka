@@ -229,7 +229,7 @@ fn register_batches(
 }
 
 fn pipeline_to_sql(spanset_sql: &str, pipeline: &[Pipeline]) -> Result<String> {
-    if pipeline.iter().all(is_search_preserving_pipeline_stage) {
+    if !pipeline.is_empty() && pipeline.iter().all(is_search_preserving_pipeline_stage) {
         return Ok(format!("SELECT * FROM ({spanset_sql}) AS q"));
     }
 
@@ -843,6 +843,7 @@ mod tests {
 
     use super::*;
     use crate::InMemorySpanStore;
+    use crate::ast::Value;
     use crate::parser::parse;
     use crate::result::{AttrValue, EventRef};
     use crate::span_columns::{COL_NAME, InputSpan};
@@ -939,6 +940,106 @@ mod tests {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    fn test_field(scope: Scope, key: &str) -> Field {
+        Field {
+            scope,
+            key: key.into(),
+        }
+    }
+
+    #[test]
+    fn aggregate_pipeline_projects_nested_value_fields() {
+        let matchers = pipeline_nested_projection_matchers(&[Pipeline::Aggregate(Aggregate::Avg(
+            test_field(Scope::Event, "http.method"),
+        ))]);
+        assert!(
+            matchers
+                == vec![SpanMatcher {
+                    scope: MatchScope::Event,
+                    key: "http.method".into(),
+                    op: MatchCmp::Neq,
+                    value: MatchValue::Nil,
+                    negated: false,
+                }]
+        );
+
+        assert!(
+            pipeline_nested_projection_matchers(&[Pipeline::Aggregate(Aggregate::Count)])
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn collect_nested_selectors_keeps_only_unique_nested_selectors() {
+        let nested = FieldExpr::Comparison {
+            lhs: test_field(Scope::Event, "http.method"),
+            op: ComparisonOp::Eq,
+            rhs: Value::Str("GET".into()),
+        };
+        let non_nested = FieldExpr::Comparison {
+            lhs: test_field(Scope::Span, "http.method"),
+            op: ComparisonOp::Eq,
+            rhs: Value::Str("GET".into()),
+        };
+        let root = SpansetExpr::And(
+            Box::new(SpansetExpr::Selector(Box::new(nested.clone()))),
+            Box::new(SpansetExpr::And(
+                Box::new(SpansetExpr::Selector(Box::new(non_nested))),
+                Box::new(SpansetExpr::Selector(Box::new(nested.clone()))),
+            )),
+        );
+
+        let mut selectors = Vec::new();
+        collect_nested_selectors(&root, &mut selectors);
+
+        assert!(selectors == vec![nested]);
+    }
+
+    #[test]
+    fn pipeline_to_sql_empty_pipeline_uses_passthrough_query() {
+        assert!(
+            pipeline_to_sql("SELECT * FROM spans", &[]).unwrap()
+                == "SELECT * FROM (SELECT * FROM spans) AS q"
+        );
+    }
+
+    #[test]
+    fn grouped_no_filter_by_only_accepts_search_preserving_aggregates() {
+        let by = vec![test_field(Scope::Span, "svc")];
+        let passing = vec![
+            Pipeline::Aggregate(Aggregate::Count),
+            Pipeline::By(by.clone()),
+        ];
+        assert!(grouped_no_filter_by(&passing).unwrap() == by.as_slice());
+
+        let non_preserving = vec![
+            Pipeline::Aggregate(Aggregate::CountOverTime),
+            Pipeline::By(by),
+        ];
+        assert!(grouped_no_filter_by(&non_preserving).is_none());
+        assert!(is_search_preserving_aggregate(&Aggregate::Count));
+        assert!(!is_search_preserving_aggregate(&Aggregate::CountOverTime));
+    }
+
+    #[test]
+    fn aggregate_sql_helpers_cover_scalar_aggregates() {
+        let field = test_field(Scope::Intrinsic(Intrinsic::Duration), "duration");
+        for (aggregate, prefix) in [
+            (Aggregate::Sum(field.clone()), "SUM("),
+            (Aggregate::Avg(field.clone()), "AVG("),
+            (Aggregate::Min(field.clone()), "MIN("),
+            (Aggregate::Max(field), "MAX("),
+        ] {
+            assert!(aggregate_expr_sql(&aggregate).unwrap().starts_with(prefix));
+            assert!(
+                aggregate_rank_expr_sql(&aggregate)
+                    .unwrap()
+                    .starts_with(prefix)
+            );
+        }
+        assert!(aggregate_rank_expr_sql(&Aggregate::CountOverTime).is_err());
     }
 
     #[tokio::test]

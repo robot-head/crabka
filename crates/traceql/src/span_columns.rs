@@ -317,6 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn self_parented_span_keeps_input_order_root_position() {
+        let spans = vec![span(1, Some(1)), span(2, None)];
+        let ns = assign_nested_set(&spans);
+        let self_parented = ns[idx(&spans, 1)];
+        let later_root = ns[idx(&spans, 2)];
+
+        assert!(self_parented.parent_id == -1);
+        assert!(self_parented.left == 1);
+        assert!(self_parented.right == 2);
+        assert!(later_root.left == 3);
+        assert!(later_root.right == 4);
+    }
+
+    #[test]
     fn cyclic_parents_still_get_valid_intervals() {
         // A.parent = B and B.parent = A: neither is a root, so the DFS seeded
         // only from roots would never visit them and leave {left:0,right:0},
@@ -327,6 +341,9 @@ mod tests {
             assert!(entry.left > 0);
             assert!(entry.left < entry.right);
         }
+        assert!(ns[0].parent_id == -1);
+        assert!(ns[1].parent_id == ns[0].left);
+        assert!(ns[0].left < ns[1].left && ns[1].right < ns[0].right);
         // The two intervals must be distinct (no collision at 0).
         assert!(ns[0].left != ns[1].left);
     }
