@@ -62,6 +62,9 @@ fn parse_metric_subexpression(input: &str) -> Result<MetricQuery, ParseError> {
 fn strip_outer_metric_parentheses(input: &str) -> &str {
     let mut trimmed = input.trim();
     while let Some(inner) = outer_metric_parentheses_inner(trimmed) {
+        if inner.len() >= trimmed.len() {
+            break;
+        }
         trimmed = inner.trim();
     }
     trimmed
@@ -74,7 +77,7 @@ fn outer_metric_parentheses_inner(input: &str) -> Option<&str> {
     }
 
     let mut depth = 0usize;
-    let mut quote_delimiter = None;
+    let mut quote_delimiter: Option<char> = None;
     let mut escaped = false;
     for (index, ch) in input.char_indices() {
         if let Some(delimiter) = quote_delimiter {
@@ -82,7 +85,7 @@ fn outer_metric_parentheses_inner(input: &str) -> Option<&str> {
                 escaped = false;
             } else if ch == '\\' {
                 escaped = true;
-            } else if ch == delimiter {
+            } else if delimiter.eq(&ch) {
                 quote_delimiter = None;
             }
             continue;
@@ -90,12 +93,12 @@ fn outer_metric_parentheses_inner(input: &str) -> Option<&str> {
 
         match ch {
             '"' | '`' => quote_delimiter = Some(ch),
-            '(' => depth += 1,
+            '(' => depth = depth.saturating_add(1),
             ')' => {
                 depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    let close_end = index + ch.len_utf8();
-                    if close_end == input.len() {
+                if matches!(depth, 0) {
+                    let close_end = index.saturating_add(ch.len_utf8());
+                    if matches!(close_end.cmp(&input.len()), std::cmp::Ordering::Equal) {
                         return Some(&input[1..index]);
                     }
                     return None;
@@ -488,16 +491,16 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         let start = self.pos;
         let mut depth = 0usize;
-        let mut quote_delimiter = None;
+        let mut quote_delimiter: Option<char> = None;
         let mut escaped = false;
         while let Some(ch) = self.peek() {
             if let Some(delimiter) = quote_delimiter {
-                self.pos += ch.len_utf8();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
                 if escaped {
                     escaped = false;
                 } else if ch == '\\' {
                     escaped = true;
-                } else if ch == delimiter {
+                } else if delimiter.eq(&ch) {
                     quote_delimiter = None;
                 }
                 continue;
@@ -506,21 +509,21 @@ impl<'a> Parser<'a> {
             match ch {
                 '"' | '`' => {
                     quote_delimiter = Some(ch);
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 '(' => {
-                    depth += 1;
-                    self.pos += ch.len_utf8();
+                    depth = depth.saturating_add(1);
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 ')' => {
-                    if depth == 0 {
+                    let Some(next_depth) = depth.checked_sub(1) else {
                         let message = format!("expected {function_name} metric query argument");
                         return Err(self.error(&message));
-                    }
-                    depth -= 1;
-                    self.pos += ch.len_utf8();
+                    };
+                    depth = next_depth;
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
-                ',' if depth == 0 => {
+                ',' if matches!(depth, 0) => {
                     let metric_query = self.input[start..self.pos].trim();
                     if metric_query.is_empty() {
                         let message = format!("expected {function_name} metric query argument");
@@ -528,7 +531,9 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(metric_query.to_string());
                 }
-                _ => self.pos += ch.len_utf8(),
+                _ => {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                }
             }
         }
         let message = format!("expected {function_name} metric query argument");
@@ -700,16 +705,16 @@ impl<'a> Parser<'a> {
     fn parse_metric_expression_argument(&mut self) -> Result<String, ParseError> {
         let start = self.pos;
         let mut depth = 0usize;
-        let mut quote_delimiter = None;
+        let mut quote_delimiter: Option<char> = None;
         let mut escaped = false;
         while let Some(ch) = self.peek() {
             if let Some(delimiter) = quote_delimiter {
-                self.pos += ch.len_utf8();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
                 if escaped {
                     escaped = false;
                 } else if ch == '\\' {
                     escaped = true;
-                } else if ch == delimiter {
+                } else if delimiter.eq(&ch) {
                     quote_delimiter = None;
                 }
                 continue;
@@ -718,27 +723,29 @@ impl<'a> Parser<'a> {
             match ch {
                 '"' | '`' => {
                     quote_delimiter = Some(ch);
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 '(' => {
-                    depth += 1;
-                    self.pos += ch.len_utf8();
+                    depth = depth.saturating_add(1);
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 ')' => {
-                    if depth == 0 {
+                    let Some(next_depth) = depth.checked_sub(1) else {
                         return Err(self.error("expected metric expression"));
-                    }
-                    depth -= 1;
-                    self.pos += ch.len_utf8();
+                    };
+                    depth = next_depth;
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
-                '>' | '<' | '=' | '!' if depth == 0 => {
+                '>' | '<' | '=' | '!' if matches!(depth, 0) => {
                     let metric_query = self.input[start..self.pos].trim();
                     if metric_query.is_empty() {
                         return Err(self.error("expected metric expression"));
                     }
                     return Ok(metric_query.to_string());
                 }
-                _ => self.pos += ch.len_utf8(),
+                _ => {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                }
             }
         }
         Err(self.error("expected metric comparison operator"))
@@ -749,16 +756,16 @@ impl<'a> Parser<'a> {
     ) -> Result<(String, MetricScalarArithmeticOp), ParseError> {
         let start = self.pos;
         let mut depth = 0usize;
-        let mut quote_delimiter = None;
+        let mut quote_delimiter: Option<char> = None;
         let mut escaped = false;
         while let Some(ch) = self.peek() {
             if let Some(delimiter) = quote_delimiter {
-                self.pos += ch.len_utf8();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
                 if escaped {
                     escaped = false;
                 } else if ch == '\\' {
                     escaped = true;
-                } else if ch == delimiter {
+                } else if delimiter.eq(&ch) {
                     quote_delimiter = None;
                 }
                 continue;
@@ -767,20 +774,20 @@ impl<'a> Parser<'a> {
             match ch {
                 '"' | '`' => {
                     quote_delimiter = Some(ch);
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 '(' => {
-                    depth += 1;
-                    self.pos += ch.len_utf8();
+                    depth = depth.saturating_add(1);
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 ')' => {
-                    if depth == 0 {
+                    let Some(next_depth) = depth.checked_sub(1) else {
                         return Err(self.error("expected metric expression"));
-                    }
-                    depth -= 1;
-                    self.pos += ch.len_utf8();
+                    };
+                    depth = next_depth;
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
-                '+' | '-' | '*' | '/' | '%' | '^' if depth == 0 => {
+                '+' | '-' | '*' | '/' | '%' | '^' if matches!(depth, 0) => {
                     let metric_query = self.input[start..self.pos].trim();
                     if metric_query.is_empty() {
                         return Err(self.error("expected metric expression"));
@@ -788,7 +795,9 @@ impl<'a> Parser<'a> {
                     let op = self.parse_arithmetic_op().expect("operator matched above");
                     return Ok((metric_query.to_string(), op));
                 }
-                _ => self.pos += ch.len_utf8(),
+                _ => {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                }
             }
         }
         Err(self.error("expected metric arithmetic operator"))
@@ -797,16 +806,16 @@ impl<'a> Parser<'a> {
     fn parse_metric_set_argument(&mut self) -> Result<(String, MetricBinarySetOp), ParseError> {
         let start = self.pos;
         let mut depth = 0usize;
-        let mut quote_delimiter = None;
+        let mut quote_delimiter: Option<char> = None;
         let mut escaped = false;
         while let Some(ch) = self.peek() {
             if let Some(delimiter) = quote_delimiter {
-                self.pos += ch.len_utf8();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
                 if escaped {
                     escaped = false;
                 } else if ch == '\\' {
                     escaped = true;
-                } else if ch == delimiter {
+                } else if delimiter.eq(&ch) {
                     quote_delimiter = None;
                 }
                 continue;
@@ -815,31 +824,33 @@ impl<'a> Parser<'a> {
             match ch {
                 '"' | '`' => {
                     quote_delimiter = Some(ch);
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 '(' => {
-                    depth += 1;
-                    self.pos += ch.len_utf8();
+                    depth = depth.saturating_add(1);
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
                 ')' => {
-                    if depth == 0 {
+                    let Some(next_depth) = depth.checked_sub(1) else {
                         return Err(self.error("expected metric expression"));
-                    }
-                    depth -= 1;
-                    self.pos += ch.len_utf8();
+                    };
+                    depth = next_depth;
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
-                _ if depth == 0 => {
+                _ if matches!(depth, 0) => {
                     if let Some((keyword_len, op)) = self.match_metric_set_op_at(self.pos) {
                         let metric_query = self.input[start..self.pos].trim();
                         if metric_query.is_empty() {
                             return Err(self.error("expected metric expression"));
                         }
-                        self.pos += keyword_len;
+                        self.pos = self.pos.saturating_add(keyword_len);
                         return Ok((metric_query.to_string(), op));
                     }
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 }
-                _ => self.pos += ch.len_utf8(),
+                _ => {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                }
             }
         }
         Err(self.error("expected metric set operator"))
@@ -858,7 +869,7 @@ impl<'a> Parser<'a> {
             if previous.is_some_and(is_ident_char) {
                 continue;
             }
-            let end = position + keyword.len();
+            let end = position.saturating_add(keyword.len());
             let next = self.input[end..].chars().next();
             if next.is_some_and(is_ident_char) {
                 continue;
@@ -875,7 +886,7 @@ impl<'a> Parser<'a> {
         if self.consume_keyword("on") {
             let labels = self.parse_grouping_labels()?;
             let group = self.parse_metric_vector_group_modifier()?;
-            if group.is_some() && !allow_group_modifier {
+            if matches!((allow_group_modifier, group.is_some()), (false, true)) {
                 return Err(self.error("group modifiers are not supported for set operators"));
             }
             return Ok(Some(MetricVectorMatching::On { labels, group }));
@@ -883,7 +894,7 @@ impl<'a> Parser<'a> {
         if self.consume_keyword("ignoring") {
             let labels = self.parse_grouping_labels()?;
             let group = self.parse_metric_vector_group_modifier()?;
-            if group.is_some() && !allow_group_modifier {
+            if matches!((allow_group_modifier, group.is_some()), (false, true)) {
                 return Err(self.error("group modifiers are not supported for set operators"));
             }
             return Ok(Some(MetricVectorMatching::Ignoring { labels, group }));
@@ -926,7 +937,7 @@ impl<'a> Parser<'a> {
             '^' => MetricScalarArithmeticOp::Power,
             _ => return None,
         };
-        self.pos += 1;
+        self.pos = self.pos.saturating_add(1);
         Some(op)
     }
 
@@ -934,39 +945,39 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         let start = self.pos;
         if matches!(self.peek(), Some('+') | Some('-')) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
         }
 
         let whole_start = self.pos;
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
         }
-        let whole_digits = self.pos > whole_start;
+        let whole_digits = self.pos != whole_start;
 
         let mut fractional_digits = false;
         if self.peek() == Some('.') {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
             let fractional_start = self.pos;
             while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
-            fractional_digits = self.pos > fractional_start;
+            fractional_digits = self.pos != fractional_start;
         }
 
-        if !whole_digits && !fractional_digits {
+        if matches!((whole_digits, fractional_digits), (false, false)) {
             return Err(self.error("expected scalar literal"));
         }
 
         if matches!(self.peek(), Some('e') | Some('E')) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
             if matches!(self.peek(), Some('+') | Some('-')) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
             let exponent_start = self.pos;
             while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
-            if self.pos == exponent_start {
+            if matches!(self.pos.cmp(&exponent_start), std::cmp::Ordering::Equal) {
                 return Err(self.error("expected scalar exponent"));
             }
         }
@@ -1042,7 +1053,7 @@ impl<'a> Parser<'a> {
     fn parse_u64_scalar(&mut self) -> Result<u64, ParseError> {
         let start = self.pos;
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
         }
         if self.pos == start {
             return Err(self.error("expected scalar parameter"));
@@ -1068,17 +1079,17 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.peek() == Some(')') {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
                 return Ok(labels);
             }
             labels.push(self.parse_ident()?);
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
-                    self.pos += 1;
+                    self.pos = self.pos.saturating_add(1);
                 }
                 Some(')') => {
-                    self.pos += 1;
+                    self.pos = self.pos.saturating_add(1);
                     return Ok(labels);
                 }
                 _ => return Err(self.error("expected ',' or ')'")),
@@ -1154,9 +1165,9 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         let whole_start = self.pos;
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
         }
-        let has_whole = self.pos > whole_start;
+        let has_whole = self.pos != whole_start;
         let whole = if has_whole {
             self.input[whole_start..self.pos]
                 .parse::<u64>()
@@ -1168,12 +1179,12 @@ impl<'a> Parser<'a> {
         let mut denominator = 1_u64;
         let mut fraction = 0_u64;
         if self.peek() == Some('.') {
-            self.pos += 1;
+            self.pos = self.pos.saturating_add(1);
             let fraction_start = self.pos;
             while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
-            if self.pos == fraction_start {
+            if matches!(self.pos.cmp(&fraction_start), std::cmp::Ordering::Equal) {
                 return Err(self.error("expected quantile scalar"));
             }
             let fraction_text = &self.input[fraction_start..self.pos];
@@ -1184,7 +1195,7 @@ impl<'a> Parser<'a> {
                 .parse::<u64>()
                 .map_err(|_| self.error("expected quantile scalar"))?;
         }
-        if !has_whole && denominator == 1 {
+        if matches!((has_whole, denominator), (false, 1)) {
             return Err(self.error("expected quantile scalar"));
         }
 
@@ -1192,8 +1203,11 @@ impl<'a> Parser<'a> {
             .checked_mul(denominator)
             .and_then(|value| value.checked_add(fraction))
             .ok_or_else(|| self.error("expected quantile scalar"))?;
-        if numerator > denominator {
-            return Err(self.error("quantile scalar must be between 0 and 1"));
+        match numerator.cmp(&denominator) {
+            std::cmp::Ordering::Greater => {
+                return Err(self.error("quantile scalar must be between 0 and 1"));
+            }
+            std::cmp::Ordering::Equal | std::cmp::Ordering::Less => {}
         }
 
         let divisor = gcd_u64(numerator, denominator);
@@ -1213,8 +1227,10 @@ impl<'a> Parser<'a> {
         let mut pipeline = Vec::new();
         loop {
             self.skip_ws();
-            if stop_before_range && self.peek() == Some('[') {
-                break;
+            if stop_before_range {
+                if matches!(self.peek(), Some('[')) {
+                    break;
+                }
             }
             if self.pos == self.input.len() {
                 break;
@@ -1272,7 +1288,7 @@ impl<'a> Parser<'a> {
         loop {
             let value_start = self.pos;
             while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
             if self.pos == value_start {
                 if parsed_chunk {
@@ -1286,7 +1302,7 @@ impl<'a> Parser<'a> {
 
             let unit_start = self.pos;
             while self.peek().is_some_and(|ch| ch.is_ascii_alphabetic()) {
-                self.pos += 1;
+                self.pos = self.pos.saturating_add(1);
             }
             let unit = &self.input[unit_start..self.pos];
             let Some((unit_order, unit_bit, multiplier)) = duration_unit(unit) else {
@@ -1295,8 +1311,13 @@ impl<'a> Parser<'a> {
             if seen_units & unit_bit != 0 {
                 return Err(self.error("repeated range duration unit"));
             }
-            if previous_unit_order.is_some_and(|previous| unit_order <= previous) {
-                return Err(self.error("range duration units must be longest to shortest"));
+            if let Some(previous) = previous_unit_order {
+                match unit_order.cmp(&previous) {
+                    std::cmp::Ordering::Greater => {}
+                    std::cmp::Ordering::Equal | std::cmp::Ordering::Less => {
+                        return Err(self.error("range duration units must be longest to shortest"));
+                    }
+                }
             }
 
             let chunk_ns = value
@@ -1305,11 +1326,11 @@ impl<'a> Parser<'a> {
             total_ns = total_ns
                 .checked_add(chunk_ns)
                 .ok_or_else(|| self.error("range duration overflow"))?;
-            seen_units |= unit_bit;
+            seen_units = seen_units.saturating_add(unit_bit);
             previous_unit_order = Some(unit_order);
             parsed_chunk = true;
 
-            if self.peek() == Some(']') {
+            if matches!(self.peek(), Some(']')) {
                 break;
             }
         }
@@ -1335,7 +1356,7 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
-                    self.pos += 1;
+                    self.pos = self.pos.saturating_add(1);
                 }
                 Some('}') => return Ok(matchers),
                 _ => return Err(self.error("expected ',' or '}'")),
@@ -1654,20 +1675,23 @@ impl<'a> Parser<'a> {
         }
 
         let start = self.pos;
-        if self.peek() == Some('-') {
-            self.pos += 1;
+        if matches!(self.peek(), Some('-')) {
+            self.pos = self.pos.saturating_add(1);
         }
         while let Some(ch) = self.peek() {
-            if ch.is_ascii_alphanumeric() || ch == '.' {
-                self.pos += ch.len_utf8();
-            } else {
-                break;
+            match ch {
+                '.' => self.pos = self.pos.saturating_add(ch.len_utf8()),
+                _ if ch.is_ascii_alphanumeric() => {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                }
+                _ => break,
             }
         }
-        if self.pos == start || &self.input[start..self.pos] == "-" {
-            return Err(self.error("expected field comparison value"));
-        }
         let literal = &self.input[start..self.pos];
+        match literal {
+            "" | "-" => return Err(self.error("expected field comparison value")),
+            _ => {}
+        }
         if literal.bytes().any(|byte| byte.is_ascii_alphabetic()) {
             if let Some(duration_ns) = parse_prometheus_duration_literal(literal) {
                 return Ok(FieldValue::Duration(duration_ns));
@@ -1687,7 +1711,7 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         while let Some(ch) = self.peek() {
             if is_ident_char(ch) {
-                self.pos += ch.len_utf8();
+                self.pos = self.pos.saturating_add(ch.len_utf8());
             } else {
                 break;
             }
@@ -1700,16 +1724,20 @@ impl<'a> Parser<'a> {
 
     fn parse_quoted(&mut self) -> Result<String, ParseError> {
         self.skip_ws();
-        if self.peek() == Some('`') {
-            self.pos += 1;
+        if matches!(self.peek(), Some('`')) {
+            self.pos = self.pos.saturating_add(1);
             let start = self.pos;
             while let Some(ch) = self.peek() {
-                if ch == '`' {
-                    let out = self.input[start..self.pos].to_string();
-                    self.pos += 1;
-                    return Ok(out);
+                match ch {
+                    '`' => {
+                        let out = self.input[start..self.pos].to_string();
+                        self.pos = self.pos.saturating_add(1);
+                        return Ok(out);
+                    }
+                    _ => {
+                        self.pos = self.pos.saturating_add(ch.len_utf8());
+                    }
                 }
-                self.pos += ch.len_utf8();
             }
             return Err(self.error("expected closing backtick"));
         }
@@ -1717,14 +1745,14 @@ impl<'a> Parser<'a> {
         self.expect('"')?;
         let mut out = String::new();
         while let Some(ch) = self.peek() {
-            self.pos += ch.len_utf8();
+            self.pos = self.pos.saturating_add(ch.len_utf8());
             match ch {
                 '"' => return Ok(out),
                 '\\' => {
                     let Some(escaped) = self.peek() else {
                         return Err(self.error("expected escaped character"));
                     };
-                    self.pos += escaped.len_utf8();
+                    self.pos = self.pos.saturating_add(escaped.len_utf8());
                     out.push(decode_quoted_escape(escaped));
                 }
                 _ => out.push(ch),
@@ -1735,8 +1763,8 @@ impl<'a> Parser<'a> {
 
     fn expect(&mut self, expected: char) -> Result<(), ParseError> {
         self.skip_ws();
-        if self.peek() == Some(expected) {
-            self.pos += expected.len_utf8();
+        if self.peek().is_some_and(|ch| ch == expected) {
+            self.pos = self.pos.saturating_add(expected.len_utf8());
             Ok(())
         } else {
             Err(self.error(&format!("expected {}", QuotedChar(expected))))
@@ -1746,7 +1774,7 @@ impl<'a> Parser<'a> {
     fn consume(&mut self, text: &str) -> bool {
         self.skip_ws();
         if self.input[self.pos..].starts_with(text) {
-            self.pos += text.len();
+            self.pos = self.pos.saturating_add(text.len());
             true
         } else {
             false
@@ -1758,7 +1786,7 @@ impl<'a> Parser<'a> {
         if !self.input[self.pos..].starts_with(keyword) {
             return false;
         }
-        let end = self.pos + keyword.len();
+        let end = self.pos.saturating_add(keyword.len());
         let next = self.input[end..].chars().next();
         if next.is_some_and(is_ident_char) {
             return false;
@@ -1772,20 +1800,20 @@ impl<'a> Parser<'a> {
             let start = self.pos;
             while let Some(ch) = self.peek() {
                 if ch.is_whitespace() {
-                    self.pos += ch.len_utf8();
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
                 } else {
                     break;
                 }
             }
-            if self.peek() == Some('#') {
+            if matches!(self.peek(), Some('#')) {
                 while let Some(ch) = self.peek() {
-                    self.pos += ch.len_utf8();
-                    if ch == '\n' {
+                    self.pos = self.pos.saturating_add(ch.len_utf8());
+                    if matches!(ch, '\n') {
                         break;
                     }
                 }
             }
-            if self.pos == start {
+            if matches!(self.pos.cmp(&start), std::cmp::Ordering::Equal) {
                 break;
             }
         }

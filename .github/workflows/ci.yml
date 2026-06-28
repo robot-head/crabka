@@ -1012,23 +1012,23 @@ jobs:
             --test diff_prometheus \
             -- --ignored --nocapture
 
-  # Incremental mutation testing (https://mutants.rs): generate mutants ONLY for
-  # the lines this PR changes (`--in-diff`) and check the suite kills them — a
-  # stronger signal than line coverage, since a surviving mutant means a changed
-  # line runs but nothing asserts on its behaviour. Mutating the whole 30-crate
-  # workspace would take hours, so we scope to the diff. PR-only: `--in-diff`
-  # needs a base branch to diff against, so this is skipped on push to main
-  # (skipped != failure, so the gatekeeper still passes). cargo-mutants tests
-  # only the mutated package by default, so a typical PR runs one or two crates'
-  # nextest suites. Runner, timeouts, and exclusions live in .cargo/mutants.toml.
-  mutants:
-    needs: changes
+  # Sharded incremental mutation testing (https://mutants.rs): generate mutants
+  # only for the lines this PR changes (`--in-diff`) and distribute them across
+  # deterministic shards. Run after the baseline Rust matrix passes so
+  # cargo-mutants can skip its own baseline and spend the time budget on mutants.
+  # PR-only: `--in-diff` needs a base branch to diff against, so this is skipped
+  # on push to main (skipped != failure, so the gatekeeper still passes).
+  cargo-mutants:
+    needs:
+      - changes
+      - rust
     if: ${{ needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
-    # A large feature PR's diff can generate dozens of mutants; with the cold
-    # workspace baseline build (~40 min) plus ~5 min/mutant, 90 min was not
-    # enough headroom. 180 min keeps the incremental gate viable for big PRs.
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
       # Run nextest under the `ci` profile so the test-group serialization in
       # .config/nextest.toml applies (the fixed-port broker / schema-registry
@@ -1048,8 +1048,9 @@ jobs:
           toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@v2
         with:
-          key: mutants
+          key: cargo-mutants
       - uses: taiki-e/install-action@v2
+        name: Install cargo-mutants using install-action
         with:
           tool: cargo-mutants,nextest
       - name: Compute PR diff
@@ -1060,53 +1061,14 @@ jobs:
           git fetch --no-tags origin "${{ github.base_ref }}"
           git diff "origin/${{ github.base_ref }}...HEAD" | tee git.diff
       - name: Mutants
-        # --no-shuffle gives deterministic ordering (stable logs across reruns);
-        # -vV surfaces per-mutant build/test output. test_tool=nextest plus the
-        # timeouts and exclusions come from .cargo/mutants.toml.
-        #
-        # cargo-mutants reruns the mutated package's whole nextest suite once per
-        # mutant, so a large broker-touching PR's diff can generate more mutants
-        # than fit in any sane wall-clock budget. A *timeout* is a resource limit,
-        # not a real "surviving mutant" signal, so it must NOT block the merge
-        # gate — but a genuine surviving mutant still must. We cap the run with an
-        # inner `timeout` (leaving headroom under the 180-min job for the
-        # artifact upload) and map only the time-budget exit codes to an advisory
-        # pass; cargo-mutants' "missed mutant" exit (non-zero, non-timeout) still
-        # fails the job.
         run: |
-          set +e
-          timeout --signal=INT 165m cargo mutants --no-shuffle -vV --in-place --in-diff git.diff
-          code=$?
-          case "$code" in
-            0)
-              echo "cargo-mutants: all in-diff mutants caught."
-              ;;
-            4|124|130|137|143)
-              # 4 = cargo-mutants interrupted; 124/130/137/143 = killed by the
-              # `timeout` cutoff (INT/KILL/TERM): the run was incomplete due to
-              # time, not finished with a verdict. Still fail if a surviving
-              # mutant was already recorded before the cutoff; otherwise treat the
-              # unfinished run as advisory so a resource limit can't block merges.
-              if [ -s mutants.out/missed.txt ]; then
-                echo "::error title=cargo-mutants found a surviving mutant::A changed line runs but no test asserts on its behaviour (recorded before the time cutoff):"
-                cat mutants.out/missed.txt
-                code=1
-              else
-                echo "::warning title=cargo-mutants incremental run did not finish::Hit the time budget before testing every in-diff mutant; no surviving mutant was recorded before the cutoff, so treating as advisory. See the mutants-incremental.out artifact."
-                code=0
-              fi
-              ;;
-            *)
-              echo "::error title=cargo-mutants found a surviving mutant::A changed line runs but no test asserts on its behaviour (exit $code)."
-              ;;
-          esac
-          exit $code
+          cargo mutants --no-shuffle -vV --shard ${{ matrix.shard }}/8 --baseline=skip --timeout 300 --in-place --in-diff git.diff
       - name: Archive mutants.out
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mutants-incremental.out
           path: mutants.out
+          name: mutants-shard${{ matrix.shard }}.out
 
   gatekeeper-ci:
     needs:
@@ -1128,7 +1090,7 @@ jobs:
       - operator-integration
       - metrics-conformance
       - metrics-differential-prometheus
-      - mutants
+      - cargo-mutants
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 1

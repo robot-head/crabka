@@ -452,7 +452,8 @@ impl IpRange {
             (!0_u128) << u32::from(host_bits)
         } & family.mask();
         let start = value & mask;
-        let end = start | (!mask & family.mask());
+        let host_mask = !mask & family.mask();
+        let end = start.saturating_add(host_mask);
         Ok(Self { family, start, end })
     }
 
@@ -524,4 +525,191 @@ fn line_matches_pattern(line: &str, pattern: &str) -> bool {
         remaining = &remaining[offset + literal.len()..];
     }
     matched_any_literal || pattern.contains("<_>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Labels;
+
+    fn labels(pairs: &[(&str, &str)]) -> Labels {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    fn number_filter(name: &str, op: ComparisonOp, expected: f64) -> FieldFilter {
+        FieldFilter::new(name, op, FieldValue::Number(expected))
+    }
+
+    fn string_filter(name: &str, op: ComparisonOp, expected: &str) -> FieldFilter {
+        FieldFilter::new(name, op, FieldValue::String(expected.to_string()))
+    }
+
+    #[test]
+    fn field_filter_matches_returns_candidate_result() {
+        let filter = number_filter("status", ComparisonOp::GreaterEqual, 500.0);
+
+        assert!(filter.matches(&labels(&[("status", "500")])));
+        assert!(!filter.matches(&labels(&[("status", "499")])));
+    }
+
+    #[test]
+    fn field_filter_expression_matches_honors_logic() {
+        let expression = FieldFilterExpression::Chain {
+            first: Box::new(FieldFilterExpression::Group(Box::new(
+                FieldFilterExpression::Filter(number_filter(
+                    "status",
+                    ComparisonOp::GreaterEqual,
+                    500.0,
+                )),
+            ))),
+            rest: vec![(
+                FieldFilterLogicOp::Or,
+                FieldFilterExpression::Filter(string_filter("level", ComparisonOp::Equal, "warn")),
+            )],
+        };
+
+        assert!(expression.matches(&labels(&[("status", "500"), ("level", "info")])));
+        assert!(expression.matches(&labels(&[("status", "200"), ("level", "warn")])));
+        assert!(!expression.matches(&labels(&[("status", "200"), ("level", "info")])));
+    }
+
+    #[test]
+    fn field_filter_chain_matches_and_exposes_rest_filters() {
+        let rest_filter = string_filter("path", ComparisonOp::NotEqual, "/health");
+        let chain = FieldFilterChain::new(
+            number_filter("status", ComparisonOp::GreaterEqual, 500.0),
+            vec![(FieldFilterLogicOp::And, rest_filter.clone())],
+        );
+
+        assert!(chain.matches(&labels(&[("status", "500"), ("path", "/checkout")])));
+        assert!(!chain.matches(&labels(&[("status", "500"), ("path", "/health")])));
+        assert_eq!(chain.rest(), &[(FieldFilterLogicOp::And, rest_filter)]);
+    }
+
+    #[test]
+    fn field_filter_validation_rejects_invalid_combinations() {
+        assert!(
+            FieldFilter::try_new(
+                "path",
+                ComparisonOp::RegexEqual,
+                FieldValue::String("[".to_string())
+            )
+            .is_err()
+        );
+        assert!(
+            FieldFilter::try_new("path", ComparisonOp::RegexEqual, FieldValue::Number(1.0))
+                .is_err()
+        );
+        assert!(
+            FieldFilter::try_new(
+                "remote_addr",
+                ComparisonOp::Greater,
+                FieldValue::Ip(IpMatcher::parse("192.168.1.1").unwrap())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn comparison_ops_compare_number_boundaries() {
+        for (op, candidate, expected, result) in [
+            (ComparisonOp::Equal, 500.0, 500.0, true),
+            (ComparisonOp::Equal, 499.0, 500.0, false),
+            (ComparisonOp::NotEqual, 499.0, 500.0, true),
+            (ComparisonOp::NotEqual, 500.0, 500.0, false),
+            (ComparisonOp::Greater, 501.0, 500.0, true),
+            (ComparisonOp::Greater, 500.0, 500.0, false),
+            (ComparisonOp::GreaterEqual, 501.0, 500.0, true),
+            (ComparisonOp::GreaterEqual, 500.0, 500.0, true),
+            (ComparisonOp::GreaterEqual, 499.0, 500.0, false),
+            (ComparisonOp::Less, 499.0, 500.0, true),
+            (ComparisonOp::Less, 500.0, 500.0, false),
+            (ComparisonOp::LessEqual, 499.0, 500.0, true),
+            (ComparisonOp::LessEqual, 500.0, 500.0, true),
+            (ComparisonOp::LessEqual, 501.0, 500.0, false),
+        ] {
+            assert_eq!(
+                op.compare_numbers(candidate, expected),
+                result,
+                "{candidate} {op:?} {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn comparison_ops_compare_string_boundaries() {
+        for (op, candidate, expected, result) in [
+            (ComparisonOp::Greater, "n", "m", true),
+            (ComparisonOp::Greater, "m", "m", false),
+            (ComparisonOp::GreaterEqual, "n", "m", true),
+            (ComparisonOp::GreaterEqual, "m", "m", true),
+            (ComparisonOp::GreaterEqual, "l", "m", false),
+            (ComparisonOp::Less, "l", "m", true),
+            (ComparisonOp::Less, "m", "m", false),
+            (ComparisonOp::Less, "n", "m", false),
+            (ComparisonOp::LessEqual, "l", "m", true),
+            (ComparisonOp::LessEqual, "m", "m", true),
+            (ComparisonOp::LessEqual, "n", "m", false),
+        ] {
+            assert_eq!(
+                op.compare_strings(candidate, expected),
+                result,
+                "{candidate} {op:?} {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn line_filter_reports_ip_matcher_mode() {
+        assert!(
+            !LineFilter::new(LineFilterOp::Contains, "error")
+                .unwrap()
+                .is_ip_matcher()
+        );
+        assert!(
+            LineFilter::ip(LineFilterOp::Contains, "192.168.1.0/24")
+                .unwrap()
+                .is_ip_matcher()
+        );
+    }
+
+    #[test]
+    fn line_filter_validation_rejects_invalid_regex_and_ip_ops() {
+        assert!(LineFilter::new(LineFilterOp::Regex, "[").is_err());
+        assert!(LineFilter::ip(LineFilterOp::Regex, "192.168.1.1").is_err());
+    }
+
+    #[test]
+    fn ip_matcher_returns_original_pattern() {
+        let matcher = IpMatcher::parse("192.168.1.0/24").unwrap();
+
+        assert_eq!(matcher.pattern(), "192.168.1.0/24");
+    }
+
+    #[test]
+    fn ip_matcher_rejects_invalid_ranges_and_prefixes() {
+        assert!(IpMatcher::parse("192.168.1.10-192.168.1.1").is_err());
+        assert!(IpMatcher::parse("192.168.1.1-2001:db8::1").is_err());
+        assert!(IpMatcher::parse("192.168.1.1/33").is_err());
+    }
+
+    #[test]
+    fn ip_matcher_accepts_single_address_ranges_and_host_prefixes() {
+        let range = IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap();
+        assert!(range.matches_ip_text("192.168.1.1"));
+        assert!(!range.matches_ip_text("192.168.1.2"));
+
+        let cidr = IpMatcher::parse("192.168.1.1/32").unwrap();
+        assert!(cidr.matches_ip_text("192.168.1.1"));
+        assert!(!cidr.matches_ip_text("192.168.1.2"));
+    }
+
+    #[test]
+    fn line_pattern_matches_wildcard_only_pattern() {
+        assert!(line_matches_pattern("anything", "<_>"));
+        assert!(!line_matches_pattern("anything", ""));
+    }
 }

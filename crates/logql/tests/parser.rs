@@ -1470,6 +1470,43 @@ fn query_evaluator_logfmt_keep_empty_keeps_standalone_keys() {
 }
 
 #[test]
+fn query_evaluator_logfmt_skips_leading_whitespace() {
+    let query = parse_query(r#"{app="api"} | logfmt | status = "204""#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, " \tstatus=204", &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
+}
+
+#[test]
+fn query_evaluator_logfmt_non_strict_skips_malformed_tokens() {
+    let query = parse_query(r#"{app="api"} | logfmt | status = "204" | __error__ = """#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"=broken status=204"#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
+    check!(!evaluation.fields.contains_key("__error__"));
+}
+
+#[test]
+fn query_evaluator_logfmt_decodes_quoted_value_escapes() {
+    let query = parse_query(r#"{app="api"} | logfmt | msg = "hello \"api\"""#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"msg="hello \"api\"""#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("msg") == Some(&r#"hello "api""#.to_string()));
+}
+
+#[test]
 fn query_evaluator_field_filter_matches_missing_string_label_as_empty() {
     let query = parse_query(r#"{app="api"} | logfmt | empty = """#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
@@ -1574,6 +1611,19 @@ fn query_evaluator_logfmt_strict_reports_loki_syntax_error_details() {
         evaluation.fields.get("__error_details__")
             == Some(&"logfmt syntax error at pos 29 : unterminated quoted value".to_string())
     );
+}
+
+#[test]
+fn query_evaluator_logfmt_non_strict_keep_empty_skips_malformed_quoted_values() {
+    let query = parse_query(r#"{app="api"} | logfmt --keep-empty | __error__ = """#).unwrap();
+    let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
+
+    let evaluation = query
+        .evaluate_with_fields(&labels, r#"status=500 msg="unterminated"#, &BTreeMap::new())
+        .unwrap();
+
+    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
+    check!(!evaluation.fields.contains_key("__error__"));
 }
 
 #[test]
@@ -2296,6 +2346,44 @@ fn parses_parenthesized_metric_expression_operands() {
 }
 
 #[test]
+fn rejects_parenthesized_metric_operands_with_trailing_text() {
+    check!(
+        parse_metric_scalar_comparison_query(
+            r#"2 > bool (count_over_time({app="api"}[30s])) trailing"#,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn parses_metric_function_arguments_with_nested_commas_and_quotes() {
+    let label_replace = parse_metric_label_replace_query(
+        r#"label_replace(sum by (app) (count_over_time({app="api"} |= "contains,comma" [30s])), "service", "$1", "app", "api,(.*)")"#,
+    )
+    .unwrap();
+
+    check!(label_replace.query.vector_aggregation.is_some());
+    check!(label_replace.pattern == "api,(.*)");
+
+    let label_join = parse_metric_label_join_query(
+        r#"label_join(sum by (app) (count_over_time({app="api"}[30s])), "joined", ",", "app", "env")"#,
+    )
+    .unwrap();
+
+    check!(label_join.query.vector_aggregation.is_some());
+    check!(label_join.separator == ",");
+}
+
+#[test]
+fn rejects_empty_metric_function_arguments() {
+    check!(
+        parse_metric_label_replace_query(r#"label_replace(, "service", "$1", "app", "(.*)")"#)
+            .is_err()
+    );
+    check!(parse_metric_label_join_query(r#"label_join(, "joined", ",", "app")"#).is_err());
+}
+
+#[test]
 fn parses_metric_binary_arithmetic_query() {
     let query = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error" [30s])"#,
@@ -2307,6 +2395,21 @@ fn parses_metric_binary_arithmetic_query() {
     check!(query.left.range_ns == 30_000_000_000);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn parses_metric_arithmetic_modulo_and_power_ops() {
+    let modulo = parse_metric_scalar_arithmetic_query(
+        r#"count_over_time({app="api"} |= "error" [30s]) % 2"#,
+    )
+    .unwrap();
+    check!(modulo.op == crabka_logql::MetricScalarArithmeticOp::Modulo);
+
+    let power = parse_metric_scalar_arithmetic_query(
+        r#"count_over_time({app="api"} |= "error" [30s]) ^ 2"#,
+    )
+    .unwrap();
+    check!(power.op == crabka_logql::MetricScalarArithmeticOp::Power);
 }
 
 #[test]
@@ -2326,6 +2429,30 @@ fn parses_metric_binary_arithmetic_matching_modifier() {
     check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
     check!(query.left.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
+}
+
+#[test]
+fn parses_metric_binary_arguments_with_nested_operator_characters() {
+    let comparison = parse_metric_binary_comparison_query(
+        r#"count_over_time({app="api"} | line_format `literal > inside` [30s]) > bool count_over_time({app="api"}[30s])"#,
+    )
+    .unwrap();
+    check!(comparison.op == ComparisonOp::Greater);
+    check!(comparison.left.range_ns == 30_000_000_000);
+
+    let arithmetic = parse_metric_binary_arithmetic_query(
+        r#"count_over_time({app="api"} |= "+" [30s]) + count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    check!(arithmetic.right.range_ns == 15_000_000_000);
+
+    let set = parse_metric_binary_set_query(
+        r#"count_over_time({app="origin"} |= "or" [30s]) or count_over_time({app="worker"}[15s])"#,
+    )
+    .unwrap();
+    check!(set.op == crabka_logql::MetricBinarySetOp::Or);
+    check!(set.left.range_ns == 30_000_000_000);
 }
 
 #[test]
@@ -2376,6 +2503,16 @@ fn parses_metric_binary_set_query() {
     check!(query.left.range_ns == 30_000_000_000);
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
     check!(query.right.range_ns == 30_000_000_000);
+}
+
+#[test]
+fn rejects_group_modifiers_on_metric_set_operators() {
+    check!(
+        parse_metric_binary_set_query(
+            r#"count_over_time({app="api"}[30s]) and on(app) group_left(status) count_over_time({app="worker"}[30s])"#,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -2660,6 +2797,13 @@ fn parses_fraction_only_quantile_over_time_metric_query() {
 }
 
 #[test]
+fn rejects_invalid_quantile_scalars() {
+    check!(parse_metric_query(r#"quantile_over_time(1.01, {app="api"}[30s])"#).is_err());
+    check!(parse_metric_query(r#"quantile_over_time(., {app="api"}[30s])"#).is_err());
+    check!(parse_metric_query(r#"quantile_over_time(0., {app="api"}[30s])"#).is_err());
+}
+
+#[test]
 fn parses_absent_over_time_metric_query() {
     let query = parse_metric_query(r#"absent_over_time({app="api",env="prod"} [30s])"#).unwrap();
 
@@ -2786,6 +2930,36 @@ fn rejects_metric_query_with_offset_after_range_aggregation() {
 fn rejects_out_of_order_or_repeated_prometheus_duration_units() {
     check!(parse_metric_query(r#"count_over_time({app="api"} [30m1h])"#).is_err());
     check!(parse_metric_query(r#"count_over_time({app="api"} [1h30m15m])"#).is_err());
+}
+
+#[test]
+fn rejects_range_aggregations_that_do_not_support_grouping() {
+    check!(parse_metric_query(r#"count_over_time({app="api"}[30s]) by (app)"#).is_err());
+    check!(parse_metric_query(r#"rate({app="api"}[30s]) without (app)"#).is_err());
+}
+
+#[test]
+fn rejects_invalid_metric_scalar_literals() {
+    check!(
+        parse_metric_scalar_comparison_query(r#". > bool count_over_time({app="api"}[30s])"#)
+            .is_err()
+    );
+    check!(
+        parse_metric_scalar_comparison_query(r#"1e > bool count_over_time({app="api"}[30s])"#)
+            .is_err()
+    );
+    check!(
+        parse_metric_scalar_comparison_query(r#"+.5e+2 > bool count_over_time({app="api"}[30s])"#)
+            .is_ok()
+    );
+}
+
+#[test]
+fn parses_and_rejects_field_value_literal_boundaries() {
+    check!(parse_query(r#"{app="api"} | logfmt | status = -5"#).is_ok());
+    check!(parse_query(r#"{app="api"} | logfmt | status = -"#).is_err());
+    check!(parse_query(r#"{app="api"} | logfmt | size = 1.5MiB"#).is_ok());
+    check!(parse_query(r#"{app="api"} | logfmt | size = 1.5XYZ"#).is_err());
 }
 
 #[test]

@@ -374,8 +374,12 @@ fn selected_json_value_to_string(value: &serde_json::Value) -> String {
 fn parse_logfmt_fields(line: &str, fields: &mut Labels) {
     let mut parser = LogfmtParser::new(line);
     loop {
+        let previous_pos = parser.pos;
         match parser.next_pair_with_options(false, false) {
             Ok(Some((key, value))) => {
+                if parser.pos <= previous_pos {
+                    break;
+                }
                 insert_extracted_field(fields, &sanitize_logfmt_field_name(&key), value);
             }
             Ok(None) | Err(_) => break,
@@ -386,8 +390,12 @@ fn parse_logfmt_fields(line: &str, fields: &mut Labels) {
 fn parse_configured_logfmt_fields(line: &str, fields: &mut Labels, config: &LogfmtParserConfig) {
     let mut parser = LogfmtParser::new(line);
     loop {
+        let previous_pos = parser.pos;
         match parser.next_pair_with_options(config.keep_empty(), config.strict()) {
             Ok(Some((key, value))) => {
+                if parser.pos <= previous_pos {
+                    break;
+                }
                 insert_extracted_field(fields, &sanitize_logfmt_field_name(&key), value);
             }
             Ok(None) => break,
@@ -403,8 +411,12 @@ fn parse_selected_logfmt_fields(line: &str, fields: &mut Labels, config: &Logfmt
     let mut parsed = Labels::new();
     let mut parser = LogfmtParser::new(line);
     loop {
+        let previous_pos = parser.pos;
         match parser.next_pair_with_options(true, config.strict()) {
             Ok(Some((key, value))) => {
+                if parser.pos <= previous_pos {
+                    break;
+                }
                 parsed.entry(key).or_insert(value);
             }
             Ok(None) => break,
@@ -514,18 +526,22 @@ impl PatternParser {
                     if !line[pos..].starts_with(literal) {
                         return None;
                     }
-                    pos += literal.len();
+                    pos = pos.saturating_add(literal.len());
                 }
                 PatternPart::Capture(name) => {
-                    let next_literal = self.parts[index + 1..].iter().find_map(|part| {
-                        if let PatternPart::Literal(literal) = part {
-                            Some(literal.as_str())
-                        } else {
-                            None
-                        }
-                    });
+                    let next_literal =
+                        self.parts
+                            .iter()
+                            .skip(index.saturating_add(1))
+                            .find_map(|part| {
+                                if let PatternPart::Literal(literal) = part {
+                                    Some(literal.as_str())
+                                } else {
+                                    None
+                                }
+                            });
                     let value_end = if let Some(next_literal) = next_literal {
-                        pos + line[pos..].find(next_literal)?
+                        pos.saturating_add(line[pos..].find(next_literal)?)
                     } else {
                         line.len()
                     };
@@ -547,24 +563,24 @@ enum PatternPart {
 fn parse_pattern_parts(pattern: &str) -> Result<Vec<PatternPart>, ParseError> {
     let mut pos = 0;
     let mut parts = Vec::new();
-    let mut named_captures = 0;
+    let mut has_named_capture = false;
     let mut previous_capture = false;
     let mut separator_since_capture = String::new();
 
     while let Some(open_offset) = pattern[pos..].find('<') {
         let literal_start = pos;
-        let open = pos + open_offset;
+        let open = pos.saturating_add(open_offset);
         let literal = &pattern[literal_start..open];
         if !literal.is_empty() {
             separator_since_capture.push_str(literal);
             parts.push(PatternPart::Literal(literal.to_string()));
         }
 
-        let capture_start = open + 1;
+        let capture_start = open.saturating_add(1);
         let close_offset = pattern[capture_start..]
             .find('>')
             .ok_or_else(|| pattern_parse_error("expected closing pattern capture"))?;
-        let close = capture_start + close_offset;
+        let close = capture_start.saturating_add(close_offset);
         let name = &pattern[capture_start..close];
         if name.is_empty() {
             return Err(pattern_parse_error("expected pattern capture name"));
@@ -575,12 +591,12 @@ fn parse_pattern_parts(pattern: &str) -> Result<Vec<PatternPart>, ParseError> {
             ));
         }
         if name != "_" {
-            named_captures += 1;
+            has_named_capture = true;
         }
         parts.push(PatternPart::Capture(name.to_string()));
         previous_capture = true;
         separator_since_capture.clear();
-        pos = close + 1;
+        pos = close.saturating_add(1);
     }
 
     let literal = &pattern[pos..];
@@ -589,7 +605,7 @@ fn parse_pattern_parts(pattern: &str) -> Result<Vec<PatternPart>, ParseError> {
         parts.push(PatternPart::Literal(literal.to_string()));
     }
 
-    if named_captures == 0 {
+    if !has_named_capture {
         return Err(pattern_parse_error(
             "pattern parser requires at least one named capture",
         ));
@@ -606,7 +622,7 @@ fn pattern_parse_error(message: &str) -> ParseError {
 
 #[cfg(test)]
 mod tests {
-    use super::{PatternPart, parse_pattern_parts};
+    use super::{PatternParser, PatternPart, parse_pattern_parts};
 
     #[test]
     fn parse_pattern_parts_omits_empty_literals_around_captures() {
@@ -627,6 +643,19 @@ mod tests {
                 PatternPart::Capture("method".to_string()),
                 PatternPart::Literal(" ".to_string()),
                 PatternPart::Capture("path".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn pattern_parser_captures_after_nonzero_prefix() {
+        let parser = PatternParser::new("prefix <method> suffix <status>").unwrap();
+
+        assert_eq!(
+            parser.captures("prefix GET suffix 500").unwrap(),
+            vec![
+                ("method".to_string(), "GET".to_string()),
+                ("status".to_string(), "500".to_string()),
             ]
         );
     }
