@@ -250,7 +250,7 @@ fn parse_cases(file: &str, contents: &str) -> Vec<Case> {
                 ..Case::default()
             };
             for line in block.lines().map(str::trim) {
-                if line.is_empty() || line.starts_with('#') {
+                if line.starts_with('#') {
                     continue;
                 }
                 let Some((key, value)) = line.split_once(':') else {
@@ -417,5 +417,140 @@ fn span(
         attrs: attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         events: Vec::new(),
         links: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("traceql-testkit-{name}-{unique}"))
+    }
+
+    #[test]
+    fn report_text_and_write_include_case_statuses() {
+        let report = Report {
+            cases: vec![
+                CaseResult {
+                    name: "ok".into(),
+                    passed: true,
+                    passed_assertions: 1,
+                    total_assertions: 1,
+                    message: String::new(),
+                },
+                CaseResult {
+                    name: "bad".into(),
+                    passed: false,
+                    passed_assertions: 1,
+                    total_assertions: 2,
+                    message: "mismatch".into(),
+                },
+            ],
+        };
+
+        let text = report.to_text();
+        assert!(text.contains("TraceQL conformance: 1/2 cases passed"));
+        assert!(text.contains("PASS ok (1/1)"));
+        assert!(text.contains("FAIL bad (1/2) mismatch"));
+
+        let dir = temp_dir("report");
+        let path = dir.join("nested").join("report.txt");
+        report.write_to(&path).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(written == text);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_corpus_dir_only_reads_case_files_by_file_name() {
+        let dir = temp_dir("corpus");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("one.case"),
+            r#"
+name: explicit
+query: { .svc = "a" }
+expect_trace_ids: 1,3
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("ignored.txt"),
+            r#"
+name: ignored
+query: { .svc = "x" }
+"#,
+        )
+        .unwrap();
+
+        let report = run_corpus_dir(&dir);
+
+        assert!(report.cases.len() == 1);
+        assert!(report.cases[0].name == "one.case:explicit");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_name_uses_only_last_path_component() {
+        assert!(file_name(Path::new("nested/cases/selectors.case")) == "selectors.case");
+    }
+
+    #[test]
+    fn span_helper_offsets_start_time_by_span_id() {
+        let span = span(9, 2, Some(1), "child", 123, vec![]);
+
+        assert!(span.trace_id == [9; 16]);
+        assert!(span.span_id == [2; 8]);
+        assert!(span.parent_span_id == Some([1; 8]));
+        assert!(span.start_unix_nano == 1_002);
+    }
+
+    #[test]
+    fn parse_cases_defaults_name_and_kind_for_unnamed_search_blocks() {
+        let cases = parse_cases(
+            "selectors.case",
+            r#"
+query: { .svc = "a" }
+expect_trace_ids: 1
+expect_span_ids: 1
+"#,
+        );
+
+        assert!(cases.len() == 1);
+        assert!(cases[0].name == "selectors.case#1");
+        assert!(cases[0].kind == "search");
+    }
+
+    #[test]
+    fn parse_cases_splits_blocks_and_applies_explicit_names() {
+        let cases = parse_cases(
+            "selectors.case",
+            r#"
+# name: ignored
+name: first
+query: { .svc = "a" }
+
+---
+
+name: second
+kind: metrics
+query: { .svc = "b" } | count_over_time()
+expect_series_count: 1
+"#,
+        );
+
+        assert!(cases.len() == 2);
+        assert!(cases[0].name == "selectors.case:first");
+        assert!(cases[0].kind == "search");
+        assert!(cases[0].query.as_deref() == Some(r#"{ .svc = "a" }"#));
+        assert!(cases[1].name == "selectors.case:second");
+        assert!(cases[1].kind == "metrics");
+        assert!(cases[1].expect_series_count == Some(1));
     }
 }

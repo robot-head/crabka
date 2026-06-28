@@ -23,6 +23,19 @@ struct Parser {
     pos: usize,
 }
 
+macro_rules! eat {
+    ($parser:expr, $expected:expr) => {{
+        let pos = $parser.pos;
+        let matched = $parser.eat($expected);
+        if matched && $parser.pos <= pos {
+            return Err(TraceqlError::Parse(format!(
+                "parser made no progress at token {pos}"
+            )));
+        }
+        matched
+    }};
+}
+
 impl Parser {
     fn parse_query(&mut self) -> Result<Query> {
         let root = self.parse_spanset_or()?;
@@ -60,7 +73,7 @@ impl Parser {
                 "sample" => hints.sample = Some(value),
                 other => return Err(Self::err(format!("unsupported query hint {other:?}"))),
             }
-            if !self.eat(&Token::Comma) {
+            if !eat!(self, &Token::Comma) {
                 break;
             }
         }
@@ -70,7 +83,7 @@ impl Parser {
 
     fn parse_pipeline(&mut self) -> Result<Vec<Pipeline>> {
         let mut out = Vec::new();
-        while self.eat(&Token::Pipe) {
+        while eat!(self, &Token::Pipe) {
             out.push(self.parse_pipeline_stage()?);
             if let Some(by) = self.parse_adjacent_by()? {
                 out.push(by);
@@ -108,7 +121,7 @@ impl Parser {
                 self.expect(&Token::LParen)?;
                 let field = self.parse_field()?;
                 let mut quantiles = Vec::new();
-                while self.eat(&Token::Comma) {
+                while eat!(self, &Token::Comma) {
                     quantiles.push(self.parse_quantile()?);
                 }
                 self.expect(&Token::RParen)?;
@@ -174,12 +187,12 @@ impl Parser {
     fn parse_compare(&mut self) -> Result<Pipeline> {
         self.expect(&Token::LParen)?;
         let selection = self.parse_spanset_or()?;
-        let top_n = if self.eat(&Token::Comma) {
+        let top_n = if eat!(self, &Token::Comma) {
             self.parse_compare_top_n()?
         } else {
             DEFAULT_COMPARE_TOP_N
         };
-        let (start, end) = if self.eat(&Token::Comma) {
+        let (start, end) = if eat!(self, &Token::Comma) {
             let start = self.parse_signed_int()?;
             self.expect(&Token::Comma)?;
             let end = self.parse_signed_int()?;
@@ -208,7 +221,7 @@ impl Parser {
     /// nanosecond bounds. `-5` lexes as `Minus Int`, so the leading `-` is
     /// consumed here rather than relying on value folding.
     fn parse_signed_int(&mut self) -> Result<i64> {
-        let negative = self.eat(&Token::Minus);
+        let negative = eat!(self, &Token::Minus);
         let Token::Int(value) = self.advance() else {
             return Err(Self::err("expected integer literal"));
         };
@@ -229,7 +242,7 @@ impl Parser {
             self.expect(&Token::Eq)?;
             let expr = self.parse_field_or()?;
             bindings.push(WithBinding { name, expr });
-            if !self.eat(&Token::Comma) {
+            if !eat!(self, &Token::Comma) {
                 break;
             }
         }
@@ -296,14 +309,14 @@ impl Parser {
 
     fn parse_field_list(&mut self) -> Result<Vec<Field>> {
         let mut fields = vec![self.parse_field()?];
-        while self.eat(&Token::Comma) {
+        while eat!(self, &Token::Comma) {
             fields.push(self.parse_field()?);
         }
         Ok(fields)
     }
 
     fn parse_quantile(&mut self) -> Result<f64> {
-        let value = if self.eat(&Token::Dot) {
+        let value = if eat!(self, &Token::Dot) {
             let digits = match self.advance() {
                 Token::Int(v) => v.to_string(),
                 other => {
@@ -333,7 +346,7 @@ impl Parser {
 
     fn parse_spanset_or(&mut self) -> Result<SpansetExpr> {
         let mut expr = self.parse_spanset_and()?;
-        while self.eat(&Token::Or) {
+        while eat!(self, &Token::Or) {
             let rhs = self.parse_spanset_and()?;
             expr = SpansetExpr::Or(Box::new(expr), Box::new(rhs));
         }
@@ -342,7 +355,7 @@ impl Parser {
 
     fn parse_spanset_and(&mut self) -> Result<SpansetExpr> {
         let mut expr = self.parse_structural()?;
-        while self.eat(&Token::And) {
+        while eat!(self, &Token::And) {
             let rhs = self.parse_structural()?;
             expr = SpansetExpr::And(Box::new(expr), Box::new(rhs));
         }
@@ -363,18 +376,18 @@ impl Parser {
     }
 
     fn parse_spanset_primary(&mut self) -> Result<SpansetExpr> {
-        if self.eat(&Token::LBrace) {
+        if eat!(self, &Token::LBrace) {
             // `{}` is the match-all spanset (every span). TraceQL treats empty
             // braces as a constant-true filter, so don't require a field
             // expression — Grafana's Tempo Explore sends `{}` by default.
-            if self.eat(&Token::RBrace) {
+            if eat!(self, &Token::RBrace) {
                 return Ok(SpansetExpr::Selector(Box::new(FieldExpr::Const(true))));
             }
             let fe = self.parse_field_or()?;
             self.expect(&Token::RBrace)?;
             return Ok(SpansetExpr::Selector(Box::new(fe)));
         }
-        if self.eat(&Token::LParen) {
+        if eat!(self, &Token::LParen) {
             let expr = self.parse_spanset_or()?;
             self.expect(&Token::RParen)?;
             return Ok(expr);
@@ -387,7 +400,7 @@ impl Parser {
 
     fn parse_field_or(&mut self) -> Result<FieldExpr> {
         let mut expr = self.parse_field_and()?;
-        while self.eat(&Token::Or) {
+        while eat!(self, &Token::Or) {
             let rhs = self.parse_field_and()?;
             expr = FieldExpr::Or(Box::new(expr), Box::new(rhs));
         }
@@ -396,7 +409,7 @@ impl Parser {
 
     fn parse_field_and(&mut self) -> Result<FieldExpr> {
         let mut expr = self.parse_field_not()?;
-        while self.eat(&Token::And) {
+        while eat!(self, &Token::And) {
             let rhs = self.parse_field_not()?;
             expr = FieldExpr::And(Box::new(expr), Box::new(rhs));
         }
@@ -404,14 +417,14 @@ impl Parser {
     }
 
     fn parse_field_not(&mut self) -> Result<FieldExpr> {
-        if self.eat(&Token::Not) {
+        if eat!(self, &Token::Not) {
             return Ok(FieldExpr::Not(Box::new(self.parse_field_not()?)));
         }
         self.parse_comparison()
     }
 
     fn parse_comparison(&mut self) -> Result<FieldExpr> {
-        if self.eat(&Token::LParen) {
+        if eat!(self, &Token::LParen) {
             let expr = self.parse_field_or()?;
             self.expect(&Token::RParen)?;
             return Ok(expr);
@@ -436,7 +449,7 @@ impl Parser {
     }
 
     fn parse_field(&mut self) -> Result<Field> {
-        if self.eat(&Token::Dot) {
+        if eat!(self, &Token::Dot) {
             return Ok(Field {
                 scope: Scope::Both,
                 key: self.expect_ident()?,
@@ -444,14 +457,14 @@ impl Parser {
         }
 
         let first = self.expect_ident()?;
-        if self.eat(&Token::Colon) {
+        if eat!(self, &Token::Colon) {
             let key = self.expect_ident()?;
             return Ok(Field {
                 scope: Scope::Intrinsic(intrinsic(&first, &key)?),
                 key,
             });
         }
-        if self.eat(&Token::Dot) {
+        if eat!(self, &Token::Dot) {
             return Ok(Field {
                 scope: scope(&first)?,
                 key: self.expect_ident()?,
@@ -480,9 +493,9 @@ impl Parser {
     fn parse_additive_value(&mut self, lhs: &Field) -> Result<Value> {
         let mut value = self.parse_multiplicative_value(lhs)?;
         loop {
-            if self.eat(&Token::Plus) {
+            if eat!(self, &Token::Plus) {
                 value = value_add(value, self.parse_multiplicative_value(lhs)?)?;
-            } else if self.eat(&Token::Minus) {
+            } else if eat!(self, &Token::Minus) {
                 value = value_sub(value, self.parse_multiplicative_value(lhs)?)?;
             } else {
                 return Ok(value);
@@ -493,11 +506,11 @@ impl Parser {
     fn parse_multiplicative_value(&mut self, lhs: &Field) -> Result<Value> {
         let mut value = self.parse_power_value(lhs)?;
         loop {
-            if self.eat(&Token::Star) {
+            if eat!(self, &Token::Star) {
                 value = value_mul(value, self.parse_power_value(lhs)?)?;
-            } else if self.eat(&Token::Slash) {
+            } else if eat!(self, &Token::Slash) {
                 value = value_div(value, self.parse_power_value(lhs)?)?;
-            } else if self.eat(&Token::Mod) {
+            } else if eat!(self, &Token::Mod) {
                 value = value_mod(value, self.parse_power_value(lhs)?)?;
             } else {
                 return Ok(value);
@@ -507,14 +520,14 @@ impl Parser {
 
     fn parse_power_value(&mut self, lhs: &Field) -> Result<Value> {
         let mut value = self.parse_unary_value(lhs)?;
-        while self.eat(&Token::Caret) {
+        while eat!(self, &Token::Caret) {
             value = value_pow(value, self.parse_unary_value(lhs)?)?;
         }
         Ok(value)
     }
 
     fn parse_unary_value(&mut self, lhs: &Field) -> Result<Value> {
-        if self.eat(&Token::Minus) {
+        if eat!(self, &Token::Minus) {
             return value_neg(self.parse_unary_value(lhs)?);
         }
         self.parse_primary_value(lhs)
@@ -1317,6 +1330,15 @@ mod tests {
     }
 
     #[test]
+    fn compare_accepts_zero_top_n() {
+        let q = parse("{} | compare({ status = error }, 0)").unwrap();
+        let [Pipeline::Compare { top_n, .. }] = q.pipeline.as_slice() else {
+            panic!("compare pipeline")
+        };
+        assert!(*top_n == 0);
+    }
+
+    #[test]
     fn compare_parses_optional_start_end_window() {
         let q = parse("{} | compare({}, 5, 1000, 2000)").unwrap();
         let [
@@ -1402,6 +1424,12 @@ mod tests {
     #[test]
     fn double_equals_is_rejected() {
         assert!(parse("{ .a == 1 }").is_err());
+    }
+
+    #[test]
+    fn spaced_double_equals_reports_single_equals_error() {
+        let msg = parse_err("{ .a = = 1 }");
+        assert!(msg.contains("use single = for equality"));
     }
 
     #[test]
@@ -1612,6 +1640,15 @@ mod tests {
     }
 
     #[test]
+    fn rank_limit_accepts_zero() {
+        let q = parse("{ .a = 1 } | count_over_time() | topk(0)").unwrap();
+        assert!(matches!(q.pipeline.as_slice(), [_, Pipeline::TopK(0)]));
+
+        let q = parse("{ .a = 1 } | count_over_time() | bottomk(0)").unwrap();
+        assert!(matches!(q.pipeline.as_slice(), [_, Pipeline::BottomK(0)]));
+    }
+
+    #[test]
     fn rank_limit_rejects_negative() {
         let msg = parse_err("{ .a = 1 } | bottomk(0 - 1)");
         // `0 - 1` is two int tokens; the rank parser only reads the first Int so
@@ -1742,6 +1779,10 @@ mod tests {
             ("{ trace:rootService = \"x\" }", Intrinsic::TraceRootService),
             ("{ trace:id = \"x\" }", Intrinsic::TraceId),
             ("{ event:name = \"x\" }", Intrinsic::EventName),
+            (
+                "{ event:timeSinceStart > 5ms }",
+                Intrinsic::EventTimeSinceStart,
+            ),
             ("{ link:traceID = \"x\" }", Intrinsic::LinkTraceId),
             ("{ link:spanID = \"x\" }", Intrinsic::LinkSpanId),
             (
@@ -1824,6 +1865,8 @@ mod tests {
         assert!(selector_rhs("{ .a = 6.0 / 2.0 }") == Value::Float(3.0));
         assert!(selector_rhs("{ .a = 1.0 - 0.5 }") == Value::Float(0.5));
         assert!(selector_rhs("{ .a = 2.0 * 2.0 }") == Value::Float(4.0));
+        assert!(selector_rhs("{ .a = 2.0 * 3.0 }") == Value::Float(6.0));
+        assert!(selector_rhs("{ .a = 5 / 2 }") == Value::Float(2.5));
     }
 
     #[test]

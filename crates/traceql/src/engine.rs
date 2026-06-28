@@ -5345,6 +5345,17 @@ mod tests {
         assert!(resp.series[0].points == vec![(0, 1.0), (60_000, 1.0)]);
     }
 
+    #[test]
+    fn assemble_metrics_response_builds_one_point_per_step_bucket() {
+        let batch = metric_start_batch(&[9, 10, 12, 14, 15]);
+        let plan = count_plan();
+
+        let resp = assemble_metrics_response(&[batch], 10, 14, 2, &plan, 0, 10).unwrap();
+
+        assert!(resp.series.len() == 1);
+        assert!(resp.series[0].points == vec![(10, 1.0), (12, 1.0), (14, 1.0)]);
+    }
+
     #[tokio::test]
     async fn count_over_time_counts_spans_regardless_of_value_field() {
         // count_over_time has no value field, so absent attributes still count.
@@ -5634,6 +5645,22 @@ mod tests {
         assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
     }
 
+    #[tokio::test]
+    async fn compare_rejects_event_link_and_parent_selection_scopes() {
+        let e = engine();
+        for query in [
+            "{} | compare({ event.exception.type != nil }, 10)",
+            "{} | compare({ link.traceID != nil }, 10)",
+            "{} | compare({ parent.name != nil }, 10)",
+        ] {
+            let err = e.query_range("t", query, 0, 60_000, 60_000).await;
+            assert!(
+                matches!(err, Err(TraceqlError::Unsupported(_))),
+                "query should reject unsupported compare selection scope: {query}"
+            );
+        }
+    }
+
     // ---- MAJOR 1: resource.service.name is the trace-root service only ----
 
     /// Builds a single-row batch in the REAL store's block shape: the
@@ -5746,6 +5773,19 @@ mod tests {
         SpansetExpr::Selector(Box::new(fe))
     }
 
+    fn compare_start_batch(starts: &[i64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![ArrowField::new(
+            COL_START,
+            DataType::Int64,
+            false,
+        )]));
+        RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(starts.to_vec())) as ArrayRef],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn compare_row_emits_single_root_resource_service_name() {
         // MAJOR 1: a single span row must surface `resource.service.name` exactly
@@ -5793,6 +5833,65 @@ mod tests {
         assert!(svc_values == ["root-svc"].into_iter().collect());
     }
 
+    #[test]
+    fn assemble_compare_response_allows_equal_start_and_rejects_reversed_range() {
+        let compare = CompareSpec {
+            selection: selector(FieldExpr::Const(false)),
+            top_n: 10,
+            start: None,
+            end: None,
+        };
+
+        let equal_range = MetricsRange {
+            scan_start: 0,
+            scan_end: 0,
+            output_start: 0,
+            step: 60_000,
+        };
+        let resp =
+            assemble_compare_response(&[compare_block_batch()], &compare, equal_range).unwrap();
+        assert!(meta_total(&resp, "baseline_total") == 1);
+
+        let reversed_range = MetricsRange {
+            scan_start: 60_000,
+            scan_end: 0,
+            output_start: 60_000,
+            step: 60_000,
+        };
+        assert!(
+            assemble_compare_response(&[compare_block_batch()], &compare, reversed_range).is_err()
+        );
+    }
+
+    #[test]
+    fn assemble_compare_response_builds_one_point_per_step_bucket() {
+        let compare = CompareSpec {
+            selection: selector(FieldExpr::Const(false)),
+            top_n: 10,
+            start: None,
+            end: None,
+        };
+        let range = MetricsRange {
+            scan_start: 10,
+            scan_end: 14,
+            output_start: 10,
+            step: 2,
+        };
+        let resp = assemble_compare_response(
+            &[compare_start_batch(&[9, 10, 12, 14, 15])],
+            &compare,
+            range,
+        )
+        .unwrap();
+        let baseline_total = resp
+            .series
+            .iter()
+            .find(|series| series_label(series, "__meta_type") == Some("baseline_total"))
+            .unwrap();
+
+        assert!(baseline_total.points == vec![(10, 1.0), (12, 1.0), (14, 1.0)]);
+    }
+
     // ---- MAJOR 3: != / !~ on an absent attribute stays Baseline ----
 
     #[test]
@@ -5834,6 +5933,295 @@ mod tests {
             ..neq.clone()
         };
         assert!(compare_group_for_row(&row, &eq_nil, &regexes) == CompareGroup::Selection);
+    }
+
+    #[test]
+    fn compare_row_selection_evaluator_obeys_boolean_and_presence_semantics() {
+        let row = CompareRow {
+            ts: 0,
+            attrs: vec![("span.present".into(), "yes".into())],
+            raw_span_attrs: vec![("present".into(), AttrValue::Str("yes".into()))],
+            raw_resource_attrs: vec![
+                ("region".into(), AttrValue::Str("eu".into())),
+                ("cluster".into(), AttrValue::Str("prod".into())),
+            ],
+            name: None,
+            status_code: None,
+            status_message: None,
+            kind: None,
+            duration: None,
+        };
+        let present = FieldExpr::Comparison {
+            lhs: field(Scope::Span, "present"),
+            op: ComparisonOp::Eq,
+            rhs: Value::Str("yes".into()),
+        };
+        let missing = FieldExpr::Comparison {
+            lhs: field(Scope::Span, "missing"),
+            op: ComparisonOp::Eq,
+            rhs: Value::Str("yes".into()),
+        };
+        let regexes = CompareRegexCache::new();
+
+        assert!(compare_field_present(&field(Scope::Span, "present"), &row));
+        assert!(!compare_field_present(&field(Scope::Span, "missing"), &row));
+        let resource_values = compare_row_attr_values(&row, &Scope::Resource, "region");
+        assert!(resource_values.len() == 1);
+        assert!(resource_values[0] == &AttrValue::Str("eu".into()));
+        assert!(!field_expr_matches_row(
+            &FieldExpr::And(Box::new(present.clone()), Box::new(missing.clone())),
+            &row,
+            &regexes,
+        ));
+        assert!(field_expr_matches_row(
+            &FieldExpr::Or(Box::new(present.clone()), Box::new(missing.clone())),
+            &row,
+            &regexes,
+        ));
+        assert!(!field_expr_matches_row(
+            &FieldExpr::Not(Box::new(present.clone())),
+            &row,
+            &regexes,
+        ));
+        assert!(!spanset_matches_row(
+            &SpansetExpr::And(
+                Box::new(selector(present.clone())),
+                Box::new(selector(missing.clone())),
+            ),
+            &row,
+            &regexes,
+        ));
+        assert!(spanset_matches_row(
+            &SpansetExpr::Or(Box::new(selector(present)), Box::new(selector(missing))),
+            &row,
+            &regexes,
+        ));
+    }
+
+    #[test]
+    fn compare_attr_neq_requires_every_repeated_value_to_differ() {
+        let get = AttrValue::Str("GET".into());
+        let post = AttrValue::Str("POST".into());
+        let values = vec![&get, &post];
+        let regexes = CompareRegexCache::new();
+
+        assert!(!compare_attr_values_match(
+            &values,
+            ComparisonOp::Neq,
+            &Value::Str("GET".into()),
+            &regexes,
+        ));
+        assert!(compare_attr_values_match(
+            &values,
+            ComparisonOp::Neq,
+            &Value::Str("PUT".into()),
+            &regexes,
+        ));
+    }
+
+    #[test]
+    fn compare_value_match_covers_numeric_and_bool_attrs() {
+        let regexes = CompareRegexCache::new();
+
+        assert!(compare_value_match(
+            &AttrValue::Int(42),
+            ComparisonOp::Eq,
+            &Value::Int(42),
+            &regexes,
+        ));
+        assert!(compare_value_match(
+            &AttrValue::Int(42),
+            ComparisonOp::Eq,
+            &Value::Duration(42),
+            &regexes,
+        ));
+        assert!(compare_value_match(
+            &AttrValue::Float(1.5),
+            ComparisonOp::Eq,
+            &Value::Float(1.5),
+            &regexes,
+        ));
+        assert!(compare_value_match(
+            &AttrValue::Bool(true),
+            ComparisonOp::Eq,
+            &Value::Bool(true),
+            &regexes,
+        ));
+    }
+
+    #[test]
+    fn compare_intrinsic_present_covers_supported_intrinsics_and_empty_values() {
+        let populated = CompareRow {
+            ts: 0,
+            attrs: Vec::new(),
+            raw_span_attrs: Vec::new(),
+            raw_resource_attrs: Vec::new(),
+            name: Some("op".into()),
+            status_code: Some(2),
+            status_message: Some("failed".into()),
+            kind: Some(3),
+            duration: Some(100),
+        };
+        for intrinsic in [
+            Intrinsic::Name,
+            Intrinsic::Status,
+            Intrinsic::StatusMessage,
+            Intrinsic::Kind,
+            Intrinsic::Duration,
+        ] {
+            assert!(compare_intrinsic_present(&populated, &intrinsic));
+        }
+
+        let empty = CompareRow {
+            name: Some(String::new()),
+            status_message: Some(String::new()),
+            status_code: None,
+            kind: None,
+            duration: None,
+            ..populated
+        };
+        for intrinsic in [
+            Intrinsic::Name,
+            Intrinsic::Status,
+            Intrinsic::StatusMessage,
+            Intrinsic::Kind,
+            Intrinsic::Duration,
+        ] {
+            assert!(!compare_intrinsic_present(&empty, &intrinsic));
+        }
+    }
+
+    #[test]
+    fn compare_intrinsic_matches_covers_status_message_kind_and_duration() {
+        let row = CompareRow {
+            ts: 0,
+            attrs: Vec::new(),
+            raw_span_attrs: Vec::new(),
+            raw_resource_attrs: Vec::new(),
+            name: None,
+            status_code: None,
+            status_message: Some("failed".into()),
+            kind: Some(3),
+            duration: Some(100),
+        };
+        let regexes = CompareRegexCache::new();
+
+        assert!(compare_intrinsic_matches(
+            &row,
+            &Intrinsic::StatusMessage,
+            ComparisonOp::Eq,
+            &Value::Str("failed".into()),
+            &regexes,
+        ));
+        assert!(compare_intrinsic_matches(
+            &row,
+            &Intrinsic::Kind,
+            ComparisonOp::Eq,
+            &Value::Str("client".into()),
+            &regexes,
+        ));
+        assert!(compare_intrinsic_matches(
+            &row,
+            &Intrinsic::Duration,
+            ComparisonOp::Gt,
+            &Value::Duration(50),
+            &regexes,
+        ));
+    }
+
+    #[test]
+    fn compare_scalar_helpers_cover_enum_int_negated_regex_and_numeric_neq() {
+        let mut regexes = CompareRegexCache::new();
+        regexes.insert("op-.*".into(), regex::Regex::new("^(?:op-.*)$").unwrap());
+
+        assert!(enum_cmp(
+            0,
+            ComparisonOp::Eq,
+            &Value::Str("unset".into()),
+            status_enum_value,
+        ));
+        assert!(enum_cmp(
+            1,
+            ComparisonOp::Eq,
+            &Value::Str("ok".into()),
+            status_enum_value,
+        ));
+        assert!(enum_cmp(
+            2,
+            ComparisonOp::Eq,
+            &Value::Int(2),
+            status_enum_value
+        ));
+        assert!(!string_cmp("op-1", ComparisonOp::Nre, "op-.*", &regexes));
+        assert!(num_cmp(42, ComparisonOp::Neq, 7));
+        assert!(num_cmp(3, ComparisonOp::Lt, 5));
+        assert!(!num_cmp(5, ComparisonOp::Lt, 5));
+        assert!(num_cmp(5, ComparisonOp::Lte, 5));
+        assert!(num_cmp(7, ComparisonOp::Gt, 5));
+        assert!(!num_cmp(5, ComparisonOp::Gt, 5));
+        assert!(num_cmp(5, ComparisonOp::Gte, 5));
+
+        assert!(!float_cmp(1.0, ComparisonOp::Eq, 2.0));
+        assert!(float_cmp(1.0, ComparisonOp::Neq, 2.0));
+        assert!(float_cmp(1.0, ComparisonOp::Lt, 2.0));
+        assert!(!float_cmp(2.0, ComparisonOp::Lt, 2.0));
+        assert!(float_cmp(2.0, ComparisonOp::Lte, 2.0));
+        assert!(float_cmp(3.0, ComparisonOp::Gt, 2.0));
+        assert!(!float_cmp(2.0, ComparisonOp::Gt, 2.0));
+        assert!(float_cmp(2.0, ComparisonOp::Gte, 2.0));
+
+        assert!(!bool_cmp(true, ComparisonOp::Eq, false));
+        assert!(bool_cmp(true, ComparisonOp::Neq, false));
+    }
+
+    #[test]
+    fn compare_kind_enum_helpers_cover_all_names() {
+        let cases = [
+            ("unspecified", 0),
+            ("internal", 1),
+            ("server", 2),
+            ("client", 3),
+            ("producer", 4),
+            ("consumer", 5),
+        ];
+
+        for (name, code) in cases {
+            assert!(kind_enum_value(name) == Some(code));
+            assert!(kind_enum_name(code) == name);
+        }
+        assert!(kind_enum_value("unknown") == None);
+        assert!(kind_enum_name(-1) == "unspecified");
+    }
+
+    #[test]
+    fn compare_row_filters_promoted_event_and_link_attrs() {
+        let schema = Arc::new(Schema::new(vec![
+            ArrowField::new(
+                format!("{ATTR_PREFIX}{EVENT_ATTR_PREFIX}exception.type"),
+                DataType::Utf8,
+                true,
+            ),
+            ArrowField::new(
+                format!("{ATTR_PREFIX}{LINK_ATTR_PREFIX}trace_id"),
+                DataType::Utf8,
+                true,
+            ),
+            ArrowField::new(format!("{ATTR_PREFIX}http.method"), DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["IOError"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["abcd"])),
+                Arc::new(StringArray::from(vec!["GET"])),
+            ],
+        )
+        .unwrap();
+
+        let row = compare_row(&batch, 0, 0).unwrap();
+
+        assert!(row.attrs == vec![("span.http.method".into(), "GET".into())]);
+        assert!(row.raw_span_attrs == vec![("http.method".into(), AttrValue::Str("GET".into()))]);
     }
 
     // ---- MAJOR 4: baseline and selection share one value set per attribute ----

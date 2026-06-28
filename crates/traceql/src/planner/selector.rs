@@ -39,7 +39,7 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         )
         .await?;
     let inspected_bytes = scan.inspected_bytes;
-    let parent_table = if has_nested_scope(fe) && has_parent_scope(fe) {
+    let parent_table = if needs_unfiltered_parent_table(fe) {
         register_unfiltered_parent_table(store, ctx, &scan.ctx).await?
     } else {
         scan.span_table.clone()
@@ -307,6 +307,10 @@ pub(crate) fn has_parent_scope(fe: &FieldExpr) -> bool {
         FieldExpr::Not(inner) => has_parent_scope(inner),
         FieldExpr::Const(_) => false,
     }
+}
+
+fn needs_unfiltered_parent_table(fe: &FieldExpr) -> bool {
+    has_nested_scope(fe) && has_parent_scope(fe)
 }
 
 fn field_expr_to_sql_qualified(
@@ -1528,6 +1532,19 @@ mod tests {
         assert!(has_parent_scope(&selector("{ .a = 1 && parent.b = 2 }")));
         assert!(has_parent_scope(&selector("{ !(parent.b = 2) }")));
         assert!(!has_parent_scope(&selector("{ .a = 1 }")));
+    }
+
+    #[test]
+    fn unfiltered_parent_table_is_needed_only_for_nested_parent_selectors() {
+        assert!(!needs_unfiltered_parent_table(&selector(
+            "{ event:name = \"x\" }"
+        )));
+        assert!(!needs_unfiltered_parent_table(&selector(
+            "{ parent.a = 1 }"
+        )));
+        assert!(needs_unfiltered_parent_table(&selector(
+            "{ event:name = \"x\" && parent.a = 1 }"
+        )));
     }
 
     #[test]
